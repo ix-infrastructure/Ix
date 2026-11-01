@@ -66,6 +66,12 @@ const HISTORY_DEPTH = 100;
 const MAX_COMMIT_FILES = 20;
 /** Times a file must have changed with the target to count. */
 const MIN_CO_CHANGES = 2;
+/**
+ * Output a `git` call may print. `log --name-only --full-diff` lists every
+ * file of a sweep before {@link MAX_COMMIT_FILES} drops it, so one large
+ * commit in the window can print megabytes; past the cap the call fails.
+ */
+export const GIT_MAX_BUFFER = 16 * 1024 * 1024;
 
 /**
  * The newest commits to `path`, plus its newest fixes, newest first.
@@ -133,7 +139,7 @@ export function gitRunner(root: string): GitRunner {
         "git",
         args,
         // Killed with the `ix mcp` tool call that runs it (run-signal.ts).
-        { cwd: root, encoding: "utf-8", maxBuffer: 16 * 1024 * 1024, timeout: GIT_TIMEOUT_MS, signal: currentRunSignal() },
+        { cwd: root, encoding: "utf-8", maxBuffer: GIT_MAX_BUFFER, timeout: GIT_TIMEOUT_MS, signal: currentRunSignal() },
         (err, stdout) => resolve(err ? undefined : stdout),
       );
     });

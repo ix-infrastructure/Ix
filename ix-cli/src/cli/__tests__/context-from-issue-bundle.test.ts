@@ -1,11 +1,16 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
-import { buildBundle, clampBudgets, renderBundle } from "../commands/context.js";
+import { buildBundle, clampBudgets, issueRankedFiles, renderBundle } from "../commands/context.js";
 import { contextBundleSchema } from "../context-bundle-schema.js";
 import type { ContextFacts, EntityLocation } from "../explain/facts.js";
 import type { RankedFile, StartingPoint } from "../explain/issue.js";
+import { gitRepoAccess } from "../explain/text-references.js";
 
 /**
  * The bundle `ix context --from-issue` builds: the usual bundle around the
@@ -119,6 +124,15 @@ describe("ix context --from-issue bundle", () => {
     expect(parsed.data?.issue).toEqual(b.issue);
   });
 
+  it("preserves companion provenance when validating saved JSON", () => {
+    const companion = { source: "re-export" as const, seed: "src/client/api.ts" };
+    const files = ranked(3);
+    files[1] = { ...files[1], companion };
+    const b = build(issue({ rankedFiles: files }));
+    const parsed = contextBundleSchema.parse(JSON.parse(JSON.stringify(b)));
+    expect(parsed.rankedFiles?.[1]).toHaveProperty("companion", companion);
+  });
+
   it("keeps a start's snippet and traceback marks through the schema", () => {
     const starts: StartingPoint[] = [{ ...STARTS[0], snippet: true }, { ...STARTS[1], traceback: true }];
     const b = build({ ...issue(), startingPoints: starts });
@@ -144,6 +158,61 @@ describe("ix context --from-issue bundle", () => {
     const text = captureLog(() => renderBundle(b, "text")).join("\n");
     expect(text).toContain("starting points: listByKind (src/client/api.ts:141-152)");
     expect(text).toContain("ranked files: src/client/api.ts");
+  });
+
+  it("ranks a full --from-issue run's files with the checkout's companions, and keeps them in the JSON", async () => {
+    // The wiring buildIssueBundle uses: the plan's repository access and the
+    // git history at the workspace root, against a real (synthetic) checkout.
+    const dir = mkdtempSync(join(process.cwd(), ".issue-bundle-test-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    try {
+      git("init", "-q");
+      git("config", "user.name", "Fixture");
+      git("config", "user.email", "fixture@example.invalid");
+      // other.py changes on its own, so only worker.py has a co-change partner (schema.py).
+      writeFileSync(join(dir, "other.py"), "NAME = 0\n");
+      git("add", "other.py");
+      git("commit", "-qm", "Add other");
+      for (let i = 0; i < 2; i++) {
+        writeFileSync(join(dir, "worker.py"), `def run_job(): return ${i}\n`);
+        writeFileSync(join(dir, "schema.py"), `VERSION = ${i}\n`);
+        git("add", "worker.py", "schema.py");
+        git("commit", "-qm", "Update worker and schema");
+      }
+      const start: StartingPoint = { token: "worker.py", name: "worker.py", kind: "file", path: "worker.py", via: "path in issue" };
+      const files = await issueRankedFiles("run_job fails in worker.py",
+        { starts: [start], bm25: [{ path: "other.py", score: 2 }], near: new Map() }, gitRepoAccess(dir), dir);
+      // The named file keeps its boosted place in the primary ranking (here below a stronger BM25 hit); the companion follows it.
+      expect(files.map((f) => f.path)).toEqual(["other.py", "worker.py", "schema.py"]);
+      expect(files[2]).toMatchObject({ companion: { source: "co-change", seed: "worker.py" } });
+
+      const b = build(issue({ rankedFiles: files }));
+      const parsed = contextBundleSchema.parse(JSON.parse(JSON.stringify(b)));
+      expect(parsed.rankedFiles?.map((f) => f.path)).toEqual(files.map((f) => f.path));
+      expect(parsed.rankedFiles?.[2]).toHaveProperty("companion", { source: "co-change", seed: "worker.py" });
+      // Without a checkout the primary ranking comes back unchanged.
+      expect((await issueRankedFiles("run_job fails", { starts: [start], bm25: [], near: new Map() }, undefined, dir))
+        .map((f) => f.path)).toEqual(["worker.py"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("names companion files in the evidence row even past the shown primary files", () => {
+    const companion = { path: "src/client/index.ts", score: 1, reason: "companion (re-export of src/client/api.ts)",
+      companion: { source: "re-export" as const, seed: "src/client/api.ts" } };
+    const b = build(issue({ rankedFiles: [...ranked(20), companion] }));
+    expect(b.rankedFiles).toHaveLength(21);
+    const row = b.evidence.find((e) => e.id === "issue-ranked-files")!;
+    const shown = row.title.replace(/^ranked files: /, "").split(", ");
+    expect(shown).toEqual([...ranked(20).slice(0, 10).map((f) => f.path), "src/client/index.ts"]);
+    expect(row.reason).toContain("then companion files");
+    expect(row.reason).toContain("index.ts (companion (re-export of src/client/api.ts))");
+    expect(captureLog(() => renderBundle(b, "llm")).join("\n")).toMatch(/^evidence .*title="ranked files: .*src\/client\/index.ts"/m);
+    expect(captureLog(() => renderBundle(b, "text")).join("\n")).toContain("src/client/index.ts");
+
+    const plain = build(issue({ rankedFiles: ranked(20) })).evidence.find((e) => e.id === "issue-ranked-files")!;
+    expect(plain.reason).not.toContain("companion");
   });
 
   it("says so when the start came from BM25 because nothing in the issue resolved", () => {

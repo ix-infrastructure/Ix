@@ -5,6 +5,7 @@ import { posix } from "node:path";
 
 import { isTestPath } from "./related-files.js";
 import { resolveToken, type RepoAccess } from "./text-references.js";
+import type { CompanionSource } from "./issue-companions.js";
 
 /**
  * From an issue's text to the files its fix starts in, for
@@ -962,9 +963,11 @@ export async function chooseCentre(
 
 export interface RankedFile {
   path: string;
-  /** BM25 with bounded start and graph-closeness boosts. */
+  /** BM25 with bounded start and graph-closeness boosts, or a bounded companion evidence score. */
   score: number;
   reason: string;
+  /** Present only when post-ranking companion expansion promoted this file. */
+  companion?: { source: CompanionSource; seed: string };
 }
 
 /** Why a file is near a starting point, and how near: 1 one hop, 0.5 two. */
