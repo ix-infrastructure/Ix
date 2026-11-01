@@ -54,6 +54,7 @@ export const IX_MCP_OSS_TOOL_NAMES = [
   "ix_callees",
   "ix_imported_by",
   "ix_imports",
+  "ix_overrides",
   "ix_depends",
   "ix_trace",
   "ix_explain",
@@ -145,6 +146,7 @@ const TOOL_ANNOTATIONS: Record<(typeof IX_MCP_TOOL_NAMES)[number], ToolAnnotatio
   ix_callees: { ...READ_ONLY, title: "Callees" },
   ix_imported_by: { ...READ_ONLY, title: "Importers" },
   ix_imports: { ...READ_ONLY, title: "Imports" },
+  ix_overrides: { ...READ_ONLY, title: "Overrides and implementations" },
   ix_depends: { ...READ_ONLY, title: "Dependent tree" },
   ix_trace: { ...READ_ONLY, title: "Trace paths" },
   ix_explain: { ...READ_ONLY, title: "Explain a symbol" },
@@ -250,6 +252,7 @@ export const IX_MCP_INSTRUCTIONS = [
   "Ix is a code graph of this repository: definitions, calls and imports parsed from the source, not matched as text. Use it next to Grep/Glob/Read for what they cannot answer in one step:",
   "- Where to start on an issue or task, or what a file or symbol touches: ix_context (target=<name or path>, or issue=<issue text>). Ranked evidence, each row path:lines.",
   "- Who calls or imports X across files, or what X calls or imports: ix_neighbors (relation=callers|callees|imports|imported_by).",
+  "- Before changing a method's signature: every override, base declaration and sibling implementation, ix_neighbors (relation=overrides).",
   "- What a change to X would reach, before you edit it: ix_impact.",
   "- Which definition a name means when several share it: ix_search (definitions first); ix_read returns a definition's source by name.",
   "Not for a literal string, a regex, or a line in a file you already have open: use Grep/Read.",
@@ -521,12 +524,12 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   registerTool(
     ctx,
     "ix_neighbors",
-    "Use when you need who calls X, what X calls, what X imports, or which files import X, across the repo. Returns one row per resolved edge with path:lines, where grep finds every same-named symbol too. For transitive reach use ix_impact.",
+    "Use when you need who calls X, what X calls, what X imports, which files import X, or a method's overrides, across the repo. Returns one row per resolved edge with path:lines, where grep finds every same-named symbol too. For transitive reach use ix_impact.",
     {
       ...EDGE_TOOL_INPUT,
       relation: z
-        .enum(["callers", "callees", "imports", "imported_by"])
-        .describe("callers = who calls it; callees = what it calls"),
+        .enum(["callers", "callees", "imports", "imported_by", "overrides"])
+        .describe("callers = who calls it; callees = what it calls; overrides = a method's other definitions"),
     },
     async (input) => {
       const relation = stringArg(input, "relation");
@@ -543,6 +546,14 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   registerSymbolTool(ctx, runIx, "ix_callees", "What this calls, with path:lines. Prefer ix_neighbors.", "callees", EDGE_TOOL_INPUT);
   registerSymbolTool(ctx, runIx, "ix_imported_by", "What imports this, with path:lines. Prefer ix_neighbors.", "imported-by", EDGE_TOOL_INPUT);
   registerSymbolTool(ctx, runIx, "ix_imports", "What this imports, with path:lines. Prefer ix_neighbors.", "imports", EDGE_TOOL_INPUT);
+  registerSymbolTool(
+    ctx,
+    runIx,
+    "ix_overrides",
+    "Before a signature change: every override, base declaration and sibling implementation, with path:lines. Prefer ix_neighbors.",
+    "overrides",
+    EDGE_TOOL_INPUT,
+  );
   registerTool(
     ctx,
     "ix_depends",

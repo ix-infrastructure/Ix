@@ -304,6 +304,41 @@ describe("agent outcomes", () => {
   });
 });
 
+// Python callers through imports (fixtures/pyimports): app/main.py reaches
+// pkg/sub/mod.py by an absolute import, an aliased module import and a typed
+// receiver inside a method, and pkg/__init__.py by a package import.
+// other/mod.py defines the same names; only other/use.py, which imports it,
+// calls into it.
+describe("python callers through imports", () => {
+  type Row = { name?: string; path?: string };
+  const callers = (co: Checkout, symbol: string, path: string): { resultSource: string; results: Row[] } =>
+    JSON.parse(ix(env, co, ["callers", symbol, "--path", path, "--format", "json"]).stdout);
+
+  it("answers from the graph for the imported module, the package and a typed receiver", () => {
+    const co = checkout("pyimports");
+    map(env, co);
+
+    const load = callers(co, "load", "pkg/sub/mod.py");
+    expect(load.resultSource).toBe("graph");
+    expect(load.results.map((r) => r.name)).toEqual(expect.arrayContaining(["read_alias", "read_config"]));
+    expect(load.results.every((r) => r.path === "app/main.py")).toBe(true);
+
+    const where = callers(co, "where", "pkg/sub/mod.py");
+    expect(where.resultSource).toBe("graph");
+    expect(where.results.map((r) => r.name)).toContain("run");
+
+    const entry = callers(co, "entry", "pkg/__init__.py");
+    expect(entry.resultSource).toBe("graph");
+    expect(entry.results.map((r) => r.name)).toContain("run");
+
+    // The same-named module has exactly one caller, other/use.py, which
+    // imports it: answered from the graph, with nothing from app/main.py.
+    const other = callers(co, "load", "other/mod.py");
+    expect(other.resultSource).toBe("graph");
+    expect(other.results.map((r) => `${r.name}@${r.path}`)).toEqual(["read_other@other/use.py"]);
+  });
+});
+
 describe("an extractor upgrade over a real backend (IN-20)", () => {
   // The orphan sweep decides ownership from what POST /v1/nodes returns
   // (provenance.sourceUri, attrs.external, deletedRev). The unit suite proves

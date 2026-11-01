@@ -85,7 +85,7 @@ describe("ix reset --workspace", () => {
     expect(calls.reset + calls.resetCode).toBe(0);
     // Left in place, the rebuild would skip every file as unchanged.
     expect(fs.existsSync(cache)).toBe(false);
-    expect(out.join("\n")).toContain("Workspace 'mine' wiped. Other workspaces untouched.");
+    expect(out.join("\n")).toContain("Workspace 'mine' (id bbbb0002) wiped. Other workspace ids untouched.");
     expect(process.exitCode).toBeUndefined();
   });
 

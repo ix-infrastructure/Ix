@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -572,54 +572,72 @@ describe("ParsePool", () => {
   }, 20000);
 
   it("gives a worker that has just gone idle a full grace before giving up", async () => {
-    // Idleness has to be OBSERVED for a grace period, not read as an instant.
-    // The worker posts its result, the main thread deletes its `active` entry,
-    // and only then does the worker reach the queued `__shutdown` and start
-    // unwinding its isolate. An expiry landing in that window sees a worker
-    // that looks idle and unresponsive and abandons it -- one that was about to
-    // answer. Under the old `terminate()` this was the segfault itself; the
-    // pool unrefs now, so the cost is a lost parse result rather than the
-    // process, and it is still wrong.
-    //
-    // The timings are chosen so the two rules give different answers, which is
-    // the only way to catch this. Grace 300ms, so ticks land at 300/600/900. A
-    // 580ms parse puts the result 20ms before a tick, and the worker then
-    // spends 150ms in its shutdown handler:
-    //
-    //   instantaneous idleness -> abandons at 600, mid-handler, no marker
-    //   observed idleness      -> first idle tick at 600 starts the clock, so
-    //                             giving up would be 900; the worker finishes
-    //                             at 730 and exits on its own, marker written
+    // Control the main-thread clock and explicitly release each worker phase.
+    // Fixed 580/150ms spins with a 300ms grace raced worker startup and CI
+    // scheduling: destroy() could return while the worker still wrote in dir.
+    // The worker remains real; only the pool's grace clock is simulated.
+    const started = join(dir, "started");
+    const finishParse = join(dir, "finish-parse");
+    const finishShutdown = join(dir, "finish-shutdown");
     const marker = join(dir, "unwound-cleanly");
     const path = worker(
       "slow-to-unwind",
       `
       import { parentPort } from 'node:worker_threads';
-      import { writeFileSync } from 'node:fs';
-      const spin = (ms) => { const end = Date.now() + ms; while (Date.now() < end); };
+      import { existsSync, writeFileSync } from 'node:fs';
+      const waitFor = (path) => {
+        const deadline = Date.now() + 15000;
+        const pause = new Int32Array(new SharedArrayBuffer(4));
+        while (!existsSync(path)) {
+          if (Date.now() > deadline) throw new Error('fixture gate never opened: ' + path);
+          Atomics.wait(pause, 0, 0, 5);
+        }
+      };
       parentPort.on('message', (msg) => {
         if (msg && msg.__shutdown) {
-          spin(150);                       // stands in for isolate teardown
+          waitFor(${JSON.stringify(finishShutdown)});
           writeFileSync(${JSON.stringify(marker)}, 'clean', 'utf8');
           parentPort.close();
           return;
         }
-        spin(580);
+        writeFileSync(${JSON.stringify(started)}, 'ready', 'utf8');
+        waitFor(${JSON.stringify(finishParse)});
         parentPort.postMessage({ ok: true, result: { filePath: msg.filePath } });
       });
     `,
     );
 
-    const pool = new ParsePool(path, 1, 300);
+    // Disable the independent parse backstop; this test drives shutdown only.
+    const pool = new ParsePool(path, 1, 300, 10000, 0);
     pool.init();
     const parsing = pool.parse("slow.ts", "x");
-    await pool.destroy();
+    let destroying: Promise<void> | undefined;
+    let destroyed = false;
+    try {
+      await waitUntil(() => existsSync(started), "worker began parsing");
+      vi.useFakeTimers();
+      destroying = pool.destroy().then(() => { destroyed = true; });
+      await vi.advanceTimersByTimeAsync(300); // still busy at the first tick
+      writeFileSync(finishParse, "go");
+      await expect(parsing).resolves.toEqual({ filePath: "slow.ts" });
+      await vi.advanceTimersByTimeAsync(300); // first observation of idleness
+      expect(destroyed, "a newly idle worker gets a full grace").toBe(false);
+      await vi.advanceTimersByTimeAsync(299);
+      expect(destroyed, "the idle grace must not expire early").toBe(false);
+      expect(existsSync(marker)).toBe(false);
 
-    await expect(parsing).resolves.toEqual({ filePath: "slow.ts" });
-    expect(
-      existsSync(marker),
-      "a worker that just went idle must not be killed mid-teardown",
-    ).toBe(true);
+      writeFileSync(finishShutdown, "go");
+      await destroying;
+      expect(existsSync(marker), "worker finished its own teardown").toBe(true);
+    } finally {
+      vi.useRealTimers();
+      // Release the real thread even when an assertion fails, before afterEach
+      // removes its files (otherwise Windows can report ENOTEMPTY).
+      writeFileSync(finishParse, "go");
+      writeFileSync(finishShutdown, "go");
+      await (destroying ?? pool.destroy());
+      await waitUntil(() => existsSync(marker), "worker finished writing");
+    }
   }, 20000);
 
   it("gives up on a worker that stays busy past the hard deadline", async () => {

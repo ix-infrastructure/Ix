@@ -30,6 +30,7 @@ import {
   planIssue,
   rankIssueFiles,
   readIssueText,
+  START_BOOST,
   type Closeness,
   type IssuePlan,
   type LeanIssueView,
@@ -40,7 +41,8 @@ import {
 import { collectIssueEntities, placeIssueMatches, rankIssueEntities, type IssueEntityRanking } from "../explain/issue-entities.js";
 import { symbolReadChecker } from "../symbol-read-check.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
-import { cachedBm25Ranker } from "../explain/bm25-cache.js";
+import { cachedBm25Ranker, saveBm25Index } from "../explain/bm25-cache.js";
+import { companionHistory, expandIssueCompanions } from "../explain/issue-companions.js";
 import { collectTextReferences, gitRepoAccess, type RepoAccess, type TextSource } from "../explain/text-references.js";
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
@@ -461,13 +463,22 @@ export function registerContextCommand(program: Command): void {
         renderInvestigationDiff(saved, fresh, opts.format, requestedBudgets);
         return;
       }
+      // The BM25 index is written once the answer is out (planIssueWith).
       if (opts.fromIssue && opts.lean) {
-        await emitLeanIssue(opts.fromIssue, opts);
+        try {
+          await emitLeanIssue(opts.fromIssue, opts);
+        } finally {
+          saveBm25Index();
+        }
         return;
       }
       if (opts.fromIssue) {
-        const bundle = await buildIssueBundle(opts.fromIssue, opts, clampBudgets(opts, fmt), fmt);
-        if (bundle) await emitBundle(bundle, opts);
+        try {
+          const bundle = await buildIssueBundle(opts.fromIssue, opts, clampBudgets(opts, fmt), fmt);
+          if (bundle) await emitBundle(bundle, opts);
+        } finally {
+          saveBm25Index();
+        }
         return;
       }
       if (!target) {
@@ -1725,7 +1736,7 @@ async function buildIssueBundle(
   // A path start has no node yet, and the graph may not have one either: it
   // does not index every tracked file. chooseCentre walks BM25 for one it does.
   const { starts, centre, walked } = await chooseCentre(
-    plan.starts, plan.bm25, (path) => findFileNode(client, path));
+    plan.starts, plan.bm25, (path) => findFileNode(client, path), CENTRE_FALLBACK_TRIES, plan.sourcePaths);
   if (!centre) {
     issueFailure(
       "issue_unresolved",
@@ -1782,7 +1793,7 @@ export async function issueBundleSection(
   client: Pick<IxClient, "listByKind">,
   input: {
     text: string;
-    plan: Pick<IssuePlan, "bm25" | "unresolved" | "fallback"> & { repo?: Pick<RepoAccess, "files" | "read"> };
+    plan: Pick<IssuePlan, "bm25" | "unresolved" | "fallback" | "sourcePaths"> & { repo?: Pick<RepoAccess, "files" | "read"> };
     starts: StartingPoint[];
     walked: boolean;
     neighbourhoods: IssueNeighbourhood[];
@@ -1816,7 +1827,7 @@ export async function issueBundleSection(
       mark(ref.path, 0.5, `near ${n.start.name}`);
     }
   }
-  const rankedFiles = rankIssueFiles({ starts, bm25: plan.bm25, near });
+  const rankedFiles = await issueRankedFiles(text, { starts, bm25: plan.bm25, near, sourcePaths: plan.sourcePaths }, plan.repo, resolveWorkspaceRoot());
   const candidates = await collectIssueEntities(client, rankedFiles, input.scope);
   // The listing planIssueWith already ran: a second `git ls-files` would only
   // repeat it. Only tracked paths are read, as BM25 read them.
@@ -1834,6 +1845,21 @@ export async function issueBundleSection(
     repo: repo ? { read: path => tracked.has(path) ? repo.read(path) : undefined } : undefined,
     distances,
   };
+}
+
+/**
+ * The full `--from-issue` bundle's ranked files: the primary ranking, whole
+ * and in order, then companion files of a leading file (issue-companions.ts)
+ * read through `repo` and the git history at `root`. The lean view never
+ * calls this: companions are full-bundle only.
+ */
+export function issueRankedFiles(
+  text: string,
+  ranking: Parameters<typeof rankIssueFiles>[0],
+  repo: Pick<RepoAccess, "files" | "read"> | undefined,
+  root: string,
+): Promise<RankedFile[]> {
+  return expandIssueCompanions(text, rankIssueFiles(ranking), { repo, history: companionHistory(root) });
 }
 
 /** The issue's text, or undefined after reporting why it has none. */
@@ -1869,8 +1895,9 @@ async function planIssueWith(client: IxClient, text: string) {
   const plan = await planIssue(text, {
     repo,
     // Through the on-disk term index (bm25-cache.ts): the same ranking, with
-    // only the files that differ from HEAD read again.
-    rank: cachedBm25Ranker(root),
+    // only the files that differ from HEAD read again. The caller saves the
+    // index after printing (saveBm25Index).
+    rank: cachedBm25Ranker(root, { deferSave: true }),
     search: async (name) =>
       (await client.search(name, { limit: ISSUE_SEARCH_LIMIT, nameOnly: true, ...scope })).map(symbolHit),
   });
@@ -1881,7 +1908,8 @@ async function planIssueWith(client: IxClient, text: string) {
  * `ix context --from-issue --lean`: the starting points Ix trusts and the
  * next few files, with no bundle around them. See `leanIssueView` for why.
  * Nothing here needs a centre node, so it is also the cheap path: one search
- * per name the issue mentions, and BM25 over the tracked files.
+ * per name the issue mentions, and BM25 over the tracked files. Companion
+ * files (issue-companions.ts) are full-bundle only.
  */
 async function emitLeanIssue(arg: string, opts: ContextOptions): Promise<void> {
   const text = await readIssueOrReport(arg, opts.format);
@@ -2726,7 +2754,11 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
       ...locationField(starts[0]),
     });
   }
-  const shown = issue.rankedFiles.slice(0, SHOWN_RANKED_FILES);
+  // Companions (issue-companions.ts) follow the whole primary list, past the
+  // first SHOWN_RANKED_FILES once BM25 matches enough files: named after the
+  // primary files shown, or text and llm output would never show one.
+  const companions = issue.rankedFiles.filter((f) => f.companion);
+  const shown = [...issue.rankedFiles.filter((f) => !f.companion).slice(0, SHOWN_RANKED_FILES), ...companions];
   if (shown.length > 0) {
     items.push({
       id: "issue-ranked-files",
@@ -2734,7 +2766,7 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
       source: "issue.ranking",
       title: `ranked files: ${shown.map((f) => f.path).join(", ")}`,
       score: tierScore(TIER.issue, 1),
-      reason: `starting points first, then bm25 against the issue text, graph neighbours of a starting point boosted up to ${Math.round(CLOSENESS_BOOST * 100)}%; `
+      reason: `bm25 against the issue text, starting points boosted by up to ${Math.round(START_BOOST * 100)}% of the best bm25 score, graph neighbours of a starting point boosted up to ${Math.round(CLOSENESS_BOOST * 100)}%${companions.length > 0 ? ", then companion files of a leading file" : ""}; `
         + shown.map((f) => `${f.path.split("/").pop()} (${f.reason})`).join("; "),
       refs: [],
     });

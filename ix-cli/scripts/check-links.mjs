@@ -53,20 +53,49 @@
 // that no longer appears in any scanned file is itself an ERROR — a stale
 // allowlist must not rot silently.
 //
-// Usage: node ix-cli/scripts/check-links.mjs [--offline]   (from the repo root)
-//   --offline  skip the external-URL probes; relative links, routes and
-//              anchors are still checked. For local runs and tests, not CI.
+// Usage: node ix-cli/scripts/check-links.mjs [--offline] [--dist <dir> [--dist-only]]
+//   (from the repo root)
+//   --offline    skip the external-URL probes; relative links, routes and
+//                anchors are still checked. For local runs and tests, not CI.
+//   --dist <dir> additionally crawl a BUILT docs-site dist/ — the shipped
+//                output — so a route the build dropped, a page the template
+//                broke, or an href the base plugin failed to rewrite is caught
+//                even when every tracked source resolves. The --dist=<dir>
+//                form is accepted too; the flag is parsed, never searched for, because
+//                an invocation that meant to crawl a build and silently ran
+//                the source gate instead reports green about a build it never
+//                read.
+//   --dist-only  crawl only the built tree; skip the tracked-source pass. The
+//                CI step uses this so the docs gate is scoped to what ships
+//                and cannot inherit source-tree failures from elsewhere in the
+//                checkout. Needs --dist.
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 // Arguments first, so a bad invocation fails before any network probe runs.
-const USAGE = 'usage: check-links.mjs [--offline]';
+const USAGE = 'usage: check-links.mjs [--offline] [--dist <built-dist-dir> [--dist-only]]';
 let offline = false;
-for (const arg of process.argv.slice(2)) {
+let distArg;
+let distOnly = false;
+for (let i = 2; i < process.argv.length; i++) {
+  const arg = process.argv[i];
   if (arg === '--offline') offline = true;
+  else if (arg === '--dist') {
+    distArg = process.argv[++i];
+    if (!distArg) { console.error(`--dist needs a built-dist directory\n${USAGE}`); process.exit(2); }
+  }
+  else if (arg.startsWith('--dist=')) {
+    distArg = arg.slice('--dist='.length);
+    if (!distArg) { console.error(`--dist needs a built-dist directory\n${USAGE}`); process.exit(2); }
+  }
+  else if (arg === '--dist-only') distOnly = true;
   else { console.error(`unknown argument: ${arg}\n${USAGE}`); process.exit(2); }
+}
+if (distOnly && !distArg) {
+  console.error(`--dist-only needs --dist <built-dist-dir>\n${USAGE}`);
+  process.exit(2);
 }
 
 // Empty, and that is the intended steady state.
@@ -161,7 +190,10 @@ async function probe(url) {
   return res;
 }
 
-const allFiles = trackedFiles();
+// --dist-only crawls a built tree and nothing else: no git ls-files, no source
+// pass. The CI step depends on this — the docs job must report on the build,
+// not on unrelated source links elsewhere in the checkout.
+const allFiles = distOnly ? [] : trackedFiles();
 const mdFiles = allFiles.filter((f) => f.endsWith('.md') || f.endsWith('.mdx'));
 const allSet = new Set(allFiles);
 // One owner for case-insensitive lookup, keyed lowercase, and it answers both
@@ -528,10 +560,143 @@ for (const file of mdFiles) {
   }
 }
 
-// Allowlist must justify itself: an entry that matches nothing is stale.
-for (const [url] of ALLOW) {
-  if (!allContent.includes(url)) {
-    errors.push(`stale allowlist entry ${url} no longer appears in any scanned file — remove it (${ALLOW.get(url)})`);
+// Allowlist must justify itself: an entry that matches nothing is stale. It is
+// a property of the source pass, so --dist-only (which scans no source file)
+// does not evaluate it rather than failing every entry as stale.
+if (!distOnly) {
+  for (const [url] of ALLOW) {
+    if (!allContent.includes(url)) {
+      errors.push(`stale allowlist entry ${url} no longer appears in any scanned file — remove it (${ALLOW.get(url)})`);
+    }
+  }
+}
+
+if (distArg) {
+  const MAX_DIST_FILES = 5000; // crawl bound: a runaway walk is a bug
+  // Per-page bound, and an ERROR when exceeded rather than a quiet skip. Real
+  // built pages run from tens to a few hundred KB, so this sits far above any
+  // real page: exceeding it means the build is wrong, not that the page is big.
+  // It was 512 KB and a warning, which left a page over the cap with its links
+  // unread while the gate still reported green — and 512 KB is inside the range a
+  // large generated API page can reach, so this was a live false negative, not
+  // only a runaway guard.
+  const MAX_HTML_BYTES = 4 * 1024 * 1024;
+  const distRoot = path.resolve(distArg);
+  const distFiles = new Set(); // dist-relative posix paths of every file
+  let distEntries = 0;
+  try {
+    const walkDist = (dir) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.isDirectory()) walkDist(path.join(dir, e.name));
+        else {
+          if (++distEntries > MAX_DIST_FILES) {
+            throw new Error(`dist walk exceeded ${MAX_DIST_FILES} entries — refusing to crawl further`);
+          }
+          distFiles.add(path.relative(distRoot, path.join(dir, e.name)).split(path.sep).join('/'));
+        }
+      }
+    };
+    walkDist(distRoot);
+    // A walk that finds no page cannot have checked anything. Without this, an
+    // empty or missing build reports `checked 0 references — 0 broken` and exits
+    // 0, which is indistinguishable from a build that is clean — the one false
+    // green a gate that exists to read the output cannot afford.
+    if (![...distFiles].some((rel) => rel.endsWith('.html'))) {
+      throw new Error(`no .html files found (${distEntries} entries) — the walk was empty, so nothing was checked`);
+    }
+  } catch (e) {
+    errors.push(`dist crawl failed (${distRoot}): ${e.message}`);
+  }
+
+  // _redirects (emitted by finalize-dist.mjs): a link to a redirect SOURCE is
+  // served by its destination, so sources count as resolving targets.
+  const redirectSources = new Set();
+  for (const rel of distFiles) {
+    if (!rel.endsWith('_redirects')) continue;
+    for (const line of readFileSync(path.join(distRoot, rel), 'utf8').split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const src = t.split(/\s+/)[0];
+      if (src.startsWith('/')) redirectSources.add(src);
+    }
+  }
+
+  // Anchor universe of a built page: every fragment-target attribute plus
+  // GitHub-style slugs of h1–h6 text. Same helpers as the source-level check —
+  // tagAnchors, slugifyHeading and slugAdder above — so the two surfaces cannot
+  // disagree about what a page exposes as an anchor.
+  const distIdsCache = new Map();
+  const distIdsOf = (rel) => {
+    if (!distIdsCache.has(rel)) {
+      const ids = new Set();
+      const addHeading = slugAdder(ids);
+      const html = readFileSync(path.join(distRoot, rel), 'utf8');
+      tagAnchors(html, ids);
+      for (const m of html.matchAll(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi)) addHeading(slugifyHeading(m[2]));
+      distIdsCache.set(rel, ids);
+    }
+    return distIdsCache.get(rel);
+  };
+
+  for (const htmlRel of distFiles) {
+    if (!htmlRel.endsWith('.html')) continue;
+    const abs = path.join(distRoot, htmlRel);
+    let html;
+    try { html = readFileSync(abs, 'utf8'); } catch { warnings.push(`cannot read dist file ${htmlRel}`); continue; }
+    const htmlBytes = Buffer.byteLength(html);
+    if (htmlBytes > MAX_HTML_BYTES) {
+      errors.push(`dist page over ${MAX_HTML_BYTES} bytes (${htmlBytes}) — its links were not read, so it cannot pass as checked: ${htmlRel}`);
+      continue;
+    }
+    // URL directory this page's relative links resolve against: Astro emits
+    // clean routes as <dir>/index.html, whose URL is <dir>/.
+    const pageDir = htmlRel === 'index.html' ? ''
+      : htmlRel.endsWith('/index.html') ? htmlRel.slice(0, -'index.html'.length)
+      : htmlRel.replace(/[^/]*$/, '');
+    for (const m of html.matchAll(/\s(href|src)\s*=\s*["']([^"']+)["']/g)) {
+      const raw = m[2];
+      // Skipped classes stay uncounted, matching the tracked-file pass —
+      // except a pure #anchor, which is checked as an in-page anchor below.
+      if (!raw || isExternal(raw)) continue;
+      checked++;
+      const line = html.slice(0, m.index).split('\n').length;
+      const hashAt = raw.indexOf('#');
+      const pathPart = hashAt === -1 ? raw : raw.slice(0, hashAt);
+      const frag = hashAt === -1 ? null : raw.slice(hashAt + 1);
+      if (!pathPart) {
+        if (frag && !distIdsOf(htmlRel).has(frag)) errors.push(`${raw} (dist anchor, in ${htmlRel}#L${line})`);
+        continue;
+      }
+      // Resolve in URL space. Root-relative targets live at the dist root;
+      // page-relative targets resolve against this page's URL directory.
+      // Percent-decoding is normalization only: raw and decoded are both
+      // tried, so an encoded path cannot fail on its own encoding.
+      const rawPath = pathPart.split('?')[0];
+      let decPath = rawPath;
+      try { decPath = decodeURIComponent(rawPath); } catch { /* malformed escape: raw still tried */ }
+      let hit = null;
+      for (const p of decPath === rawPath ? [rawPath] : [decPath, rawPath]) {
+        if (redirectSources.has(p) || redirectSources.has(p.replace(/\/+$/, '') + '/')) { hit = 'redirect'; break; }
+        const joined = p.startsWith('/')
+          ? p.slice(1)
+          : path.posix.normalize(path.posix.join(pageDir, p));
+        const rel2 = joined.replace(/\/+$/, '');
+        if (distFiles.has(rel2)) { hit = rel2; break; }
+        // A directory target resolves to its index.html. At the dist root that is
+        // `index.html`, not `'/index.html'`: every key here comes from
+        // path.relative and carries no leading slash, so the concatenation could
+        // never match and the root's own index.html — the page a host serves for
+        // `/` — was invisible. The source surface already treats a bare `/` as the
+        // repo root, so this is the same reference, not a second policy.
+        const idxRel = rel2 === '' ? 'index.html' : rel2 + '/index.html';
+        if (distFiles.has(idxRel)) { hit = idxRel; break; }
+      }
+      if (hit === 'redirect') continue;
+      if (!hit) { errors.push(`${raw} (dist href, in ${htmlRel}#L${line})`); continue; }
+      if (frag && hit.endsWith('.html') && !distIdsOf(hit).has(frag)) {
+        errors.push(`${raw} (dist anchor, in ${htmlRel}#L${line})`);
+      }
+    }
   }
 }
 

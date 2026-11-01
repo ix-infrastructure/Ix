@@ -450,7 +450,9 @@ describe("issue bundle section, as --from-issue wires it", () => {
     const { issue } = await section();
     expect(Object.fromEntries(issue.distances!)).toEqual({ start: 0, near: 1, second: 0, imported: 1 });
     expect(issue.extraEntities!.map(e => e.id)).toEqual(["second-related"]);
-    expect(issue.rankedFiles.slice(0, 2).map(f => f.path)).toEqual([path, second.path]);
+    // Starts are boosted within the BM25 order, not forced first (#884): both are ranked, the best one first.
+    expect(issue.rankedFiles[0].path).toBe(path);
+    expect(issue.rankedFiles.map(f => f.path)).toContain(second.path);
   });
 
   it("lists definitions in the active read scope and reads only tracked files", async () => {

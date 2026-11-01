@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
@@ -107,7 +107,22 @@ describe("workspace_id migration (Ix#225 gap 2)", () => {
     expect(config.workspaces[0].root_path).toBe(canonicalRoot);
   });
 
-  it("re-keys a legacy random workspace_id to the path-based id and reports migrated", () => {
+  it("keeps a legacy random (or pinned) workspace_id unless asked to re-key it", () => {
+    const root = nodePath.join(home, "repoKeep");
+    fs.mkdirSync(root, { recursive: true });
+    writeConfig([{ workspace_id: "rand0002", workspace_name: "repoKeep", root_path: root, default: true }]);
+    const canonicalRoot = fs.realpathSync.native(root);
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    const state = ensureWorkspaceIdState(root);
+    expect(state.workspaceId).toBe("rand0002");
+    expect(state.migrated).toBe(false);
+    expect(state.previousWorkspaceId).toBeUndefined();
+    expect(readWorkspaceId(canonicalRoot)).toBe("rand0002");
+    vi.restoreAllMocks();
+  });
+
+  it("re-keys a legacy random workspace_id to the path-based id with adoptPathId and reports migrated", () => {
     const root = nodePath.join(home, "repoOne");
     fs.mkdirSync(root, { recursive: true });
     writeConfig([{ workspace_id: "rand0001", workspace_name: "repoOne", root_path: root, default: true }]);
@@ -116,7 +131,7 @@ describe("workspace_id migration (Ix#225 gap 2)", () => {
     const pathId = workspaceIdForPath(canonicalRoot);
     expect(pathId).not.toBe("rand0001");
 
-    const state = ensureWorkspaceIdState(root);
+    const state = ensureWorkspaceIdState(root, { adoptPathId: true });
     expect(state.workspaceId).toBe(pathId);
     expect(state.migrated).toBe(true);
     expect(state.previousWorkspaceId).toBe("rand0001"); // captured for orphan cleanup
