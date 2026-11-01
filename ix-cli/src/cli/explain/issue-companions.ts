@@ -155,18 +155,26 @@ export async function expandIssueCompanions(
     texts.set(path, bounded);
     return live() ? bounded : undefined;
   };
-  const found = new Map<string, { path: string; source: CompanionSource; seed: string; weight: number }>();
-  const credit = (path: string, source: CompanionSource, seed: string, weight: number) => {
+  // `weight` is capped so a co-change never outranks a static link; `strength`
+  // (the uncapped co-change score) then orders files of equal weight, so the
+  // most related co-changes win over ones whose paths merely sort first.
+  type Found = { path: string; source: CompanionSource; seed: string; weight: number; strength: number; order: number };
+  const found = new Map<string, Found>();
+  const credit = (path: string, source: CompanionSource, seed: string, weight: number, strength = weight) => {
     if (!live() || primaryPaths.has(path) || !tracked.has(path)) return;
     const prior = found.get(path);
     if (!prior && found.size >= MAX_COMPANION_CANDIDATES) return;
-    if (!prior || weight > prior.weight) found.set(path, { path, source, seed, weight });
+    if (!prior || weight > prior.weight || (weight === prior.weight && strength > prior.strength)) {
+      found.set(path, { path, source, seed, weight, strength, order: prior?.order ?? found.size });
+    }
   };
   const definition = (path: string, name: string, depth = 0): string | undefined => {
     const text = read(path);
     if (!text) return undefined;
+    // A bare `NAME = ...` counts only at module level (column 0): an indented
+    // one is a reassignment inside a body, and `NAME == x` is a comparison.
     const declaration = name === "default" ? /\bexport\s+default\b/
-      : new RegExp(`\\b(?:def|class|function|interface|type|enum|const|let|var)\\s+${escaped(name)}\\b|^\\s*${escaped(name)}\\s*(?::[^=\\n]+)?=`, "m");
+      : new RegExp(`\\b(?:def|class|function|interface|type|enum|const|let|var)\\s+${escaped(name)}\\b|^${escaped(name)}[ \\t]*(?::[^=\\n]+)?=(?!=)`, "m");
     if (declaration.test(text)) return path;
     if (depth >= 2) return undefined;
     for (const ref of imports(text, path.endsWith(".py"))) {
@@ -220,7 +228,8 @@ export async function expandIssueCompanions(
       // A provider that ignores cancellation still cannot delay this pass.
       const changes = await Promise.race([deps.history(seed.path, signal).catch(() => []), stopped]);
       for (const change of (changes ?? []).slice(0, MAX_COMPANION_HISTORY)) {
-        credit(change.path, "co-change", seed.path, 0.8 * Math.min(1, Math.max(0, change.score)));
+        const strength = Math.max(0, change.score);
+        credit(change.path, "co-change", seed.path, 0.8 * Math.min(1, strength), strength);
       }
     }
   } finally {
@@ -229,7 +238,7 @@ export async function expandIssueCompanions(
     signal.removeEventListener("abort", onAbort!);
   }
   const companions: RankedFile[] = [...found.values()]
-    .sort((a, b) => b.weight - a.weight || a.path.localeCompare(b.path))
+    .sort((a, b) => b.weight - a.weight || b.strength - a.strength || a.order - b.order || a.path.localeCompare(b.path))
     .slice(0, MAX_COMPANIONS)
     .map((c) => ({ path: c.path, score: Math.max(0, primary[0].score) * 0.8 * c.weight,
       reason: `companion (${c.source} of ${c.seed})`, companion: { source: c.source, seed: c.seed } }));

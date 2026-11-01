@@ -1,11 +1,16 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
-import { buildBundle, clampBudgets, renderBundle } from "../commands/context.js";
+import { buildBundle, clampBudgets, issueRankedFiles, renderBundle } from "../commands/context.js";
 import { contextBundleSchema } from "../context-bundle-schema.js";
 import type { ContextFacts, EntityLocation } from "../explain/facts.js";
 import type { RankedFile, StartingPoint } from "../explain/issue.js";
+import { gitRepoAccess } from "../explain/text-references.js";
 
 /**
  * The bundle `ix context --from-issue` builds: the usual bundle around the
@@ -144,6 +149,40 @@ describe("ix context --from-issue bundle", () => {
     const text = captureLog(() => renderBundle(b, "text")).join("\n");
     expect(text).toContain("starting points: listByKind (src/client/api.ts:141-152)");
     expect(text).toContain("ranked files: src/client/api.ts");
+  });
+
+  it("ranks a full --from-issue run's files with the checkout's companions, and keeps them in the JSON", async () => {
+    // The wiring buildIssueBundle uses: the plan's repository access and the
+    // git history at the workspace root, against a real (synthetic) checkout.
+    const dir = mkdtempSync(join(process.cwd(), ".issue-bundle-test-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    try {
+      git("init", "-q");
+      git("config", "user.name", "Fixture");
+      git("config", "user.email", "fixture@example.invalid");
+      for (let i = 0; i < 2; i++) {
+        writeFileSync(join(dir, "worker.py"), `def run_job(): return ${i}\n`);
+        writeFileSync(join(dir, "schema.py"), `VERSION = ${i}\n`);
+        writeFileSync(join(dir, "other.py"), `NAME = ${i}\n`);
+        git("add", "worker.py", "schema.py", "other.py");
+        git("commit", "-qm", "Update worker and schema");
+      }
+      const start: StartingPoint = { token: "worker.py", name: "worker.py", kind: "file", path: "worker.py", via: "path in issue" };
+      const files = await issueRankedFiles("run_job fails in worker.py",
+        { starts: [start], bm25: [{ path: "other.py", score: 2 }], near: new Map() }, gitRepoAccess(dir), dir);
+      expect(files.map((f) => f.path)).toEqual(["worker.py", "other.py", "schema.py"]);
+      expect(files[2]).toMatchObject({ companion: { source: "co-change", seed: "worker.py" } });
+
+      const b = build(issue({ rankedFiles: files }));
+      const parsed = contextBundleSchema.parse(JSON.parse(JSON.stringify(b)));
+      expect(parsed.rankedFiles?.map((f) => f.path)).toEqual(["worker.py", "other.py", "schema.py"]);
+      expect(parsed.rankedFiles?.[2]).toHaveProperty("companion", { source: "co-change", seed: "worker.py" });
+      // Without a checkout the primary ranking comes back unchanged.
+      expect((await issueRankedFiles("run_job fails", { starts: [start], bm25: [], near: new Map() }, undefined, dir))
+        .map((f) => f.path)).toEqual(["worker.py"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("names companion files in the evidence row even past the shown primary files", () => {

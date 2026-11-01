@@ -40,7 +40,7 @@ import { symbolReadChecker } from "../symbol-read-check.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
 import { cachedBm25Ranker, saveBm25Index } from "../explain/bm25-cache.js";
 import { companionHistory, expandIssueCompanions } from "../explain/issue-companions.js";
-import { collectTextReferences, gitRepoAccess, type TextSource } from "../explain/text-references.js";
+import { collectTextReferences, gitRepoAccess, type RepoAccess, type TextSource } from "../explain/text-references.js";
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parseBudgetOption, parsePickOption, parseRevisionOption } from "../options.js";
@@ -1773,12 +1773,25 @@ async function buildIssueBundle(
       startingPoints: starts,
       unresolved: plan.unresolved,
       fallback: plan.fallback || walked,
-      rankedFiles: await expandIssueCompanions(text, rankIssueFiles({ starts, bm25: plan.bm25, near }), {
-        repo: plan.repo, history: companionHistory(resolveWorkspaceRoot()),
-      }),
+      rankedFiles: await issueRankedFiles(text, { starts, bm25: plan.bm25, near }, plan.repo, resolveWorkspaceRoot()),
       extraEntities: around.flatMap((n) => n.related),
     },
   });
+}
+
+/**
+ * The full `--from-issue` bundle's ranked files: the primary ranking, whole
+ * and in order, then companion files of a leading file (issue-companions.ts)
+ * read through `repo` and the git history at `root`. The lean view never
+ * calls this: companions are full-bundle only.
+ */
+export function issueRankedFiles(
+  text: string,
+  ranking: Parameters<typeof rankIssueFiles>[0],
+  repo: RepoAccess | undefined,
+  root: string,
+): Promise<RankedFile[]> {
+  return expandIssueCompanions(text, rankIssueFiles(ranking), { repo, history: companionHistory(root) });
 }
 
 /** The issue's text, or undefined after reporting why it has none. */

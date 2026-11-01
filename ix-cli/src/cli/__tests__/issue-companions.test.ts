@@ -95,7 +95,8 @@ describe("issue companion expansion", () => {
       expect(history.mock.calls.map(([path]) => path)).toEqual(limit <= 1 ? [] : ["a.ts", "b.ts"]);
     }
     const result = await expandIssueCompanions("bug", primary, { repo: files, history }, 5);
-    expect(result.map((r) => r.path)).toEqual(["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts", "g.ts"]);
+    // Equal co-change scores keep the order history returned them in.
+    expect(result.map((r) => r.path)).toEqual(["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "g.ts", "f.ts"]);
     expect(primary.map((r) => r.path)).toEqual(["a.ts", "b.ts", "c.ts", "d.ts", "e.ts"]);
   });
 
@@ -207,6 +208,41 @@ describe("issue companion expansion", () => {
     expect(result.map((r) => r.path)).toEqual(["s1.ts", "s2.ts", "s3.ts", "b1.ts", "b2.ts", "b3.ts", "c1.ts", "c2.ts", "c3.ts"]);
     expect(result.slice(0, primary.length)).toEqual(primary);
     expect(result.slice(primary.length).every((r) => r.companion?.source === "co-change")).toBe(true);
+  });
+
+  it("orders strong co-changes by their score, not by path, when several reach the weight cap", async () => {
+    const files = repo(Object.fromEntries(["seed.ts", "a.ts", "b.ts", "y.ts", "z.ts"].map((p) => [p, ""])));
+    // The order coChangedFiles returns: commit-weighted, strongest first.
+    const history = async () => [["z.ts", 2.18], ["y.ts", 1.93], ["a.ts", 1.09], ["b.ts", 1.05]]
+      .map(([path, score]) => ({ path: path as string, commits: 5, score: score as number }));
+    const result = await expandIssueCompanions("bug", ranking("seed.ts"), { repo: files, history });
+    expect(result.slice(1).map((r) => r.path)).toEqual(["z.ts", "y.ts", "a.ts"]);
+    // A static link still outranks any co-change.
+    const linked = repo({ "seed.ts": "", "a.ts": "", "b.ts": "", "y.ts": "", "z.ts": "", "index.ts": 'export { x } from "./seed";' });
+    const withEntry = await expandIssueCompanions("bug", ranking("seed.ts"), { repo: linked, history });
+    expect(withEntry.slice(1).map((r) => r.path)).toEqual(["index.ts", "z.ts", "y.ts"]);
+  });
+
+  it.each([
+    ["pkg/worker.py", "from .public import JobError\ndef run_job(): pass",
+      "pkg/public.py", "from .types import JobError\n\ndef reset():\n    JobError = None\n    return JobError == 1\n",
+      "pkg/types.py", "class JobError(Exception): pass"],
+    ["src/worker.ts", 'import { JobError } from "./public";\nexport function runJob() {}',
+      "src/public.ts", 'export { JobError } from "./types";\nfunction check(e: unknown) {\n  JobError == e;\n}\n',
+      "src/types.ts", "export class JobError {}"],
+  ])("does not take an indented reassignment or comparison in %s's chain for the definition", async (seed, source, hop, hopText, target, definition) => {
+    const files = repo({ [seed]: source, [hop]: hopText, [target]: definition });
+    const result = await expandIssueCompanions("JobError escapes", ranking(seed), { repo: files });
+    expect(result[1]).toMatchObject({ path: target, companion: { source: "issue-import", seed } });
+  });
+
+  it("still takes a module-level assignment for the definition", async () => {
+    const files = repo({
+      "pkg/worker.py": "from .errors import JobError\ndef run_job(): pass",
+      "pkg/errors.py": "JobError: type = make_error('JobError')\n",
+    });
+    const result = await expandIssueCompanions("JobError escapes", ranking("pkg/worker.py"), { repo: files });
+    expect(result[1]).toMatchObject({ path: "pkg/errors.py", companion: { source: "issue-import" } });
   });
 
   it("does not treat the word 'default' as naming a default import", async () => {
