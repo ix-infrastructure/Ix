@@ -101,7 +101,8 @@ export function textInvocations(text) {
   for (const m of text.matchAll(/`(ix\s+[a-z][^`\n]*)`/g)) {
     // Inside a JS template literal the span is written \`ix …\`: the closing
     // backtick's escape is captured as the span's last character.
-    found.push({ argv: tokens(m[1].replace(/\\+$/, "")), line: lineOf(text, m.index), snippet: m[1].slice(0, 100) });
+    const span = m[1].replace(/\\+$/, "");
+    found.push({ argv: tokens(span), line: lineOf(text, m.index), snippet: span.slice(0, 100) });
   }
   let inFence = false;
   text.split("\n").forEach((raw, i) => {
@@ -117,7 +118,7 @@ export function textInvocations(text) {
  * prompts as JSON strings, where a fenced block's newlines are `\n` escapes:
  * scanned as raw text, those blocks are invisible.
  */
-function jsonInvocations(text) {
+export function jsonInvocations(text) {
   let data;
   try {
     data = JSON.parse(text);
