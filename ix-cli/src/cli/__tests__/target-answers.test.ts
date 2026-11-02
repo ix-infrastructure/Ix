@@ -95,17 +95,28 @@ vi.mock("../miss-reason.js", () => ({
 }));
 
 // The miss's did-you-mean probe (target-suggestions.ts) finds a real entity
-// near a name that is also only text.
+// near a name that is also only text. Its budget is half the miss's elapsed
+// time, which is near zero against these instant mocks, so a loaded test run
+// could cut the real probe off: the names it answers here are fixed.
 vi.mock("../target-suggestions.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../target-suggestions.js")>();
   return {
     ...actual,
-    findTargetCandidates: async (...args: Parameters<typeof actual.findTargetCandidates>) => args[1] === "nearKey"
-      ? {
+    findTargetCandidates: async (...args: Parameters<typeof actual.findTargetCandidates>) => {
+      if (args[1] === "nearKey") {
+        return {
           didYouMean: [{ name: "loadKeys", kind: "function", path: "src/near.ts", line: 1 }],
           suggestions: [{ id: "near-id", name: "loadKeys", kind: "function", path: "src/near.ts" }],
-        }
-      : actual.findTargetCandidates(...args),
+        };
+      }
+      if (args[1] === "Router.handle") {
+        return {
+          didYouMean: [{ name: "handle", kind: "method", path: "src/dispatcher.ts", line: 1 }],
+          suggestions: [{ id: "handle-id", name: "handle", kind: "method", path: "src/dispatcher.ts" }],
+        };
+      }
+      return actual.findTargetCandidates(...args);
+    },
   };
 });
 

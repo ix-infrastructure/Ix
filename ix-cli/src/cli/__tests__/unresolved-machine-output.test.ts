@@ -178,6 +178,41 @@ describe("unresolved targets in machine formats", () => {
     });
   });
 
+  it("reports both missing trace endpoints in one result", async () => {
+    const result = await run(
+      (await import("../commands/trace.js")).registerTraceCommand,
+      ["trace", "MissingFrom", "--to", "MissingTo", "--format", "json"],
+    );
+
+    expect(process.exitCode).toBe(3);
+    expect(JSON.parse(result.stdout)).toEqual({
+      error: "unresolved_target",
+      message: 'No entities found matching "MissingFrom" or "MissingTo".',
+      targets: ["MissingFrom", "MissingTo"],
+    });
+  });
+
+  // locate joins the same contract (#539) and keeps its own body, with the
+  // shared `{error, message}` fields added rather than substituted:
+  // shipped plugins read `diagnostics` off it, and the point of #539 is that
+  // the exit code becomes informative without the payload going away.
+  it("returns a non-zero status from ix locate while keeping its result body", async () => {
+    const { registerLocateCommand } = await import("../commands/locate.js");
+    const result = await run(registerLocateCommand, ["locate", "DefinitelyMissing", "--format", "json"]);
+
+    expect(process.exitCode).toBe(3);
+    expect(JSON.parse(result.stdout)).toEqual({
+      resolvedTarget: null,
+      resolutionMode: "none",
+      systemPath: null,
+      diagnostics: ["No graph entity found."],
+      // The slug and message every other command's miss carries.
+      error: "unresolved_target",
+      message: 'No graph entity found for "DefinitelyMissing".',
+      didYouMean: [],
+    });
+  });
+
   it("exits non-zero for an AMBIGUOUS locate under --strict, in every format (#547)", async () => {
     // Without --strict, locate answers an ambiguous name for its top
     // candidate like every other graph command (target-answers.test.ts), so

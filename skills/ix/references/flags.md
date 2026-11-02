@@ -333,7 +333,7 @@ Build a bounded, deterministic context bundle for a symbol, file, or entity (or 
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
-| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command. A named target only; the fresh side of `--diff` is always strict |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command. A named target only; the fresh side of `--diff` rebuilds the saved entity by its id, and re-resolves the name strictly only when that id is gone or `--kind`/`--path`/`--pick` is given |
 | `--depth` | `compact\|standard\|full\|shallow\|deep` | — | Context-graph expansion depth (compact\|standard\|full\|shallow\|deep) |
 | `--as-of-rev` | `<n>` | — | Historical context as of a graph revision |
 | `--max-entities` | `<n>` | — | Maximum entities in the bundle (default: 50, clamped to 1-500) |

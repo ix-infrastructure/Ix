@@ -47,7 +47,7 @@ import { collectTextReferences, gitRepoAccess, type RepoAccess, type TextSource 
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parseBudgetOption, parsePickOption, STRICT_TARGET_HELP, parseRevisionOption } from "../options.js";
-import { activeReadScope, ensureReadScope, resolveFileOrReport } from "../resolve.js";
+import { activeReadScope, ensureReadScope, isRawId, resolveFileOrEntityFull, resolveFileOrReport, type ResolvedEntity } from "../resolve.js";
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
 import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure } from "../ui.js";
 import { printJson, relativePath } from "../format.js";
@@ -456,11 +456,17 @@ export function registerContextCommand(program: Command): void {
         // diff output can report what was asked for instead of dropping it
         // silently; what actually governed is read back off the built bundle.
         const requestedBudgets = parseRequestedBudgets(opts);
+        // With no target or selector typed, the fresh side is the saved
+        // bundle's own entity, looked up by its id: a name the save answered
+        // for an auto-picked candidate (resolve.ts answerAmbiguous) is still
+        // ambiguous, and re-resolving it strictly would exit 2.
+        const reuseSavedEntity = !target && opts.kind === undefined && opts.path === undefined && opts.pick === undefined;
         const fresh = await buildFreshBundle(
           target ?? saved.bundle.target.name,
           { ...opts, ...mergeDiffOptions(saved, opts) },
           saved.bundle.budgets,
           opts.format,
+          reuseSavedEntity ? saved.bundle.target.id : undefined,
         );
         if (!fresh) return;
         renderInvestigationDiff(saved, fresh, opts.format, requestedBudgets);
@@ -612,12 +618,20 @@ async function buildFreshBundle(
   opts: { kind?: string; path?: string; pick?: number; depth?: string; asOfRev?: number },
   budgets: BudgetSnapshot & { format?: BundleFormat },
   format: string,
+  savedId?: string,
 ): Promise<ContextBundle | undefined> {
   const client = createClient({ query: true });
+  // The saved entity itself when it still exists; a miss on its id (the
+  // graph was rebuilt) falls through to its name.
+  let resolved: ResolvedEntity | null = null;
+  if (savedId && isRawId(savedId)) {
+    const byId = await resolveFileOrEntityFull(client, savedId, { format, silentMiss: true });
+    if (byId.resolved) resolved = byId.entity;
+  }
   // Strict: the fresh side of --diff must be the saved bundle's entity, so a
   // name that has become ambiguous is reported, never answered with a guess
   // the diff would then compare against.
-  const resolved = await resolveFileOrReport(client, target, {
+  resolved ??= await resolveFileOrReport(client, target, {
     kind: opts.kind,
     path: opts.path,
     pick: opts.pick,
