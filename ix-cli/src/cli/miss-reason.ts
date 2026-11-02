@@ -227,10 +227,11 @@ export function snippetText(raw: string): string {
  * `-F -w name`, as a pattern that matches the window around it: `name` as a
  * word (what `-w` means: no word character either side), with up to
  * SNIPPET_CONTEXT characters before and after. The name is an identifier
- * (`missProbeWouldRun`), so `$` is the only character to escape.
+ * (`missProbeWouldRun`), but every regex metacharacter is escaped anyway, so the
+ * pattern can never mean more than the literal name.
  */
 export function windowPattern(name: string): string {
-  const word = name.replace(/\$/g, "\\$&");
+  const word = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return `.{0,${SNIPPET_CONTEXT}}(?:^|\\W)${word}(?:\\W|$).{0,${SNIPPET_CONTEXT}}`;
 }
 
