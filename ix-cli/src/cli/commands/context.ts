@@ -46,11 +46,11 @@ import { companionHistory, expandIssueCompanions } from "../explain/issue-compan
 import { collectTextReferences, gitRepoAccess, type RepoAccess, type TextSource } from "../explain/text-references.js";
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
-import { parseBudgetOption, parsePickOption, parseRevisionOption } from "../options.js";
-import { activeReadScope, ensureReadScope, resolveFileOrReport } from "../resolve.js";
+import { parseBudgetOption, parsePickOption, STRICT_TARGET_HELP, parseRevisionOption } from "../options.js";
+import { activeReadScope, ensureReadScope, isRawId, resolveFileOrEntityFull, resolveFileOrReport, type ResolutionNotice, type ResolvedEntity } from "../resolve.js";
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
 import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure } from "../ui.js";
-import { printJson, relativePath } from "../format.js";
+import { printJson, relativePath, takeResolutionNotices } from "../format.js";
 import { forMcp, suggest, toolCall } from "../next-step.js";
 import {
   assessTargetStructure, checkGraphHealth, graphHealthJson, isUnhealthy, worseHealth, type GraphHealth,
@@ -195,6 +195,8 @@ interface ContextOptions extends Partial<BudgetSnapshot> {
   kind?: string;
   path?: string;
   pick?: number;
+  /** `--strict`: an ambiguous or text-only target is an error, not answered. */
+  strict?: boolean;
   depth?: string;
   asOfRev?: number;
   out?: string;
@@ -378,6 +380,7 @@ export function registerContextCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_TARGET_HELP)
     .option(
       "--depth <depth>",
       `Context-graph expansion depth (${CONTEXT_DEPTHS.join("|")})`,
@@ -453,11 +456,17 @@ export function registerContextCommand(program: Command): void {
         // diff output can report what was asked for instead of dropping it
         // silently; what actually governed is read back off the built bundle.
         const requestedBudgets = parseRequestedBudgets(opts);
+        // With no target or selector typed, the fresh side is the saved
+        // bundle's own entity, looked up by its id: a name the save answered
+        // for an auto-picked candidate (resolve.ts answerAmbiguous) is still
+        // ambiguous, and re-resolving it strictly would exit 2.
+        const reuseSavedEntity = !target && opts.kind === undefined && opts.path === undefined && opts.pick === undefined;
         const fresh = await buildFreshBundle(
           target ?? saved.bundle.target.name,
           { ...opts, ...mergeDiffOptions(saved, opts) },
           saved.bundle.budgets,
           opts.format,
+          reuseSavedEntity ? saved.bundle.target.id : undefined,
         );
         if (!fresh) return;
         renderInvestigationDiff(saved, fresh, opts.format, requestedBudgets);
@@ -499,6 +508,10 @@ export function registerContextCommand(program: Command): void {
         kind: opts.kind,
         path: opts.path,
         pick: opts.pick,
+        strict: opts.strict,
+        // --out / --save promise a bundle: a text-only name has none to
+        // write, so it stays the miss (exit 3) rather than a file list and 0.
+        ...(opts.out || opts.save ? { textAnswer: false } : {}),
       }, opts.format);
       if (!resolved) return;
 
@@ -543,6 +556,7 @@ export function registerContextCommand(program: Command): void {
 
 /** `--save`, `--out`, or render: what every freshly built bundle goes through. */
 async function emitBundle(bundle: ContextBundle, opts: ContextOptions): Promise<void> {
+  if (opts.save || opts.out) reportGuessedTargetForArtifact(opts.format);
   if (opts.save) {
     saveInvestigation(opts.save, bundle);
     renderNote(`Saved investigation "${opts.save}" (${bundle.entities.length} entities, ${bundle.relationships.length} relationships, ${bundle.evidence.length} evidence items). Resume with: ix context --resume ${opts.save}`);
@@ -603,17 +617,57 @@ async function emitBundle(bundle: ContextBundle, opts: ContextOptions): Promise<
   renderBundle(bundle, opts.format);
 }
 
+/**
+ * Say which entity a guessed target became, when the bundle goes to a file.
+ *
+ * A json caller's `ambiguous_target` / `fuzzy_match` notice waits in the queue
+ * for `printJson` (ui.ts `reportResolutionNotices`), and `--save` / `--out`
+ * never call it: the bundle goes to a file whose versioned schema
+ * (ix-context-bundle/1) has no field for it, and stdout gets a prose note. So
+ * the notice goes to stderr here, as a warning `--quiet` does not hide: it is
+ * the only sign that the saved bundle is for a guess. text and llm already
+ * printed it when the target resolved.
+ */
+function reportGuessedTargetForArtifact(format: string | undefined): void {
+  if (format !== "json") return;
+  const notices = takeResolutionNotices() as ResolutionNotice[];
+  for (const notice of notices) {
+    renderWarningErr(notice.message);
+    if (notice.code !== "ambiguous_target") continue;
+    notice.candidates.forEach((candidate, index) => {
+      const where = candidate.path ? ` in ${candidate.path}` : "";
+      console.error(`  ${index + 1}. ${(candidate.kind ?? "").padEnd(10)} ${candidate.id.slice(0, 8)}  ${candidate.name}${where}`);
+    });
+    if (notice.total > notice.candidates.length || notice.truncated) {
+      console.error(`  Showing ${notice.candidates.length} of ${notice.truncated ? ">=" : ""}${notice.total}`);
+    }
+    console.error("  Use --pick <n> or --path to choose another.");
+  }
+}
+
 async function buildFreshBundle(
   target: string,
   opts: { kind?: string; path?: string; pick?: number; depth?: string; asOfRev?: number },
   budgets: BudgetSnapshot & { format?: BundleFormat },
   format: string,
+  savedId?: string,
 ): Promise<ContextBundle | undefined> {
   const client = createClient({ query: true });
-  const resolved = await resolveFileOrReport(client, target, {
+  // The saved entity itself when it still exists; a miss on its id (the
+  // graph was rebuilt) falls through to its name.
+  let resolved: ResolvedEntity | null = null;
+  if (savedId && isRawId(savedId)) {
+    const byId = await resolveFileOrEntityFull(client, savedId, { format, silentMiss: true });
+    if (byId.resolved) resolved = byId.entity;
+  }
+  // Strict: the fresh side of --diff must be the saved bundle's entity, so a
+  // name that has become ambiguous is reported, never answered with a guess
+  // the diff would then compare against.
+  resolved ??= await resolveFileOrReport(client, target, {
     kind: opts.kind,
     path: opts.path,
     pick: opts.pick,
+    strict: true,
   }, format);
   if (!resolved) return undefined;
 
@@ -668,6 +722,7 @@ const BUILD_FLAGS: ReadonlyArray<[keyof ContextOptions, string]> = [
   ["kind", "--kind"],
   ["path", "--path"],
   ["pick", "--pick"],
+  ["strict", "--strict"],
   ["depth", "--depth"],
   ["asOfRev", "--as-of-rev"],
   ...BUDGETS.map((b) => [b.key, b.flag] as [keyof ContextOptions, string]),

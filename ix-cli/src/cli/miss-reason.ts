@@ -8,6 +8,7 @@ import { currentRunSignal } from "../client/run-signal.js";
 import { resolveWorkspaceRoot } from "./config.js";
 import { SKIPPED_DIRS, isGeneratedFile, isSupportedSourceFile } from "./file-discovery.js";
 import { isFileStale } from "./stale.js";
+import type { TextMatch } from "./text-matches.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -58,6 +59,14 @@ export interface SymbolMissReason {
   message: string;
   /** Workspace-relative files the name appears in (at most three). */
   files?: string[];
+  /**
+   * Every file the name appears in, any kind, with its first matching line,
+   * in path order: from the same rg run, so they cost nothing more. A command
+   * answers with the source ones (text-matches.ts).
+   */
+  matches?: TextMatch[];
+  /** The fix is `ix map`: a file that mentions the name is unindexed, or changed since. */
+  remap?: boolean;
 }
 
 /**
@@ -127,8 +136,9 @@ async function probe(
   scope: { path?: string; workspaceId?: string; systemId?: string },
   timeoutMs: number,
 ): Promise<SymbolMissReason | null> {
-  const hits = await filesMentioning(name, root, scope.path, timeoutMs);
-  if (hits === null) return null;
+  const matches = await filesMentioning(name, root, scope.path, timeoutMs);
+  if (matches === null) return null;
+  const hits = matches.map((m) => m.path);
   if (hits.length === 0) {
     return {
       reason: "symbol_not_in_source",
@@ -160,6 +170,8 @@ async function probe(
       message: `"${symbol}" is not in the graph, but it appears in ${checked[0]}, which has not been indexed: ` +
         "run `ix map`, or the file is ignored.",
       files: checked,
+      matches,
+      remap: true,
     };
   }
 
@@ -174,15 +186,72 @@ async function probe(
         ? `${stale.file} changed after it was indexed, so run \`ix map\` and retry.`
         : "it may be a local, a string, or a construct the parser does not index; `ix text` finds the occurrences."),
     files: checked,
+    matches,
+    ...(stale ? { remap: true } : {}),
   };
 }
 
-/** Workspace-relative files containing `name` as a word, sorted; null when rg could not answer. */
-async function filesMentioning(name: string, root: string, pathFilter: string | undefined, timeoutMs: number): Promise<string[] | null> {
+/**
+ * Characters kept on each side of the name in a matching line. rg prints
+ * only that window (`-o`), so the name is in the snippet however far along a
+ * long line it sits (a preview of the line's first bytes can miss it), and a
+ * minified file cannot fill the buffer.
+ */
+const SNIPPET_CONTEXT = 70;
+
+/**
+ * A safety cap on a printed window, sized so the window always fits. rg
+ * counts `--max-columns` in bytes, and the window is SNIPPET_CONTEXT
+ * characters each side plus a boundary character, each up to 4 bytes in
+ * UTF-8, around the (ASCII) name. A fixed 300 was overrun by a window of 3-
+ * or 4-byte text, and rg then printed its preview, `[... 0 more matches]`
+ * and all, as the snippet.
+ */
+export function rgMaxColumns(name: string): string {
+  return String(4 * (2 * SNIPPET_CONTEXT + 2) + name.length);
+}
+
+/**
+ * What rg appends to a line cut at `--max-columns` (`--max-columns-preview`).
+ * The cap above leaves no window that long; this is the second line of
+ * defence, so the marker can never pass for source text.
+ */
+const RG_PREVIEW_MARKER = /\s*\[\.\.\. (?:omitted end of long line|\d+ more match(?:es)?)\]$/;
+
+/** A printed window as source text: line ending and any rg preview marker dropped. */
+export function snippetText(raw: string): string {
+  return raw.replace(/\r$/, "").replace(RG_PREVIEW_MARKER, "");
+}
+
+/**
+ * `-F -w name`, as a pattern that matches the window around it: `name` as a
+ * word (what `-w` means: no word character either side), with up to
+ * SNIPPET_CONTEXT characters before and after. The name is an identifier
+ * (`missProbeWouldRun`), but every regex metacharacter is escaped anyway, so the
+ * pattern can never mean more than the literal name.
+ */
+export function windowPattern(name: string): string {
+  const word = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return `.{0,${SNIPPET_CONTEXT}}(?:^|\\W)${word}(?:\\W|$).{0,${SNIPPET_CONTEXT}}`;
+}
+
+/**
+ * Workspace-relative files containing `name` as a word, each with its first
+ * matching line, sorted by path; null when rg could not answer.
+ *
+ * `-m 1` stops reading a file at its first matching line, as `-l` did, so the
+ * walk costs what it cost before; `--null` ends each path with a NUL, so a
+ * path with a colon in it still splits from its line number. `-o` prints the
+ * window around each match on that line: the first is kept.
+ */
+async function filesMentioning(name: string, root: string, pathFilter: string | undefined, timeoutMs: number): Promise<TextMatch[] | null> {
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync("rg", ["-l", "-F", "-w", ...RG_SCOPE_ARGS, "-e", name, "--", root], {
-      maxBuffer: 1024 * 1024, timeout: Math.min(5_000, timeoutMs), signal: currentRunSignal(),
+    ({ stdout } = await execFileAsync("rg", [
+      "-n", "-m", "1", "--null", "--no-heading", "--with-filename", "-o", "--max-columns", rgMaxColumns(name), "--max-columns-preview",
+      ...RG_SCOPE_ARGS, "-e", windowPattern(name), "--", root,
+    ], {
+      maxBuffer: 4 * 1024 * 1024, timeout: Math.min(5_000, timeoutMs), signal: currentRunSignal(),
     }));
   } catch (err) {
     const failure = err as { code?: unknown; stdout?: string };
@@ -191,11 +260,22 @@ async function filesMentioning(name: string, root: string, pathFilter: string | 
     return null;
   }
   const filter = pathFilter ? normalizeForPathMatch(pathFilter) : "";
-  return stdout.split("\n")
-    .filter(Boolean)
-    .map((abs) => path.relative(root, abs).split(path.sep).join("/"))
-    .filter((rel) => !filter || normalizeForPathMatch(rel).includes(filter))
-    .sort();
+  const out: TextMatch[] = [];
+  const seen = new Set<string>();
+  for (const row of stdout.split("\n")) {
+    const nul = row.indexOf("\0");
+    if (nul < 0) continue;
+    const rest = row.slice(nul + 1);
+    const colon = rest.indexOf(":");
+    const line = Number(rest.slice(0, colon));
+    if (colon < 0 || !Number.isInteger(line)) continue;
+    const rel = path.relative(root, row.slice(0, nul)).split(path.sep).join("/");
+    if (filter && !normalizeForPathMatch(rel).includes(filter)) continue;
+    if (seen.has(rel)) continue;
+    seen.add(rel);
+    out.push({ path: rel, line, snippet: snippetText(rest.slice(colon + 1)) });
+  }
+  return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
 const FILE_SEARCH_LIMIT = 50;

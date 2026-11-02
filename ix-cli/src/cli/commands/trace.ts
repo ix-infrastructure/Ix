@@ -4,7 +4,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
-import { resolveFileOrEntityFull, resolveFileOrReport, activeReadScope, ensureReadScope } from "../resolve.js";
+import { answerAmbiguous, resolveFileOrEntityFull, resolveFileOrReport, activeReadScope, ensureReadScope } from "../resolve.js";
 import type { ResolvedEntity } from "../resolve.js";
 import {
   renderSection,
@@ -18,7 +18,7 @@ import {
 import { compactTreeNode, relativePath, printJson } from "../format.js";
 import { llmLine, llmShortId, type LlmValue } from "../llm.js";
 import { traversalHint } from "./depends.js";
-import { parseCountOption, parsePickOption } from "../options.js";
+import { parseCountOption, parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 import { createLimiter, EXPAND_CONCURRENCY, walkTree, type Limiter, type TreeWalkResult } from "../tree-walk.js";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -520,6 +520,7 @@ export function registerTraceCommand(program: Command): void {
     .option("--depth <n>", "Cap traversal depth in edges (also applies to --to)")
     .option("--cap <n>", "Cap nodes visited per direction, or across the --to search (including the source)")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_TARGET_HELP)
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--include-tests", "Include test and fixture entities")
@@ -545,6 +546,7 @@ export function registerTraceCommand(program: Command): void {
           depth?: string;
           cap?: string;
           pick?: number;
+          strict?: boolean;
           path?: string;
           format: string;
           includeTests?: boolean;
@@ -556,6 +558,7 @@ export function registerTraceCommand(program: Command): void {
         const resolveOpts = {
           path: opts.path,
           pick: opts.pick,
+          strict: opts.strict,
           includeTests: opts.includeTests,
           testsOnly: opts.testsOnly,
         };
@@ -569,10 +572,14 @@ export function registerTraceCommand(program: Command): void {
             ...resolveOpts,
             path: undefined,
           };
-          const [fromResult, toResult] = await Promise.all([
+          const [fromRaw, toRaw] = await Promise.all([
             resolveFileOrEntityFull(client, symbol, resolveOpts),
             resolveFileOrEntityFull(client, opts.to, toResolveOpts),
           ]);
+          // Each end answered for its top candidate when ambiguous, with a
+          // notice, unless --strict.
+          const fromResult = answerAmbiguous(symbol, fromRaw, resolveOpts);
+          const toResult = answerAmbiguous(opts.to, toRaw, toResolveOpts);
           if (!fromResult.resolved || !toResult.resolved) {
             if (!fromResult.resolved && !toResult.resolved && !fromResult.ambiguous && !toResult.ambiguous) {
               reportUnresolvedTarget([symbol, opts.to], opts.format);

@@ -142,7 +142,11 @@ describe("roundRobinByFile", () => {
   });
 });
 
+// The candidate list as the error record shows it, under --strict; the notice
+// on an answered target carries the same list (target-answers.test.ts).
 describe("ambiguous candidates spread across files", () => {
+  beforeEach(() => { process.env.IX_STRICT_TARGETS = "1"; });
+  afterEach(() => { delete process.env.IX_STRICT_TARGETS; });
   it("the first page covers min(8, files) files, in round-robin order (json)", async () => {
     const result = await run(["locate", "crop", "--format", "json"]);
     expect(result.exitCode).toBe(2);
@@ -205,6 +209,8 @@ describe("ambiguous candidates spread across files", () => {
 });
 
 describe("candidate rows name their container", () => {
+  beforeEach(() => { process.env.IX_STRICT_TARGETS = "1"; });
+  afterEach(() => { delete process.env.IX_STRICT_TARGETS; });
   it("json: an additive `container` key, only where there is one", async () => {
     const body = JSON.parse((await run(["locate", "crop", "--format", "json"])).stdout);
     const byId = Object.fromEntries(body.candidates.map((c: { id: string }) => [c.id, c]));

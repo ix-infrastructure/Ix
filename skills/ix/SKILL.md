@@ -53,8 +53,8 @@ Glob and Read need several steps or cannot answer at all:
 
 Not for a literal string or a line in a file you already have open: that is
 Grep and Read. `ix_context` and `ix_impact` end in `next` records phrased as
-tool calls; an ambiguous name answers with candidates and `pick=`/`path=` to
-choose one. No health check is needed first. `ix mcp --tools=all` serves
+tool calls; an ambiguous name answers for its top candidate, with a notice
+listing the others and `pick=`/`path=` to choose another. No health check is needed first. `ix mcp --tools=all` serves
 every command as a tool.
 
 ## Reading the exit code
@@ -63,15 +63,17 @@ A non-zero exit from a graph command is usually an answer, not a breakage:
 
 | Exit | Means | Do |
 |---|---|---|
-| 0 | results | use them |
-| 2 | ambiguous: candidates listed | re-run with `--pick <n>` or `--path`, or `--all` (`callers`/`callees`/`impact`) for every candidate at once |
-| 3 | not found | read `reason` / `suggestion`: a file not indexed means `ix map`; a near name means retry with it |
+| 0 | results | use them; an `ambiguous_target` notice says which candidate was answered (`--pick <n>` or `--path` for another, `--all` on `callers`/`callees`/`impact` for every one), and `note code=text_matches` means the name is no code symbol: the rows are the source files that mention it |
+| 2 | ambiguous, with `--strict` / `IX_STRICT_TARGETS=1` (also without, for a `--pick` past the end, or a name only fuzzy matches carry and no source file mentions): candidates listed | re-run with `--pick <n>` or `--path`, or `--all` (`callers`/`callees`/`impact`) for every candidate at once |
+| 3 | not found anywhere | read `reason` / `suggestion`: a file not indexed means `ix map`; a near name means retry with it |
 | 4 | workspace not mapped | `ix map` |
 | 1 | a real error | read the `error` record |
 
 json carries the same outcome in `error` (`ambiguous_target`,
-`unresolved_target`, `workspace_not_mapped`); llm in `error code=`. One
-exception: `ix locate`'s json ambiguity carries it as `code: "ambiguous_target"`
+`unresolved_target`, `workspace_not_mapped`); llm in `error code=`. An answered
+ambiguity is a `resolutionNotices` entry (json) or `diagnostic
+code=ambiguous_target` (llm), never an error. One exception: under `--strict`,
+`ix locate`'s json ambiguity carries it as `code: "ambiguous_target"`
 (with its candidates), not `error`; and `ix read`'s ambiguity exits 0 with an
 `ambiguous` record (json `targetType: "ambiguous-symbol"`) and its candidates.
 Ask about

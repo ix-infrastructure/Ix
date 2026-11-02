@@ -179,7 +179,12 @@ describe("ix mcp structured output", () => {
     // take it back. Neither is in the core set. Raised again from 17,200 for
     // ix_overrides (one more symbol tool, ~730 bytes) and the `overrides`
     // relation on ix_neighbors (~75 bytes, the one change in the core set).
-    expect(total).toBeLessThan(18_100);
+    // Raised again from 18,100 for undescribed `path` and `pick` on
+    // ix_overview, ix_diff, ix_depends, ix_trace and ix_history (~90 bytes
+    // each): they answer an ambiguous name for its top candidate and say
+    // "Pass pick=<n> or path=…", which they must be able to take back. None
+    // is in the core set.
+    expect(total).toBeLessThan(18_600);
   });
 
   it("attaches structuredContent only where an outputSchema was declared", async () => {

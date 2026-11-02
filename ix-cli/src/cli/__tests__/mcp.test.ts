@@ -116,6 +116,23 @@ describe("ix mcp", () => {
     expect(result.content).toEqual([{ type: "text", text: "match name=Widget" }]);
   });
 
+  it("forwards ix_locate pick and path, so a caller can act on an auto-picked answer's notice", async () => {
+    // An ambiguous name is answered for its top candidate with a notice that
+    // says "Use --pick <n> or --path to choose another": over MCP that has to
+    // be reachable from ix_locate itself.
+    const calls: string[][] = [];
+    const client = await connect(async (args) => {
+      calls.push(args);
+      return { ok: true, stdout: "match name=Widget", stderr: "" };
+    });
+
+    await client.callTool({ name: "ix_locate", arguments: { symbol: "Widget", pick: 2, path: "src/b" } });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(expect.arrayContaining(["locate", "--path=src/b", "--pick=2", "Widget"]));
+    expect(calls[0].indexOf("Widget")).toBeGreaterThan(calls[0].indexOf("--"));
+  });
+
   it("marks a structured LLM error as an MCP error when the CLI exits successfully", async () => {
     const error = 'error code=unresolved_target message="No graph entity found for \\"Missing\\"."';
     const client = await connect(async () => ({
@@ -298,6 +315,28 @@ describe("ix mcp", () => {
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toBeUndefined();
     expect(result.content).toEqual([{ type: "text", text: "not json at all" }]);
+  });
+
+  it("marks a text-only answer as an MCP error on the structured path, never as a bundle", async () => {
+    // `ix context redrivePolicy --format json` exits 0 with a text_matches
+    // record (the name is a config key, not a symbol). structured: true asked
+    // for an ix-context-bundle/1; that record is not one.
+    const record = {
+      note: "text_matches",
+      target: "redrivePolicy",
+      message: '"redrivePolicy" is not a code symbol in the graph; source files that mention it:',
+      textMatches: [{ path: "lib/sqs.js", line: 88, snippet: "const redrivePolicy = event.redrivePolicy;" }],
+      shown: 1,
+      total: 1,
+    };
+    const client = await connect(async () => ({ ok: true, stdout: JSON.stringify(record), stderr: "" }));
+
+    const result = await client.callTool({ name: "ix_context", arguments: { target: "redrivePolicy", structured: true } });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+    // The files still reach the caller, as text.
+    expect(JSON.parse((result.content as Array<{ text: string }>)[0].text)).toEqual(record);
   });
 
   it("surfaces a CLI error record from the records path", async () => {

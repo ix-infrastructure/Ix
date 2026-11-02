@@ -91,8 +91,11 @@ export function isSourcePath(path: string, context?: { importable: boolean; head
 // the post-edit hook shares `isSourcePath` and still reports an edit to one.
 const GENERATED_NAME = /_pb2(?:_grpc)?\.py$/;
 
-/** `isSourcePath` for an issue, with no listing or header to go on. */
-function issueSourcePath(path: string): boolean {
+/**
+ * `isSourcePath` for an issue, with no listing or header to go on. Also how a
+ * graph command's text matches (text-matches.ts) tell source from the rest.
+ */
+export function issueSourcePath(path: string): boolean {
   return isSourcePath(path) && !GENERATED_NAME.test(path);
 }
 
