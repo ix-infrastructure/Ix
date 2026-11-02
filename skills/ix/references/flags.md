@@ -167,7 +167,8 @@ surfaces (#575).
   code=text_matches` + `match` rows, json `textMatches`, plus any near-name
   `suggestion` rows); docs, changelogs and tests are not listed, and a
   qualified name (`Class.method`) stays a miss, as does any name under `ix
-  context --out` / `--save`, which promise a bundle. `--strict`, or
+  context --out` / `--save`, `ix diff` and `ix history`, which promise a
+  bundle, a revision diff or a history. `--strict`, or
   `IX_STRICT_TARGETS=1`, keeps both as errors (exit 2 and 3).
 - **`--pick <n>` is 1-based** everywhere it appears, and is how you choose
   another candidate of an ambiguous target without re-running with a longer

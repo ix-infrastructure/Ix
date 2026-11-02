@@ -3,6 +3,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import { registerCallersCommand } from "../commands/callers.js";
+import { registerDependsCommand } from "../commands/depends.js";
+import { registerDiffCommand } from "../commands/diff.js";
+import { registerHistoryCommand } from "../commands/history.js";
 import { registerExplainCommand } from "../commands/explain.js";
 import { registerImpactCommand } from "../commands/impact.js";
 import { registerLocateCommand } from "../commands/locate.js";
@@ -78,6 +81,16 @@ vi.mock("../miss-reason.js", () => ({
         matches: [{ path: "src/a.ts", line: 3, snippet: `this.${term}(req)` }],
       };
     }
+    if (symbol === "staleKey") {
+      // In a source file the graph has not indexed: `ix map` is the fix.
+      return {
+        reason: "symbol_file_not_indexed",
+        message: '"staleKey" is not in the graph, but it appears in src/new.ts, which has not been indexed: run `ix map`, or the file is ignored.',
+        files: ["src/new.ts"],
+        matches: [{ path: "src/new.ts", line: 2, snippet: "staleKey: 1," }],
+        remap: true,
+      };
+    }
     if (symbol === "docsOnlyKey") {
       return {
         reason: "symbol_not_extracted",
@@ -134,6 +147,9 @@ async function run(args: string[]): Promise<{ stdout: string; stderr: string; ex
   registerImpactCommand(program);
   registerLocateCommand(program);
   registerExplainCommand(program);
+  registerDependsCommand(program);
+  registerHistoryCommand(program);
+  registerDiffCommand(program);
   const stdout: string[] = [];
   const stderr: string[] = [];
   const log = vi.spyOn(console, "log").mockImplementation((...parts) => { stdout.push(parts.join(" ")); });
@@ -276,6 +292,32 @@ describe.each(["locate", "callers", "impact", "explain"])("ix %s on a name that 
       "lib/plugins/aws/events/sqs.js", "lib/plugins/aws/package/compile.js",
     ]);
     expect(body.textMatches[1]).toEqual({ path: "lib/plugins/aws/package/compile.js", line: 12, snippet: "redrivePolicy: {" });
+    // The command's own keys are there, holding no entity.
+    expect(body.resolvedTarget).toBeNull();
+    expect(body.resolutionMode).toBe("text");
+    if (command === "callers") {
+      expect(body.results).toEqual([]);
+      expect(body.resultSource).toBe("graph");
+    }
+  });
+
+  it("keeps the `ix map` advice when the file that has the name is unindexed", async () => {
+    const json = await run([command, "staleKey", "--format", "json"]);
+    expect(json.exitCode).toBe(0);
+    const body = JSON.parse(json.stdout);
+    expect(body.note).toBe("text_matches");
+    expect(body.reason).toBe("symbol_file_not_indexed");
+    expect(body.detail).toContain("run `ix map`");
+
+    const llm = await run([command, "staleKey", "--format", "llm"]);
+    expect(llm.exitCode).toBe(0);
+    expect(llm.stdout).toMatch(/^note code=text_matches target=staleKey reason=symbol_file_not_indexed /m);
+    expect(llm.stdout).toMatch(/^hint text=".*run `ix map`.*"$/m);
+
+    const text = await run([command, "staleKey"]);
+    expect(text.exitCode).toBe(0);
+    expect(text.stdout).toContain("src/new.ts:2");
+    expect(text.stdout).toContain("run `ix map`");
   });
 
   it("text lists them on stdout", async () => {
@@ -330,6 +372,56 @@ describe.each(["locate", "callers", "impact", "explain"])("ix %s keeps the miss'
     expect(llm.stdout).not.toContain("code=text_matches");
     expect(llm.stdout).toMatch(/^error code=unresolved_target /m);
     expect(llm.stdout).toMatch(/^suggestion n=1 name=handle kind=method path=src\/dispatcher\.ts/m);
+  });
+});
+
+describe("a text-only name's json answer keeps the command's keys", () => {
+  it("callees lists no results", async () => {
+    const body = JSON.parse((await run(["callees", "redrivePolicy", "--format", "json"])).stdout);
+    expect(body).toMatchObject({ note: "text_matches", resolvedTarget: null, results: [], resultSource: "graph" });
+  });
+
+  it("depends has an empty tree", async () => {
+    const json = await run(["depends", "redrivePolicy", "--format", "json"]);
+    expect(json.exitCode).toBe(0);
+    expect(JSON.parse(json.stdout)).toMatchObject({
+      note: "text_matches", resolvedTarget: null, semantics: "downstream_dependents", tree: [],
+    });
+  });
+});
+
+describe("commands whose answer is an artifact keep the miss for a text-only name", () => {
+  // A revision diff or an entity's history was asked for; the files that
+  // mention the name today are neither, so exit 0 would claim one.
+  it.each([
+    ["history", ["history", "redrivePolicy"]],
+    ["diff", ["diff", "3", "5", "redrivePolicy"]],
+  ])("ix %s exits 3 with unresolved_target", async (_name, args) => {
+    const json = await run([...args, "--format", "json"]);
+    expect(json.exitCode).toBe(3);
+    const body = JSON.parse(json.stdout);
+    expect(body.error).toBe("unresolved_target");
+    expect(body.note).toBeUndefined();
+  });
+});
+
+describe("the auto-picked candidate is a definition, not an import of the name", () => {
+  // The e2e polyglot fixture's shape: `clamp` defined twice, and imported by
+  // app/pricing.py (a one-line module entity), whose path sorts first.
+  it("answers for a definition; the import is listed after them", async () => {
+    search.mockImplementation(async (term: string) => term === "clamp" ? [
+      { id: "imp-id", kind: "module", name: "clamp", attrs: { line_start: 1, line_end: 1 }, provenance: { sourceUri: "app/pricing.py" } },
+      { id: "py-id", kind: "function", name: "clamp", attrs: { line_start: 3, line_end: 9 }, provenance: { sourceUri: "app/utils.py" } },
+      { id: "ts-id", kind: "function", name: "clamp", attrs: { line_start: 3, line_end: 9 }, provenance: { sourceUri: "web/src/math.ts" } },
+    ] : []);
+    const json = await run(["callers", "clamp", "--format", "json"]);
+    expect(json.exitCode).toBe(0);
+    const notice = JSON.parse(json.stdout).resolutionNotices.find((n: { code: string }) => n.code === "ambiguous_target");
+    expect(notice.chosen.id).toBe("py-id");
+    expect(notice.candidates.map((c: { id: string }) => c.id)).toEqual(["py-id", "ts-id", "imp-id"]);
+    // The same list `--strict` reports, so `--pick 1` is the answer given.
+    const strict = JSON.parse((await run(["callers", "clamp", "--strict", "--format", "json"])).stdout);
+    expect(strict.candidates.map((c: { id: string }) => c.id)).toEqual(["py-id", "ts-id", "imp-id"]);
   });
 });
 

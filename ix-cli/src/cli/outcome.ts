@@ -21,7 +21,8 @@
  * `--pick`; a name that is no code symbol but appears in source files is
  * answered with those files (`text_matches`, with the miss's near names; a
  * qualified name stays a miss, and so does any name under `ix context --out` /
- * `--save`, which promise a bundle). The guess is always visible,
+ * `--save`, `ix diff` and `ix history`, which promise an artifact a file list
+ * is not). The guess is always visible,
  * which keeps #847's rule against silent guessing. `--strict` or
  * `IX_STRICT_TARGETS=1` restores both errors (exit 2 and 3).
  *

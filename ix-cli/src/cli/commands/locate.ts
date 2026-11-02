@@ -10,7 +10,7 @@ import {
   answerAmbiguous, textMatchesFor,
   type ResolvedEntity, type ResolveResult, type Suggestion,
 } from "../resolve.js";
-import { textMatchesLlm, textMatchesRecord, textMatchesText, type TextMatch } from "../text-matches.js";
+import { textMatchesJson, textMatchesLlm, textMatchesText, type TextMatch } from "../text-matches.js";
 import { EXIT_CODES_HELP, setOutcome } from "../outcome.js";
 import { didYouMeanRows, type TargetCandidate } from "../target-suggestions.js";
 import { runPerTarget } from "../multi-target.js";
@@ -377,13 +377,7 @@ export function renderLocateLlm(output: LocateOutput, symbol: string, retryComma
  */
 function outputLocateText(symbol: string, miss: Miss, rows: TextMatch[], format: string): void {
   if (format === "json") {
-    printJson({
-      resolvedTarget: null,
-      resolutionMode: "text",
-      systemPath: null,
-      diagnostics: [],
-      ...textMatchesRecord(symbol, miss, rows),
-    });
+    printJson(textMatchesJson(symbol, miss, rows, { systemPath: null, diagnostics: [] }));
     return;
   }
   const lines = format === "llm" ? textMatchesLlm(symbol, miss, rows) : textMatchesText(symbol, miss, rows);

@@ -253,8 +253,8 @@ keeps its own `ambiguous` record (above), and an issue's starting points
 A name the graph has no entity for, but that appears in source files (a
 configuration key such as `redrivePolicy`), is answered with those files,
 exit 0, instead of `unresolved_target`. The rows come from the miss probe's
-own bounded search (one `rg` per miss, the first matching line of each file),
-so it costs nothing extra; only source files are listed (generated files,
+own bounded search (one `rg` per miss, the first matching line of each file,
+cut to the part around the name), so it costs nothing extra; only source files are listed (generated files,
 docs, examples, site, tests and build output are not, the same test
 `--from-issue` uses), a line that sets the name (`name:`, `name =`) first, at
 most 10:
@@ -269,16 +269,20 @@ match n=2 path=lib/plugins/aws/package/compile.js line=12 text="redrivePolicy: {
 map` would fix the miss (a file that has the name is unindexed, or changed
 since), a `hint` record says so. json: `{ note: "text_matches", target,
 reason, message, textMatches: [{ path, line, snippet }], shown, total }`,
-with `detail` for that hint, and no `error`; `locate` keeps its body around it
-(`resolvedTarget: null`, `resolutionMode: "text"`). The miss's near names
+with `detail` for that hint, and no `error`, inside the command's own keys
+holding nothing: `resolvedTarget: null` and `resolutionMode: "text"` always,
+`results: []` for an edge list (`callers`, `callees`, `contains`, `imports`,
+`imported-by`), `tree: []` for `depends`, `rows: []` for `overrides`, and
+`systemPath: null` for `locate`. The miss's near names
 ride along: `suggestion` rows and their retry `hint` after the matches (json
 `suggestions` / `didYouMean`), the same ones `unresolved_target` would list. A
 name only docs, changelogs or tests mention, or found nowhere, is still
 `unresolved_target` (exit 3), as is any miss under `--strict` /
 `IX_STRICT_TARGETS=1`, and any qualified name (`Router.handle`, `pkg::name`):
 the probe searches its last segment only, so those hits are not about it.
-`ix context --out` / `--save` also keep the miss: they promise a bundle, and a
-list of files is not one.
+`ix context --out` / `--save`, `ix diff` and `ix history` also keep the miss:
+they promise a bundle, a revision diff or an entity's history, and a list of
+files is none of them.
 
 `Class.method` and `Class#method` resolve only to a member of that class: one
 of the class's `CONTAINS` children in the graph or, when the graph has none

@@ -157,6 +157,25 @@ describe.skipIf(!hasRipgrep)("explainSymbolMiss", () => {
     ]);
   });
 
+  it("keeps the name in the snippet when it sits far along a long line", async () => {
+    // Past the 300 columns a line preview keeps: the snippet is the window around the name.
+    const long = `const settings = { ${"padding: 1, ".repeat(40)}visibilityTimeoutSecs: 5 };`;
+    mkdirSync(join(workspace.root, "lib", "queue"), { recursive: true });
+    writeFileSync(join(workspace.root, "lib", "queue", "long.js"), `${long}\nuse(visibilityTimeoutSecs);\n`);
+    writeFileSync(join(workspace.root, "lib", "queue", "$dollar.js"), "const x = 1; const $queueDepth = 2;\n");
+    const why = await explainSymbolMiss(client([{ uri: "lib/queue/long.js" }]), "visibilityTimeoutSecs", {});
+    expect(long.indexOf("visibilityTimeoutSecs")).toBeGreaterThan(300);
+    expect(why?.matches).toHaveLength(1);
+    expect(why?.matches?.[0]).toMatchObject({ path: "lib/queue/long.js", line: 1 });
+    expect(why?.matches?.[0].snippet).toContain("visibilityTimeoutSecs: 5 };");
+    expect(why?.matches?.[0].snippet.length).toBeLessThan(200);
+    // The line that sets the name is still recognised as one.
+    expect(sourceTextMatches("visibilityTimeoutSecs", why?.matches)[0].snippet).toContain("visibilityTimeoutSecs: 5");
+    // A `$` in the name is matched literally, as a word.
+    const dollar = await explainSymbolMiss(client([{ uri: "lib/queue/$dollar.js" }]), "$queueDepth", {});
+    expect(dollar?.matches).toEqual([{ path: "lib/queue/$dollar.js", line: 1, snippet: "const x = 1; const $queueDepth = 2;" }]);
+  });
+
   it("ignores files Ix does not parse: the name only there is a plain miss", async () => {
     expect(await explainSymbolMiss(client([]), "onlyInProse", {})).toBeNull();
   });

@@ -174,14 +174,35 @@ function suggestionText(miss: TextMatchSource): string[] {
 }
 
 /**
+ * The `--format json` answer of a graph command: the command's own keys,
+ * empty (`results: []` for an edge list, `tree: []` for `depends`; the
+ * caller's `shape`), with `resolvedTarget: null` and `resolutionMode: "text"`
+ * as `locate` prints them, then the text matches. A script that reads the
+ * command's keys on exit 0 finds them, holding no entity.
+ */
+export function textMatchesJson(
+  target: string, miss: TextMatchSource, rows: TextMatch[], shape?: Record<string, unknown>,
+): Record<string, unknown> {
+  return { resolvedTarget: null, resolutionMode: "text", ...shape, ...textMatchesRecord(target, miss, rows) };
+}
+
+/** The empty json body of an edge list (`callers`, `callees`, `contains`, `imports`, `imported-by`). */
+export function emptyEdgeResultsJson(): Record<string, unknown> {
+  return { results: [], resultSource: "graph" };
+}
+
+/**
  * Answer a miss with its source text matches, in the caller's format, and say
  * whether it did. False (nothing printed) when no source file mentions the
- * name: the caller reports the miss as before.
+ * name: the caller reports the miss as before. `shape` is the command's own
+ * json body with nothing in it (`textMatchesJson`).
  */
-export function reportTextMatches(target: string, miss: TextMatchSource, format: string | undefined): boolean {
+export function reportTextMatches(
+  target: string, miss: TextMatchSource, format: string | undefined, shape?: Record<string, unknown>,
+): boolean {
   const rows = sourceTextMatches(target, miss.matches);
   if (rows.length === 0) return false;
-  if (format === "json") printJson(textMatchesRecord(target, miss, rows));
+  if (format === "json") printJson(textMatchesJson(target, miss, rows, shape));
   else if (format === "llm") console.log(textMatchesLlm(target, miss, rows).join("\n"));
   else console.log(textMatchesText(target, miss, rows).join("\n"));
   return true;

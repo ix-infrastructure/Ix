@@ -265,6 +265,12 @@ export interface ResolveOpts {
    * still answered, since that does produce the artifact.
    */
   textAnswer?: boolean;
+  /**
+   * The command's own `--format json` body with nothing in it (`results: []`,
+   * `tree: []`), printed under a text-matches answer so its keys are there on
+   * exit 0 (text-matches.ts `textMatchesJson`).
+   */
+  textAnswerJson?: Record<string, unknown>;
 }
 
 export interface Suggestion {
@@ -1795,7 +1801,7 @@ export async function reportUnresolved(
   const guided = await withTargetCandidates(client, target, reason, opts);
   // A name in source files but in no entity (a config key) is answered with
   // those files, exit 0 (text-matches.ts); found nowhere, it is the miss.
-  if (answersText(opts) && reportTextMatches(target, guided, format)) return;
+  if (answersText(opts) && reportTextMatches(target, guided, format, opts?.textAnswerJson)) return;
   reportResolutionFailure(target, guided, format, opts);
 }
 

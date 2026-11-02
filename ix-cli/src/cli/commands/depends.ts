@@ -216,6 +216,8 @@ export function registerDependsCommand(program: Command): void {
         strict: opts.strict,
         includeTests: opts.includeTests,
         testsOnly: opts.testsOnly,
+        // A text-only name's json answer keeps this command's keys, empty.
+        textAnswerJson: { semantics: "downstream_dependents", tree: [] },
       };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
       if (!target) return;

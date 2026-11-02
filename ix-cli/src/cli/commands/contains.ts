@@ -6,6 +6,7 @@ import { expandCapped, formatEdgeResults, sliceEdgeResults } from "../format.js"
 import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
+import { emptyEdgeResultsJson } from "../text-matches.js";
 
 export function registerContainsCommand(program: Command): void {
   program
@@ -23,7 +24,7 @@ export function registerContainsCommand(program: Command): void {
       const client = createClient();
       const limit = parseInt(opts.limit, 10);
       const offset = parseOffset(opts.offset);
-      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict };
+      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, textAnswerJson: emptyEdgeResultsJson() };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
       if (!target) return;
       if (opts.format === "text") printResolved(target);

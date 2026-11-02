@@ -254,9 +254,10 @@ describe("ix verify (CL-24A)", () => {
 // The outcome contract agents route on (ix-cli/src/cli/outcome.ts), against a
 // real backend: `clamp` is defined in app/utils.py and web/src/math.ts, and
 // app/pricing.py imports it (`from app.utils import clamp`, a one-line module
-// entity the ambiguity lists as --pick 1 but --all skips). An ambiguous name
-// is answered for its top candidate with an `ambiguous_target` notice; exit 2
-// is `--strict` / IX_STRICT_TARGETS=1 only.
+// entity the ambiguity ranks after both definitions, and --all skips). An
+// ambiguous name is answered for its top candidate (`--pick 1`, a definition)
+// with an `ambiguous_target` notice; exit 2 is `--strict` /
+// IX_STRICT_TARGETS=1 only.
 describe("agent outcomes", () => {
   it("exits 0 / 2 / 3 / 4 for results, strict ambiguity, a miss and an unmapped directory", () => {
     const co = checkout("polyglot");
@@ -271,8 +272,10 @@ describe("agent outcomes", () => {
     const notice = body.resolutionNotices.find((n: { code: string }) => n.code === "ambiguous_target");
     expect(notice).toMatchObject({ code: "ambiguous_target", target: "clamp" });
     expect(notice.candidates.length).toBeGreaterThanOrEqual(2);
-    // The answer is for the candidate `--pick 1` names.
+    // The answer is for the candidate `--pick 1` names: a definition, never
+    // the import in app/pricing.py.
     expect(notice.chosen.id).toBe(notice.candidates[0].id);
+    expect(notice.chosen.path).toMatch(/(?:^|\/)(?:app\/utils\.py|web\/src\/math\.ts)$/);
 
     const ambiguous = ix(env, co, ["callers", "clamp", "--strict", "--format", "json"], true);
     expect(ambiguous.status).toBe(2);

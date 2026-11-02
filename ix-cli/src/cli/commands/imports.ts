@@ -4,6 +4,7 @@ import type { Command } from "commander";
 import { createClient } from "../../client/factory.js";
 import { expandCapped, formatEdgeResults, sliceEdgeResults } from "../format.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
+import { emptyEdgeResultsJson } from "../text-matches.js";
 import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
 import { edgeTargetFor, withEdgeSites } from "../edge-sites.js";
@@ -24,7 +25,7 @@ export function registerImportsCommand(program: Command): void {
       const client = createClient();
       const limit = parseInt(opts.limit, 10);
       const offset = parseOffset(opts.offset);
-      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict };
+      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, textAnswerJson: emptyEdgeResultsJson() };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
       if (!target) return;
       if (opts.format === "text") printResolved(target);
@@ -50,7 +51,7 @@ export function registerImportsCommand(program: Command): void {
       const client = createClient();
       const limit = parseInt(opts.limit, 10);
       const offset = parseOffset(opts.offset);
-      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict };
+      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, textAnswerJson: emptyEdgeResultsJson() };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
       if (!target) return;
       if (opts.format === "text") printResolved(target);

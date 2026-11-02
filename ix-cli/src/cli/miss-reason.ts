@@ -192,25 +192,45 @@ async function probe(
 }
 
 /**
- * rg cuts a matching line longer than this to a preview: plenty for a
- * one-line snippet, and a minified file cannot fill the buffer.
+ * Characters kept on each side of the name in a matching line. rg prints
+ * only that window (`-o`), so the name is in the snippet however far along a
+ * long line it sits (a preview of the line's first bytes can miss it), and a
+ * minified file cannot fill the buffer.
+ */
+const SNIPPET_CONTEXT = 70;
+
+/**
+ * A safety cap on a printed window; the window itself is shorter unless the
+ * name is very long.
  */
 const RG_MAX_COLUMNS = "300";
+
+/**
+ * `-F -w name`, as a pattern that matches the window around it: `name` as a
+ * word (what `-w` means: no word character either side), with up to
+ * SNIPPET_CONTEXT characters before and after. The name is an identifier
+ * (`missProbeWouldRun`), so `$` is the only character to escape.
+ */
+export function windowPattern(name: string): string {
+  const word = name.replace(/\$/g, "\\$&");
+  return `.{0,${SNIPPET_CONTEXT}}(?:^|\\W)${word}(?:\\W|$).{0,${SNIPPET_CONTEXT}}`;
+}
 
 /**
  * Workspace-relative files containing `name` as a word, each with its first
  * matching line, sorted by path; null when rg could not answer.
  *
- * `-m 1` stops reading a file at its first match, as `-l` did, so the walk
- * costs what it cost before; `--null` ends each path with a NUL, so a path
- * with a colon in it still splits from its line number.
+ * `-m 1` stops reading a file at its first matching line, as `-l` did, so the
+ * walk costs what it cost before; `--null` ends each path with a NUL, so a
+ * path with a colon in it still splits from its line number. `-o` prints the
+ * window around each match on that line: the first is kept.
  */
 async function filesMentioning(name: string, root: string, pathFilter: string | undefined, timeoutMs: number): Promise<TextMatch[] | null> {
   let stdout: string;
   try {
     ({ stdout } = await execFileAsync("rg", [
-      "-n", "-m", "1", "--null", "--no-heading", "--with-filename", "--max-columns", RG_MAX_COLUMNS, "--max-columns-preview",
-      "-F", "-w", ...RG_SCOPE_ARGS, "-e", name, "--", root,
+      "-n", "-m", "1", "--null", "--no-heading", "--with-filename", "-o", "--max-columns", RG_MAX_COLUMNS, "--max-columns-preview",
+      ...RG_SCOPE_ARGS, "-e", windowPattern(name), "--", root,
     ], {
       maxBuffer: 4 * 1024 * 1024, timeout: Math.min(5_000, timeoutMs), signal: currentRunSignal(),
     }));
@@ -222,6 +242,7 @@ async function filesMentioning(name: string, root: string, pathFilter: string | 
   }
   const filter = pathFilter ? normalizeForPathMatch(pathFilter) : "";
   const out: TextMatch[] = [];
+  const seen = new Set<string>();
   for (const row of stdout.split("\n")) {
     const nul = row.indexOf("\0");
     if (nul < 0) continue;
@@ -231,6 +252,8 @@ async function filesMentioning(name: string, root: string, pathFilter: string | 
     if (colon < 0 || !Number.isInteger(line)) continue;
     const rel = path.relative(root, row.slice(0, nul)).split(path.sep).join("/");
     if (filter && !normalizeForPathMatch(rel).includes(filter)) continue;
+    if (seen.has(rel)) continue;
+    seen.add(rel);
     out.push({ path: rel, line, snippet: rest.slice(colon + 1).replace(/\r$/, "") });
   }
   return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));

@@ -11,6 +11,7 @@ import { checkGraphHealth, graphHealthProse, isUnhealthy, type GraphHealth } fro
 import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
 import { activeReadScope, candidatesCut, resolveTargetSetOrReport, printResolved, type TargetSet } from "../resolve.js";
+import { emptyEdgeResultsJson } from "../text-matches.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
 import { runPerTarget } from "../multi-target.js";
 import type { IxClient } from "../../client/api.js";
@@ -227,7 +228,7 @@ ${EXIT_CODES_HELP}`)
       const client = createClient();
       const calleeLimit = parseInt(opts.limit, 10);
       const calleeOffset = parseOffset(opts.offset);
-      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all };
+      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all, textAnswerJson: emptyEdgeResultsJson() };
       const set = await resolveTargetSetOrReport(client, symbol, resolveOpts, opts.format);
       if (!set) return;
       if (set.all) {
@@ -254,7 +255,7 @@ ${EXIT_CODES_HELP}`)
 async function callersOne(client: IxClient, symbol: string, opts: EdgeOpts, cmd: Command): Promise<void> {
   const limit = parseInt(opts.limit, 10);
   const offset = parseOffset(opts.offset);
-  const resolveOpts = { suggest: opts.suggest, suggestCommand: "callers", kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all };
+  const resolveOpts = { suggest: opts.suggest, suggestCommand: "callers", kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all, textAnswerJson: emptyEdgeResultsJson() };
   const set = await resolveTargetSetOrReport(client, symbol, resolveOpts, opts.format);
   if (!set) return;
   if (set.all) {

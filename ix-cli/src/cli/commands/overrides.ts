@@ -71,7 +71,11 @@ ${EXIT_CODES_HELP}`)
 async function overridesOne(client: IxClient, symbol: string, opts: OverridesOpts, cmd: Command): Promise<void> {
   const limit = parseOverridesLimit(opts.limit) ?? 0;
   const offset = parseOffset(opts.offset);
-  const target = await resolveFileOrReport(client, symbol, { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict }, opts.format);
+  const target = await resolveFileOrReport(client, symbol, {
+    kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict,
+    // A text-only name's json answer keeps this command's keys, empty.
+    textAnswerJson: { rows: [], total: 0, truncated: false, diagnostics: [] },
+  }, opts.format);
   if (!target) return;
   if (opts.format === "text") printResolved(target);
   const family = await overrideFamily(client, target);
