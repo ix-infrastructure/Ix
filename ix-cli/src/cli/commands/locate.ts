@@ -7,10 +7,10 @@ import { createClient } from "../../client/factory.js";
 import {
   resolveFileOrEntityFull, rankEntity, withContainers, printResolved, printAmbiguous,
   looksFileLike, isRawId, qualifiedSeparator, isFuzzyResult, withMissReason, withTargetCandidates,
-  answerAmbiguous, textMatchesFor,
+  answerAmbiguous, fuzzyTextAnswer, textMatchesFor,
   type ResolvedEntity, type ResolveResult, type Suggestion,
 } from "../resolve.js";
-import { textMatchesJson, textMatchesLlm, textMatchesText, type TextMatch } from "../text-matches.js";
+import { textMatchesJson, textMatchesLlm, textMatchesText, type TextMatch, type TextMatchSource } from "../text-matches.js";
 import { EXIT_CODES_HELP, setOutcome } from "../outcome.js";
 import { didYouMeanRows, type TargetCandidate } from "../target-suggestions.js";
 import { runPerTarget } from "../multi-target.js";
@@ -108,12 +108,16 @@ async function locateOne(
   };
 
   // Resolution with ambiguity detection
-  const { target, ambiguous, miss } = await resolveWithAmbiguity(client, symbol, resolveOpts, opts.format);
+  const { target, ambiguous, miss, answered } = await resolveWithAmbiguity(client, symbol, resolveOpts, opts.format);
 
   if (!target) {
+    // Fuzzy matches only, and source files mention the name: answered with
+    // them, exit 0 (fuzzyTextAnswer).
+    if (answered) return;
     if (ambiguous) {
-      // Only under --strict / IX_STRICT_TARGETS=1; otherwise the top
-      // candidate answered (answerAmbiguous). Printed above, in whichever
+      // Only under --strict / IX_STRICT_TARGETS=1, for fuzzy matches only,
+      // or past an out-of-range --pick; otherwise the top candidate answered
+      // (answerAmbiguous). Printed above, in whichever
       // format was asked for. Exits 2, like every other ambiguous graph
       // target (outcome.ts): the candidates are the answer, and
       // `--pick <n>` is the retry.
@@ -257,7 +261,7 @@ async function resolveWithAmbiguity(
   symbol: string,
   opts: { kind?: string; path?: string; pick?: number; strict?: boolean },
   format: string,
-): Promise<{ target: ResolvedEntity | null; ambiguous: boolean; miss?: Miss }> {
+): Promise<{ target: ResolvedEntity | null; ambiguous: boolean; miss?: Miss; answered?: boolean }> {
   let result: ResolveResult;
   // For raw IDs and file-like targets, delegate to resolveFileOrEntityFull. A
   // file target can tie, but it resolves (with a notice) rather than turn
@@ -292,6 +296,11 @@ async function resolveWithAmbiguity(
   }
 
   if (result.ambiguous) {
+    const text = await fuzzyTextAnswer(client, symbol, result, opts);
+    if (text) {
+      outputLocateText(symbol, text.miss, text.rows, format);
+      return { target: null, ambiguous: false, answered: true };
+    }
     if (format === "json") {
       printJson({
         // Locate's ambiguity was never an `error` record, and integrations that
@@ -375,7 +384,7 @@ export function renderLocateLlm(output: LocateOutput, symbol: string, retryComma
  * body (`resolvedTarget: null`, `systemPath`, `diagnostics`) and adds the
  * `text_matches` note, so a reader of locate's shape still parses it.
  */
-function outputLocateText(symbol: string, miss: Miss, rows: TextMatch[], format: string): void {
+function outputLocateText(symbol: string, miss: TextMatchSource, rows: TextMatch[], format: string): void {
   if (format === "json") {
     printJson(textMatchesJson(symbol, miss, rows, { systemPath: null, diagnostics: [] }));
     return;

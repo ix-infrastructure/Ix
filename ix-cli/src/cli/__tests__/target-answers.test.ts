@@ -91,6 +91,15 @@ vi.mock("../miss-reason.js", () => ({
         remap: true,
       };
     }
+    if (symbol === "timeout") {
+      // A config key that is also a substring of two code names.
+      return {
+        reason: "symbol_not_extracted",
+        message: '"timeout" is not in the graph.',
+        files: ["src/config.ts"],
+        matches: [{ path: "src/config.ts", line: 7, snippet: "  timeout: 30," }],
+      };
+    }
     if (symbol === "docsOnlyKey") {
       return {
         reason: "symbol_not_extracted",
@@ -137,6 +146,16 @@ const DUPLICATES = [
   { id: "first-id", kind: "function", name: "Duplicate", provenance: { sourceUri: "src/first.ts" } },
   { id: "second-id", kind: "function", name: "Duplicate", provenance: { sourceUri: "src/second.ts" } },
 ];
+// The backend matches names by substring: `timeout` and `retry` find only
+// differently named entities, a fuzzy-only ambiguity.
+const TIMEOUTS = [
+  { id: "connect-id", kind: "function", name: "connectTimeout", provenance: { sourceUri: "src/connect.ts" } },
+  { id: "read-id", kind: "function", name: "readTimeout", provenance: { sourceUri: "src/read.ts" } },
+];
+const RETRIES = [
+  { id: "retry-a-id", kind: "function", name: "retryLater", provenance: { sourceUri: "src/a.ts" } },
+  { id: "retry-b-id", kind: "function", name: "retryNow", provenance: { sourceUri: "src/b.ts" } },
+];
 const UNIQUE = [{ id: "only-id", kind: "function", name: "Unique", provenance: { sourceUri: "src/only.ts" } }];
 // The method a qualified miss's last segment names.
 const HANDLE = [{ id: "handle-id", kind: "method", name: "handle", provenance: { sourceUri: "src/dispatcher.ts" } }];
@@ -181,7 +200,7 @@ beforeEach(() => {
   savedExitCode = process.exitCode;
   delete process.env[LEGACY_EXIT_CODES_ENV];
   delete process.env[STRICT_TARGETS_ENV];
-  search.mockReset().mockImplementation(async (term: string) => ({ Duplicate: DUPLICATES, Unique: UNIQUE, handle: HANDLE } as Record<string, unknown[]>)[term] ?? []);
+  search.mockReset().mockImplementation(async (term: string) => ({ Duplicate: DUPLICATES, Unique: UNIQUE, handle: HANDLE, timeout: TIMEOUTS, retry: RETRIES } as Record<string, unknown[]>)[term] ?? []);
   expand.mockReset().mockResolvedValue({ nodes: [], edges: [] });
   entity.mockReset();
 });
@@ -231,12 +250,17 @@ describe.each(["locate", "callers", "impact", "explain"])("ix %s on an ambiguous
     expect(idsAsked()).not.toContain("first-id");
   });
 
-  it("an out-of-range --pick answers for the top candidate, exit 0, saying the pick was out of range", async () => {
+  it("an out-of-range --pick answers no candidate: the list, pick_out_of_range, exit 2", async () => {
+    // The caller asked for one candidate; answering another with exit 0
+    // would pass for it.
     const json = await run([command, "Duplicate", "--pick", "3", "--format", "json"]);
-    expect(json.exitCode).toBe(0);
-    const notice = JSON.parse(json.stdout).resolutionNotices[0];
-    expect(notice).toMatchObject({ code: "ambiguous_target", chosen: { id: "first-id" } });
-    expect(notice.diagnostics).toEqual([{ code: "pick_out_of_range", message: "--pick 3 is out of range (1-2)." }]);
+    expect(json.exitCode).toBe(2);
+    const body = JSON.parse(json.stdout);
+    expect(body.resolutionNotices).toBeUndefined();
+    expect(command === "locate" ? body.code : body.error).toBe("ambiguous_target");
+    expect(body.candidates.map((c: { id: string }) => c.id)).toEqual(["first-id", "second-id"]);
+    expect(body.diagnostics).toContainEqual({ code: "pick_out_of_range", message: "--pick 3 is out of range (1-2)." });
+    expect(idsAsked()).toEqual([]);
   });
 
   it("--strict keeps the ambiguous_target error and exit 2", async () => {
@@ -372,6 +396,45 @@ describe.each(["locate", "callers", "impact", "explain"])("ix %s keeps the miss'
     expect(llm.stdout).not.toContain("code=text_matches");
     expect(llm.stdout).toMatch(/^error code=unresolved_target /m);
     expect(llm.stdout).toMatch(/^suggestion n=1 name=handle kind=method path=src\/dispatcher\.ts/m);
+  });
+});
+
+describe.each(["locate", "callers", "impact", "explain"])("ix %s on a name only fuzzy matches carry", (command) => {
+  it("is not answered for a differently named symbol: the name's source text answers, exit 0", async () => {
+    const llm = await run([command, "timeout", "--format", "llm"]);
+    expect(llm.exitCode).toBe(0);
+    expect(llm.stdout).toMatch(/^note code=text_matches target=timeout /m);
+    expect(llm.stdout).toContain("match n=1 path=src/config.ts line=7");
+    // The fuzzy candidates are the near code symbols, as on a miss.
+    expect(llm.stdout).toMatch(/^suggestion n=1 name=connectTimeout /m);
+    expect(llm.stdout).not.toMatch(/^diagnostic code=ambiguous_target/m);
+    expect(idsAsked()).toEqual([]);
+
+    const json = JSON.parse((await run([command, "timeout", "--format", "json"])).stdout);
+    expect(json).toMatchObject({ note: "text_matches", resolvedTarget: null, resolutionMode: "text" });
+    expect(json.suggestions.map((c: { id: string }) => c.id)).toEqual(["connect-id", "read-id"]);
+    expect(json.error).toBeUndefined();
+  });
+
+  it("with no source text, keeps the candidates as the answer, exit 2, as before", async () => {
+    const llm = await run([command, "retry", "--format", "llm"]);
+    expect(llm.exitCode).toBe(2);
+    expect(llm.stdout).toMatch(/^error code=ambiguous_target /m);
+    expect(llm.stdout).toContain("name=retryLater");
+    expect(idsAsked()).toEqual([]);
+  });
+
+  it("--pick still chooses among the fuzzy matches", async () => {
+    const json = await run([command, "retry", "--pick", "2", "--format", "json"]);
+    expect(json.exitCode).toBe(0);
+    expect(idsAsked()).toContain("retry-b-id");
+  });
+
+  it("--strict keeps the ambiguous error rather than the text answer", async () => {
+    const llm = await run([command, "timeout", "--strict", "--format", "llm"]);
+    expect(llm.exitCode).toBe(2);
+    expect(llm.stdout).toMatch(/^error code=ambiguous_target /m);
+    expect(llm.stdout).not.toContain("text_matches");
   });
 });
 

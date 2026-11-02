@@ -11,7 +11,7 @@
  *
  *   0  results
  *   1  a real error (backend down, bad argument, ...)
- *   2  ambiguous target, only with --strict:       `ambiguous_target`
+ *   2  ambiguous target, with --strict (*):        `ambiguous_target`
  *   3  target found nowhere: suggestions when known `unresolved_target`
  *   4  workspace not mapped                         `workspace_not_mapped`
  *
@@ -25,6 +25,11 @@
  * is not). The guess is always visible,
  * which keeps #847's rule against silent guessing. `--strict` or
  * `IX_STRICT_TARGETS=1` restores both errors (exit 2 and 3).
+ *
+ * (*) Two ambiguities are no tie to break, and still exit 2 without
+ * `--strict`: a name only fuzzy matches carry (no entity has it; its source
+ * text answers instead when there is any), and an explicit `--pick <n>` past
+ * the end of the list.
  *
  * All of them are still non-zero, so a runner that only asks "did it fail?"
  * sees what it always saw. `IX_LEGACY_EXIT_CODES=1` collapses 2, 3 and 4 back
@@ -57,7 +62,8 @@ Exit codes:
   An ambiguous target is answered for its top candidate, with a notice listing
   the others (--pick <n> chooses one); a name found only as text in source files
   is answered with those files. --strict or ${STRICT_TARGETS_ENV}=1 makes both
-  errors again (exit 2 and 3). ${LEGACY_EXIT_CODES_ENV}=1 makes every non-zero exit 1.`;
+  errors again (exit 2 and 3). Exit 2 without --strict: a name only fuzzy
+  matches carry and no source file mentions, or a --pick past the end. ${LEGACY_EXIT_CODES_ENV}=1 makes every non-zero exit 1.`;
 
 function envSwitch(name: string): boolean {
   const value = process.env[name]?.trim().toLowerCase();

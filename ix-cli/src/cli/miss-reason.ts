@@ -200,10 +200,28 @@ async function probe(
 const SNIPPET_CONTEXT = 70;
 
 /**
- * A safety cap on a printed window; the window itself is shorter unless the
- * name is very long.
+ * A safety cap on a printed window, sized so the window always fits. rg
+ * counts `--max-columns` in bytes, and the window is SNIPPET_CONTEXT
+ * characters each side plus a boundary character, each up to 4 bytes in
+ * UTF-8, around the (ASCII) name. A fixed 300 was overrun by a window of 3-
+ * or 4-byte text, and rg then printed its preview, `[... 0 more matches]`
+ * and all, as the snippet.
  */
-const RG_MAX_COLUMNS = "300";
+export function rgMaxColumns(name: string): string {
+  return String(4 * (2 * SNIPPET_CONTEXT + 2) + name.length);
+}
+
+/**
+ * What rg appends to a line cut at `--max-columns` (`--max-columns-preview`).
+ * The cap above leaves no window that long; this is the second line of
+ * defence, so the marker can never pass for source text.
+ */
+const RG_PREVIEW_MARKER = /\s*\[\.\.\. (?:omitted end of long line|\d+ more match(?:es)?)\]$/;
+
+/** A printed window as source text: line ending and any rg preview marker dropped. */
+export function snippetText(raw: string): string {
+  return raw.replace(/\r$/, "").replace(RG_PREVIEW_MARKER, "");
+}
 
 /**
  * `-F -w name`, as a pattern that matches the window around it: `name` as a
@@ -229,7 +247,7 @@ async function filesMentioning(name: string, root: string, pathFilter: string | 
   let stdout: string;
   try {
     ({ stdout } = await execFileAsync("rg", [
-      "-n", "-m", "1", "--null", "--no-heading", "--with-filename", "-o", "--max-columns", RG_MAX_COLUMNS, "--max-columns-preview",
+      "-n", "-m", "1", "--null", "--no-heading", "--with-filename", "-o", "--max-columns", rgMaxColumns(name), "--max-columns-preview",
       ...RG_SCOPE_ARGS, "-e", windowPattern(name), "--", root,
     ], {
       maxBuffer: 4 * 1024 * 1024, timeout: Math.min(5_000, timeoutMs), signal: currentRunSignal(),
@@ -254,7 +272,7 @@ async function filesMentioning(name: string, root: string, pathFilter: string | 
     if (filter && !normalizeForPathMatch(rel).includes(filter)) continue;
     if (seen.has(rel)) continue;
     seen.add(rel);
-    out.push({ path: rel, line, snippet: rest.slice(colon + 1).replace(/\r$/, "") });
+    out.push({ path: rel, line, snippet: snippetText(rest.slice(colon + 1)) });
   }
   return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }

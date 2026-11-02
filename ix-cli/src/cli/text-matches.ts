@@ -21,7 +21,9 @@ import { didYouMeanRows, type TargetCandidate } from "./target-suggestions.js";
  *
  * Only source files count: generated files, docs, examples, site, tests and
  * build output are not (`issueSourcePath`, the test `--from-issue` uses). A
- * name that only those mention stays the plain miss.
+ * name that only those mention stays the plain miss, and so does a key that
+ * appears only in a data file (YAML, JSON, TOML, Terraform): the answer is
+ * the code that reads or sets the key, and a key no code mentions has none.
  *
  * A qualified target (`Router.handle`, `pkg::name`) is never answered this
  * way: the probe searches its last segment only, so its hits are about

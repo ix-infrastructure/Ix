@@ -64,7 +64,7 @@ A non-zero exit from a graph command is usually an answer, not a breakage:
 | Exit | Means | Do |
 |---|---|---|
 | 0 | results | use them; an `ambiguous_target` notice says which candidate was answered (`--pick <n>` or `--path` for another, `--all` on `callers`/`callees`/`impact` for every one), and `note code=text_matches` means the name is no code symbol: the rows are the source files that mention it |
-| 2 | ambiguous, only with `--strict` / `IX_STRICT_TARGETS=1`: candidates listed | re-run with `--pick <n>` or `--path`, or `--all` (`callers`/`callees`/`impact`) for every candidate at once |
+| 2 | ambiguous, with `--strict` / `IX_STRICT_TARGETS=1` (also without, for a `--pick` past the end, or a name only fuzzy matches carry and no source file mentions): candidates listed | re-run with `--pick <n>` or `--path`, or `--all` (`callers`/`callees`/`impact`) for every candidate at once |
 | 3 | not found anywhere | read `reason` / `suggestion`: a file not indexed means `ix map`; a near name means retry with it |
 | 4 | workspace not mapped | `ix map` |
 | 1 | a real error | read the `error` record |

@@ -17,7 +17,7 @@ import { isQuiet } from "./output-shape.js";
 import { disambiguationHint } from "./next-step.js";
 import { explainSymbolMiss, missProbeWouldRun } from "./miss-reason.js";
 import { strictTargets } from "./outcome.js";
-import { reportTextMatches, sourceTextMatches, type TextMatch } from "./text-matches.js";
+import { reportTextMatches, sourceTextMatches, type TextMatch, type TextMatchSource } from "./text-matches.js";
 import { isBackendUnreachable } from "./errors.js";
 import { findTargetCandidates, rowsInclude, type TargetCandidate } from "./target-suggestions.js";
 import {
@@ -1021,40 +1021,79 @@ export function pickFromNotice(
  * (`resolveFileOrReport`, `ix locate`); internal resolution (`pickBest`,
  * `--from-issue` starts, rank, the post-edit hook) never calls it. Returns the
  * result untouched when it is not ambiguous, or under `--strict` /
- * `IX_STRICT_TARGETS=1`.
+ * `IX_STRICT_TARGETS=1`, and in two cases that are no tie to break:
+ *
+ * - Every candidate is a fuzzy match (no entity carries the name): the
+ *   backend matches by substring, so `timeout` "matches" `connectTimeout` and
+ *   `readTimeout`, and answering for either would be callers of a different
+ *   symbol. The caller tries the name's source text first
+ *   ({@link fuzzyTextAnswer}); otherwise the candidates are the answer, exit 2.
+ * - An explicit `--pick <n>` past the end of the list: the caller asked for
+ *   one candidate, and answering another with exit 0 would pass for it.
  */
 export function answerAmbiguous(target: string, result: ResolveResult, opts?: { strict?: boolean }): ResolveResult {
   if (result.resolved || !result.ambiguous || strictTargets(opts)) return result;
+  if (isFuzzyResult(result) || pickedOutOfRange(result)) return result;
   const amb = result.result;
   const all = allCandidatesOf(amb);
   const top = all[0];
   if (!top) return result;
-  const fuzzy = (amb.diagnostics ?? []).some((d) => d.code === "fuzzy_match");
   const total = amb.total ?? all.length;
   const where = top.path ? ` (${top.path})` : "";
   const count = `${amb.truncated ? "at least " : ""}${total}`;
   const notice: ResolutionNotice = {
     code: "ambiguous_target",
     target,
-    message: fuzzy
-      ? `No exact match for "${target}"; ${count} fuzzy matches; using ${top.name}${where}.`
-      : `"${target}" matches ${count} candidates; using ${top.name}${where}.`,
+    message: `"${target}" matches ${count} candidates; using ${top.name}${where}.`,
     chosen: { id: top.id, name: top.name, kind: top.kind, path: top.path },
     candidates: amb.candidates,
     total,
     ...(amb.truncated ? { truncated: true } : {}),
   };
   // The record's "Use --pick or --path to disambiguate" is the notice's own
-  // hint line now; anything else (`pick_out_of_range`, `fuzzy_match`) stays.
+  // hint line now; anything else stays.
   const diagnostics = (amb.diagnostics ?? []).filter((d) => d.code !== "ambiguous_resolution");
   if (diagnostics.length) notice.diagnostics = diagnostics;
   rememberAll(notice, amb.candidates, all, importIdsOf(amb));
   return {
     resolved: true,
-    entity: { id: top.id, kind: top.kind, name: top.name, path: top.path, resolutionMode: fuzzy ? "fuzzy" : "scored" },
+    entity: { id: top.id, kind: top.kind, name: top.name, path: top.path, resolutionMode: "scored" },
     notices: [notice],
     ...(result.hiddenTestCount ? { hiddenTestCount: result.hiddenTestCount } : {}),
   };
+}
+
+/** An ambiguous result left so by an explicit `--pick` past the end of its list. */
+function pickedOutOfRange(result: ResolveResult): boolean {
+  return !result.resolved && result.ambiguous && !!result.result.diagnostics?.some((d) => d.code === "pick_out_of_range");
+}
+
+/**
+ * The source text answer for a name whose only candidates are fuzzy matches.
+ *
+ * No entity carries the name, so it is a miss with near names, and the miss's
+ * answer applies: the source files that mention the name itself (a config
+ * key `timeout` beside `connectTimeout` and `readTimeout`), with the fuzzy
+ * candidates as the near code symbols. One bounded probe, the one a miss
+ * runs (explainSymbolMiss, under its run budget). Null, nothing printed, when
+ * the text does not answer: under `--strict`, for a file or id target, when a
+ * filter set aside an entity with the name, or when no source file has it.
+ */
+export async function fuzzyTextAnswer(
+  client: IxClient,
+  target: string,
+  result: ResolveResult,
+  opts: ResolveOpts | undefined,
+): Promise<{ miss: TextMatchSource; rows: TextMatch[] } | null> {
+  if (result.resolved || !result.ambiguous || !isFuzzyResult(result) || pickedOutOfRange(result)) return null;
+  if (!answersText(opts) || isRawId(target) || looksFileLike(target) || !missProbeWouldRun(target)) return null;
+  if (await filteredOut(client, target, result, opts)) return null;
+  const why = await explainSymbolMiss(client, target, { path: opts?.path, ...activeScope() });
+  if (!why) return null;
+  const suggestions: Suggestion[] = result.result.candidates.map(({ id, name, kind, path: p }) => ({ id, name, kind, ...(p ? { path: p } : {}) }));
+  const miss: TextMatchSource = { ...why, suggestions };
+  const rows = sourceTextMatches(target, miss.matches);
+  return rows.length ? { miss, rows } : null;
 }
 
 /** "exact" only for a case-sensitive exact name; otherwise the score bands. */
@@ -1786,6 +1825,9 @@ export async function reportUnresolved(
   format: string,
 ): Promise<void> {
   if (result.ambiguous) {
+    // Fuzzy matches only: the name's own source text, if any, is the answer.
+    const text = await fuzzyTextAnswer(client, target, result, opts);
+    if (text && reportTextMatches(target, text.miss, format, opts?.textAnswerJson)) return;
     reportResolutionFailure(target, result, format, opts);
     return;
   }

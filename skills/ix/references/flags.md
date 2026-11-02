@@ -189,8 +189,9 @@ surfaces (#575).
   the cap or the search cut it off. `--pick` takes precedence over it.
 - **Exit codes** for the graph commands: `0` results (an ambiguous target
   answered for its top candidate, or a name answered with its text matches,
-  included), `2` ambiguous, only under `--strict` / `IX_STRICT_TARGETS=1`
-  (candidates listed), `3` not found anywhere (suggestions and a reason when
+  included), `2` ambiguous under `--strict` / `IX_STRICT_TARGETS=1`
+  (candidates listed; also without it for a `--pick` past the end, or a name
+  only fuzzy matches carry and no source file mentions), `3` not found anywhere (suggestions and a reason when
   known), `4` workspace not mapped, `1` any other error. `IX_LEGACY_EXIT_CODES=1` makes
   every non-zero exit `1` again. With several targets (`ix locate a b c`) the
   run exits with the worst target's code and each group carries its own.

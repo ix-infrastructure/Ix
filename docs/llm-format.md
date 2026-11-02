@@ -75,7 +75,7 @@ which value it ignored, on stderr, when a person is there to read it.
   | Exit | Outcome | Slug |
   |---|---|---|
   | 0 | results | — |
-  | 2 | ambiguous, only with `--strict` or `IX_STRICT_TARGETS=1`: candidates listed, retry with `--pick <n>`, `--path` or `--all` | `ambiguous_target` |
+  | 2 | ambiguous, with `--strict` or `IX_STRICT_TARGETS=1` (also without, for a `--pick` past the end, or a name only fuzzy matches carry and no source file mentions): candidates listed, retry with `--pick <n>`, `--path` or `--all` | `ambiguous_target` |
   | 3 | not found anywhere: suggestions and a reason when known | `unresolved_target` |
   | 4 | workspace not mapped: run `ix map` | `workspace_not_mapped` |
   | 1 | any other error (backend down, bad argument, ...) | its own slug |
@@ -233,10 +233,14 @@ hint text="Use --pick <n> or --path to choose another."
 ```
 
 The list is the ambiguity's (the 8 best, `total` counting every close match,
-`container=` where known), not only exact ties. A fuzzy-only ambiguity says
-`No exact match for "<name>"; <n> fuzzy matches; using ...` and the answer
-carries `resolutionMode: "fuzzy"`. An out-of-range `--pick` answers the first
-candidate and adds `pick_out_of_range`. json carries the notice in
+`container=` where known), not only exact ties. Two ambiguities are not
+answered this way. A name no entity carries, whose candidates are only fuzzy
+matches (the backend matches by substring: `timeout` finds `connectTimeout`
+and `readTimeout`), is a miss with near names: the source files that mention
+the name answer it (Text matches, below, with the fuzzy candidates as
+`suggestion` rows), or, when none does, the `error code=ambiguous_target`
+record and exit 2 as before. An out-of-range `--pick` asked for one candidate,
+so it gets the record and exit 2 too, with `pick_out_of_range`. json carries the notice in
 `resolutionNotices` beside the normal answer (`code: "ambiguous_target"`,
 `target`, `chosen`, `candidates`, `total`, `truncated` when the search window
 was full). Text prints the same on stderr; under `--quiet` it keeps the one
@@ -256,8 +260,9 @@ exit 0, instead of `unresolved_target`. The rows come from the miss probe's
 own bounded search (one `rg` per miss, the first matching line of each file,
 cut to the part around the name), so it costs nothing extra; only source files are listed (generated files,
 docs, examples, site, tests and build output are not, the same test
-`--from-issue` uses), a line that sets the name (`name:`, `name =`) first, at
-most 10:
+`--from-issue` uses; nor are data files such as YAML, JSON or TOML, so a key
+only they hold stays a miss), a line that sets the name (`name:`, `name =`)
+first, at most 10:
 
 ```
 note code=text_matches target=redrivePolicy reason=symbol_not_extracted shown=2 total=2 message="\"redrivePolicy\" is not a code symbol in the graph; source files that mention it:"

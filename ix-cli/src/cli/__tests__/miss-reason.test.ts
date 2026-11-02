@@ -13,7 +13,7 @@ vi.mock("../config.js", async (importOriginal) => ({
   resolveWorkspaceRoot: () => workspace.root,
 }));
 
-const { explainSymbolMiss, MISS_PROBE_ENV } = await import("../miss-reason.js");
+const { explainSymbolMiss, MISS_PROBE_ENV, snippetText } = await import("../miss-reason.js");
 const { runWithSignal } = await import("../../client/run-signal.js");
 const { withMissReason } = await import("../resolve.js");
 const { sourceTextMatches } = await import("../text-matches.js");
@@ -174,6 +174,25 @@ describe.skipIf(!hasRipgrep)("explainSymbolMiss", () => {
     // A `$` in the name is matched literally, as a word.
     const dollar = await explainSymbolMiss(client([{ uri: "lib/queue/$dollar.js" }]), "$queueDepth", {});
     expect(dollar?.matches).toEqual([{ path: "lib/queue/$dollar.js", line: 1, snippet: "const x = 1; const $queueDepth = 2;" }]);
+  });
+
+  it("keeps rg's long-line preview marker out of a window of 4-byte text", async () => {
+    // 70 four-byte characters each side is 560 bytes: past a fixed 300-byte
+    // cap, rg printed a cut preview ending in `[... 0 more matches]`.
+    const wide = "\u{1D538}".repeat(80);
+    mkdirSync(join(workspace.root, "lib", "wide"), { recursive: true });
+    writeFileSync(join(workspace.root, "lib", "wide", "emoji.js"), `// ${wide} deadLetterQueueArn ${wide}\n`);
+    const why = await explainSymbolMiss(client([{ uri: "lib/wide/emoji.js" }]), "deadLetterQueueArn", {});
+    const snippet = why?.matches?.[0].snippet ?? "";
+    expect(snippet).toContain(" deadLetterQueueArn ");
+    expect(snippet).not.toMatch(/\[\.\.\./);
+    expect([...snippet].length).toBeLessThanOrEqual(2 * 71 + "deadLetterQueueArn".length);
+  });
+
+  it("drops a preview marker, should rg ever print one", () => {
+    expect(snippetText("a = deadLetterQueueArn [... 0 more matches]\r")).toBe("a = deadLetterQueueArn");
+    expect(snippetText("x deadLetterQueueArn y [... omitted end of long line]")).toBe("x deadLetterQueueArn y");
+    expect(snippetText("list[... 3] = deadLetterQueueArn")).toBe("list[... 3] = deadLetterQueueArn");
   });
 
   it("ignores files Ix does not parse: the name only there is a plain miss", async () => {
