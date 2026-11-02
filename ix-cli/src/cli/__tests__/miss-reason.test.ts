@@ -16,6 +16,7 @@ vi.mock("../config.js", async (importOriginal) => ({
 const { explainSymbolMiss, MISS_PROBE_ENV } = await import("../miss-reason.js");
 const { runWithSignal } = await import("../../client/run-signal.js");
 const { withMissReason } = await import("../resolve.js");
+const { sourceTextMatches } = await import("../text-matches.js");
 
 const hasRipgrep = (() => {
   try { execFileSync("rg", ["--version"], { stdio: "ignore" }); return true; } catch { return false; }
@@ -124,6 +125,36 @@ describe.skipIf(!hasRipgrep)("explainSymbolMiss", () => {
     const why = await explainSymbolMiss(client([{ uri: "src/late.ts", rev: 3 }]), "frobnicate", {});
     expect(why).toMatchObject({ reason: "symbol_not_extracted", files: ["aaa/early.go", "src/late.ts"] });
     expect(why?.message).toContain("src/late.ts (indexed at rev 3)");
+  });
+
+  it("keeps each file's first matching line, and only source files answer a config key", async () => {
+    const files: Record<string, string> = {
+      "CHANGELOG.md": "# Changelog\n- Support redrivePolicy on SQS events\n",
+      "docs/events/sqs.md": "Set `redrivePolicy` to send failures to a queue.\n",
+      "lib/plugins/aws/events/sqs.js": "'use strict';\n\nconst redrivePolicy = event.redrivePolicy;\nuse(redrivePolicy);\n",
+      "lib/plugins/aws/package/compile.js": "module.exports = {\n  compile() {\n    return {\n      redrivePolicy: { deadLetterTargetArn: arn },\n    };\n  },\n};\n",
+      "test/unit/sqs.test.js": "expect(queue.redrivePolicy).toBeDefined();\n",
+    };
+    for (const [file, text] of Object.entries(files)) {
+      mkdirSync(join(workspace.root, file, ".."), { recursive: true });
+      writeFileSync(join(workspace.root, file), text);
+    }
+    const why = await explainSymbolMiss(
+      client([{ uri: "lib/plugins/aws/events/sqs.js" }, { uri: "lib/plugins/aws/package/compile.js" }]), "redrivePolicy", {},
+    );
+    expect(why?.reason).toBe("symbol_not_extracted");
+    expect(why?.matches).toEqual([
+      { path: "CHANGELOG.md", line: 2, snippet: "- Support redrivePolicy on SQS events" },
+      { path: "docs/events/sqs.md", line: 1, snippet: "Set `redrivePolicy` to send failures to a queue." },
+      { path: "lib/plugins/aws/events/sqs.js", line: 3, snippet: "const redrivePolicy = event.redrivePolicy;" },
+      { path: "lib/plugins/aws/package/compile.js", line: 4, snippet: "      redrivePolicy: { deadLetterTargetArn: arn }," },
+      { path: "test/unit/sqs.test.js", line: 1, snippet: "expect(queue.redrivePolicy).toBeDefined();" },
+    ]);
+    // The changelog, the docs page and the test are not listed: source only.
+    expect(sourceTextMatches("redrivePolicy", why?.matches)).toEqual([
+      { path: "lib/plugins/aws/events/sqs.js", line: 3, snippet: "const redrivePolicy = event.redrivePolicy;" },
+      { path: "lib/plugins/aws/package/compile.js", line: 4, snippet: "redrivePolicy: { deadLetterTargetArn: arn }," },
+    ]);
   });
 
   it("ignores files Ix does not parse: the name only there is a plain miss", async () => {

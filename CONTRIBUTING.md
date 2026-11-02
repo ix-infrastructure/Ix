@@ -98,8 +98,10 @@ Breaking changes: use `feat!:` or `fix!:` prefix.
 ### Exit codes
 
 The graph commands share one set of codes, defined in
-`ix-cli/src/cli/outcome.ts`: `0` results, `1` error, `2` ambiguous target,
-`3` target not found, `4` workspace not mapped (`IX_LEGACY_EXIT_CODES=1`
+`ix-cli/src/cli/outcome.ts`: `0` results, `1` error, `2` ambiguous target
+(only with `--strict` / `IX_STRICT_TARGETS=1`; otherwise the top candidate is
+answered with a notice), `3` target not found anywhere (a name in source files
+is answered with them), `4` workspace not mapped (`IX_LEGACY_EXIT_CODES=1`
 collapses 2-4 to 1). A hook that runs `ix` exits with its own status, never
 ix's: Claude Code treats a hook's exit `2` as a block. Report a resolution
 failure through `resolveFileOrReport` or `reportResolutionFailure` rather than

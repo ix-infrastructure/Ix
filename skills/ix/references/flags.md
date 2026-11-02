@@ -158,14 +158,25 @@ surfaces (#575).
 - **`--fields name,path,lines` keeps those fields on each ROW, in that order** —
   the caller's order, not the renderer's. It never touches a header, and a field
   no row carries is dropped rather than emitted empty.
-- **`--pick <n>` is 1-based** everywhere it appears, and is how you resolve an
-  ambiguous target without re-running with a longer name. It indexes the list
+- **An ambiguous target is answered for its top candidate** (exit 0), with an
+  `ambiguous_target` notice naming the choice and listing the other candidates
+  (llm `diagnostic` + `candidate` records, json `resolutionNotices`, text on
+  stderr). A name that is no code symbol but appears in source files (a config
+  key) is answered with up to 10 of those files, source first (llm `note
+  code=text_matches` + `match` rows, json `textMatches`, plus any near-name
+  `suggestion` rows); docs, changelogs and tests are not listed, and a
+  qualified name (`Class.method`) stays a miss. `--strict`, or `IX_STRICT_TARGETS=1`, keeps both as
+  errors (exit 2 and 3).
+- **`--pick <n>` is 1-based** everywhere it appears, and is how you choose
+  another candidate of an ambiguous target without re-running with a longer
+  name. It indexes the list
   in its stable numbered order (best match first; equal matches dealt
   round-robin by file so one file cannot fill the page), and also selects among the candidates of a
   resolution notice (a target that resolved by choosing among equal matches;
   only the true ties are listed and numbered).
 - **`--all` answers an ambiguous name for every candidate** (`callers`,
-  `callees`, `impact`), instead of exiting 2 with the candidate list. Each row
+  `callees`, `impact`), instead of only the top one (or, under `--strict`,
+  exiting 2 with the candidate list). Each row
   (or, for `impact`, each analysis) carries `candidate=<n>`, numbering the
   `candidate` records printed with it. It covers the tied candidates the name
   search returned, not only the 8 an ambiguity lists (numbered as `--pick`
@@ -173,9 +184,11 @@ surfaces (#575).
   too), up to 25 per call, so narrow with `--kind`
   or `--path` for a common name; a `candidates_truncated` diagnostic says when
   the cap or the search cut it off. `--pick` takes precedence over it.
-- **Exit codes** for the graph commands: `0` results, `2` ambiguous
-  (candidates listed), `3` not found (suggestions and a reason when known),
-  `4` workspace not mapped, `1` any other error. `IX_LEGACY_EXIT_CODES=1` makes
+- **Exit codes** for the graph commands: `0` results (an ambiguous target
+  answered for its top candidate, or a name answered with its text matches,
+  included), `2` ambiguous, only under `--strict` / `IX_STRICT_TARGETS=1`
+  (candidates listed), `3` not found anywhere (suggestions and a reason when
+  known), `4` workspace not mapped, `1` any other error. `IX_LEGACY_EXIT_CODES=1` makes
   every non-zero exit `1` again. With several targets (`ix locate a b c`) the
   run exits with the worst target's code and each group carries its own.
 - **`--no-recursive` and `--no-open` negate a default-on behaviour**, so their
@@ -217,6 +230,7 @@ Show methods/functions called by the given symbol (cross-file).
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--all` | — | off | When the symbol is ambiguous, answer for every candidate; rows are tagged with their candidate |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -238,6 +252,7 @@ through a superclass or interface follow the direct ones, tagged
 | `--no-suggest` | — | off | Disable did-you-mean candidates on unresolved targets |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--all` | — | off | When the symbol is ambiguous, answer for every candidate; rows are tagged with their candidate |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -299,6 +314,7 @@ Show members contained by the given entity (class, module, file).
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -317,6 +333,7 @@ Build a bounded, deterministic context bundle for a symbol, file, or entity (or 
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command. A named target only; the fresh side of `--diff` is always strict |
 | `--depth` | `compact\|standard\|full\|shallow\|deep` | — | Context-graph expansion depth (compact\|standard\|full\|shallow\|deep) |
 | `--as-of-rev` | `<n>` | — | Historical context as of a graph revision |
 | `--max-entities` | `<n>` | — | Maximum entities in the bundle (default: 50, clamped to 1-500) |
@@ -343,6 +360,7 @@ Show upstream dependents of the given entity (full tree by default).
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command |
 | `--depth` | `<n>` | `3` | Cap traversal depth |
 | `--cap` | `<n>` | `100` | Cap number of nodes visited |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -371,6 +389,7 @@ Show diff between two revisions, optionally scoped to a file or entity. The diff
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command |
 
 ### `ix docker`
 
@@ -451,6 +470,7 @@ Explain an entity — infers role, importance, and structural context.
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--no-suggest` | — | off | Disable did-you-mean candidates on unresolved targets |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -479,6 +499,7 @@ Show provenance chain for a file or entity.
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -511,6 +532,7 @@ System risk analysis — what behavior is at risk if this changes.
 | `--no-suggest` | — | off | Disable did-you-mean candidates on unresolved targets |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
 | `--all` | — | off | When the target is ambiguous, analyse every candidate; each analysis is tagged with its candidate |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command |
 | `--depth` | `<n>` | `1` | Expansion depth for callers/importers (default 1, max 3) |
 | `--limit` | `<n>` | `10` | Max top-impacted members (and llm caller/callee rows) to show; JSON lists are not cut |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -527,6 +549,7 @@ Show what imports the given entity.
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -543,6 +566,7 @@ Show what the given entity imports.
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -605,6 +629,7 @@ Several symbols answer in one call, grouped per symbol.
 | `--path` | `<path>` | — | Restrict to results from files matching this path substring |
 | `--no-suggest` | — | off | Disable did-you-mean candidates on unresolved targets |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -683,6 +708,7 @@ grouped per symbol.
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command |
 | `--limit` | `<n>` | `50` | Max results to show |
 | `--offset` | `<n>` | `0` | Skip the first N results (use the next: hint to page) |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
@@ -699,6 +725,7 @@ Structural summary — what a target contains or what surrounds it.
 | `--kind` | `<kind>` | — | Filter target entity by kind |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
@@ -928,6 +955,7 @@ Follow how it connects.
 | `--depth` | `<n>` | `3` | Cap traversal depth in edges (also applies to `--to`) |
 | `--cap` | `<n>` | `100` | Cap nodes visited per direction, or across the `--to` search (including the source) |
 | `--pick` | `<n>` | — | Pick Nth candidate from ambiguous results (1-based) |
+| `--strict` | — | off | Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it; `IX_STRICT_TARGETS=1` does the same for every command |
 | `--path` | `<path>` | — | Restrict to symbols from files matching this path substring |
 | `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |

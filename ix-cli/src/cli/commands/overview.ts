@@ -8,7 +8,7 @@ import { getEffectiveSystemPath, getSystemPath, hasMapData } from "../hierarchy.
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { relativePath, printJson } from "../format.js";
 import { llmLine, type LlmValue } from "../llm.js";
-import { parsePickOption } from "../options.js";
+import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 import { renderSection, renderKeyValue, renderNote, renderBreadcrumb } from "../ui.js";
 import { forMcp } from "../next-step.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
@@ -43,6 +43,7 @@ export function registerOverviewCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_TARGET_HELP)
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText(
       "after",
@@ -57,9 +58,9 @@ Examples:
   ix overview overview.ts
   ix overview scoreCandidate --pick 2`
     )
-    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; format: string }) => {
+    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; strict?: boolean; format: string }) => {
       const client = createClient({ query: true });
-      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
+      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
       if (!target) return;
 

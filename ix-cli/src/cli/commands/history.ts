@@ -6,7 +6,7 @@ import { createClient } from "../../client/factory.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
 import { relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
-import { parsePickOption } from "../options.js";
+import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 
 /** Render an entity's provenance chain as llm records: a header then one `patch` row per revision. */
 export function renderHistoryLlm(
@@ -31,15 +31,16 @@ export function registerHistoryCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_TARGET_HELP)
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", `\nExamples:
   ix history ix-cli/src/cli/commands/decide.ts
   ix history decide.ts
   ix history IngestionService --kind class
   ix history <entity-uuid>`)
-    .action(async (target: string, opts: { kind?: string; path?: string; pick?: number; format: string }) => {
+    .action(async (target: string, opts: { kind?: string; path?: string; pick?: number; strict?: boolean; format: string }) => {
       const client = createClient();
-      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
+      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict };
       const resolved = await resolveFileOrReport(client, target, resolveOpts, opts.format);
       if (!resolved) return;
 

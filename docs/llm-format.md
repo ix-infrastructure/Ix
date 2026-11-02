@@ -75,20 +75,28 @@ which value it ignored, on stderr, when a person is there to read it.
   | Exit | Outcome | Slug |
   |---|---|---|
   | 0 | results | — |
-  | 2 | ambiguous: candidates listed, retry with `--pick <n>`, `--path` or `--all` | `ambiguous_target` |
-  | 3 | not found: suggestions and a reason when known | `unresolved_target` |
+  | 2 | ambiguous, only with `--strict` or `IX_STRICT_TARGETS=1`: candidates listed, retry with `--pick <n>`, `--path` or `--all` | `ambiguous_target` |
+  | 3 | not found anywhere: suggestions and a reason when known | `unresolved_target` |
   | 4 | workspace not mapped: run `ix map` | `workspace_not_mapped` |
   | 1 | any other error (backend down, bad argument, ...) | its own slug |
 
+  Two of these are answered instead, exit 0: an ambiguous target is answered
+  for its top candidate with an `ambiguous_target` notice listing the others
+  ([Resolution notices](#resolution-notices-exit-0)), and a name that is no
+  code symbol but appears in source files is answered with those files
+  ([Text matches](#text-matches-a-name-that-is-no-code-symbol)). The guess is
+  always printed, never silent. `--strict` on the command, or
+  `IX_STRICT_TARGETS=1` for every command, makes both errors again (exit 2 and
+  3), for a script that wants the old contract.
   `IX_LEGACY_EXIT_CODES=1` makes every non-zero exit `1`, for an integration
   that compares the status against `1`. A hook must not pass ix's status
   through as its own: Claude Code reads a hook's exit `2` as "block this
-  action", so an ambiguous name would block the tool call. End the hook with
+  action", so an ambiguous name under `--strict` would block the tool call. End the hook with
   its own status (the shipped hooks exit 0), or set `IX_LEGACY_EXIT_CODES=1`.
   One exception in json: `locate`'s ambiguity record carries the slug as
   `code: "ambiguous_target"`, not `error` (it never was an `error` record, and
   readers that treat any string `error` as a failure would drop its
-  candidates); it still exits 2.
+  candidates); under `--strict` it still exits 2.
   One exception in exit code: `read`'s ambiguity (a file or symbol name that
   matches several) exits 0 with its own record, `ambiguous kind=<file|symbol>
   target=... count=<n>` and its candidates (json: `targetType:
@@ -131,9 +139,9 @@ which value it ignored, on stderr, when a person is there to read it.
   A graph read from a directory no registered workspace covers is
   `workspace_not_mapped`, with `dir=` and a `hint=` naming the command that
   maps it.
-  An ambiguous graph target is instead `ambiguous_target`, includes numbered
-  candidates, and exits non-zero because the requested graph operation could
-  not choose a target. The error also carries `shown=<n> total=<m>` after
+  Under `--strict`, an ambiguous graph target is instead `ambiguous_target`,
+  includes numbered candidates, and exits non-zero because the requested
+  graph operation could not choose a target. The error also carries `shown=<n> total=<m>` after
   `count=` (and `truncated=true` when the search window came back full, so
   `total` is a lower bound); json has `total` and `truncated` beside
   `candidates`. Candidates are ranked by how well they match (ties in
@@ -153,7 +161,8 @@ which value it ignored, on stderr, when a person is there to read it.
 ### Every candidate at once (`--all`)
 
 `callers`, `callees` and `impact` take `--all`: an ambiguous name is answered
-for every listed candidate (exit 0) instead of exiting 2. Edge rows are one
+for every listed candidate (exit 0) instead of only the top one (or, under
+`--strict`, exiting 2). Edge rows are one
 union, paged by `--limit`/`--offset`, and each carries the candidate it belongs
 to; json has `resolutionMode: "all"`, a `candidates` list and `candidate` on
 each row:
@@ -185,7 +194,8 @@ with `target n=<i> name=<t>` and ends with
 `targets total=<n> ok=<n> [ambiguous=<n>] [not_found=<n>] [not_mapped=<n>] [failed=<n>]`;
 json is `{ targets: [{ target, exitCode, ...answer }], summary }`. The run exits
 with the worst target's code (error, then workspace not mapped, then not
-found, then ambiguous), so a partial answer never exits 0. The summary counts
+found, then ambiguous under `--strict`), so a partial answer never exits 0. An
+ambiguous target answered for its top candidate counts as answered (`ok`). The summary counts
 each target by its outcome, so it reads the same under `IX_LEGACY_EXIT_CODES=1`.
 
 ### Resolution notices (exit 0)
@@ -209,6 +219,60 @@ only counts them ("2 more scored lower and are not listed"). `--pick <n>`
 selects among the tied candidates, the listed ones first and the rest in the
 order `--all` numbers them; an out-of-range pick keeps the
 default and adds a `pick_out_of_range` diagnostic, still exiting 0.
+
+An ambiguous target, where no candidate wins on score, is answered the same
+way: for the first candidate of its numbered list (what `--pick 1` chooses),
+with one notice naming the choice and listing the candidates, numbered as
+`--pick` numbers them, so `--pick <n>` on the next call chooses another:
+
+```
+diagnostic code=ambiguous_target target=createBreakpoints chosen=createBreakpoints shown=7 total=7 message="\"createBreakpoints\" matches 7 candidates; using createBreakpoints (packages/material-ui/src/styles/createBreakpoints.js)."
+candidate n=1 name=createBreakpoints kind=function path=packages/material-ui/src/styles/createBreakpoints.js id=1111aaaa
+candidate n=2 name=createBreakpoints kind=function path=packages/material-ui-system/src/breakpoints.js id=2222bbbb
+hint text="Use --pick <n> or --path to choose another."
+```
+
+The list is the ambiguity's (the 8 best, `total` counting every close match,
+`container=` where known), not only exact ties. A fuzzy-only ambiguity says
+`No exact match for "<name>"; <n> fuzzy matches; using ...` and the answer
+carries `resolutionMode: "fuzzy"`. An out-of-range `--pick` answers the first
+candidate and adds `pick_out_of_range`. json carries the notice in
+`resolutionNotices` beside the normal answer (`code: "ambiguous_target"`,
+`target`, `chosen`, `candidates`, `total`, `truncated` when the search window
+was full). Text prints the same on stderr. `--strict` / `IX_STRICT_TARGETS=1`
+keep the `error code=ambiguous_target` record and exit 2 instead. `ix read`
+keeps its own `ambiguous` record (above), and an issue's starting points
+(`context --from-issue`) are chosen by their own rules, unchanged.
+
+### Text matches (a name that is no code symbol)
+
+A name the graph has no entity for, but that appears in source files (a
+configuration key such as `redrivePolicy`), is answered with those files,
+exit 0, instead of `unresolved_target`. The rows come from the miss probe's
+own bounded search (one `rg` per miss, the first matching line of each file),
+so it costs nothing extra; only source files are listed (generated files,
+docs, examples, site, tests and build output are not, the same test
+`--from-issue` uses), a line that sets the name (`name:`, `name =`) first, at
+most 10:
+
+```
+note code=text_matches target=redrivePolicy reason=symbol_not_extracted shown=2 total=2 message="\"redrivePolicy\" is not a code symbol in the graph; source files that mention it:"
+match n=1 path=lib/plugins/aws/events/sqs.js line=88 text="const redrivePolicy = event.redrivePolicy;"
+match n=2 path=lib/plugins/aws/package/compile.js line=12 text="redrivePolicy: {"
+```
+
+`total` counts every source file that mentions it. When the probe says `ix
+map` would fix the miss (a file that has the name is unindexed, or changed
+since), a `hint` record says so. json: `{ note: "text_matches", target,
+reason, message, textMatches: [{ path, line, snippet }], shown, total }`,
+with `detail` for that hint, and no `error`; `locate` keeps its body around it
+(`resolvedTarget: null`, `resolutionMode: "text"`). The miss's near names
+ride along: `suggestion` rows and their retry `hint` after the matches (json
+`suggestions` / `didYouMean`), the same ones `unresolved_target` would list. A
+name only docs, changelogs or tests mention, or found nowhere, is still
+`unresolved_target` (exit 3), as is any miss under `--strict` /
+`IX_STRICT_TARGETS=1`, and any qualified name (`Router.handle`, `pkg::name`):
+the probe searches its last segment only, so those hits are not about it.
 
 `Class.method` and `Class#method` resolve only to a member of that class: one
 of the class's `CONTAINS` children in the graph or, when the graph has none

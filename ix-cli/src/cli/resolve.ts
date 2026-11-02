@@ -16,6 +16,8 @@ import { relativePath } from "./format.js";
 import { isQuiet } from "./output-shape.js";
 import { disambiguationHint } from "./next-step.js";
 import { explainSymbolMiss, missProbeWouldRun } from "./miss-reason.js";
+import { strictTargets } from "./outcome.js";
+import { reportTextMatches, sourceTextMatches, type TextMatch } from "./text-matches.js";
 import { isBackendUnreachable } from "./errors.js";
 import { findTargetCandidates, rowsInclude, type TargetCandidate } from "./target-suggestions.js";
 import {
@@ -249,6 +251,12 @@ export interface ResolveOpts {
   silentMiss?: boolean;
   /** The command takes `--all`, so an ambiguity's hint names it. */
   offerAll?: boolean;
+  /**
+   * `--strict`: report an ambiguous target (exit 2) or a name found only as
+   * text (exit 3) as an error, rather than answer it (`answerAmbiguous`,
+   * text-matches.ts). `IX_STRICT_TARGETS=1` does the same for every command.
+   */
+  strict?: boolean;
 }
 
 export interface Suggestion {
@@ -278,6 +286,10 @@ export type ResolveResult =
       message?: string;
       /** For a symbol miss with a `symbol_*` reason: the files the name appears in. */
       files?: string[];
+      /** Every file the miss probe found the name in, with its first matching line. */
+      matches?: TextMatch[];
+      /** The probe says `ix map` would fix the miss. */
+      remap?: boolean;
       /** Set by the reporter's caller when the graph itself is empty or degraded. */
       graph?: GraphHealth;
     };
@@ -977,6 +989,57 @@ export function pickFromNotice(
           candidates: [{ ...picked, rank: 1 }],
         };
       }),
+  };
+}
+
+/**
+ * Answer an ambiguous target for its top candidate, at the command layer.
+ *
+ * The ambiguous result becomes one resolved for the first candidate in the
+ * record's own order (what `--pick 1` chooses), with an `ambiguous_target`
+ * notice naming the choice and listing the candidates, numbered as `--pick`
+ * numbers them (`rememberAll`, so the full list stays reachable). A guess, but
+ * a visible one: #847 stopped *silent* guessing, and the notice is printed in
+ * every format. An error here was pure overhead to an agent, which never
+ * followed up with `--pick`.
+ *
+ * Only where a user-supplied target's failed resolution would be reported
+ * (`resolveFileOrReport`, `ix locate`); internal resolution (`pickBest`,
+ * `--from-issue` starts, rank, the post-edit hook) never calls it. Returns the
+ * result untouched when it is not ambiguous, or under `--strict` /
+ * `IX_STRICT_TARGETS=1`.
+ */
+export function answerAmbiguous(target: string, result: ResolveResult, opts?: { strict?: boolean }): ResolveResult {
+  if (result.resolved || !result.ambiguous || strictTargets(opts)) return result;
+  const amb = result.result;
+  const all = allCandidatesOf(amb);
+  const top = all[0];
+  if (!top) return result;
+  const fuzzy = (amb.diagnostics ?? []).some((d) => d.code === "fuzzy_match");
+  const total = amb.total ?? all.length;
+  const where = top.path ? ` (${top.path})` : "";
+  const count = `${amb.truncated ? "at least " : ""}${total}`;
+  const notice: ResolutionNotice = {
+    code: "ambiguous_target",
+    target,
+    message: fuzzy
+      ? `No exact match for "${target}"; ${count} fuzzy matches; using ${top.name}${where}.`
+      : `"${target}" matches ${count} candidates; using ${top.name}${where}.`,
+    chosen: { id: top.id, name: top.name, kind: top.kind, path: top.path },
+    candidates: amb.candidates,
+    total,
+    ...(amb.truncated ? { truncated: true } : {}),
+  };
+  // The record's "Use --pick or --path to disambiguate" is the notice's own
+  // hint line now; anything else (`pick_out_of_range`, `fuzzy_match`) stays.
+  const diagnostics = (amb.diagnostics ?? []).filter((d) => d.code !== "ambiguous_resolution");
+  if (diagnostics.length) notice.diagnostics = diagnostics;
+  rememberAll(notice, amb.candidates, all, importIdsOf(amb));
+  return {
+    resolved: true,
+    entity: { id: top.id, kind: top.kind, name: top.name, path: top.path, resolutionMode: fuzzy ? "fuzzy" : "scored" },
+    notices: [notice],
+    ...(result.hiddenTestCount ? { hiddenTestCount: result.hiddenTestCount } : {}),
   };
 }
 
@@ -1687,7 +1750,7 @@ export async function resolveFileOrReport(
   // The format goes in so the resolver knows whether a person will read its
   // prose, or whether the structured record below is the only copy that should
   // reach stdout.
-  const result = await resolveFileOrEntityFull(client, target, { ...opts, format });
+  const result = answerAmbiguous(target, await resolveFileOrEntityFull(client, target, { ...opts, format }), opts);
   if (result.resolved) {
     if (result.notices?.length) reportResolutionNotices(result.notices, format, opts);
     return result.entity;
@@ -1720,7 +1783,17 @@ export async function reportUnresolved(
     return;
   }
   const reason = await withMissReason(client, target, result, opts, format);
-  reportResolutionFailure(target, await withTargetCandidates(client, target, reason, opts), format, opts);
+  // The near names first: an answer from the text keeps them, as the miss does.
+  const guided = await withTargetCandidates(client, target, reason, opts);
+  // A name in source files but in no entity (a config key) is answered with
+  // those files, exit 0 (text-matches.ts); found nowhere, it is the miss.
+  if (!strictTargets(opts) && reportTextMatches(target, guided, format)) return;
+  reportResolutionFailure(target, guided, format, opts);
+}
+
+/** The source text matches a miss will be answered with; none under `--strict`. */
+export function textMatchesFor(target: string, miss: { matches?: TextMatch[] }, opts?: { strict?: boolean }): TextMatch[] {
+  return strictTargets(opts) ? [] : sourceTextMatches(target, miss.matches);
 }
 
 /** Add guidance at the final command miss, never during qualified-name resolution. */
@@ -1765,9 +1838,16 @@ export async function withMissReason<T extends { reason?: string; message?: stri
   const why = await explainSymbolMiss(client, target, { path: opts?.path, ...activeScope() });
   if (!why) return result;
   // The resolver already wrote the bare miss for a person; this is the part
-  // that says what to do about it. Machine formats get it in the record.
-  if (format !== "json" && format !== "llm") stderr(chalk.dim(why.message));
-  return { ...result, reason: why.reason, message: why.message, ...(why.files ? { files: why.files } : {}) };
+  // that says what to do about it. Machine formats get it in the record. A
+  // miss answered with its text matches says what it is there instead.
+  const answered = textMatchesFor(target, why, opts).length > 0;
+  if (format !== "json" && format !== "llm" && !answered) stderr(chalk.dim(why.message));
+  return {
+    ...result, reason: why.reason, message: why.message,
+    ...(why.files ? { files: why.files } : {}),
+    ...(why.matches ? { matches: why.matches } : {}),
+    ...(why.remap ? { remap: true } : {}),
+  };
 }
 
 /**

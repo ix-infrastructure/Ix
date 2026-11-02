@@ -11,9 +11,18 @@
  *
  *   0  results
  *   1  a real error (backend down, bad argument, ...)
- *   2  ambiguous target: candidates returned       `ambiguous_target`
- *   3  target not found: suggestions when known     `unresolved_target`
+ *   2  ambiguous target, only with --strict:       `ambiguous_target`
+ *   3  target found nowhere: suggestions when known `unresolved_target`
  *   4  workspace not mapped                         `workspace_not_mapped`
+ *
+ * An error is still overhead to an agent, so two of these now answer instead
+ * (exit 0): an ambiguous target is answered for its top candidate, with an
+ * `ambiguous_target` notice naming what was chosen and listing the rest for
+ * `--pick`; a name that is no code symbol but appears in source files is
+ * answered with those files (`text_matches`, with the miss's near names; a
+ * qualified name stays a miss). The guess is always visible,
+ * which keeps #847's rule against silent guessing. `--strict` or
+ * `IX_STRICT_TARGETS=1` restores both errors (exit 2 and 3).
  *
  * All of them are still non-zero, so a runner that only asks "did it fail?"
  * sees what it always saw. `IX_LEGACY_EXIT_CODES=1` collapses 2, 3 and 4 back
@@ -27,6 +36,9 @@ export const EXIT_NOT_MAPPED = 4;
 
 export const LEGACY_EXIT_CODES_ENV = "IX_LEGACY_EXIT_CODES";
 
+/** `IX_STRICT_TARGETS=1`: what `--strict` does, for every graph command. */
+export const STRICT_TARGETS_ENV = "IX_STRICT_TARGETS";
+
 export type MissOutcome = "ambiguous" | "not_found" | "not_mapped";
 
 const CODES: Record<MissOutcome, number> = {
@@ -38,13 +50,28 @@ const CODES: Record<MissOutcome, number> = {
 /** One line per code, for `--help` and the agent docs. */
 export const EXIT_CODES_HELP = `
 Exit codes:
-  0  results     2  ambiguous: candidates listed      4  workspace not mapped
+  0  results     2  ambiguous, with --strict: candidates listed     4  workspace not mapped
   1  error       3  not found: suggestions listed
-  ${LEGACY_EXIT_CODES_ENV}=1 makes every non-zero exit 1.`;
+  An ambiguous target is answered for its top candidate, with a notice listing
+  the others (--pick <n> chooses one); a name found only as text in source files
+  is answered with those files. --strict or ${STRICT_TARGETS_ENV}=1 makes both
+  errors again (exit 2 and 3). ${LEGACY_EXIT_CODES_ENV}=1 makes every non-zero exit 1.`;
+
+function envSwitch(name: string): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  return !!value && value !== "0" && value !== "false" && value !== "no";
+}
 
 export function legacyExitCodes(): boolean {
-  const value = process.env[LEGACY_EXIT_CODES_ENV]?.trim().toLowerCase();
-  return !!value && value !== "0" && value !== "false" && value !== "no";
+  return envSwitch(LEGACY_EXIT_CODES_ENV);
+}
+
+/**
+ * Whether a target that did not resolve to one entity is an error (exit 2 or
+ * 3), as it was before ambiguous targets and text matches were answered.
+ */
+export function strictTargets(opts?: { strict?: boolean }): boolean {
+  return !!opts?.strict || envSwitch(STRICT_TARGETS_ENV);
 }
 
 /** The exit code for an outcome, honouring the legacy switch. */

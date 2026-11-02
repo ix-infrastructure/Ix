@@ -13,7 +13,7 @@ import { inferRiskSemantics, humanizeLabel, type ImpactFacts, type RiskSemantics
 import { captureJson, lineSpan, printJson, relativePath, rowLocation, sliceEdgeResults, stripNulls, type Slice } from "../format.js";
 import { forMcp, suggest, type Relation } from "../next-step.js";
 import { llmLine, llmShortId } from "../llm.js";
-import { parsePickOption } from "../options.js";
+import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
 
 const CONTAINER_KINDS = new Set(["class", "module", "file", "object", "trait", "interface"]);
@@ -26,6 +26,7 @@ export function registerImpactCommand(program: Command): void {
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--no-suggest", "Disable did-you-mean candidates on unresolved targets")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_TARGET_HELP)
     .option("--all", "When the target is ambiguous, analyse every candidate; each analysis is tagged with its candidate")
     .option("--depth <n>", "Expansion depth for callers/importers (default 1, max 3)", "1")
     .option("--limit <n>", "Max top-impacted members (and llm caller/callee rows) to show", "10")
@@ -38,13 +39,13 @@ export function registerImpactCommand(program: Command): void {
     .action(
       async (
         symbol: string,
-        opts: { kind?: string; path?: string; pick?: number; suggest?: boolean; all?: boolean; depth: string; limit: string; format: string }
+        opts: { kind?: string; path?: string; pick?: number; strict?: boolean; suggest?: boolean; all?: boolean; depth: string; limit: string; format: string }
       ) => {
         const client = createClient({ query: true });
         const limit = parseInt(opts.limit, 10);
         const depth = Math.min(Math.max(parseInt(opts.depth, 10) || 1, 1), 3);
 
-        const resolveOpts = { suggest: opts.suggest, suggestCommand: "impact", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick, all: opts.all };
+        const resolveOpts = { suggest: opts.suggest, suggestCommand: "impact", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all };
         const set = await resolveTargetSetOrReport(client, symbol, resolveOpts, opts.format);
         if (!set) return;
         const target = set.entities[0];

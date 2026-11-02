@@ -46,7 +46,7 @@ import { companionHistory, expandIssueCompanions } from "../explain/issue-compan
 import { collectTextReferences, gitRepoAccess, type RepoAccess, type TextSource } from "../explain/text-references.js";
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
-import { parseBudgetOption, parsePickOption, parseRevisionOption } from "../options.js";
+import { parseBudgetOption, parsePickOption, STRICT_TARGET_HELP, parseRevisionOption } from "../options.js";
 import { activeReadScope, ensureReadScope, resolveFileOrReport } from "../resolve.js";
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
 import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure } from "../ui.js";
@@ -195,6 +195,8 @@ interface ContextOptions extends Partial<BudgetSnapshot> {
   kind?: string;
   path?: string;
   pick?: number;
+  /** `--strict`: an ambiguous or text-only target is an error, not answered. */
+  strict?: boolean;
   depth?: string;
   asOfRev?: number;
   out?: string;
@@ -378,6 +380,7 @@ export function registerContextCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_TARGET_HELP)
     .option(
       "--depth <depth>",
       `Context-graph expansion depth (${CONTEXT_DEPTHS.join("|")})`,
@@ -499,6 +502,7 @@ export function registerContextCommand(program: Command): void {
         kind: opts.kind,
         path: opts.path,
         pick: opts.pick,
+        strict: opts.strict,
       }, opts.format);
       if (!resolved) return;
 
@@ -610,10 +614,14 @@ async function buildFreshBundle(
   format: string,
 ): Promise<ContextBundle | undefined> {
   const client = createClient({ query: true });
+  // Strict: the fresh side of --diff must be the saved bundle's entity, so a
+  // name that has become ambiguous is reported, never answered with a guess
+  // the diff would then compare against.
   const resolved = await resolveFileOrReport(client, target, {
     kind: opts.kind,
     path: opts.path,
     pick: opts.pick,
+    strict: true,
   }, format);
   if (!resolved) return undefined;
 
@@ -668,6 +676,7 @@ const BUILD_FLAGS: ReadonlyArray<[keyof ContextOptions, string]> = [
   ["kind", "--kind"],
   ["path", "--path"],
   ["pick", "--pick"],
+  ["strict", "--strict"],
   ["depth", "--depth"],
   ["asOfRev", "--as-of-rev"],
   ...BUDGETS.map((b) => [b.key, b.flag] as [keyof ContextOptions, string]),

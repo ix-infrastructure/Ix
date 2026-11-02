@@ -191,7 +191,7 @@ describe("a suffix not on a '/' boundary is labelled fuzzy (review round 5)", ()
   });
 });
 
-describe("acceptance 4: two functions named render stay ambiguous (exit 2)", () => {
+describe("acceptance 4: two functions named render stay ambiguous under --strict (exit 2)", () => {
   const nodes = [node("r2", "render", "function", "src/z.ts", 5), node("r1", "render", "function", "src/a.ts", 9)];
 
   it("json: path-sorted candidates with total, the same in both orders", async () => {
@@ -199,7 +199,7 @@ describe("acceptance 4: two functions named render stay ambiguous (exit 2)", () 
     for (const c of [client(nodes), client([...nodes].reverse())]) {
       logs.length = 0;
       process.exitCode = undefined;
-      expect(await resolveFileOrReport(c, "render", {}, "json")).toBeNull();
+      expect(await resolveFileOrReport(c, "render", { strict: true }, "json")).toBeNull();
       expect(process.exitCode).toBe(2);
       outs.push(JSON.parse(logs[0]));
     }
@@ -210,9 +210,19 @@ describe("acceptance 4: two functions named render stay ambiguous (exit 2)", () 
   });
 
   it("llm: count= unchanged, shown= and total= added", async () => {
-    await resolveFileOrReport(client(nodes), "render", {}, "llm");
+    await resolveFileOrReport(client(nodes), "render", { strict: true }, "llm");
     expect(process.exitCode).toBe(2);
     expect(logs[0]).toMatch(/^error code=ambiguous_target .*count=2 shown=2 total=2/);
+  });
+
+  it("without --strict: answered for the first path-sorted candidate, in both orders, with the notice", async () => {
+    for (const c of [client(nodes), client([...nodes].reverse())]) {
+      logs.length = 0;
+      process.exitCode = undefined;
+      expect(await resolveFileOrReport(c, "render", {}, "llm")).toMatchObject({ id: "r1", path: "src/a.ts" });
+      expect(process.exitCode).toBeUndefined();
+      expect(logs[0]).toMatch(/^diagnostic code=ambiguous_target target=render chosen=render shown=2 total=2 /);
+    }
   });
 });
 
@@ -569,13 +579,20 @@ describe("acceptance 7: many methods named run", () => {
   it("40 of them (window 30): exit 1 as before, 8 shown, total=30, truncated", async () => {
     const nodes = runs(40);
     logs.length = 0;
-    expect(await resolveFileOrReport(client(nodes), "run", {}, "json")).toBeNull();
+    expect(await resolveFileOrReport(client(nodes), "run", { strict: true }, "json")).toBeNull();
     expect(process.exitCode).toBe(2);
     const out = JSON.parse(logs[0]);
     expect(out.error).toBe("ambiguous_target");
     expect(out.candidates).toHaveLength(8);
     expect(out.total).toBe(30);
     expect(out.truncated).toBe(true);
+  });
+
+  it("40 of them, without --strict: answered for the first, and the notice says at least 30", async () => {
+    logs.length = 0;
+    expect(await resolveFileOrReport(client(runs(40)), "run", {}, "llm")).toMatchObject({ id: "run-00" });
+    expect(process.exitCode).toBeUndefined();
+    expect(logs[0]).toMatch(/^diagnostic code=ambiguous_target .*shown=8 total=30 truncated=true message="\\"run\\" matches at least 30 candidates; using run \(src\/m00\.ts\)\."/);
   });
 
   it("20 of them: --pick 3 gives the same id in both orders", async () => {

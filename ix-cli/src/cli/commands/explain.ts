@@ -12,7 +12,8 @@ import { inferImportance } from "../explain/importance.js";
 import { renderExplanation } from "../explain/render.js";
 import { renderExplainLlm, renderExplainRawLlm } from "../explain/llm.js";
 import { printLlmLines } from "../llm.js";
-import { parsePickOption } from "../options.js";
+import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
+import { EXIT_CODES_HELP } from "../outcome.js";
 import { renderSection, renderWarning, renderNote } from "../ui.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm } from "../map-freshness.js";
 import { forMcp, toolCall } from "../next-step.js";
@@ -28,12 +29,13 @@ export function registerExplainCommand(program: Command): void {
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--no-suggest", "Disable did-you-mean candidates on unresolved targets")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_TARGET_HELP)
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .option("--raw", "Show raw metadata dump (legacy format)")
-    .addHelpText("after", "\nExamples:\n  ix explain IngestionService\n  ix explain expand --path memory-layer\n  ix explain verify_token --kind function --format json\n  ix explain IxClient --raw")
-    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; suggest?: boolean; format: string; raw?: boolean }) => {
+    .addHelpText("after", "\nExamples:\n  ix explain IngestionService\n  ix explain expand --path memory-layer\n  ix explain verify_token --kind function --format json\n  ix explain IxClient --raw\n" + EXIT_CODES_HELP)
+    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; strict?: boolean; suggest?: boolean; format: string; raw?: boolean }) => {
       const client = createClient({ query: true });
-      const resolveOpts = { suggest: opts.suggest, suggestCommand: "explain", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick };
+      const resolveOpts = { suggest: opts.suggest, suggestCommand: "explain", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
       if (!target) return;
 

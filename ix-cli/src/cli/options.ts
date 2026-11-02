@@ -109,6 +109,14 @@ export function parsePickOption(value: string): number {
 }
 
 /**
+ * `--strict` on every command that resolves a target through the shared path
+ * (resolve.ts `answerAmbiguous`, text-matches.ts). One string, so the help and
+ * skills/ix/references/flags.md say the same thing everywhere.
+ */
+export const STRICT_TARGET_HELP =
+  "Report an ambiguous target (exit 2) or a name found only as text (exit 3) as an error instead of answering it";
+
+/**
  * The longest `--wait <seconds>` budget: 5 minutes. Node's fetch (undici)
  * gives up on a response whose headers have not arrived after 300 s whatever
  * the request's own timeout, so a longer wait would end there anyway.

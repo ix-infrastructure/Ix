@@ -8,7 +8,7 @@ import { createClient } from "../../client/factory.js";
 import { resolveWorkspaceRoot } from "../config.js";
 import { expandCapped, formatEdgeResults, printJson, relativePath, sliceEdgeResults, sliceRanked, truncationHint, type Diagnostic, type EdgeCandidate } from "../format.js";
 import { checkGraphHealth, graphHealthProse, isUnhealthy, type GraphHealth } from "../graph-health.js";
-import { parsePickOption } from "../options.js";
+import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
 import { activeReadScope, candidatesCut, resolveTargetSetOrReport, printResolved, type TargetSet } from "../resolve.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
@@ -129,7 +129,7 @@ function bannerOverRows(health: { diagnostics?: Diagnostic[] }, format: string, 
 }
 
 interface EdgeOpts {
-  kind?: string; path?: string; pick?: number; suggest?: boolean; all?: boolean; limit: string; offset: string; format: string;
+  kind?: string; path?: string; pick?: number; strict?: boolean; suggest?: boolean; all?: boolean; limit: string; offset: string; format: string;
 }
 
 const ALL_FLAG = "When the symbol is ambiguous, answer for every candidate; rows are tagged with their candidate";
@@ -187,6 +187,7 @@ export function registerCallersCommand(program: Command): void {
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--no-suggest", "Disable did-you-mean candidates on unresolved targets")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_TARGET_HELP)
     .option("--all", ALL_FLAG)
     .option("--limit <n>", "Max results to show", "50")
     .option("--offset <n>", OFFSET_FLAG, "0")
@@ -212,6 +213,7 @@ ${EXIT_CODES_HELP}`)
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_TARGET_HELP)
     .option("--all", ALL_FLAG)
     .option("--limit <n>", "Max results to show", "50")
     .option("--offset <n>", OFFSET_FLAG, "0")
@@ -225,7 +227,7 @@ ${EXIT_CODES_HELP}`)
       const client = createClient();
       const calleeLimit = parseInt(opts.limit, 10);
       const calleeOffset = parseOffset(opts.offset);
-      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, all: opts.all };
+      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all };
       const set = await resolveTargetSetOrReport(client, symbol, resolveOpts, opts.format);
       if (!set) return;
       if (set.all) {
@@ -252,7 +254,7 @@ ${EXIT_CODES_HELP}`)
 async function callersOne(client: IxClient, symbol: string, opts: EdgeOpts, cmd: Command): Promise<void> {
   const limit = parseInt(opts.limit, 10);
   const offset = parseOffset(opts.offset);
-  const resolveOpts = { suggest: opts.suggest, suggestCommand: "callers", kind: opts.kind, path: opts.path, pick: opts.pick, all: opts.all };
+  const resolveOpts = { suggest: opts.suggest, suggestCommand: "callers", kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all };
   const set = await resolveTargetSetOrReport(client, symbol, resolveOpts, opts.format);
   if (!set) return;
   if (set.all) {

@@ -4,7 +4,7 @@ import type { Command } from "commander";
 import { createClient } from "../../client/factory.js";
 import { expandCapped, formatEdgeResults, sliceEdgeResults } from "../format.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
-import { parsePickOption } from "../options.js";
+import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
 import { edgeTargetFor, withEdgeSites } from "../edge-sites.js";
 
@@ -15,15 +15,16 @@ export function registerImportsCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_TARGET_HELP)
     .option("--limit <n>", "Max results to show", "50")
     .option("--offset <n>", OFFSET_FLAG, "0")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", "\nExamples:\n  ix imports auth.py\n  ix imports IngestionService --format json")
-    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; limit: string; offset: string; format: string }, cmd: Command) => {
+    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; strict?: boolean; limit: string; offset: string; format: string }, cmd: Command) => {
       const client = createClient();
       const limit = parseInt(opts.limit, 10);
       const offset = parseOffset(opts.offset);
-      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
+      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
       if (!target) return;
       if (opts.format === "text") printResolved(target);
@@ -40,15 +41,16 @@ export function registerImportsCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_TARGET_HELP)
     .option("--limit <n>", "Max results to show", "50")
     .option("--offset <n>", OFFSET_FLAG, "0")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", "\nExamples:\n  ix imported-by AuthProvider\n  ix imported-by io.circe.Json --format json")
-    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; limit: string; offset: string; format: string }, cmd: Command) => {
+    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; strict?: boolean; limit: string; offset: string; format: string }, cmd: Command) => {
       const client = createClient();
       const limit = parseInt(opts.limit, 10);
       const offset = parseOffset(opts.offset);
-      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
+      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict };
       const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
       if (!target) return;
       if (opts.format === "text") printResolved(target);

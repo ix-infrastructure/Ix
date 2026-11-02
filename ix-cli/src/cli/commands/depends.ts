@@ -8,7 +8,7 @@ import { resolveFileOrReport, printResolved, isRawId } from "../resolve.js";
 import { walkTree, type TreeWalkResult } from "../tree-walk.js";
 import { compactTreeNode, relativePath, printJson } from "../format.js";
 import { llmLine, llmShortId } from "../llm.js";
-import { parsePickOption } from "../options.js";
+import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 
 // ── Tree types ──────────────────────────────────────────────────────
 
@@ -194,6 +194,7 @@ export function registerDependsCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_TARGET_HELP)
     .option("--depth <n>", "Cap traversal depth")
     .option("--cap <n>", "Cap number of nodes visited")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
@@ -205,13 +206,14 @@ export function registerDependsCommand(program: Command): void {
   ix depends AuthProvider --depth 2
   ix depends parser.py --kind file
   ix depends NodeKind --pick 1 --cap 500`)
-    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; depth?: string; cap?: string; format: string; includeTests?: boolean; testsOnly?: boolean }) => {
+    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; strict?: boolean; depth?: string; cap?: string; format: string; includeTests?: boolean; testsOnly?: boolean }) => {
       const client = createClient();
 
       const resolveOpts = {
         kind: opts.kind,
         path: opts.path,
         pick: opts.pick,
+        strict: opts.strict,
         includeTests: opts.includeTests,
         testsOnly: opts.testsOnly,
       };
