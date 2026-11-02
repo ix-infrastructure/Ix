@@ -47,10 +47,10 @@ import { collectTextReferences, gitRepoAccess, type RepoAccess, type TextSource 
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parseBudgetOption, parsePickOption, STRICT_TARGET_HELP, parseRevisionOption } from "../options.js";
-import { activeReadScope, ensureReadScope, isRawId, resolveFileOrEntityFull, resolveFileOrReport, type ResolvedEntity } from "../resolve.js";
+import { activeReadScope, ensureReadScope, isRawId, resolveFileOrEntityFull, resolveFileOrReport, type ResolutionNotice, type ResolvedEntity } from "../resolve.js";
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
 import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure } from "../ui.js";
-import { printJson, relativePath } from "../format.js";
+import { printJson, relativePath, takeResolutionNotices } from "../format.js";
 import { forMcp, suggest, toolCall } from "../next-step.js";
 import {
   assessTargetStructure, checkGraphHealth, graphHealthJson, isUnhealthy, worseHealth, type GraphHealth,
@@ -556,6 +556,7 @@ export function registerContextCommand(program: Command): void {
 
 /** `--save`, `--out`, or render: what every freshly built bundle goes through. */
 async function emitBundle(bundle: ContextBundle, opts: ContextOptions): Promise<void> {
+  if (opts.save || opts.out) reportGuessedTargetForArtifact(opts.format);
   if (opts.save) {
     saveInvestigation(opts.save, bundle);
     renderNote(`Saved investigation "${opts.save}" (${bundle.entities.length} entities, ${bundle.relationships.length} relationships, ${bundle.evidence.length} evidence items). Resume with: ix context --resume ${opts.save}`);
@@ -614,6 +615,34 @@ async function emitBundle(bundle: ContextBundle, opts: ContextOptions): Promise<
     return;
   }
   renderBundle(bundle, opts.format);
+}
+
+/**
+ * Say which entity a guessed target became, when the bundle goes to a file.
+ *
+ * A json caller's `ambiguous_target` / `fuzzy_match` notice waits in the queue
+ * for `printJson` (ui.ts `reportResolutionNotices`), and `--save` / `--out`
+ * never call it: the bundle goes to a file whose versioned schema
+ * (ix-context-bundle/1) has no field for it, and stdout gets a prose note. So
+ * the notice goes to stderr here, as a warning `--quiet` does not hide: it is
+ * the only sign that the saved bundle is for a guess. text and llm already
+ * printed it when the target resolved.
+ */
+function reportGuessedTargetForArtifact(format: string | undefined): void {
+  if (format !== "json") return;
+  const notices = takeResolutionNotices() as ResolutionNotice[];
+  for (const notice of notices) {
+    renderWarningErr(notice.message);
+    if (notice.code !== "ambiguous_target") continue;
+    notice.candidates.forEach((candidate, index) => {
+      const where = candidate.path ? ` in ${candidate.path}` : "";
+      console.error(`  ${index + 1}. ${(candidate.kind ?? "").padEnd(10)} ${candidate.id.slice(0, 8)}  ${candidate.name}${where}`);
+    });
+    if (notice.total > notice.candidates.length || notice.truncated) {
+      console.error(`  Showing ${notice.candidates.length} of ${notice.truncated ? ">=" : ""}${notice.total}`);
+    }
+    console.error("  Use --pick <n> or --path to choose another.");
+  }
 }
 
 async function buildFreshBundle(
