@@ -238,14 +238,14 @@ describe("acceptance 4: two functions named render stay ambiguous under --strict
     const notice = errs.filter((e) => e.includes("matches 2 candidates"));
     expect(notice).toEqual(['"render" matches 2 candidates; using render (src/a.ts). Use --pick <n> or --path to choose another.']);
     // One line: the candidate list and the Resolved: header are the scaffolding --quiet drops.
-    expect(errs.join("\n")).not.toMatch(/Resolved:|  1\. /);
+    expect(errs.join("\n")).not.toMatch(/Resolved:| {2}1\. /);
   });
 
   it("text without --quiet: the notice and the candidate list", async () => {
     await resolveFileOrReport(client(nodes), "render", {}, "text");
     const all = errs.join("\n");
     expect(all).toContain('"render" matches 2 candidates; using render (src/a.ts).');
-    expect(all).toMatch(/  2\. .*src\/z\.ts/);
+    expect(all).toMatch(/ {2}2\. .*src\/z\.ts/);
   });
 });
 
