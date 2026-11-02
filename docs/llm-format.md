@@ -239,7 +239,8 @@ carries `resolutionMode: "fuzzy"`. An out-of-range `--pick` answers the first
 candidate and adds `pick_out_of_range`. json carries the notice in
 `resolutionNotices` beside the normal answer (`code: "ambiguous_target"`,
 `target`, `chosen`, `candidates`, `total`, `truncated` when the search window
-was full). Text prints the same on stderr. `ix context --format json` with
+was full). Text prints the same on stderr; under `--quiet` it keeps the one
+notice line (the guess is never silent) and drops the candidate list. `ix context --format json` with
 `--out` or `--save` writes the bundle to a file, whose schema has no notice
 field, so it prints the notice on stderr as a warning (`--quiet` does not hide
 it). `--strict` / `IX_STRICT_TARGETS=1`

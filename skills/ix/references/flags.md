@@ -154,7 +154,8 @@ surfaces (#575).
 - **`--quiet` drops the scaffolding, not the bookkeeping.** Section titles,
   `Resolved:` headers and advisory hints go; warnings, error records and the
   `shown=`/`total=`/`truncated=` fields stay. A caller asking for less output is
-  not asking to be misled about what was cut.
+  not asking to be misled about what was cut. An auto-picked ambiguous target
+  still prints its one-line notice on stderr (text), without the candidate list.
 - **`--fields name,path,lines` keeps those fields on each ROW, in that order** —
   the caller's order, not the renderer's. It never touches a header, and a field
   no row carries is dropped rather than emitted empty.

@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { printJson, resetResolutionNotices } from "../format.js";
+import { setOutputShape } from "../output-shape.js";
 import { resolveFileOrEntityFull, resolveFileOrReport } from "../resolve.js";
 
 // Same stand-in as resolver-definitions-first: the checkout is not a registered
@@ -223,6 +224,28 @@ describe("acceptance 4: two functions named render stay ambiguous under --strict
       expect(process.exitCode).toBeUndefined();
       expect(logs[0]).toMatch(/^diagnostic code=ambiguous_target target=render chosen=render shown=2 total=2 /);
     }
+  });
+
+  it("text under --quiet: still one stderr line naming the guess (review F1, #847)", async () => {
+    // --quiet is a global flag (main.ts); this is what it sets.
+    setOutputShape({ quiet: true });
+    try {
+      expect(await resolveFileOrReport(client(nodes), "render", {}, "text")).toMatchObject({ id: "r1" });
+    } finally {
+      setOutputShape({});
+    }
+    expect(process.exitCode).toBeUndefined();
+    const notice = errs.filter((e) => e.includes("matches 2 candidates"));
+    expect(notice).toEqual(['"render" matches 2 candidates; using render (src/a.ts). Use --pick <n> or --path to choose another.']);
+    // One line: the candidate list and the Resolved: header are the scaffolding --quiet drops.
+    expect(errs.join("\n")).not.toMatch(/Resolved:|  1\. /);
+  });
+
+  it("text without --quiet: the notice and the candidate list", async () => {
+    await resolveFileOrReport(client(nodes), "render", {}, "text");
+    const all = errs.join("\n");
+    expect(all).toContain('"render" matches 2 candidates; using render (src/a.ts).');
+    expect(all).toMatch(/  2\. .*src\/z\.ts/);
   });
 });
 

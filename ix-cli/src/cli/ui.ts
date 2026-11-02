@@ -363,7 +363,16 @@ export function reportResolutionNotices(
     console.log(lines.join("\n"));
     return;
   }
-  if (isQuiet()) return;
+  if (isQuiet()) {
+    // An auto-picked candidate is a guess about the answer, not chatter:
+    // `--quiet` keeps it to one line but never hides it (#847 / CL-19 stopped
+    // *silent* guessing; answerAmbiguous guesses visibly).
+    for (const notice of notices) {
+      if (notice.code !== "ambiguous_target") continue;
+      console.error(`${notice.message} Use --pick <n>${opts?.path ? "" : " or --path"} to choose another.`);
+    }
+    return;
+  }
   for (const notice of notices) {
     console.error(chalk.dim(notice.message));
     if (notice.code !== "ambiguous_target") continue;
