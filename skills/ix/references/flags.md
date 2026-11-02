@@ -165,8 +165,9 @@ surfaces (#575).
   key) is answered with up to 10 of those files, source first (llm `note
   code=text_matches` + `match` rows, json `textMatches`, plus any near-name
   `suggestion` rows); docs, changelogs and tests are not listed, and a
-  qualified name (`Class.method`) stays a miss. `--strict`, or `IX_STRICT_TARGETS=1`, keeps both as
-  errors (exit 2 and 3).
+  qualified name (`Class.method`) stays a miss, as does any name under `ix
+  context --out` / `--save`, which promise a bundle. `--strict`, or
+  `IX_STRICT_TARGETS=1`, keeps both as errors (exit 2 and 3).
 - **`--pick <n>` is 1-based** everywhere it appears, and is how you choose
   another candidate of an ambiguous target without re-running with a longer
   name. It indexes the list

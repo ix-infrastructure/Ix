@@ -273,6 +273,8 @@ name only docs, changelogs or tests mention, or found nowhere, is still
 `unresolved_target` (exit 3), as is any miss under `--strict` /
 `IX_STRICT_TARGETS=1`, and any qualified name (`Router.handle`, `pkg::name`):
 the probe searches its last segment only, so those hits are not about it.
+`ix context --out` / `--save` also keep the miss: they promise a bundle, and a
+list of files is not one.
 
 `Class.method` and `Class#method` resolve only to a member of that class: one
 of the class's `CONTAINS` children in the graph or, when the graph has none

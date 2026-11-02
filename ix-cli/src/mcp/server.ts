@@ -11,6 +11,7 @@ import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import { isReadablePath, resolveWorkspaceRoot } from "../cli/config.js";
 import { resolveIngestRootWithSource } from "../cli/map-root.js";
+import { BUNDLE_SCHEMA } from "../cli/context-bundle-schema.js";
 
 import {
   createProtocolStdout,
@@ -404,9 +405,14 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   registerTool(
     ctx,
     "ix_locate",
-    "Use when a name has several definitions and you want the canonical one. Returns one definition with path:lines, or the candidates when it cannot choose. For a ranked list use ix_search.",
-    { symbol: z.string().min(1) },
-    async (input) => runFormatted(runIx, "ix_locate", ix("locate", [stringArg(input, "symbol")])),
+    "Use when a name has several definitions and you want the canonical one. Returns the top match with path:lines; pick or path selects another.",
+    // The notice on an auto-picked answer says to use --pick or --path: an MCP
+    // caller needs the same two inputs to act on it. No `kind`, and pick's
+    // description dropped: both would push the full catalog past its
+    // tools/list budget (mcp-structured-output.test.ts).
+    { symbol: SYMBOL_TOOL_INPUT.symbol, path: SYMBOL_TOOL_INPUT.path, pick: z.number().int().min(1).max(50).optional() },
+    async (input) =>
+      runFormatted(runIx, "ix_locate", ix("locate", [stringArg(input, "symbol")], symbolOptions(input, { limit: false }))),
   );
   registerTool(
     ctx,
@@ -983,6 +989,12 @@ async function runJsonStructured(
   if (!isRecord(parsed) || Object.keys(parsed).length === 0) {
     return textResult(text || JSON.stringify({ error: `${argv.command} produced no parseable JSON`, tool }), true);
   }
+  // `structured: true` asked for a bundle. A name the graph has no entity for
+  // but source files mention exits 0 with a `text_matches` record instead
+  // (text-matches.ts): useful to read, but not the bundle, so it goes back as
+  // text marked as an error — the failure signal a structured caller keys on —
+  // never as structuredContent posing as one.
+  if (parsed.schema !== BUNDLE_SCHEMA) return textResult(text, true);
   const { generatedAt: _perCall, ...stable } = parsed;
   return {
     content: [{ type: "text", text: JSON.stringify(stable) }],

@@ -509,6 +509,9 @@ export function registerContextCommand(program: Command): void {
         path: opts.path,
         pick: opts.pick,
         strict: opts.strict,
+        // --out / --save promise a bundle: a text-only name has none to
+        // write, so it stays the miss (exit 3) rather than a file list and 0.
+        ...(opts.out || opts.save ? { textAnswer: false } : {}),
       }, opts.format);
       if (!resolved) return;
 

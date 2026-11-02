@@ -257,6 +257,14 @@ export interface ResolveOpts {
    * text-matches.ts). `IX_STRICT_TARGETS=1` does the same for every command.
    */
   strict?: boolean;
+  /**
+   * False: a miss is never answered with its source text matches, only
+   * reported (exit 3). For a command whose output is an artifact the caller
+   * asked for — `ix context --out` / `--save` — where a list of files is not
+   * the bundle and exit 0 would claim one was written. An ambiguous target is
+   * still answered, since that does produce the artifact.
+   */
+  textAnswer?: boolean;
 }
 
 export interface Suggestion {
@@ -1787,13 +1795,21 @@ export async function reportUnresolved(
   const guided = await withTargetCandidates(client, target, reason, opts);
   // A name in source files but in no entity (a config key) is answered with
   // those files, exit 0 (text-matches.ts); found nowhere, it is the miss.
-  if (!strictTargets(opts) && reportTextMatches(target, guided, format)) return;
+  if (answersText(opts) && reportTextMatches(target, guided, format)) return;
   reportResolutionFailure(target, guided, format, opts);
 }
 
-/** The source text matches a miss will be answered with; none under `--strict`. */
-export function textMatchesFor(target: string, miss: { matches?: TextMatch[] }, opts?: { strict?: boolean }): TextMatch[] {
-  return strictTargets(opts) ? [] : sourceTextMatches(target, miss.matches);
+/** The source text matches a miss will be answered with; none under `--strict` or `textAnswer: false`. */
+export function textMatchesFor(
+  target: string,
+  miss: { matches?: TextMatch[] },
+  opts?: { strict?: boolean; textAnswer?: boolean },
+): TextMatch[] {
+  return answersText(opts) ? sourceTextMatches(target, miss.matches) : [];
+}
+
+function answersText(opts?: { strict?: boolean; textAnswer?: boolean }): boolean {
+  return opts?.textAnswer !== false && !strictTargets(opts);
 }
 
 /** Add guidance at the final command miss, never during qualified-name resolution. */
