@@ -7,8 +7,10 @@ import { createClient } from "../../client/factory.js";
 import {
   resolveFileOrEntityFull, rankEntity, withContainers, printResolved, printAmbiguous,
   looksFileLike, isRawId, qualifiedSeparator, isFuzzyResult, withMissReason, withTargetCandidates,
+  answerAmbiguous, fuzzyTextAnswer, textMatchesFor,
   type ResolvedEntity, type ResolveResult, type Suggestion,
 } from "../resolve.js";
+import { textMatchesJson, textMatchesLlm, textMatchesText, type TextMatch, type TextMatchSource } from "../text-matches.js";
 import { EXIT_CODES_HELP, setOutcome } from "../outcome.js";
 import { didYouMeanRows, type TargetCandidate } from "../target-suggestions.js";
 import { runPerTarget } from "../multi-target.js";
@@ -16,7 +18,7 @@ import { isFileStale } from "../stale.js";
 import { stderr } from "../stderr.js";
 import { relativePath, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
-import { parsePickOption } from "../options.js";
+import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 import { getEffectiveSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { renderSection, renderKeyValue, renderNote, renderWarning, renderBreadcrumb, reportAmbiguousTarget, reportResolutionNotices } from "../ui.js";
@@ -58,6 +60,7 @@ export function registerLocateCommand(program: Command): void {
     .option("--path <path>", "Restrict to results from files matching this path substring")
     .option("--no-suggest", "Disable did-you-mean candidates on unresolved targets")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_TARGET_HELP)
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
     .addHelpText("after", `\nExamples:
   ix locate IngestionService
@@ -68,7 +71,7 @@ export function registerLocateCommand(program: Command): void {
 
 Several symbols answer in one call, grouped per symbol (json: {targets: [...]}).
 ${EXIT_CODES_HELP}`)
-    .action(async (symbols: string[], opts: { kind?: string; path?: string; pick?: number; suggest?: boolean; format: string }) => {
+    .action(async (symbols: string[], opts: LocateOpts) => {
       const client = createClient();
       // An `ix map` after an edit may have left the map for the system paths
       // read below (CL-13). Checked once per call, on the first target that
@@ -88,25 +91,36 @@ ${EXIT_CODES_HELP}`)
     });
 }
 
+type LocateOpts = { kind?: string; path?: string; pick?: number; suggest?: boolean; strict?: boolean; format: string };
+
 async function locateOne(
   client: IxClient,
   symbol: string,
-  opts: { kind?: string; path?: string; pick?: number; suggest?: boolean; format: string },
+  opts: LocateOpts,
   freshMap: () => Promise<MapStaleState>,
   staleLlmOnce: (state: MapStaleState) => string[],
 ): Promise<void> {
   const diagnostics: string[] = [];
 
-  const resolveOpts = { suggest: opts.suggest, suggestCommand: "locate", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick };
+  const resolveOpts = {
+    suggest: opts.suggest, suggestCommand: "locate", missStarted: performance.now(),
+    kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict,
+  };
 
   // Resolution with ambiguity detection
-  const { target, ambiguous, miss } = await resolveWithAmbiguity(client, symbol, resolveOpts, opts.format);
+  const { target, ambiguous, miss, answered } = await resolveWithAmbiguity(client, symbol, resolveOpts, opts.format);
 
   if (!target) {
+    // Fuzzy matches only, and source files mention the name: answered with
+    // them, exit 0 (fuzzyTextAnswer).
+    if (answered) return;
     if (ambiguous) {
-      // Printed above, in whichever format was asked for. Exits 2, like
-      // every other ambiguous graph target (outcome.ts): the candidates
-      // are the answer, and `--pick <n>` is the retry.
+      // Only under --strict / IX_STRICT_TARGETS=1, for fuzzy matches only,
+      // or past an out-of-range --pick; otherwise the top candidate answered
+      // (answerAmbiguous). Printed above, in whichever
+      // format was asked for. Exits 2, like every other ambiguous graph
+      // target (outcome.ts): the candidates are the answer, and
+      // `--pick <n>` is the retry.
       //
       // #547 settled that locate and the other graph commands report this
       // condition with one status; `ix overview Duplicate` and
@@ -120,6 +134,14 @@ async function locateOne(
     // command's miss carries, so one parser reads them all.
     const reason = miss ? await withMissReason(client, symbol, miss, resolveOpts, opts.format) : undefined;
     const guidance = reason ? await withTargetCandidates(client, symbol, reason, resolveOpts) : undefined;
+    // In source files but no entity (a config key): answered with the files,
+    // exit 0, in locate's own body so one parser still reads every answer.
+    // The near names ride along, as they would on the miss.
+    const rows = guidance ? textMatchesFor(symbol, guidance, resolveOpts) : [];
+    if (guidance && rows.length) {
+      outputLocateText(symbol, guidance, rows, opts.format);
+      return;
+    }
     const output: LocateOutput = {
       resolvedTarget: null,
       resolutionMode: "none",
@@ -237,9 +259,9 @@ type Miss = Extract<ResolveResult, { resolved: false; ambiguous: false }>;
 async function resolveWithAmbiguity(
   client: IxClient,
   symbol: string,
-  opts: { kind?: string; path?: string; pick?: number },
+  opts: { kind?: string; path?: string; pick?: number; strict?: boolean },
   format: string,
-): Promise<{ target: ResolvedEntity | null; ambiguous: boolean; miss?: Miss }> {
+): Promise<{ target: ResolvedEntity | null; ambiguous: boolean; miss?: Miss; answered?: boolean }> {
   let result: ResolveResult;
   // For raw IDs and file-like targets, delegate to resolveFileOrEntityFull. A
   // file target can tie, but it resolves (with a notice) rather than turn
@@ -264,12 +286,21 @@ async function resolveWithAmbiguity(
     }
   }
 
+  // An ambiguous target is answered for its top candidate, with a notice,
+  // unless --strict asks for the candidates as an error (exit 2).
+  result = answerAmbiguous(symbol, result, opts);
+
   if (result.resolved) {
     if (result.notices?.length) reportResolutionNotices(result.notices, format, opts);
     return { target: result.entity, ambiguous: false };
   }
 
   if (result.ambiguous) {
+    const text = await fuzzyTextAnswer(client, symbol, result, opts);
+    if (text) {
+      outputLocateText(symbol, text.miss, text.rows, format);
+      return { target: null, ambiguous: false, answered: true };
+    }
     if (format === "json") {
       printJson({
         // Locate's ambiguity was never an `error` record, and integrations that
@@ -346,6 +377,20 @@ export function renderLocateLlm(output: LocateOutput, symbol: string, retryComma
   ])];
   for (const d of output.diagnostics ?? []) lines.push(llmLine("note", [["text", d]]));
   return lines;
+}
+
+/**
+ * A name answered with the source files that mention it. json keeps locate's
+ * body (`resolvedTarget: null`, `systemPath`, `diagnostics`) and adds the
+ * `text_matches` note, so a reader of locate's shape still parses it.
+ */
+function outputLocateText(symbol: string, miss: TextMatchSource, rows: TextMatch[], format: string): void {
+  if (format === "json") {
+    printJson(textMatchesJson(symbol, miss, rows, { systemPath: null, diagnostics: [] }));
+    return;
+  }
+  const lines = format === "llm" ? textMatchesLlm(symbol, miss, rows) : textMatchesText(symbol, miss, rows);
+  console.log(lines.join("\n"));
 }
 
 function outputLocate(output: LocateOutput, symbol: string, format: string, retryCommand?: string): void {

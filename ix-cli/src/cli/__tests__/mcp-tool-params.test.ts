@@ -128,6 +128,43 @@ describe("resolving an ambiguous symbol over MCP", () => {
     await client.callTool({ name: "ix_read", arguments: { symbol: "config", pick: 1 } });
     expect(calls).toEqual([["read", "--pick=1", "--format=llm", "--", "config"]]);
   });
+
+  it("lets every tool that resolves a name take pick= and path= back", async () => {
+    // An ambiguous name answers for its top candidate, and the notice says
+    // "Pass pick=<n> or path=<file substring> to choose another". The SDK
+    // strips an input key a tool does not declare, so a tool without them
+    // would answer candidate 1 again, silently, on the retry.
+    const client = await connect(async () => ({ ok: true, stdout: "ok", stderr: "" }));
+    const resolving = (await client.listTools()).tools.filter((tool) => {
+      const properties = (tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+      return "symbol" in properties || "target" in properties;
+    });
+    expect(resolving.map((t) => t.name)).toEqual(expect.arrayContaining([
+      "ix_locate", "ix_overview", "ix_diff", "ix_depends", "ix_trace", "ix_history", "ix_explain", "ix_impact",
+    ]));
+    for (const tool of resolving) {
+      const properties = (tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+      expect(Object.keys(properties), tool.name).toEqual(expect.arrayContaining(["path", "pick"]));
+    }
+  });
+
+  it("forwards pick= and path= on the tools that took a bare target", async () => {
+    const { calls, runIx } = recorder();
+    const client = await connect(runIx);
+    const choose = { pick: 2, path: "src/b" };
+    await client.callTool({ name: "ix_overview", arguments: { target: "Widget", ...choose } });
+    await client.callTool({ name: "ix_history", arguments: { target: "Widget", ...choose } });
+    await client.callTool({ name: "ix_depends", arguments: { symbol: "Widget", ...choose } });
+    await client.callTool({ name: "ix_trace", arguments: { symbol: "Widget", to: "Gadget", ...choose } });
+    await client.callTool({ name: "ix_diff", arguments: { from_rev: 1, to_rev: 2, target: "Widget", ...choose } });
+    expect(calls).toEqual([
+      ["overview", "--path=src/b", "--pick=2", "--format=llm", "--", "Widget"],
+      ["history", "--path=src/b", "--pick=2", "--format=llm", "--", "Widget"],
+      ["depends", "--depth=2", "--path=src/b", "--pick=2", "--format=llm", "--", "Widget"],
+      ["trace", "--depth=3", "--to=Gadget", "--path=src/b", "--pick=2", "--format=llm", "--", "Widget"],
+      ["diff", "--path=src/b", "--pick=2", "--format=llm", "--", "1", "2", "Widget"],
+    ]);
+  });
 });
 
 describe("ix_impact limit", () => {

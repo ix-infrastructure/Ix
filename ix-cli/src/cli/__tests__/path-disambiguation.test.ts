@@ -84,10 +84,19 @@ describe.each(["impact", "callers", "callees", "imports", "imported-by"])("%s pa
     expect(expand).not.toHaveBeenCalled();
   });
 
-  it("preserves ambiguity when no filter is supplied", async () => {
-    const output = await run(command, []);
+  it("preserves ambiguity under --strict when no filter is supplied", async () => {
+    const output = await run(command, ["--strict"]);
     expect(process.exitCode).toBe(2);
     expect(output.error).toBe("ambiguous_target");
     expect(expand).not.toHaveBeenCalled();
+  });
+
+  it("answers for the first candidate, visibly, when no filter is supplied", async () => {
+    const output = await run(command, []);
+    expect(process.exitCode).toBeUndefined();
+    expect(output.error).toBeUndefined();
+    expect(output.resolutionNotices[0]).toMatchObject({ code: "ambiguous_target", chosen: { id: "first-id" }, total: 2 });
+    expect(expand).toHaveBeenCalled();
+    expect(expand.mock.calls.every(([id]) => id === "first-id")).toBe(true);
   });
 });

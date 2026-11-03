@@ -11,8 +11,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   bm25Rank,
   bm25Tokens,
+  chooseCentre,
   extractCandidates,
   isSourcePath,
+  issueConfidence,
+  leanIssueView,
   pickStartingPoints,
   planIssue,
   rankIssueFiles,
@@ -221,6 +224,42 @@ describe("path candidates resolve against the tracked files", () => {
   });
 });
 
+describe("start resolution is internal: graph commands answering ambiguous targets do not change it", () => {
+  let dir: string | undefined;
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+    delete process.env.IX_STRICT_TARGETS;
+  });
+
+  it("still skips an ambiguous path and still picks among a name's definitions by its own rule, strict or not", async () => {
+    dir = mkdtempSync(join(tmpdir(), "ix-from-issue-ambiguous-"));
+    for (const path of ["src/a/index.ts", "src/b/index.ts", "src/table.ts", "src/grid.ts"]) {
+      mkdirSync(dirname(join(dir, path)), { recursive: true });
+      writeFileSync(join(dir, path), "export {};\n");
+    }
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["add", "src"], { cwd: dir });
+    const repo = gitRepoAccess(dir)!;
+    const text = "`renderRow` breaks in index.ts when the grid scrolls.";
+    const plan = async () => {
+      const { search } = fakeSearch({
+        renderRow: [hit("renderRow", "function", "src/table.ts"), hit("renderRow", "function", "src/grid.ts")],
+      });
+      const out = await planIssue(text, { repo, search, rank: () => [] });
+      return { starts: out.starts.map((s) => [s.token, s.path, s.via]), unresolved: out.unresolved };
+    };
+
+    delete process.env.IX_STRICT_TARGETS;
+    const answering = await plan();
+    // index.ts names two tracked files: skipped, never answered for the first.
+    expect(answering.unresolved).toContain("index.ts");
+    expect(answering.starts).toEqual([["renderRow", "src/grid.ts", "identifier in issue"]]);
+    process.env.IX_STRICT_TARGETS = "1";
+    expect(await plan()).toEqual(answering);
+  });
+});
+
 describe("readIssueText", () => {
   it("reads stdin for `-`", async () => {
     const text = await readIssueText("-", Readable.from(["The `listByKind` ", "call is slow\n"]));
@@ -328,7 +367,7 @@ describe("rankIssueFiles", () => {
     { token: "listByKind", name: "listByKind", kind: "method", path: "src/client/api.ts", via: "identifier in issue" as const },
   ];
 
-  it("puts starting points first, then BM25 order", () => {
+  it("boosts starts without overturning a clear lexical lead", () => {
     const ranked = rankIssueFiles({
       starts,
       bm25: [
@@ -339,10 +378,10 @@ describe("rankIssueFiles", () => {
       near: new Map(),
     });
     expect(ranked.map((r) => r.path)).toEqual([
-      "src/client/api.ts", "src/cli/commands/inventory.ts", "src/cli/commands/rank.ts",
+      "src/cli/commands/inventory.ts", "src/client/api.ts", "src/cli/commands/rank.ts",
     ]);
-    expect(ranked[0].reason).toContain("starting point");
-    expect(ranked[1].reason).toContain("bm25");
+    expect(ranked[1].reason).toContain("starting point");
+    expect(ranked[0].reason).toContain("bm25");
   });
 
   it("uses graph closeness to break ties and nudge, never to overturn a clear lexical lead", () => {
@@ -362,9 +401,500 @@ describe("rankIssueFiles", () => {
       ]),
     });
     expect(ranked.map((r) => r.path)).toEqual([
-      "src/client/api.ts", "src/far-strong.ts", "src/near-tie.ts", "src/far-tie.ts",
-      "src/near-weak.ts", "src/near-only.ts",
+      "src/far-strong.ts", "src/near-tie.ts", "src/far-tie.ts",
+      "src/near-weak.ts", "src/client/api.ts", "src/near-only.ts",
     ]);
     expect(ranked.find((r) => r.path === "src/near-tie.ts")?.reason).toContain("one hop from listByKind");
+  });
+});
+
+describe("issue localization regressions", () => {
+  const search = async (name: string) => [hit(name, "class", `src/${name}.py`)];
+
+  it("keeps a prose-named failure ahead of snippet-defined and snippet-used names", async () => {
+    const text = [
+      "```python", "class DemoModel(ModelBase):", "    field = ModelField()", "```",
+      "The decode_payload function corrupts escaped payload values.",
+    ].join("\n");
+    const repo = memoryRepo({
+      "src/DemoModel.py": "class DemoModel: pass",
+      "src/ModelBase.py": "class ModelBase: pass",
+      "src/ModelField.py": "class ModelField: pass",
+      "src/decode_payload.py": "def decode_payload(payload): # corrupts escaped payload values\n    return payload",
+    });
+    const plan = await planIssue(text, { repo, search });
+    expect(plan.starts[0].token).toBe("decode_payload");
+    expect(rankIssueFiles({ ...plan, near: new Map() })[0].path).toBe("src/decode_payload.py");
+  });
+
+  it("caps a weak start boost below much stronger lexical hits", () => {
+    const ranked = rankIssueFiles({
+      starts: [{ token: "ModelBase", name: "ModelBase", kind: "class", path: "src/base.py", via: "identifier in issue" }],
+      bm25: [
+        { path: "src/messages_pb2.py", score: 1000 },
+        { path: "src/parser.py", score: 30 }, { path: "src/decoder.py", score: 20 }, { path: "src/base.py", score: 1 },
+      ],
+      near: new Map(),
+    });
+    expect(ranked.map((f) => f.path)).toEqual(["src/parser.py", "src/decoder.py", "src/base.py"]);
+    expect(ranked[2].reason).toContain("starting point");
+    expect(ranked[2].reason).toContain("bm25");
+    expect(Object.keys(ranked[0]).sort()).toEqual(["path", "reason", "score"]);
+  });
+
+  it("keeps a path the issue names in the ranked files, even with a weak BM25 score", () => {
+    const bm25 = Array.from({ length: 25 }, (_, i) => ({ path: `src/hit${i}.py`, score: 100 - i }));
+    const named = { token: "short.py", name: "short.py", kind: "file", path: "src/short.py", via: "path in issue" as const };
+    const ranked = rankIssueFiles({ starts: [named], bm25: [...bm25, { path: "src/short.py", score: 1 }], near: new Map() });
+    expect(ranked).toHaveLength(20);
+    expect(ranked[19].path).toBe("src/short.py");
+    expect(ranked[19].reason).toContain("path in issue");
+    expect(ranked.slice(0, 19).map((f) => f.path)).toEqual(bm25.slice(0, 19).map((h) => h.path));
+    // An identifier start gets the capped boost only, and may drop out.
+    const ident = { ...named, via: "identifier in issue" as const };
+    expect(rankIssueFiles({ starts: [ident], bm25: [...bm25, { path: "src/short.py", score: 1 }], near: new Map() })
+      .map((f) => f.path)).not.toContain("src/short.py");
+  });
+
+  it("uses a start to break a close lexical race, but gives snippet-only names no boost", async () => {
+    const plan = await planIssue("```python\nclass DemoModel(ModelBase):\n    field = ModelField()\n```", {
+      // The graph knows only ModelBase: a hit in a file the listing lacks still counts.
+      search: async (name) => name === "ModelBase" ? search(name) : [],
+      repo: memoryRepo({ "src/ModelBase.py": "class ModelBase: pass" }),
+    });
+    expect(plan.starts[0]).toMatchObject({ token: "ModelBase", snippet: true });
+    expect(issueConfidence(plan).confident).toBe(false);
+    const input = {
+      starts: [{ ...plan.starts[0], path: "src/base.py" }],
+      bm25: [{ path: "src/other.py", score: 10 }, { path: "src/base.py", score: 9.5 }],
+      near: new Map(),
+    };
+    expect(rankIssueFiles(input)[0].path).toBe("src/other.py");
+    const ranked = rankIssueFiles({ ...input, starts: [{ ...input.starts[0], snippet: false }] });
+    expect(ranked[0].path).toBe("src/base.py");
+    expect(ranked[0].score).toBe(10.5);
+  });
+
+  it("prefers a prose mention over an inline call or an indented definition", () => {
+    const { identifiers, snippetIdentifiers } = extractCandidates([
+      "Calling `ModelField(value)` reproduces this.",
+      "    class DemoModel(ModelBase): pass",
+      "decode_payload fails to unescape values.",
+    ].join("\n"));
+    // The inline call ranks after the plain mention but stays evidence.
+    expect(identifiers.slice(0, 2)).toEqual(["decode_payload", "ModelField"]);
+    expect(snippetIdentifiers).toEqual(["DemoModel", "ModelBase"]);
+    expect(extractCandidates("`ModelField(value)` reproduces it; `ModelField` drops values.").snippetIdentifiers)
+      .toBeUndefined();
+    expect(extractCandidates("class DemoModel(ModelBase):\nfield = ModelField()\ndecode_payload fails").identifiers[0])
+      .toBe("decode_payload");
+  });
+
+  it("takes one innermost eligible frame per traceback, skipping runtime and wrapper frames", async () => {
+    const text = [
+      "Traceback (most recent call last):",
+      '  File "/project/src/outer.py", line 1, in run',
+      '  File "/project/src/inner.py", line 2, in decode',
+      '  File "/project/manage.py", line 3, in main',
+      '  File "/project/.venv/lib/python3.12/site-packages/lib/worker.py", line 4, in call',
+      '  File "/usr/lib/python3.12/json/decoder.py", line 5, in decode',
+      "ValueError: invalid payload",
+      "Traceback (most recent call last):",
+      '  File "/project/src/outer.py", line 1, in run',
+      '  File "/project/src/final.py", line 8, in decode',
+      "    outer_helper()",
+      "ValueError: final failure",
+    ].join("\n");
+    const out = await pickStartingPoints(text, {
+      files: ["src/outer.py", "src/inner.py", "src/final.py", "src/helper.py", "manage.py", "lib/worker.py", "json/decoder.py"],
+      search: async (name) => name === "outer_helper" ? [hit(name, "function", "src/helper.py")] : [],
+    });
+    expect(out.starts.map((s) => s.path)).toEqual(["src/inner.py", "src/final.py"]);
+    expect(rankIssueFiles({ starts: out.starts, bm25: [], near: new Map() })[0].reason).toContain("traceback");
+  });
+
+  it("keeps JavaScript's innermost-first frame order and skips dependency frames", async () => {
+    const out = await pickStartingPoints([
+      "TypeError: invalid payload",
+      "    at parse (/project/node_modules/tool/parser.ts:1:2)",
+      "    at decode (/project/src/decoder.ts:4:8)",
+      "    at run (/project/src/runner.ts:9:3)",
+    ].join("\n"), { files: ["src/decoder.ts", "src/runner.ts", "tool/parser.ts"], search: async () => [] });
+    expect(out.starts.map((s) => s.path)).toEqual(["src/decoder.ts"]);
+  });
+
+  it("tries an outer frame when the innermost frame is untracked", async () => {
+    const out = await pickStartingPoints([
+      "Traceback (most recent call last):",
+      '  File "/project/src/outer.py", line 1, in run',
+      '  File "/project/missing.py", line 2, in decode',
+    ].join("\n"), { files: ["src/outer.py"], search: async () => [] });
+    expect(out.starts.map((s) => s.path)).toEqual(["src/outer.py"]);
+  });
+
+  it("starts from a project's own env/ directory, and still skips a virtualenv named env", async () => {
+    const out = await pickStartingPoints([
+      "Traceback (most recent call last):",
+      '  File "/home/u/proj/src/app/models.py", line 1, in load',
+      '  File "/home/u/proj/src/app/env/settings.py", line 2, in get',
+      '  File "/home/u/proj/env/lib/python3.12/os.py", line 3, in __getitem__',
+      "KeyError: 'APP_KEY'",
+    ].join("\n"), {
+      files: ["src/app/__init__.py", "src/app/models.py", "src/app/env/__init__.py", "src/app/env/settings.py", "os.py"],
+      search: async () => [],
+    });
+    expect(out.starts.map((s) => s.path)).toEqual(["src/app/env/settings.py"]);
+    expect(out.unresolved).toContain("/home/u/proj/env/lib/python3.12/os.py");
+  });
+
+  it("takes a graph hit or neighbour in a file the listing does not have, judged by its path", async () => {
+    const repo = memoryRepo({ "src/app/model.py": "def save_model(): pass", "src/app/listed_pb2.py": "x = 1" });
+    const plan = await planIssue("`save_model` calls `newHelperFn` and `decode_msg`", {
+      repo,
+      search: async (name) => ({
+        save_model: [hit(name, "function", "src/app/model.py")],
+        newHelperFn: [hit(name, "function", "src/app/new_helper.py")],
+        decode_msg: [hit(name, "function", "src/app/unlisted_pb2.py")],
+      })[name] ?? [],
+    });
+    expect(plan.starts.map((s) => s.path)).toEqual(["src/app/model.py", "src/app/new_helper.py"]);
+    expect(plan.unresolved).toEqual(["decode_msg"]);
+    expect(plan.sourcePaths!.has("src/app/listed_pb2.py")).toBe(false);
+    expect(plan.sourcePaths!.has("docs/unlisted.py")).toBe(false);
+    const near = new Map([["src/app/other_new.py", { weight: 1, reason: "calls save_model" }]]);
+    expect(rankIssueFiles({ ...plan, near }).map((f) => f.path)).toContain("src/app/other_new.py");
+  });
+
+  it.each([
+    ["setup.py", 'from setuptools import setup\nsetup(packages=["docs.plugin"])'],
+    ["setup.cfg", "[options]\npackages = docs.plugin"],
+    ["pyproject.toml", '[tool.setuptools]\npackages = ["docs.plugin"]'],
+  ])("recognizes a namespace package declared in %s", async (config, text) => {
+    const plan = await planIssue("decode_payload", {
+      search: async () => [],
+      repo: memoryRepo({ [config]: text, "docs/plugin/decoder.py": "decode_payload", "docs/tutorial.py": "decode_payload" }),
+    });
+    expect(plan.bm25.map((h) => h.path)).toEqual(["docs/plugin/decoder.py"]);
+  });
+
+  it("excludes multiline generated headers but keeps handwritten code mentioning generation", async () => {
+    const plan = await planIssue("decode_payload", {
+      search: async () => [],
+      repo: memoryRepo({
+        "src/block.ts": "/**\nThis file is generated.\n*/\nconst decode_payload = 1;",
+        "src/module.py": '"""\nDO NOT EDIT\n"""\ndef decode_payload(): pass',
+        "src/manual.py": 'def decode_payload():\n    return "generated"',
+      }),
+    });
+    expect(plan.bm25.filter((h) => plan.sourcePaths!.has(h.path)).map((h) => h.path)).toEqual(["src/manual.py"]);
+    expect(rankIssueFiles({ ...plan, near: new Map() }).map((f) => f.path)).toEqual(["src/manual.py"]);
+  });
+
+  it("retains importable docs, examples and site packages but excludes generated files everywhere", async () => {
+    const repo = memoryRepo({
+      "docs/__init__.py": "",
+      "docs/parser.py": "decode_payload escaped values",
+      "examples/plugin/__init__.py": "",
+      "examples/plugin/decoder.py": "decode_payload escaped values",
+      "site/runtime/decoder.py": "decode_payload escaped values",
+      "pyproject.toml": '[tool.setuptools.packages.find]\ninclude = ["site.runtime*"]',
+      "docs/tutorial.py": "# DO NOT EDIT\ndecode_payload escaped values",
+      "src/migrations/0001_initial.py": "# Generated by a migration tool\ndecode_payload escaped values",
+      "src/migrations/manual.py": "# Handwritten data migration\ndecode_payload escaped values",
+      "src/messages_pb2.py": "decode_payload escaped values",
+      "src/messages_pb2_grpc.py": "decode_payload escaped values",
+      "src/generated.ts": "// AUTO-GENERATED. DO NOT EDIT\nconst decode_payload = 1;",
+      "src/__init__.py": "",
+      "src/docs/tutorial.py": "decode_payload escaped values",
+      "examples/demo.py": "decode_payload escaped values",
+    });
+    const plan = await planIssue("decode_payload escaped values migrations/0001_initial.py", {
+      repo, search: async () => [hit("decode_payload", "function", "src/generated.ts")],
+    });
+    const expected = ["docs/parser.py", "examples/plugin/decoder.py", "site/runtime/decoder.py", "src/migrations/manual.py"];
+    expect(plan.bm25.filter((h) => plan.sourcePaths!.has(h.path)).map((h) => h.path).sort()).toEqual(expected.sort());
+    const near = new Map(repo.files().map((path) => [path, { weight: 1, reason: "one hop" }]));
+    const ranked = rankIssueFiles({ ...plan, near }).map((f) => f.path);
+    for (const path of expected) expect(ranked).toContain(path);
+    for (const path of ["src/migrations/0001_initial.py", "src/messages_pb2.py", "src/messages_pb2_grpc.py", "src/generated.ts", "docs/tutorial.py", "examples/demo.py", "src/docs/tutorial.py"]) {
+      expect(ranked).not.toContain(path);
+      expect(plan.starts.map((s) => s.path)).not.toContain(path);
+    }
+  });
+
+  it("keeps a call the issue writes in its own words as a confident start", async () => {
+    const text = "Calling `saveModel()` raises a KeyError.";
+    // Not snippet-only: after the prose mention, but evidence all the same.
+    expect(extractCandidates(text)).toEqual({ paths: [], identifiers: ["KeyError", "saveModel"] });
+    const plan = await planIssue(text, {
+      // KeyError is a builtin: nothing in the repository defines it.
+      search: async (name) => name === "saveModel" ? [hit(name, "function", "src/saving.py")] : [],
+      repo: memoryRepo({ "src/saving.py": "def saveModel(): raise KeyError" }),
+    });
+    expect(plan.starts[0]).toMatchObject({ token: "saveModel", path: "src/saving.py" });
+    expect(plan.starts[0].snippet).toBeUndefined();
+    expect(issueConfidence(plan).confident).toBe(true);
+    expect(leanIssueView(plan).startingPoints.map((s) => s.token)).toEqual(["saveModel"]);
+    // A line that is only a call is a reproduction step, not a snippet-only hint.
+    const bare = extractCandidates("Steps:\nmodel.save_weights(path)\nraises a KeyError");
+    expect(bare.identifiers).toEqual(["KeyError", "save_weights"]);
+    expect(bare.snippetIdentifiers).toBeUndefined();
+  });
+
+  it.each([
+    ["setup.py", 'setup(packages=find_packages(include=["docs.plugin*"], exclude=["docs", "examples", "tests"]))'],
+    ["setup.py", 'setup(packages=find_packages(exclude=("docs", "examples")), package_data={"docs.plugin": ["*.txt"]})'],
+    ["pyproject.toml", '[tool.setuptools.packages.find]\nwhere = ["."]\nexclude = [\n  "docs*",\n  "examples*",\n]'],
+    ["setup.cfg", "[options]\npackages = find:\n\n[options.packages.find]\nexclude =\n    docs\n    examples\n    tests"],
+  ])("does not treat docs or examples an exclude list names in %s as packages", async (config, text) => {
+    const plan = await planIssue("decode_payload", {
+      search: async () => [],
+      repo: memoryRepo({
+        [config]: text, "docs/conf.py": "decode_payload", "examples/demo.py": "decode_payload",
+        "src/decoder.py": "decode_payload",
+      }),
+    });
+    expect(plan.sourcePaths!.has("docs/conf.py")).toBe(false);
+    expect(plan.sourcePaths!.has("examples/demo.py")).toBe(false);
+    expect(plan.bm25.map((h) => h.path)).not.toContain("docs/conf.py");
+    expect(plan.sourcePaths!.has("src/decoder.py")).toBe(true);
+  });
+
+  it("still reads an include next to an exclude", async () => {
+    const plan = await planIssue("decode_payload", {
+      search: async () => [],
+      repo: memoryRepo({
+        "setup.py": 'setup(packages=find_packages(include=["docs.plugin"], exclude=["docs"]))',
+        "docs/plugin/decoder.py": "decode_payload", "docs/conf.py": "decode_payload",
+      }),
+    });
+    expect(plan.bm25.map((h) => h.path)).toEqual(["docs/plugin/decoder.py"]);
+  });
+
+  it.each([
+    "// Code generated by protoc-gen-go. DO NOT EDIT.\npackage pb",
+    "# Generated by Django 4.2 on 2024-01-01 10:00\nfrom django.db import migrations",
+    "/**\n * @generated SignedSource<<abc>>\n */\nexport const a = 1;",
+    "// AUTO-GENERATED FILE\nexport const a = 1;",
+    '"""This file was automatically generated."""\nimport os',
+    "# DO NOT EDIT THIS FILE - it is machine generated\nimport os",
+    "/* DO NOT EDIT */\nexport const a = 1;",
+    "// DO NOT EDIT: regenerate with `make proto`.\nexport const a = 1;",
+  ])("drops a generated header: %s", (header) => {
+    expect(isSourcePath("src/a.ts", { importable: true, header })).toBe(false);
+  });
+
+  it.each([
+    "// Validates generated request IDs before they reach the store.\nexport const a = 1;",
+    '"""Parse the generated protobuf descriptors."""\nimport os',
+    "/**\n * Classify a candidate: a definition, an import, or generated output.\n */\nexport const a = 1;",
+    "/** docs/api/README.md claims the reference is generated from the client source. */\nexport const a = 1;",
+    "// Do not edit the order of these entries without updating the parser.\nexport const a = 1;",
+    "// Do not modify: callers depend on order.\nexport const a = 1;",
+    "# Do not edit (see CONTRIBUTING); the order matters.\nimport os",
+  ])("keeps a handwritten module whose doc mentions generation: %s", (header) => {
+    expect(isSourcePath("src/a.ts", { importable: true, header })).toBe(true);
+  });
+
+  it.each([
+    '"""Wrapper around the auto-generated OpenAPI client.\n\nHandwritten."""\nimport os',
+    "// Thin layer over the machine-generated bindings; edit freely.\nexport const a = 1;",
+  ])("keeps a handwritten module that wraps generated code: %s", (header) => {
+    expect(isSourcePath("src/a.py", { importable: true, header })).toBe(true);
+  });
+
+  it.each([
+    "# This file is autogenerated by pip-compile\nimport os",
+    "/* auto-generated by NAPI-RS */\nexport const a = 1;",
+  ])("still drops a header that says the file is auto-generated: %s", (header) => {
+    expect(isSourcePath("src/a.ts", { importable: true, header })).toBe(false);
+  });
+
+  it("starts from a named file whose header is a handwritten do-not-modify warning", async () => {
+    const plan = await planIssue("see src/listing.ts", {
+      search: async () => [],
+      repo: memoryRepo({
+        "src/listing.ts": "// Do not modify: callers depend on order.\nexport const order = [];",
+        "src/app/__init__.py": "see listing",
+      }),
+    });
+    expect(plan.starts.map((s) => s.path)).toEqual(["src/listing.ts"]);
+    expect(plan.unresolved).toEqual([]);
+    expect(plan.fallback).toBe(false);
+  });
+
+  it("starts from a handwritten client.py whose docstring mentions auto-generated code", async () => {
+    const plan = await planIssue("parse_header breaks in client.py", {
+      search: async (name) => name === "parse_header" ? [hit(name, "function", "src/x/client.py")] : [],
+      repo: memoryRepo({
+        "src/x/client.py": '"""Wrapper around the auto-generated OpenAPI client.\n\nHandwritten.\n"""\ndef parse_header(): pass',
+        "src/x/other.py": "def other(): pass",
+        "docs/conf.py": "project = 'x'",
+      }),
+    });
+    expect(plan.starts.map((s) => s.path)).toContain("src/x/client.py");
+    expect(plan.unresolved).toEqual([]);
+    expect(plan.sourcePaths!.has("src/x/client.py")).toBe(true);
+  });
+
+  it.each([
+    ["pyproject.toml", '[tool.pytest.ini_options]\ntestpaths = ["docs"]'],
+    ["pyproject.toml", '[tool.coverage.run]\nsource = ["docs"]\n[tool.hatch.build.targets.sdist]\ninclude = ["docs"]'],
+    ["setup.py", 'setup(name="x", data_files=[("share", ["docs"])], command_options={"build_sphinx": {"source_dir": ("setup.py", "docs")}})'],
+    ["setup.cfg", "[tool:pytest]\ntestpaths =\n    docs"],
+  ])("does not treat a non-packaging docs setting in %s as a package", async (config, text) => {
+    const plan = await planIssue("decode_payload", {
+      search: async () => [],
+      repo: memoryRepo({ [config]: text, "docs/conf.py": "decode_payload", "src/decoder.py": "decode_payload" }),
+    });
+    expect(plan.sourcePaths!.has("docs/conf.py")).toBe(false);
+    expect(plan.bm25.map((h) => h.path)).toEqual(["src/decoder.py"]);
+  });
+
+  it.each([
+    ["pyproject.toml", '[tool.poetry]\npackages = [{ include = "docs" }]'],
+    ["pyproject.toml", '[tool.hatch.build.targets.wheel]\npackages = ["docs"]'],
+    ["setup.py", 'setup(name="x", packages=find_packages(where="docs"), include_package_data=True)'],
+  ])("reads the packaging keys of %s", async (config, text) => {
+    const plan = await planIssue("decode_payload", {
+      search: async () => [],
+      repo: memoryRepo({ [config]: text, "docs/conf.py": "decode_payload" }),
+    });
+    expect(plan.sourcePaths!.has("docs/conf.py")).toBe(true);
+  });
+
+  it("reads a bounded number of packaging configs, skipping vendored and fixture copies", async () => {
+    const files: Record<string, string> = {
+      "pyproject.toml": '[tool.setuptools]\npackages = ["docs.plugin"]',
+      "docs/plugin/decoder.py": "decode_payload",
+      "tests/fixtures/proj/setup.py": 'setup(packages=["docs"])',
+      "vendor/lib/setup.cfg": "[options]\npackages = docs",
+    };
+    for (let i = 0; i < 100; i++) files[`pkgs/p${String(i).padStart(3, "0")}/pyproject.toml`] = "[tool.setuptools]\npackages = []";
+    const repo = memoryRepo(files);
+    const read: string[] = [];
+    const plan = await planIssue("decode_payload", {
+      search: async () => [],
+      repo: { ...repo, read: (path) => { read.push(path); return repo.read(path); } },
+    });
+    const configs = read.filter((p) => /(pyproject\.toml|setup\.cfg|setup\.py)$/.test(p));
+    expect(configs[0]).toBe("pyproject.toml");
+    expect(configs.length).toBeLessThanOrEqual(32);
+    expect(configs).not.toContain("tests/fixtures/proj/setup.py");
+    expect(configs).not.toContain("vendor/lib/setup.cfg");
+    expect(plan.sourcePaths!.has("docs/plugin/decoder.py")).toBe(true);
+  });
+
+  it("reads a fenced Python traceback's exception line as evidence, not a snippet", () => {
+    const out = extractCandidates([
+      "Saving fails:", "```", "Traceback (most recent call last):",
+      '  File "/app/pkg/store.py", line 3, in save', "    dump(obj)",
+      "pkg.errors.SerializationError: cannot save", "```",
+    ].join("\n"));
+    expect(out.identifiers[0]).toBe("SerializationError");
+    expect(out.snippetIdentifiers ?? []).not.toContain("SerializationError");
+    expect(out.tracebacks).toEqual([["/app/pkg/store.py"]]);
+  });
+
+  it("does not take a sentence that starts with `function` or `class` for a code line", () => {
+    for (const text of ["function names with digits break `parseHeader` here", "class names with digits break `parseHeader` here"]) {
+      const out = extractCandidates(text);
+      expect(out.identifiers).toContain("parseHeader");
+      expect(out.snippetIdentifiers ?? []).not.toContain("parseHeader");
+    }
+    for (const line of ["def parse_header(raw):", "class HeaderParser(Base):", "function parseHeader(raw) {", "class HeaderParser extends Base {"]) {
+      expect(extractCandidates(`${line}\nboom`).snippetIdentifiers).toBeDefined();
+    }
+  });
+
+  it("reads a nested list item or an item's indented continuation as prose, not a snippet", () => {
+    const nested = extractCandidates([
+      "Steps:", "- Config loading", "    - `parseHeader` drops the trailing byte", "    - then `loadConfig` fails",
+      "", "1. Save the model", "", "    continued: `saveModel` loses the optimizer",
+    ].join("\n"));
+    expect(nested.identifiers).toEqual(["parseHeader", "loadConfig", "saveModel"]);
+    expect(nested.snippetIdentifiers).toBeUndefined();
+    // Eight spaces after a blank line is still code inside a list; four is code outside one.
+    expect(extractCandidates("- Run:\n\n        exportAll(data)\nbreaks").snippetIdentifiers).toEqual(["exportAll"]);
+    expect(extractCandidates("Repro:\n\n    - exportAll(data)\nbreaks").snippetIdentifiers).toEqual(["exportAll"]);
+  });
+
+  it("ends a traceback at a blank line, so indented text after it is still read", () => {
+    for (const trace of [
+      ["Error: boom", "    at run (/app/src/a.js:1:1)"],
+      ["Traceback (most recent call last):", '  File "/app/pkg/store.py", line 3, in save', "    dump(obj)"],
+    ]) {
+      const out = extractCandidates([...trace, "", " also seen in `renderPage`"].join("\n"));
+      expect(out.identifiers).toContain("renderPage");
+      expect(out.tracebacks).toHaveLength(1);
+    }
+  });
+
+  it("keeps an unindented Python traceback as one trace and starts from its innermost frame", async () => {
+    const text = [
+      "Crash:", "```", "Traceback (most recent call last):",
+      'File "/p/src/outer.py", line 1, in <module>', "outer()",
+      'File "/p/src/inner.py", line 2, in outer', "inner()", "^^^^^^^",
+      "ValueError: boom", "```",
+    ].join("\n");
+    const out = extractCandidates(text);
+    expect(out.tracebacks).toEqual([["/p/src/inner.py", "/p/src/outer.py"]]);
+    const picked = await pickStartingPoints(text, { files: ["src/outer.py", "src/inner.py"], search: async () => [] });
+    expect(picked.starts.map((s) => s.path)).toEqual(["src/inner.py"]);
+    // An exception line straight after a frame (no source line) still ends the trace.
+    const bare = extractCandidates(['File "/p/src/a.py", line 1, in run', "pkg.DecodeError: bad", "then `renderPage` fails"].join("\n"));
+    expect(bare.tracebacks).toEqual([["/p/src/a.py"]]);
+    expect(bare.identifiers).toEqual(expect.arrayContaining(["DecodeError", "renderPage"]));
+  });
+
+  it("reads backticked names on a prose line that starts like a call", () => {
+    expect(extractCandidates("Error(s) when calling `render` on mobile (iOS)").identifiers).toContain("render");
+    expect(extractCandidates("model.save(path)").identifiers).toEqual([]);
+  });
+
+  it("does not look up a snippet's keywords or dunder methods", () => {
+    const out = extractCandidates("```js\nfunction exportAll() { continue; }\n```\n```python\ndef __init__(self): save_model()\n```");
+    expect(out.identifiers).toEqual(["exportAll", "save_model"]);
+    expect(out.snippetIdentifiers).toEqual(["exportAll", "save_model"]);
+  });
+
+  it.each([
+    ["# DO NOT EDIT THIS FILE DIRECTLY", false],
+    ["// DO NOT EDIT: maintained by tools/sync.sh", false],
+    ["// Do not edit; hand-written, regenerating would lose fixes", true],
+    ["// Do not edit: maintained by the platform team", true],
+  ])("reads the header %s as source: %s", (header, source) => {
+    expect(isSourcePath("src/a.ts", { importable: true, header: `${header}\nexport const a = 1;` })).toBe(source);
+  });
+
+  it("reads Node ESM file:// frames as a traceback", () => {
+    const out = extractCandidates([
+      "Error: boom",
+      "    at Object.<anonymous> (file:///app/src/inner.mjs:10:5)",
+      "    at run (file:///app/src/outer.mjs:3:1)",
+      "    at main (file:///C:/app/src/win.mjs:1:1)",
+    ].join("\n"));
+    expect(out.tracebacks).toEqual([["/app/src/inner.mjs", "/app/src/outer.mjs", "C:/app/src/win.mjs"]]);
+    expect(out.paths).toEqual([]);
+    expect(out.snippetIdentifiers ?? []).not.toContain("anonymous");
+  });
+
+  it("opens only the files it surfaces, not every source file, when BM25 has an index", async () => {
+    const files: Record<string, string> = { "src/generated_top.py": "# Generated by a tool\ndecode_payload" };
+    for (let i = 0; i < 60; i++) files[`src/f${String(i).padStart(2, "0")}.py`] = "decode_payload value";
+    const reads = new Set<string>();
+    const repo = { ...memoryRepo(files), read: (path: string) => { reads.add(path); return files[path]; } };
+    // A ranker that answers from its index, as cachedBm25Ranker does on a warm HEAD.
+    const rank = (_repo: RepoAccess, paths: string[]) =>
+      paths.map((path, i) => ({ path, score: path === "src/generated_top.py" ? 100 : 60 - i })).sort((a, b) => b.score - a.score);
+    const plan = await planIssue("nothing named here", { repo, search: async () => [], rank });
+    // The fallback skips the generated top hit after reading only its header and the next one.
+    expect(plan.starts[0]).toMatchObject({ via: "bm25 fallback", path: "src/f00.py" });
+    expect([...reads].sort()).toEqual(["src/f00.py", "src/generated_top.py"]);
+    const ranked = rankIssueFiles({ ...plan, near: new Map() }, 5);
+    expect(ranked.map((f) => f.path)).toEqual(["src/f00.py", "src/f01.py", "src/f02.py", "src/f03.py", "src/f04.py"]);
+    expect(reads.size).toBe(6);
+    const { centre } = await chooseCentre([], plan.bm25, async (path) => path, 10, plan.sourcePaths);
+    expect(centre?.path).toBe("src/f00.py");
   });
 });

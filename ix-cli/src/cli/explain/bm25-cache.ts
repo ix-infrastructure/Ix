@@ -200,7 +200,24 @@ export function cachedBm25Ranker(
     if (stored) {
       try {
         if (stored.header.head === state.head) {
-          found = { docs: docsAtHead(stored, repo, files, terms, state.dirty) };
+          // A caller can ask about clean files an index at this HEAD never saw: one
+          // built by an older CLI that passed fewer paths. Fold them in once, as a
+          // HEAD move does, instead of reading them on every query.
+          const known = new Set([...stored.paths, ...stored.skipped]);
+          // HEAD's blob list only when some clean file is unknown: it costs a git call.
+          const maybe = files.some((path) => !state.dirty.has(path) && !known.has(path));
+          const blobs = maybe ? state.blobs ?? readHeadBlobs(root, state.head) : undefined;
+          const unseen = blobs && files.some((path) => !state.dirty.has(path) && !known.has(path) && blobs.has(path));
+          if (!unseen) {
+            found = { docs: docsAtHead(stored, repo, files, terms, state.dirty) };
+          } else {
+            // The index's own paths stay in it (reused, not read), so a caller
+            // passing fewer files does not undo this.
+            const wanted = new Set(files);
+            const kept = [...known].filter((path) => !wanted.has(path) && !state.dirty.has(path) && blobs.has(path));
+            found = collectDocs(repo, [...files, ...kept], terms, state, { stored, changed: new Map() });
+            for (const path of kept) found.docs.delete(path);
+          }
         } else {
           // Built for another commit. A file whose blob is unchanged since
           // then keeps its counts; only the rest are read and tokenised

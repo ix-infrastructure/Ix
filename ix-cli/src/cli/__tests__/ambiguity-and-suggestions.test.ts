@@ -60,7 +60,9 @@ async function run(args: string[]): Promise<{ stdout: string; stderr: string }> 
 describe("an ambiguous target in llm format", () => {
   let savedExitCode: number | string | undefined;
 
+  // The error record: what an ambiguous target gets under --strict.
   beforeEach(() => {
+    process.env.IX_STRICT_TARGETS = "1";
     savedExitCode = process.exitCode;
     process.exitCode = undefined;
     search.mockReset().mockResolvedValue([
@@ -69,7 +71,10 @@ describe("an ambiguous target in llm format", () => {
     ]);
   });
 
-  afterEach(() => { process.exitCode = savedExitCode; });
+  afterEach(() => {
+    process.exitCode = savedExitCode;
+    delete process.env.IX_STRICT_TARGETS;
+  });
 
   it("names each candidate well enough to pick one", async () => {
     const { stdout } = await run(["overview", "Duplicate", "--format", "llm"]);

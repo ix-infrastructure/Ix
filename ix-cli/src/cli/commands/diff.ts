@@ -15,7 +15,7 @@ import { resolveFileOrReport, printResolved, type ResolvedEntity } from "../reso
 import { formatDiff, relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
 import { reportFailure } from "../ui.js";
-import { parsePickOption } from "../options.js";
+import { parsePickOption, STRICT_AMBIGUOUS_HELP } from "../options.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 
 /**
@@ -494,6 +494,7 @@ export function registerDiffCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_AMBIGUOUS_HELP)
     .addHelpText("after", `\nExamples:
   ix diff 3 5
   ix diff 3 5 ix-cli/src/cli/commands/decide.ts
@@ -502,7 +503,7 @@ export function registerDiffCommand(program: Command): void {
   ix diff 3 5 --summary`)
     .action(async (fromRev: string, toRev: string, target: string | undefined, opts: {
       entity?: string; summary?: boolean; content?: boolean; limit?: string; full?: boolean; format: string;
-      kind?: string; path?: string; pick?: number; all?: boolean;
+      kind?: string; path?: string; pick?: number; strict?: boolean; all?: boolean;
     }) => {
       const conflict = detectDiffModeConflict(opts);
       if (conflict) {
@@ -519,6 +520,11 @@ export function registerDiffCommand(program: Command): void {
         kind: opts.kind,
         path: opts.path,
         pick: opts.pick,
+        strict: opts.strict,
+        // A revision diff of the entity was asked for: a list of the files
+        // that mention a text-only name today is not one, so it stays the
+        // miss (exit 3), as `context --out` does.
+        textAnswer: false,
       };
       let entityId: string | undefined = opts.entity;
       let resolved: ResolvedEntity | null = null;

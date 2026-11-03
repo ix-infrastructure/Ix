@@ -11,6 +11,7 @@ import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import { isReadablePath, resolveWorkspaceRoot } from "../cli/config.js";
 import { resolveIngestRootWithSource } from "../cli/map-root.js";
+import { BUNDLE_SCHEMA } from "../cli/context-bundle-schema.js";
 
 import {
   createProtocolStdout,
@@ -404,9 +405,14 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   registerTool(
     ctx,
     "ix_locate",
-    "Use when a name has several definitions and you want the canonical one. Returns one definition with path:lines, or the candidates when it cannot choose. For a ranked list use ix_search.",
-    { symbol: z.string().min(1) },
-    async (input) => runFormatted(runIx, "ix_locate", ix("locate", [stringArg(input, "symbol")])),
+    "Use when a name has several definitions and you want the canonical one. Returns the top match with path:lines; pick or path selects another.",
+    // The notice on an auto-picked answer says to use --pick or --path: an MCP
+    // caller needs the same two inputs to act on it. No `kind`, and pick's
+    // description dropped: both would push the full catalog past its
+    // tools/list budget (mcp-structured-output.test.ts).
+    { symbol: SYMBOL_TOOL_INPUT.symbol, ...CHOOSE_INPUT },
+    async (input) =>
+      runFormatted(runIx, "ix_locate", ix("locate", [stringArg(input, "symbol")], symbolOptions(input, { limit: false }))),
   );
   registerTool(
     ctx,
@@ -483,8 +489,9 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     ctx,
     "ix_overview",
     "Use for a one-call summary of a file, symbol or subsystem: what it is, what it holds, and what it touches. For ranked evidence around a task use ix_context.",
-    { target: z.string().min(1) },
-    async (input) => runFormatted(runIx, "ix_overview", ix("overview", [stringArg(input, "target")])),
+    { target: z.string().min(1), ...CHOOSE_INPUT },
+    async (input) =>
+      runFormatted(runIx, "ix_overview", ix("overview", [stringArg(input, "target")], chooseOptions(input))),
   );
   registerTool(
     ctx,
@@ -511,6 +518,7 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       to_rev: z.number().int().nonnegative(),
       target: z.string().min(1).optional(),
       summary: z.boolean().default(false),
+      ...CHOOSE_INPUT,
     },
     async (input) => {
       const positionals = [
@@ -518,7 +526,8 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
         numberArg(input, "to_rev").toString(),
       ];
       if (typeof input.target === "string") positionals.push(input.target);
-      return runFormatted(runIx, "ix_diff", ix("diff", positionals, input.summary === true ? ["--summary"] : []));
+      const options = input.summary === true ? ["--summary"] : [];
+      return runFormatted(runIx, "ix_diff", ix("diff", positionals, [...options, ...chooseOptions(input)]));
     },
   );
   registerTool(
@@ -561,10 +570,12 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     {
       symbol: z.string().min(1),
       depth: z.number().int().min(1).max(5).default(2),
+      ...CHOOSE_INPUT,
     },
     async (input) =>
       runFormatted(runIx, "ix_depends", ix("depends", [stringArg(input, "symbol")], [
         `--depth=${numberArg(input, "depth")}`,
+        ...chooseOptions(input),
       ])),
   );
   registerTool(
@@ -578,10 +589,12 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       // `ix_depends` has had a `depth` since it was written and this did not,
       // so a trace through a hub ran as deep as the graph goes.
       depth: z.number().int().min(1).max(10).default(3),
+      ...CHOOSE_INPUT,
     },
     async (input) => {
       const options = [`--depth=${numberArg(input, "depth")}`];
       pushOption(options, "--to", input.to);
+      options.push(...chooseOptions(input));
       return runFormatted(runIx, "ix_trace", ix("trace", [stringArg(input, "symbol")], options));
     },
   );
@@ -662,8 +675,9 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     ctx,
     "ix_history",
     "Which revisions touched this, and what each patch said it was doing",
-    { target: z.string().min(1) },
-    async (input) => runFormatted(runIx, "ix_history", ix("history", [stringArg(input, "target")])),
+    { target: z.string().min(1), ...CHOOSE_INPUT },
+    async (input) =>
+      runFormatted(runIx, "ix_history", ix("history", [stringArg(input, "target")], chooseOptions(input))),
   );
   registerTool(
     ctx,
@@ -787,6 +801,29 @@ const SYMBOL_TOOL_INPUT = {
   pick: z.number().int().min(1).max(50).optional().describe("Nth candidate, 1-based"),
   limit: z.number().int().min(1).max(500).optional(),
 } as const;
+
+/**
+ * What a caller needs to act on an auto-picked answer's notice ("Pass pick=<n>
+ * or path=<file substring> to choose another", ui.ts), for the tools that took
+ * a bare target and no disambiguation flags. Every command that can answer an
+ * ambiguous name for its top candidate must be able to take these back: the
+ * SDK strips an input key a tool does not declare, so an undeclared `pick=2`
+ * would silently answer candidate 1 again. No `kind` (ix trace's `--kind` is
+ * an edge kind, not an entity kind) and no descriptions: the full catalog's
+ * tools/list budget (mcp-structured-output.test.ts).
+ */
+const CHOOSE_INPUT = {
+  path: z.string().min(1).optional(),
+  pick: z.number().int().min(1).max(50).optional(),
+} as const;
+
+/** Turn {@link CHOOSE_INPUT} into CLI flags. */
+function chooseOptions(input: ToolInput): string[] {
+  const options: string[] = [];
+  pushOption(options, "--path", input.path);
+  if (typeof input.pick === "number") options.push(`--pick=${numberArg(input, "pick")}`);
+  return options;
+}
 
 /**
  * The edge tools (ix_neighbors and the four single-relation tools) page with
@@ -983,6 +1020,12 @@ async function runJsonStructured(
   if (!isRecord(parsed) || Object.keys(parsed).length === 0) {
     return textResult(text || JSON.stringify({ error: `${argv.command} produced no parseable JSON`, tool }), true);
   }
+  // `structured: true` asked for a bundle. A name the graph has no entity for
+  // but source files mention exits 0 with a `text_matches` record instead
+  // (text-matches.ts): useful to read, but not the bundle, so it goes back as
+  // text marked as an error — the failure signal a structured caller keys on —
+  // never as structuredContent posing as one.
+  if (parsed.schema !== BUNDLE_SCHEMA) return textResult(text, true);
   const { generatedAt: _perCall, ...stable } = parsed;
   return {
     content: [{ type: "text", text: JSON.stringify(stable) }],

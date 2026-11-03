@@ -7,7 +7,7 @@ import type { IxClient } from "../../client/api.js";
 import { disambiguatingIds, lineSpan, locationLabel, printJson, sliceRanked, truncationHint } from "../format.js";
 import { llmLine } from "../llm.js";
 import { runPerTarget } from "../multi-target.js";
-import { parseCountOption, parsePickOption } from "../options.js";
+import { parseCountOption, parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
 import { isQuiet, projectRow } from "../output-shape.js";
@@ -16,7 +16,7 @@ import { reportError } from "./around.js";
 import { overrideFamily, type OverrideRelation, type OverrideRow } from "../type-walk.js";
 
 interface OverridesOpts {
-  kind?: string; path?: string; pick?: number; limit: string; offset: string; format: string;
+  kind?: string; path?: string; pick?: number; strict?: boolean; limit: string; offset: string; format: string;
 }
 
 /** `--limit` as a count, or undefined when it is not one (`abc`, `-1`, `10abc`). */
@@ -39,6 +39,7 @@ export function registerOverridesCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_TARGET_HELP)
     .option("--limit <n>", "Max results to show", "50")
     .option("--offset <n>", OFFSET_FLAG, "0")
     .option("--format <fmt>", "Output format (text|json|llm)", "text")
@@ -70,7 +71,11 @@ ${EXIT_CODES_HELP}`)
 async function overridesOne(client: IxClient, symbol: string, opts: OverridesOpts, cmd: Command): Promise<void> {
   const limit = parseOverridesLimit(opts.limit) ?? 0;
   const offset = parseOffset(opts.offset);
-  const target = await resolveFileOrReport(client, symbol, { kind: opts.kind, path: opts.path, pick: opts.pick }, opts.format);
+  const target = await resolveFileOrReport(client, symbol, {
+    kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict,
+    // A text-only name's json answer keeps this command's keys, empty.
+    textAnswerJson: { rows: [], total: 0, truncated: false, diagnostics: [] },
+  }, opts.format);
   if (!target) return;
   if (opts.format === "text") printResolved(target);
   const family = await overrideFamily(client, target);

@@ -174,7 +174,7 @@ jobs:
           - target: linux-arm64
             runner: ubuntu-24.04-arm
           - target: darwin-arm64
-            runner: macos-14
+            runner: macos-15
           - target: windows-amd64
             # Pinned to windows-2022: windows-latest ships Visual Studio 18,
             # which node 22's bundled node-gyp cannot detect, breaking the

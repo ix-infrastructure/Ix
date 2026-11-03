@@ -241,7 +241,7 @@ describe("mode-flag coverage does not drift from the command", () => {
    * "legal everywhere" is what certified it.
    */
   const CONTEXT_BUILD_FLAGS = [
-    "kind", "path", "pick", "depth", "asOfRev",
+    "kind", "path", "pick", "strict", "depth", "asOfRev",
     "maxEntities", "maxRelationships", "maxEvidence", "maxTokens", "maxChars",
   ];
   /** Meaningful to every mode, so in neither group. */

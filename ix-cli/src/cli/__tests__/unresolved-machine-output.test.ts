@@ -121,7 +121,7 @@ describe("unresolved targets in machine formats", () => {
 
     const result = await run(
       (await import("../commands/overview.js")).registerOverviewCommand,
-      ["overview", "Duplicate", "--format", "json"],
+      ["overview", "Duplicate", "--strict", "--format", "json"],
     );
 
     expect(process.exitCode).toBe(2);
@@ -158,7 +158,7 @@ describe("unresolved targets in machine formats", () => {
     expect(llm.stdout).toMatch(/^ambiguous kind=symbol target=Duplicate /);
   });
 
-  it("keeps an out-of-range pick classified as ambiguity and exits non-zero", async () => {
+  it("keeps an out-of-range pick classified as ambiguity and exits non-zero under --strict", async () => {
     search.mockResolvedValue([
       { id: "first-id", kind: "function", name: "Duplicate", provenance: { sourceUri: "src/first.ts" } },
       { id: "second-id", kind: "function", name: "Duplicate", provenance: { sourceUri: "src/second.ts" } },
@@ -166,7 +166,7 @@ describe("unresolved targets in machine formats", () => {
 
     const result = await run(
       (await import("../commands/overview.js")).registerOverviewCommand,
-      ["overview", "Duplicate", "--pick", "3", "--format", "json"],
+      ["overview", "Duplicate", "--pick", "3", "--strict", "--format", "json"],
     );
 
     expect(process.exitCode).toBe(2);
@@ -213,7 +213,10 @@ describe("unresolved targets in machine formats", () => {
     });
   });
 
-  it("exits non-zero for an AMBIGUOUS locate, in every format (#547)", async () => {
+  it("exits non-zero for an AMBIGUOUS locate under --strict, in every format (#547)", async () => {
+    // Without --strict, locate answers an ambiguous name for its top
+    // candidate like every other graph command (target-answers.test.ts), so
+    // #547's rule -- one status for one condition across the commands -- holds.
     // The one command that used to disagree. This exited 0 in the first draft
     // of #539, reasoned as "several candidates is an answer, not a miss" --
     // #547 settled the opposite for the eight graph commands, and locate
@@ -229,7 +232,7 @@ describe("unresolved targets in machine formats", () => {
 
     for (const format of ["json", "llm", "text"] as const) {
       process.exitCode = undefined;
-      const result = await run(registerLocateCommand, ["locate", "Duplicate", "--format", format]);
+      const result = await run(registerLocateCommand, ["locate", "Duplicate", "--strict", "--format", format]);
       expect(process.exitCode, `format=${format}`).toBe(2);
       // ...and the body still says what it always said. The exit code becomes
       // informative without the payload going away, which is #539's whole point.

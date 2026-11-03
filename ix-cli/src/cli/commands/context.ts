@@ -30,23 +30,27 @@ import {
   planIssue,
   rankIssueFiles,
   readIssueText,
+  START_BOOST,
   type Closeness,
+  type IssuePlan,
   type LeanIssueView,
   type RankedFile,
   type StartingPoint,
   type SymbolHit,
 } from "../explain/issue.js";
+import { collectIssueEntities, placeIssueMatches, rankIssueEntities, type IssueEntityRanking } from "../explain/issue-entities.js";
 import { symbolReadChecker } from "../symbol-read-check.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
 import { cachedBm25Ranker, saveBm25Index } from "../explain/bm25-cache.js";
-import { collectTextReferences, gitRepoAccess, type TextSource } from "../explain/text-references.js";
+import { companionHistory, expandIssueCompanions } from "../explain/issue-companions.js";
+import { collectTextReferences, gitRepoAccess, type RepoAccess, type TextSource } from "../explain/text-references.js";
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
-import { parseBudgetOption, parsePickOption, parseRevisionOption } from "../options.js";
-import { activeReadScope, ensureReadScope, resolveFileOrReport } from "../resolve.js";
+import { parseBudgetOption, parsePickOption, STRICT_TARGET_HELP, parseRevisionOption } from "../options.js";
+import { activeReadScope, ensureReadScope, isRawId, resolveFileOrEntityFull, resolveFileOrReport, type ResolutionNotice, type ResolvedEntity } from "../resolve.js";
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
 import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure } from "../ui.js";
-import { printJson, relativePath } from "../format.js";
+import { printJson, relativePath, takeResolutionNotices } from "../format.js";
 import { forMcp, suggest, toolCall } from "../next-step.js";
 import {
   assessTargetStructure, checkGraphHealth, graphHealthJson, isUnhealthy, worseHealth, type GraphHealth,
@@ -191,6 +195,8 @@ interface ContextOptions extends Partial<BudgetSnapshot> {
   kind?: string;
   path?: string;
   pick?: number;
+  /** `--strict`: an ambiguous or text-only target is an error, not answered. */
+  strict?: boolean;
   depth?: string;
   asOfRev?: number;
   out?: string;
@@ -296,6 +302,8 @@ interface ContextBundle {
     lineStart?: number;
     lineEnd?: number;
     stale: boolean;
+    /** Issue relevance; absent on bundles built from a named target. */
+    score?: number;
   }>;
   relationships: Array<{ src: string; dst: string; predicate: string }>;
   claims: Array<{ id: string; entityId: string; statement: string; status: string }>;
@@ -342,7 +350,7 @@ interface ContextBundle {
   metadata: {
     asOfRev?: number;
     depth?: string;
-    rankingRule: "deterministic-tier";
+    rankingRule: "deterministic-tier" | "issue-bm25";
   };
 }
 
@@ -372,6 +380,7 @@ export function registerContextCommand(program: Command): void {
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .option("--strict", STRICT_TARGET_HELP)
     .option(
       "--depth <depth>",
       `Context-graph expansion depth (${CONTEXT_DEPTHS.join("|")})`,
@@ -447,11 +456,17 @@ export function registerContextCommand(program: Command): void {
         // diff output can report what was asked for instead of dropping it
         // silently; what actually governed is read back off the built bundle.
         const requestedBudgets = parseRequestedBudgets(opts);
+        // With no target or selector typed, the fresh side is the saved
+        // bundle's own entity, looked up by its id: a name the save answered
+        // for an auto-picked candidate (resolve.ts answerAmbiguous) is still
+        // ambiguous, and re-resolving it strictly would exit 2.
+        const reuseSavedEntity = !target && opts.kind === undefined && opts.path === undefined && opts.pick === undefined;
         const fresh = await buildFreshBundle(
           target ?? saved.bundle.target.name,
           { ...opts, ...mergeDiffOptions(saved, opts) },
           saved.bundle.budgets,
           opts.format,
+          reuseSavedEntity ? saved.bundle.target.id : undefined,
         );
         if (!fresh) return;
         renderInvestigationDiff(saved, fresh, opts.format, requestedBudgets);
@@ -493,6 +508,10 @@ export function registerContextCommand(program: Command): void {
         kind: opts.kind,
         path: opts.path,
         pick: opts.pick,
+        strict: opts.strict,
+        // --out / --save promise a bundle: a text-only name has none to
+        // write, so it stays the miss (exit 3) rather than a file list and 0.
+        ...(opts.out || opts.save ? { textAnswer: false } : {}),
       }, opts.format);
       if (!resolved) return;
 
@@ -537,6 +556,7 @@ export function registerContextCommand(program: Command): void {
 
 /** `--save`, `--out`, or render: what every freshly built bundle goes through. */
 async function emitBundle(bundle: ContextBundle, opts: ContextOptions): Promise<void> {
+  if (opts.save || opts.out) reportGuessedTargetForArtifact(opts.format);
   if (opts.save) {
     saveInvestigation(opts.save, bundle);
     renderNote(`Saved investigation "${opts.save}" (${bundle.entities.length} entities, ${bundle.relationships.length} relationships, ${bundle.evidence.length} evidence items). Resume with: ix context --resume ${opts.save}`);
@@ -597,17 +617,57 @@ async function emitBundle(bundle: ContextBundle, opts: ContextOptions): Promise<
   renderBundle(bundle, opts.format);
 }
 
+/**
+ * Say which entity a guessed target became, when the bundle goes to a file.
+ *
+ * A json caller's `ambiguous_target` / `fuzzy_match` notice waits in the queue
+ * for `printJson` (ui.ts `reportResolutionNotices`), and `--save` / `--out`
+ * never call it: the bundle goes to a file whose versioned schema
+ * (ix-context-bundle/1) has no field for it, and stdout gets a prose note. So
+ * the notice goes to stderr here, as a warning `--quiet` does not hide: it is
+ * the only sign that the saved bundle is for a guess. text and llm already
+ * printed it when the target resolved.
+ */
+function reportGuessedTargetForArtifact(format: string | undefined): void {
+  if (format !== "json") return;
+  const notices = takeResolutionNotices() as ResolutionNotice[];
+  for (const notice of notices) {
+    renderWarningErr(notice.message);
+    if (notice.code !== "ambiguous_target") continue;
+    notice.candidates.forEach((candidate, index) => {
+      const where = candidate.path ? ` in ${candidate.path}` : "";
+      console.error(`  ${index + 1}. ${(candidate.kind ?? "").padEnd(10)} ${candidate.id.slice(0, 8)}  ${candidate.name}${where}`);
+    });
+    if (notice.total > notice.candidates.length || notice.truncated) {
+      console.error(`  Showing ${notice.candidates.length} of ${notice.truncated ? ">=" : ""}${notice.total}`);
+    }
+    console.error("  Use --pick <n> or --path to choose another.");
+  }
+}
+
 async function buildFreshBundle(
   target: string,
   opts: { kind?: string; path?: string; pick?: number; depth?: string; asOfRev?: number },
   budgets: BudgetSnapshot & { format?: BundleFormat },
   format: string,
+  savedId?: string,
 ): Promise<ContextBundle | undefined> {
   const client = createClient({ query: true });
-  const resolved = await resolveFileOrReport(client, target, {
+  // The saved entity itself when it still exists; a miss on its id (the
+  // graph was rebuilt) falls through to its name.
+  let resolved: ResolvedEntity | null = null;
+  if (savedId && isRawId(savedId)) {
+    const byId = await resolveFileOrEntityFull(client, savedId, { format, silentMiss: true });
+    if (byId.resolved) resolved = byId.entity;
+  }
+  // Strict: the fresh side of --diff must be the saved bundle's entity, so a
+  // name that has become ambiguous is reported, never answered with a guess
+  // the diff would then compare against.
+  resolved ??= await resolveFileOrReport(client, target, {
     kind: opts.kind,
     path: opts.path,
     pick: opts.pick,
+    strict: true,
   }, format);
   if (!resolved) return undefined;
 
@@ -662,6 +722,7 @@ const BUILD_FLAGS: ReadonlyArray<[keyof ContextOptions, string]> = [
   ["kind", "--kind"],
   ["path", "--path"],
   ["pick", "--pick"],
+  ["strict", "--strict"],
   ["depth", "--depth"],
   ["asOfRev", "--as-of-rev"],
   ...BUDGETS.map((b) => [b.key, b.flag] as [keyof ContextOptions, string]),
@@ -1614,6 +1675,11 @@ export interface IssueBundleInput extends IssueSummary {
   rankedFiles: RankedFile[];
   /** The other starting points' related files, entered as entities. */
   extraEntities?: EntityLocation[];
+  /** Lexical discoveries, behind graph context unless they match the issue. */
+  discoveredEntities?: EntityLocation[];
+  query?: string;
+  repo?: IssueEntityRanking["repo"];
+  distances?: ReadonlyMap<string, number>;
 }
 
 /**
@@ -1725,7 +1791,7 @@ async function buildIssueBundle(
   // A path start has no node yet, and the graph may not have one either: it
   // does not index every tracked file. chooseCentre walks BM25 for one it does.
   const { starts, centre, walked } = await chooseCentre(
-    plan.starts, plan.bm25, (path) => findFileNode(client, path));
+    plan.starts, plan.bm25, (path) => findFileNode(client, path), CENTRE_FALLBACK_TRIES, plan.sourcePaths);
   if (!centre) {
     issueFailure(
       "issue_unresolved",
@@ -1744,18 +1810,11 @@ async function buildIssueBundle(
     checkGraphHealth(client, activeReadScope()),
   ]);
 
-  const near = new Map<string, Closeness>();
-  const mark = (path: string | undefined, weight: number, reason: string) => {
-    if (!path) return;
-    const prior = near.get(path);
-    if (!prior || weight > prior.weight) near.set(path, { weight, reason });
-  };
-  for (const n of [{ start: centre, facts, related: facts.relatedRefs ?? [] }, ...around]) {
-    for (const ref of oneHopRefs(n.facts)) {
-      if (ref.path !== n.start.path) mark(ref.path, 1, `one hop from ${n.start.name}`);
-    }
-    for (const ref of n.related) mark(ref.path, 0.5, `near ${n.start.name}`);
-  }
+  const issue = await issueBundleSection(client, {
+    text, plan, starts, walked,
+    neighbourhoods: [{ start: centre, facts, related: facts.relatedRefs ?? [] }, ...around],
+    scope: activeReadScope(),
+  });
 
   return buildBundle({
     resolved,
@@ -1768,14 +1827,94 @@ async function buildIssueBundle(
     format,
     graphCompleted: hasCompletedSourceGraphBaseline(),
     graphHealth: bundleGraphHealth(workspaceHealth, resolved, facts),
-    issue: {
-      startingPoints: starts,
-      unresolved: plan.unresolved,
-      fallback: plan.fallback || walked,
-      rankedFiles: rankIssueFiles({ starts, bm25: plan.bm25, near }),
-      extraEntities: around.flatMap((n) => n.related),
-    },
+    issue,
   });
+}
+
+/** A starting point with its facts and related files, as `--from-issue` loads it. */
+interface IssueNeighbourhood {
+  start: StartingPoint;
+  facts?: ContextFacts;
+  related: EntityLocation[];
+}
+
+/**
+ * The issue section of a `--from-issue` bundle, once the centre's facts and
+ * the other starts' neighbourhoods are loaded: closeness and graph distances
+ * from those facts, the ranked files, and the definitions listed in the top
+ * ones. `neighbourhoods` is the centre's first, then the other starts'.
+ */
+export async function issueBundleSection(
+  client: Pick<IxClient, "listByKind">,
+  input: {
+    text: string;
+    plan: Pick<IssuePlan, "bm25" | "unresolved" | "fallback" | "sourcePaths"> & { repo?: Pick<RepoAccess, "files" | "read"> };
+    starts: StartingPoint[];
+    walked: boolean;
+    neighbourhoods: IssueNeighbourhood[];
+    scope: { workspaceId?: string; systemId?: string };
+  },
+): Promise<IssueBundleInput> {
+  const { text, plan, starts, walked, neighbourhoods } = input;
+  const near = new Map<string, Closeness>();
+  const distances = new Map<string, number>();
+  const atDistance = (id: string, distance: number) => {
+    distances.set(id, Math.min(distances.get(id) ?? Infinity, distance));
+  };
+  const mark = (path: string | undefined, weight: number, reason: string) => {
+    if (!path) return;
+    const prior = near.get(path);
+    if (!prior || weight > prior.weight) near.set(path, { weight, reason });
+  };
+  for (const n of neighbourhoods) {
+    atDistance(n.start.id!, 0);
+    for (const ref of oneHopRefs(n.facts)) {
+      if (ref.path !== n.start.path) mark(ref.path, 1, `one hop from ${n.start.name}`);
+    }
+    // Neighbour members and text/history-related files do not establish a
+    // direct graph edge. Only the facts' direct references fill missing hops.
+    for (const ref of [
+      ...(n.facts?.importRefs ?? []), ...(n.facts?.calleeRefs ?? []),
+      ...(n.facts?.topCallerRefs ?? []), ...(n.facts?.topDependentRefs ?? []),
+      ...(n.facts?.memberRefs ?? []),
+    ]) atDistance(ref.id, 1);
+    for (const ref of n.related) {
+      mark(ref.path, 0.5, `near ${n.start.name}`);
+    }
+  }
+  const rankedFiles = await issueRankedFiles(text, { starts, bm25: plan.bm25, near, sourcePaths: plan.sourcePaths }, plan.repo, resolveWorkspaceRoot());
+  const candidates = await collectIssueEntities(client, rankedFiles, input.scope);
+  // The listing planIssueWith already ran: a second `git ls-files` would only
+  // repeat it. Only tracked paths are read, as BM25 read them.
+  const repo = plan.repo;
+  const tracked = new Set(repo?.files());
+
+  return {
+    startingPoints: starts,
+    unresolved: plan.unresolved,
+    fallback: plan.fallback || walked,
+    rankedFiles,
+    extraEntities: neighbourhoods.slice(1).flatMap((n) => n.related),
+    discoveredEntities: candidates,
+    query: text,
+    repo: repo ? { read: path => tracked.has(path) ? repo.read(path) : undefined } : undefined,
+    distances,
+  };
+}
+
+/**
+ * The full `--from-issue` bundle's ranked files: the primary ranking, whole
+ * and in order, then companion files of a leading file (issue-companions.ts)
+ * read through `repo` and the git history at `root`. The lean view never
+ * calls this: companions are full-bundle only.
+ */
+export function issueRankedFiles(
+  text: string,
+  ranking: Parameters<typeof rankIssueFiles>[0],
+  repo: Pick<RepoAccess, "files" | "read"> | undefined,
+  root: string,
+): Promise<RankedFile[]> {
+  return expandIssueCompanions(text, rankIssueFiles(ranking), { repo, history: companionHistory(root) });
 }
 
 /** The issue's text, or undefined after reporting why it has none. */
@@ -1798,13 +1937,18 @@ async function readIssueOrReport(arg: string, format: string | undefined): Promi
   return text;
 }
 
-/** The issue's starting points and lexical ranking, against this workspace's graph. */
+/**
+ * The issue's starting points and lexical ranking, against this workspace's
+ * graph, with the repository access they were planned against (undefined
+ * outside a git checkout) so a caller does not list the files again.
+ */
 async function planIssueWith(client: IxClient, text: string) {
   await ensureReadScope(client);
   const scope = activeReadScope();
   const root = resolveWorkspaceRoot();
-  return planIssue(text, {
-    repo: gitRepoAccess(root),
+  const repo = gitRepoAccess(root);
+  const plan = await planIssue(text, {
+    repo,
     // Through the on-disk term index (bm25-cache.ts): the same ranking, with
     // only the files that differ from HEAD read again. The caller saves the
     // index after printing (saveBm25Index).
@@ -1812,13 +1956,15 @@ async function planIssueWith(client: IxClient, text: string) {
     search: async (name) =>
       (await client.search(name, { limit: ISSUE_SEARCH_LIMIT, nameOnly: true, ...scope })).map(symbolHit),
   });
+  return { ...plan, repo };
 }
 
 /**
  * `ix context --from-issue --lean`: the starting points Ix trusts and the
  * next few files, with no bundle around them. See `leanIssueView` for why.
  * Nothing here needs a centre node, so it is also the cheap path: one search
- * per name the issue mentions, and BM25 over the tracked files.
+ * per name the issue mentions, and BM25 over the tracked files. Companion
+ * files (issue-companions.ts) are full-bundle only.
  */
 async function emitLeanIssue(arg: string, opts: ContextOptions): Promise<void> {
   const text = await readIssueOrReport(arg, opts.format);
@@ -2007,7 +2153,7 @@ export function buildBundle(input: BuildInput): ContextBundle {
   // the field an agent reads to decide whether to trust the rest, so a wrong
   // one is worse than none.
   const seen = new Set<string>([resolved.id]);
-  const entities: ContextBundle["entities"] = [
+  let entities: ContextBundle["entities"] = [
     {
       id: resolved.id,
       name: resolved.name,
@@ -2087,7 +2233,7 @@ export function buildBundle(input: BuildInput): ContextBundle {
   // through the summaries -- ahead of its located ref, which `seen` then
   // skipped -- came out as twelve entities all named `watch.ts`.
   const trailingMembers = memberRefs.slice(LEADING_MEMBERS);
-  const locatedById = new Map(trailingMembers.map((ref) => [ref.id, ref]));
+  const locatedById = new Map([...trailingMembers, ...(issue?.discoveredEntities ?? [])].map((ref) => [ref.id, ref]));
   const fileNames = new Set(
     [...contextNodes, resolved].filter((n) => n.kind === "file").map((n) => n.name));
   for (const node of orderedNodes(contextNodes)) {
@@ -2113,12 +2259,33 @@ export function buildBundle(input: BuildInput): ContextBundle {
     });
   }
   pushLocated(trailingMembers);
+  // Unmatched discoveries must not evict graph context. Positive issue matches
+  // are promoted within their reserved budget by placeIssueMatches below; the
+  // ones that only the listing found, and that do not match, are dropped there.
+  const discoveredOnly = new Set(
+    (issue?.discoveredEntities ?? []).map((ref) => ref.id).filter((id) => !seen.has(id)));
+  pushLocated(issue?.discoveredEntities ?? []);
 
   // Relationships: graph edges, ordered deterministically.
   const contextEdges = context.edges.length > 0 ? context.edges : (context.edgeSummaries ?? []);
   const relationships = [...contextEdges]
     .sort((a, b) => cmp(a.src, b.src) || cmp(a.dst, b.dst) || cmp(a.predicate, b.predicate))
     .map((edge) => ({ src: edge.src, dst: edge.dst, predicate: edge.predicate }));
+
+  if (issue?.query !== undefined) {
+    const pinned = new Set([resolved.id, ...issue.startingPoints.flatMap((s) => s.id ? [s.id] : [])]);
+    // A listed definition that does not match the issue was never graph
+    // context: keeping it would fill spare budget with score-0 noise and count
+    // it as truncated content the bundle never had. One that matches only
+    // words most of the listed definitions share scores 0 here too.
+    entities = placeIssueMatches(
+      entities,
+      rankIssueEntities(entities, { ...issue, query: issue.query, listedOnly: discoveredOnly }, relationships),
+      pinned, budgets.maxEntities)
+      .filter((e) => e.score > 0 || !discoveredOnly.has(e.id));
+  } else {
+    entities = entities.filter((e) => !discoveredOnly.has(e.id));
+  }
 
   const evidence = rankEvidence({ resolved, facts, context, relationships, prov, entities, issue });
 
@@ -2180,7 +2347,7 @@ export function buildBundle(input: BuildInput): ContextBundle {
     metadata: {
       asOfRev,
       depth,
-      rankingRule: "deterministic-tier",
+      rankingRule: issue?.query !== undefined ? "issue-bm25" : "deterministic-tier",
     },
   };
 
@@ -2642,7 +2809,11 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
       ...locationField(starts[0]),
     });
   }
-  const shown = issue.rankedFiles.slice(0, SHOWN_RANKED_FILES);
+  // Companions (issue-companions.ts) follow the whole primary list, past the
+  // first SHOWN_RANKED_FILES once BM25 matches enough files: named after the
+  // primary files shown, or text and llm output would never show one.
+  const companions = issue.rankedFiles.filter((f) => f.companion);
+  const shown = [...issue.rankedFiles.filter((f) => !f.companion).slice(0, SHOWN_RANKED_FILES), ...companions];
   if (shown.length > 0) {
     items.push({
       id: "issue-ranked-files",
@@ -2650,7 +2821,7 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
       source: "issue.ranking",
       title: `ranked files: ${shown.map((f) => f.path).join(", ")}`,
       score: tierScore(TIER.issue, 1),
-      reason: `starting points first, then bm25 against the issue text, graph neighbours of a starting point boosted up to ${Math.round(CLOSENESS_BOOST * 100)}%; `
+      reason: `bm25 against the issue text, starting points boosted by up to ${Math.round(START_BOOST * 100)}% of the best bm25 score, graph neighbours of a starting point boosted up to ${Math.round(CLOSENESS_BOOST * 100)}%${companions.length > 0 ? ", then companion files of a leading file" : ""}; `
         + shown.map((f) => `${f.path.split("/").pop()} (${f.reason})`).join("; "),
       refs: [],
     });
