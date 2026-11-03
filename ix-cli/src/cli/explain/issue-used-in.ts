@@ -25,7 +25,12 @@ export const USED_IN_SYMBOLS = 2;
 export const USED_IN_LISTED = 5;
 /** Above this many files a list is noise: say "widely" and the count. */
 export const USED_IN_WIDELY = 25;
-/** The whole lookup's bound. The plugin briefing gives the lean call 6 s. */
+/**
+ * The whole lookup's bound. The ix-claude-plugin briefing (not in this repo)
+ * bounds the entire lean call with `IX_ISSUE_START_TIMEOUT`, 6 s, so this
+ * step may spend at most a quarter of that and is dropped when it would
+ * spend more.
+ */
 export const USED_IN_TIMEOUT_MS = 1500;
 
 /** The edges `ix callers` and `ix imported-by` follow inwards. */
