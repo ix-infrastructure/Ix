@@ -154,6 +154,7 @@ import { LANGUAGE_QUERIES } from './queries.js';
 import { classifyFileRole } from './role-classifier.js';
 import type { RoleClassification } from './role-classifier.js';
 import { callReceiver, collectReceiverFacts } from './receiver-types.js';
+import { collectPythonReceiverFacts } from './python-receivers.js';
 import { summarySignature, type FileSummary } from './symbol-index.js';
 export type { FileSummary } from './symbol-index.js';
 
@@ -240,10 +241,12 @@ export interface ParsedRelationship {
    */
   importVia?: 'helper';
   /**
-   * Lexically inferred receiver. An exact member resolves at tier `type`;
-   * otherwise the relationship resolves by its name, as without inference.
+   * Lexically inferred receiver. An exact member resolves at tier `type`.
+   * `receiverOnly` prevents a fallback to unrelated names.
    */
   receiverType?: string;
+  /** Python member call byte offset, retained through resolution to match its own inferred receiver. */
+  callSite?: number;
   receiverFactory?: string;
   /**
    * Java: methods called in turn on `receiverType` before this call
@@ -254,6 +257,8 @@ export interface ParsedRelationship {
    * Set on a typed relationship that only exists for its receiver (the call
    * also has its own, unchanged relationship). Without an exact member it
    * resolves to nothing: no edge, no claim, no unresolved-call entry.
+   * Python members use this on the actual call, without a bare fallback;
+   * those calls retain their source claim and unresolved-call diagnostics.
    */
   receiverOnly?: true;
 }
@@ -2822,12 +2827,19 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     const declaredTypeMap = new Map<string, Map<string, string>>();
     // Import aliases keyed by the in-file alias name (Go explicit aliases, etc.).
     const importAliases: Record<string, string> = {};
+    const recordPythonAlias = (local: string, target: string): void => {
+      // Imports are summarized per file. Different function-local bindings of
+      // one name cannot safely be represented as a single imported receiver.
+      const previous = Object.hasOwn(importAliases, local) ? importAliases[local] : undefined;
+      importAliases[local] = previous !== undefined && previous !== target ? '' : target;
+    };
     // JS/TS named/default import bindings (local → public symbol) for cross-repo
     // alias resolution. Additive: never alters emitted relationships.
     const isJsTs = language === SupportedLanguages.JavaScript || language === SupportedLanguages.TypeScript;
     const importBindings: ImportBinding[] = [];
     const jsTsImportedLocalNames = new Set<string>();
     const jsTsImportUseHasUnshadowed = new Map<string, boolean>();
+    const pythonImportUseHasUnshadowed = new Map<string, boolean>();
     // Per `${scope}\x00${callKey}`, whether every call site folded into that
     // CALLS relationship is a plain identifier call (see ParsedRelationship.bareCall).
     // Only for languages where such a call can never reach a class member.
@@ -3076,23 +3088,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         continue;
       }
 
-      // Python typed parameters: build paramTypeMap for qualifier substitution in the second pass.
-      // Maps function name → (param name → declared type) so that e.g. `query: Query` lets us
-      // rewrite `query.filter(...)` → `Query.filter` when building effectiveCallee.
+      // Python: retain direct class aliases (`alias = module.Class`) for bare calls.
+      // Receiver assignments and annotations are handled by python-receivers.ts.
       if (language === SupportedLanguages.Python) {
-        const typedParamScope = match.captures.find((c: any) => c.name === '_typed_param_scope');
-        const typedParamName = match.captures.find((c: any) => c.name === '_typed_param_name');
-        const typedParamType = match.captures.find((c: any) => c.name === '_typed_param_type');
-        if (typedParamScope && typedParamName && typedParamType) {
-          const scope = pythonScopeKey(typedParamScope.node);
-          if (scope) {
-            if (!paramTypeMap.has(scope)) paramTypeMap.set(scope, new Map());
-            paramTypeMap.get(scope)!.set(typedParamName.node.text, typedParamType.node.text);
-          }
-          continue;
-        }
-
-        // Assignment tracking: x = SomeClass() or x = Model.objects.method()
         const assignScope = match.captures.find((c: any) => c.name === '_assign_scope');
         const assignLhs = match.captures.find((c: any) => c.name === '_assign_lhs');
         const assignRhsType = match.captures.find((c: any) => c.name === '_assign_rhs_type');
@@ -3195,8 +3193,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       }
     }
 
-    const receiverFacts = [SupportedLanguages.Scala, SupportedLanguages.TypeScript, SupportedLanguages.Go, SupportedLanguages.Java].includes(language)
-      ? collectReceiverFacts(tree.rootNode, language, checkBudget) : undefined;
+    const pythonFacts = language === SupportedLanguages.Python ? collectPythonReceiverFacts(tree.rootNode, checkBudget) : undefined;
+    const receiverFacts = pythonFacts ?? ([SupportedLanguages.Scala, SupportedLanguages.TypeScript, SupportedLanguages.Go, SupportedLanguages.Java].includes(language)
+      ? collectReceiverFacts(tree.rootNode, language, checkBudget) : undefined);
 
     // --- Second pass: calls and imports ---
     for (const match of pass2Matches) {
@@ -3273,8 +3272,13 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         let modName = normalizeCapturedImport(importSource.node.text, language);
         if (importPrefix) modName = `${importPrefix}.${modName}`;
         const importAlias = match.captures.find((c: any) => c.name === 'import.alias')?.node.text;
+        if (language === SupportedLanguages.Python && importSource.node.parent?.type !== 'import_from_statement' && !importAlias) {
+          const head = modName.split('.')[0];
+          if (head) recordPythonAlias(head, head);
+        }
         if (importAlias && modName && importAlias !== '.' && importAlias !== '_') {
-          importAliases[importAlias] = modName;
+          if (language === SupportedLanguages.Python) recordPythonAlias(importAlias, modName);
+          else importAliases[importAlias] = modName;
         }
         // Elixir: `alias MyApp.Repo` (and grouped `alias MyApp.{Repo, ...}`) implicitly
         // bind the last segment as a short name. No @import.alias capture exists, so
@@ -3326,18 +3330,22 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       const importName = match.captures.find((c: any) => c.name === 'import.name');
       if (importName) {
         const name = importName.node.text;
-        if (name && name !== '*' && name.length > 1) {
+        if (name && name !== '*') {
           const rawModule = match.captures.find((c: any) => c.name === 'import.module')?.node.text;
           if (language === SupportedLanguages.Python && rawModule) {
             const local = match.captures.find((c: any) => c.name === 'import.local')?.node.text ?? name;
             const dotsOnly = /^\.+$/.test(rawModule);
-            const pkg = dotsOnly ? `${rawModule}${name}` : rawModule;
+            const pkg = rawModule;
             importBindings.push({ pkg, local, imported: name });
+            recordPythonAlias(local, `${rawModule}${dotsOnly ? '' : '.'}${name}`);
             if (dotsOnly) {
               entities.push({ name, kind: 'module', lineStart: importName.node.startPosition.row + 1, lineEnd: importName.node.startPosition.row + 1, language });
               relationships.push({ srcName: fileName, dstName: name, predicate: 'IMPORTS', importRaw: pkg });
               continue;
             }
+            entities.push({ name, kind: 'module', lineStart: importName.node.startPosition.row + 1, lineEnd: importName.node.startPosition.row + 1, language });
+            relationships.push({ srcName: fileName, dstName: name, predicate: 'IMPORTS', importRaw: rawModule });
+            continue;
           }
           entities.push({ name, kind: 'module', lineStart: importName.node.startPosition.row + 1, lineEnd: importName.node.startPosition.row + 1, language });
           relationships.push({ srcName: fileName, dstName: name, predicate: 'IMPORTS' });
@@ -3393,7 +3401,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         const typedReceiver = callCapture ? callReceiver(callName.node, receiverFacts!, callCapture.node) : undefined;
         // A builtin-named call is still dropped; only its typed relationship stays.
         const builtinCall = builtinsForLanguage(language).has(callee) && !qualifierCapture && !namespaceCapture;
-        if (builtinCall && !typedReceiver) continue;
+        const pythonFunction = language === SupportedLanguages.Python ? callCapture?.node.childForFieldName('function') : undefined;
+        const pythonMember = pythonFunction?.type === 'attribute' ? pythonFunction : undefined;
+        if (builtinCall && !typedReceiver && !pythonMember) continue;
 
         // For Python: skip calls that are decorator applications.
         // When a method is decorated (e.g. @util.deprecated(...)), the call sits at the
@@ -3443,6 +3453,17 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         const scope = caller;
         if (!seenCalls.has(scope)) seenCalls.set(scope, new Set());
         const seen = seenCalls.get(scope)!;
+
+        // Python members must resolve through their actual receiver or imported
+        // module. A bare member-name relationship would introduce false edges.
+        if (pythonMember) {
+          const object = pythonMember.childForFieldName('object');
+          const dstName = `${object.text}.${callee}`;
+          relationships.push({ srcName: caller, dstName, predicate: 'CALLS', receiverOnly: true, callSite: pythonMember.startIndex,
+            ...(pythonFacts?.isBound(object) ? { importBinding: false as const } : {}),
+            ...(typedReceiver?.type ? { receiverType: typedReceiver.type } : {}) });
+          continue;
+        }
 
         const effectiveCallee = (() => {
           // R package-qualified call (pkg::func / pkg:::func): keep the :: so the
@@ -3551,6 +3572,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
 
         if (!builtinCall && !qualifierCapture && !namespaceCapture && effectiveCallee === callee) {
           recordJsTsImportUse('CALLS', caller, effectiveCallee, callName.node, callee);
+          if (pythonFacts) {
+            const key = `CALLS\x00${caller}\x00${effectiveCallee}`;
+            pythonImportUseHasUnshadowed.set(key, (pythonImportUseHasUnshadowed.get(key) ?? false) || !pythonFacts.isBound(callName.node));
+          }
         }
 
         const callKey = phpCallKind ? `${phpCallKind}:${effectiveCallee}` : effectiveCallee;
@@ -3664,7 +3689,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     // sees the import, the cross-file edge remains meaningful.
     for (const rel of relationships) {
       const key = `${rel.predicate}\x00${rel.srcName}\x00${rel.dstName}`;
-      const hasUnshadowedUse = jsTsImportUseHasUnshadowed.get(key);
+      const hasUnshadowedUse = jsTsImportUseHasUnshadowed.get(key) ??
+        (language === SupportedLanguages.Python && Object.hasOwn(importAliases, rel.dstName) ? pythonImportUseHasUnshadowed.get(key) : undefined);
       if (hasUnshadowedUse === false) {
         rel.importBinding = false;
       } else if (
@@ -3791,6 +3817,8 @@ export interface ResolvedEdge {
   /** Which resolution tier produced the edge; written on the edge with `confidence`. */
   tier?: ResolutionTier;
   phpCallKind?: ParsedRelationship['phpCallKind'];
+  /** Correlates Python member calls without merging different receiver bindings. */
+  callSite?: number;
 }
 
 /**
@@ -5037,49 +5065,24 @@ export function resolveEdges(
   }
 
   /**
-   * Python absolute module `a.b.c` -> the files it can name: `a/b/c.py` or
-   * `a/b/c/__init__.py` below some source root. Matched on the full module
-   * path, so `from pkg.sub.mod import f` no longer means "any mod.py".
-   *   - One file matches: that file.
-   *   - Several (two packages named `a.b` in a monorepo): the one under the
-   *     deepest source root that contains the importing file. When no root
-   *     contains it, or the deepest tie, all of them, which the callers treat
-   *     as ambiguous (never the longest shared prefix: that binds a sibling
-   *     copy, e.g. `tests/fixtures/pkg`, over the real package).
-   *   - None: today's stem matching (`modNameToFiles`), so nothing that
-   *     resolved before stops resolving. Not when `strict` (an aliased
-   *     `import a.b as m`, which was never resolved before): then none, so
-   *     `import torch.nn as nn` does not bind a local `nn.py`.
-   * A module and a package of one name under one root (`a/b.py` beside
-   * `a/b/__init__.py`): the package, as Python's import system picks it.
-   * An undotted name keeps its stem match; only when no Python file has that
-   * stem does it name a package, `name/__init__.py`, and then only one under
-   * a source root that contains the importing file (the deepest), so a
-   * nested `myapp/logging/` does not capture `import logging` elsewhere.
-   * When `strict` (`import yaml as y`) it gets no stem match: only a module
-   * or package under the deepest root that contains the importing file.
-   * In both undotted cases a root that is itself a package directory (has an
-   * `__init__.py`) does not count, so a package's own `json.py` never stands
-   * in for the stdlib `json`.
-   * Candidates come from the stem and package maps (`pythonFilesBySuffix`),
-   * never a scan, and are memoized per (importing file, module): the
-   * transitive tier asks again for every file that imports the importing file.
+   * Match full Python module paths, preferring packages over same-named modules
+   * and the deepest source root containing the importer. Multiple roots stay
+   * ambiguous. Never fall back to a coincidental file stem for a missing module.
+   * Cache by importer and module: receiver and transitive tiers share this lookup.
    */
   const pythonModuleTargetsMemo = new Map<string, string[]>();
-  function pythonModuleTargets(srcFilePath: string, modName: string, strict = false): string[] {
-    const memoKey = `${srcFilePath}\0${modName}\0${strict ? 's' : ''}`;
+  function pythonModuleTargets(srcFilePath: string, modName: string): string[] {
+    const memoKey = `${srcFilePath}\0${modName}`;
     let targets = pythonModuleTargetsMemo.get(memoKey);
     if (!targets) {
-      targets = pythonModuleTargetsUncached(srcFilePath, modName, strict);
+      targets = pythonModuleTargetsUncached(srcFilePath, modName);
       pythonModuleTargetsMemo.set(memoKey, targets);
     }
     return targets;
   }
-  function pythonModuleTargetsUncached(srcFilePath: string, modName: string, strict: boolean): string[] {
-    const isPython = (fp: string): boolean =>
-      importLanguageCompatible(SupportedLanguages.Python, fileLanguage.get(fp) ?? languageFromPath(fp));
-    const stemMatches = (): string[] => modNameToFiles(modName, srcFilePath).filter(isPython);
-    if (!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(modName)) return stemMatches();
+  function pythonModuleTargetsUncached(srcFilePath: string, modName: string): string[] {
+    if (modName.startsWith('.')) return resolveRelativeImportTargets(srcFilePath, SupportedLanguages.Python, modName) ?? [];
+    if (!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(modName)) return [];
     const parts = modName.split('.');
     const last = parts[parts.length - 1];
     const srcKey = normalizedPathKey(srcFilePath);
@@ -5123,44 +5126,35 @@ export function resolveEdges(
     };
 
     if (parts.length === 1) {
-      // `import yaml as y` was never resolved before, so it gets no stem
-      // match: only a `yaml.py` / `yaml/__init__.py` under a source root that
-      // contains the importing file, where Python could actually find it.
-      if (strict) return deepestContaining(preferPackages([...collect(`${last}.py`, false), ...collect(`${last}/__init__.py`, true)]));
-      const byStem = stemMatches();
-      if (byStem.length > 0) return byStem;
-      return deepestContaining(collect(`${last}/__init__.py`, true));
+      const matches = preferPackages([...collect(`${last}.py`, false), ...collect(`${last}/__init__.py`, true)])
+        .filter(m => !isPackageDir(m.root));
+      const containing = deepestContaining(matches);
+      if (containing.length) return containing;
+
+      // Tests beside src/ import its top-level modules too. Require a unique
+      // provider and the explicit src layout, not an arbitrary same-stem file
+      // (tools/yaml.py) or a fixture copy in another root.
+      if (matches.length !== 1) return [];
+      const root = matches[0].root.replace(/\/$/, '');
+      const projectRoot = nodePath.posix.dirname(root);
+      return nodePath.posix.basename(root) === 'src' && scoreRoot(projectRoot === '.' ? '' : projectRoot).contains
+        ? [matches[0].fp] : [];
     }
 
     const modulePath = parts.join('/');
     const found = [...collect(`${modulePath}.py`, false), ...collect(`${modulePath}/__init__.py`, true)];
     const matches = preferPackages(found);
-    if (matches.length === 0) return strict ? [] : stemMatches();
+    if (matches.length === 0) return [];
     if (matches.length === 1) return [matches[0].fp];
 
     // Only a root that contains the importing file can win. A shared prefix
     // alone is no evidence: `tests/test_x.py` must not bind a copy under
     // `tests/fixtures/` over the real `src/` package.
     const containing = matches.map(m => ({ fp: m.fp, ...scoreRoot(m.root) })).filter(m => m.contains);
-    if (containing.length === 0) return matches.map(m => m.fp);
+    if (containing.length === 0) return [];
     const deepest = Math.max(...containing.map(m => m.shared));
     const closest = containing.filter(m => m.shared === deepest);
-    return closest.length === 1 ? [closest[0].fp] : matches.map(m => m.fp);
-  }
-
-  /**
-   * The `__init__.py` of the package a Python `from . import x` (or
-   * `from .. import x`) names, when `x` is not a submodule. Such a binding is
-   * recorded as `{ pkg: '.x', imported: 'x' }`; the package is the dots alone.
-   */
-  function pythonRelativePackageInit(srcFilePath: string, binding: ImportBinding): string | undefined {
-    const dots = binding.pkg.match(/^\.+/)?.[0];
-    if (!dots || binding.pkg !== `${dots}${binding.imported}` || binding.imported.includes('.')) return undefined;
-    const packageDir = relativeImportTarget(srcFilePath, SupportedLanguages.Python, dots);
-    if (packageDir === null) return undefined;
-    const init = normalizedPathKey(nodePath.posix.join(packageDir, '__init__.py'));
-    const files = (normalizedPathToFiles.get(init) ?? []).filter(fp => normalizedPathKey(fp) !== normalizedPathKey(srcFilePath));
-    return files.length === 1 ? files[0] : undefined;
+    return closest.length === 1 ? [closest[0].fp] : [];
   }
 
   function resolveImportTargets(
@@ -5169,8 +5163,16 @@ export function resolveEdges(
     modName: unknown,
     importRaw?: unknown,
     kind: 'runtime' | 'types' = 'runtime',
-    pythonStrict = false,
   ): string[] {
+    if (srcLanguage === SupportedLanguages.Python) {
+      if (typeof importRaw !== 'string') return [];
+      const name = typeof modName === 'string' ? modName : '';
+      if (name && name !== normalizeCapturedImport(importRaw, srcLanguage)) {
+        const child = pythonModuleTargets(srcFilePath, `${importRaw}${/^\.+$/.test(importRaw) ? '' : '.'}${name}`);
+        if (child.length) return child;
+      }
+      return pythonModuleTargets(srcFilePath, importRaw);
+    }
     const configuredMatches =
       (srcLanguage === SupportedLanguages.JavaScript || srcLanguage === SupportedLanguages.TypeScript) &&
       typeof importRaw === 'string' &&
@@ -5185,13 +5187,9 @@ export function resolveEdges(
     // come from the global stem index, so fall back to the extension-derived
     // language (always available) — otherwise an undefined dst language would
     // slip cross-language matches (e.g. a Python import -> a Rust/Elixir file).
-    // A Python module specifier (an `import` / `from … import` source, or a
-    // binding's package) matches by full module path. A bare imported name
-    // (`from pkg import f` -> `f`, no importRaw) keeps the stem match.
-    const pythonModule = srcLanguage === SupportedLanguages.Python && typeof importRaw === 'string';
     const importMatches = (configuredMatches === undefined
       ? resolveRelativeImportTargets(srcFilePath, srcLanguage, importRaw)
-        ?? (pythonModule ? pythonModuleTargets(srcFilePath, normalizeImportTarget(modName), pythonStrict) : modNameToFiles(modName, srcFilePath))
+        ?? modNameToFiles(modName, srcFilePath)
       : indexedConfiguredMatches ?? [])
       .filter(fp => importLanguageCompatible(srcLanguage, fileLanguage.get(fp) ?? languageFromPath(fp)));
     if (srcLanguage !== SupportedLanguages.Go || importMatches.length <= 1) return importMatches;
@@ -5201,8 +5199,8 @@ export function resolveEdges(
     });
   }
 
-  function resolveImportQualifierTargets(srcFilePath: string, srcLanguage: SupportedLanguages, modName: unknown, pythonStrict = false): string[] {
-    if (srcLanguage === SupportedLanguages.Python) return pythonModuleTargets(srcFilePath, normalizeImportTarget(modName), pythonStrict);
+  function resolveImportQualifierTargets(srcFilePath: string, srcLanguage: SupportedLanguages, modName: unknown): string[] {
+    if (srcLanguage === SupportedLanguages.Python) return pythonModuleTargets(srcFilePath, normalizeImportTarget(modName));
     const importMatches = modNameToFiles(modName, srcFilePath);
     if (srcLanguage !== SupportedLanguages.Go || importMatches.length <= 1) return importMatches;
     return narrowGoImportCandidates(srcFilePath, modName, importMatches, files => files);
@@ -5400,6 +5398,24 @@ export function resolveEdges(
       }).map(fp => ({ fp, type }));
     }
     if (language === SupportedLanguages.Java) return javaReceiverProviders(context, summary, parts, type);
+    if (language === SupportedLanguages.Python) {
+      const aliases = summary?.importAliases ?? {};
+      if (parts.length) {
+        const alias = aliases[parts[0]];
+        if (!alias) return [];
+        const module = [alias, ...parts.slice(1)].join('.');
+        return pythonModuleTargets(context, module).filter(fp => fileHasSymbol.get(fp)?.has(type)).map(fp => ({ fp, type }));
+      }
+      const alias = aliases[type];
+      if (alias !== undefined) {
+        if (fileHasSymbol.get(context)?.has(type)) return [];
+        const dot = alias.lastIndexOf('.');
+        const imported = alias.slice(dot + 1);
+        const module = /^\.+$/.test(alias.slice(0, dot + 1)) ? alias.slice(0, dot + 1) : alias.slice(0, dot) || '.';
+        return pythonModuleTargets(context, module).filter(fp => fileHasSymbol.get(fp)?.has(imported)).map(fp => ({ fp, type: imported }));
+      }
+      return fileHasSymbol.get(context)?.has(type) ? [{ fp: context, type }] : [];
+    }
     const binding = importBindingsByLocal.get(context)?.get(type);
     // A same-named declaration in the importing file can only be a nested
     // shadow (a `namespace` class); without scope facts, guess neither.
@@ -5538,14 +5554,19 @@ export function resolveEdges(
     return at;
   }
 
+  const typedTargetCache = new Map<string, { fp: string; key: string } | undefined>();
   /** The one member a typed CALLS relationship names, if it names exactly one. */
   function typedCallTarget(srcFilePath: string, rel: ParsedRelationship): { fp: string; key: string } | undefined {
+    const member = rel.dstName.slice(rel.dstName.lastIndexOf('.') + 1);
+    const key = `${srcFilePath}\0${rel.receiverType ?? ''}\0${rel.receiverFactory ?? ''}\0${rel.receiverChain?.join('.') ?? ''}\0${member}`;
+    if (typedTargetCache.has(key)) return typedTargetCache.get(key);
     const receiver = rel.receiverType
       ? rel.receiverChain ? javaChainReceiver(srcFilePath, rel.receiverType, rel.receiverChain) : { context: srcFilePath, type: rel.receiverType }
       : factoryReceiver(srcFilePath, rel.receiverFactory!);
-    const member = rel.dstName.slice(rel.dstName.lastIndexOf('.') + 1);
     const targets = receiver ? receiverMembers(receiver.context, receiver.type, member) : [];
-    return targets.length === 1 ? targets[0] : undefined;
+    const target = targets.length === 1 ? targets[0] : undefined;
+    typedTargetCache.set(key, target);
+    return target;
   }
 
   function factoryReceiver(context: string, factory: string): { context: string; type: string } | undefined {
@@ -5744,7 +5765,7 @@ export function resolveEdges(
       // A helper-literal import is inferred and binds no names: it becomes an
       // IMPORTS edge below but does not widen call-resolution scope.
       if (rel.importVia === 'helper') continue;
-      for (const fp of resolveImportTargets(srcFilePath, srcLanguage, rel.dstName, rel.importRaw, 'runtime', rel.importAliased === true)) {
+      for (const fp of resolveImportTargets(srcFilePath, srcLanguage, rel.dstName, rel.importRaw, 'runtime')) {
         importedFilePaths.add(fp);
       }
     }
@@ -5757,7 +5778,7 @@ export function resolveEdges(
       if (!fpSummary) continue;
       for (const rel of fpSummary.imports) {
         if (rel.importVia === 'helper') continue;
-        for (const transitiveFp of resolveImportTargets(fp, fpSummary.language, rel.dstName, rel.importRaw, 'runtime', rel.importAliased === true)) {
+        for (const transitiveFp of resolveImportTargets(fp, fpSummary.language, rel.dstName, rel.importRaw, 'runtime')) {
           if (!importedFilePaths.has(transitiveFp)) transitiveFilePaths.add(transitiveFp);
         }
       }
@@ -5838,7 +5859,7 @@ export function resolveEdges(
 
         const importMatches = pythonHasRelativeModuleImport && rel.importRaw === undefined
           ? []
-          : resolveImportTargets(srcFilePath, result.language, rel.dstName, rel.importRaw, 'runtime', rel.importAliased === true);
+          : resolveImportTargets(srcFilePath, result.language, rel.dstName, rel.importRaw, 'runtime');
         // A helper-literal import (`importModule(resolve("../x/dist/y.js"))`) is
         // inferred from a string, so it is kept only when that path names
         // exactly one tracked file — never through the package fallbacks below.
@@ -5886,11 +5907,9 @@ export function resolveEdges(
             }
           }
         }
-        // if dstName is a PascalCase symbol (class/function name captured via
-        // import.name from "from X import ClassName"), fall through to Tier 2/3
-        // symbol resolution so the edge connects to the actual class node rather than a file.
-        if (srcLanguage !== SupportedLanguages.Python || !/^[A-Z]/.test(rel.dstName)) continue;
-        // fall through to Tier 1b → Tier 2 → Tier 3 below
+        // An import without a proven module path cannot bind a same-named
+        // repository symbol, including PascalCase Python imports.
+        continue;
       }
 
       const phpType = srcLanguage === SupportedLanguages.PHP
@@ -5930,11 +5949,25 @@ export function resolveEdges(
         const target = typedCallTarget(srcFilePath, rel);
         if (target) {
           resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: target.fp, dstName: rel.dstName,
-            dstQualifiedKey: target.key, predicate: 'CALLS', confidence: 0.95, tier: 'type' });
+            dstQualifiedKey: target.key, predicate: 'CALLS', confidence: 0.95, tier: 'type',
+            ...(rel.callSite !== undefined ? { callSite: rel.callSite } : {}) });
           stats.resolvedType = (stats.resolvedType ?? 0) + 1;
           continue;
         }
-        if (rel.receiverOnly) continue;
+        if (rel.receiverOnly && srcLanguage !== SupportedLanguages.Python) continue;
+      }
+      if (srcLanguage === SupportedLanguages.Python && rel.predicate === 'CALLS' && rel.receiverOnly) {
+        const parts = rel.dstName.split('.');
+        const member = parts.pop()!;
+        const alias = rel.importBinding === false ? undefined : result.importAliases?.[parts[0]];
+        const files = alias ? pythonModuleTargets(srcFilePath, [alias, ...parts.slice(1)].join('.')) : [];
+        const fp = files[0];
+        const keys = fp ? fileQKeys.get(fp)?.get(member)?.filter(key => key === member) ?? [] : [];
+        if (files.length === 1 && keys.length === 1) {
+          resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: fp, dstName: rel.dstName,
+            dstQualifiedKey: member, predicate: 'CALLS', confidence: 0.9, tier: 'binding', callSite: rel.callSite });
+        }
+        continue;
       }
       const origDstName = rel.dstName;
       // Z: resolve a renamed-import call by the provider's public symbol, but keep the
@@ -5992,19 +6025,13 @@ export function resolveEdges(
       let bindingProviderFiles: string[] | undefined;
       if (rel.predicate === 'CALLS' || rel.predicate === 'EXTENDS' || rel.predicate === 'REFERENCES') {
         if (binding) {
-          let providerFiles = bindingProviderFiles = [...new Set(resolveImportTargets(
+          const providerFiles = bindingProviderFiles = [...new Set(resolveImportTargets(
             srcFilePath,
             srcLanguage,
             binding.pkg,
             binding.pkg,
             rel.predicate === 'CALLS' ? 'runtime' : 'types',
           ))];
-          // Python `from . import x` with no submodule `x`: `x` is a name the
-          // package itself defines, in its `__init__.py`.
-          if (providerFiles.length === 0 && srcLanguage === SupportedLanguages.Python) {
-            const packageInit = pythonRelativePackageInit(srcFilePath, binding);
-            if (packageInit) providerFiles = bindingProviderFiles = [packageInit];
-          }
           if (
             configuredBindingTargets !== undefined &&
             providerFiles.length === 1 &&
@@ -6054,6 +6081,9 @@ export function resolveEdges(
               continue;
             }
           }
+          // A Python import binds this name to that module alone. If the
+          // provider or symbol is missing, a global namesake is not a target.
+          if (srcLanguage === SupportedLanguages.Python) continue;
         }
       }
 
@@ -6104,7 +6134,7 @@ export function resolveEdges(
           // Python `import a.b as m`: `m.f` is `f` in the one file a.b names.
           // An ambiguous module stays unresolved here, as without the alias.
           const pythonAliasedModule = srcLanguage === SupportedLanguages.Python ? result.importAliases?.[qualifierPart] : undefined;
-          const pythonAliasedFiles = pythonAliasedModule ? resolveImportQualifierTargets(srcFilePath, srcLanguage, pythonAliasedModule, true) : [];
+          const pythonAliasedFiles = pythonAliasedModule ? resolveImportQualifierTargets(srcFilePath, srcLanguage, pythonAliasedModule) : [];
           const aliasedImportMatches = srcLanguage === SupportedLanguages.Go ? resolveImportQualifierTargets(srcFilePath, srcLanguage, result.importAliases?.[qualifierPart] ?? '')
           : elixirAliasedModule ? (symbolToFiles.get(elixirAliasedModule) ?? []).filter(fp => fp !== srcFilePath)
           : pythonAliasedFiles.length === 1 ? pythonAliasedFiles

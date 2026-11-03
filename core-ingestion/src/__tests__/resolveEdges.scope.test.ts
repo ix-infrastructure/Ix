@@ -260,15 +260,14 @@ describe('bare calls never resolve to a class member (Python, Rust, PHP)', () =>
     expect(callsTo(resolveEdges([caller, method]), method.filePath)).toEqual([]);
   });
 
-  it('Python: a member call still reaches the method, and a bare call a module-scope function', () => {
+  it('Python: an unknown receiver stays unresolved, and a bare call reaches a free function', () => {
     const lib = parse('pkg/lib.py', 'class Foo:\n    def describe(self):\n        return 1\n\ndef helper_fn():\n    return 2\n');
     const caller = parse('pkg/main.py', 'def run(obj):\n    obj.describe()\n    return helper_fn()\n');
     const edges = callsTo(resolveEdges([caller, lib]), lib.filePath);
     expect(edges).toEqual(expect.arrayContaining([
-      expect.objectContaining({ dstName: 'describe', dstQualifiedKey: 'Foo.describe' }),
       expect.objectContaining({ dstName: 'helper_fn', dstQualifiedKey: 'helper_fn' }),
     ]));
-    expect(edges).toHaveLength(2);
+    expect(edges).toHaveLength(1);
   });
 
   it('Rust: describe() does not link to an impl method; a free function still resolves', () => {

@@ -11,26 +11,26 @@ import { loadIngestionModules } from "../commands/ingestion-loader.js";
 import { FakeBackend } from "./helpers/fake-backend.js";
 
 /**
- * tree-sitter/1.30 adds receiver-type facts: `tier: type` CALLS edges and the
- * receiver fields of stored summaries. A graph built by 1.29 has neither, and
+ * tree-sitter/1.31 adds Python receiver-type facts and package resolution.
+ * A Python graph built by 1.30 has neither, and
  * an unchanged file keeps its patch and summary until the extractor changes.
  * This checks that the extractor change alone brings such a graph to what a
  * fresh map writes, typed edges included (see `ingest-extractor-bump.test.ts`).
  *
- * The 1.29 graph is made by the current parser with its receiver facts
- * stripped from every parse result and summary, under the 1.29 extractor name
+ * The 1.30 graph is made by the current parser with Python receiver facts
+ * stripped from every parse result and summary, under the 1.30 extractor name
  * and patch ids.
  */
 
-const OLD_EXTRACTOR = "tree-sitter/1.29";
+const OLD_EXTRACTOR = "tree-sitter/1.30";
 
 const legacy = vi.hoisted(() => ({ on: false }));
 
 vi.mock("../commands/ingestion-loader.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../commands/ingestion-loader.js")>();
-  /** A parse result as 1.29 produced it: no receiver-only calls, no receiver fields. */
+  /** Approximate legacy Python extraction; other languages keep their facts. */
   const strip = (parsed: any): any => {
-    if (!parsed || !Array.isArray(parsed.relationships)) return parsed;
+    if (!parsed || parsed.language !== 'python' || !Array.isArray(parsed.relationships)) return parsed;
     parsed.relationships = parsed.relationships.filter((r: any) => !r.receiverOnly);
     for (const r of parsed.relationships) { delete r.receiverType; delete r.receiverFactory; }
     delete parsed.receiverPackage; delete parsed.receiverFactories; delete parsed.receiverHeritage;
@@ -83,9 +83,11 @@ const SOURCES: Record<string, string> = {
   "go/use.go": "package p\n\nfunc use(t Target) { t.Run() }\n",
   "scala/model.scala": "package model\nclass Target { def run() = () }\nclass Other { def run() = () }\n",
   "scala/use.scala": "import model.Target\nobject Use { def use(d: Target) = d.run() }\n",
+  "src/pkg/model.py": "class Target:\n    def run(self): pass\nclass Other:\n    def run(self): pass\n",
+  "src/pkg/use.py": "from .model import Target\nclass Service:\n    def __init__(self):\n        self.dep = Target()\n    def execute(self):\n        self.dep.run()\n",
 };
 
-describe("the tree-sitter/1.30 extractor bump", () => {
+describe("the tree-sitter/1.31 extractor bump", () => {
   vi.setConfig({ testTimeout: 120_000 });
 
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ix-receiver-bump-")));
@@ -128,7 +130,7 @@ describe("the tree-sitter/1.30 extractor bump", () => {
     }
   }
 
-  it("re-ingests a 1.29 graph once and gains the fresh map's typed edges", async () => {
+  it("re-ingests a 1.30 graph once and gains the fresh map's Python edges", async () => {
     const current = (await loadIngestionModules())[1].extractorName();
     const backend = new FakeBackend({ semantics: "head" });
     const fresh = new FakeBackend({ semantics: "head" });
@@ -137,12 +139,12 @@ describe("the tree-sitter/1.30 extractor bump", () => {
       const endpoint = await backend.start();
       await map(join(root, "fresh-home"), await fresh.start());
       // One typed edge per language.
-      expect(fresh.edgesOfTier("type"), "the fresh map").toHaveLength(3);
+      expect(fresh.edgesOfTier("type"), "the fresh map").toHaveLength(4);
 
       legacy.on = true;
       await map(home, endpoint);
       legacy.on = false;
-      expect(backend.edgesOfTier("type"), "the 1.29 graph").toEqual([]);
+      expect(backend.edgesOfTier("type"), "the 1.30 graph").toHaveLength(3);
       expect(backend.graphSignature().edges).not.toEqual(fresh.graphSignature().edges);
 
       backend.resetRequests();

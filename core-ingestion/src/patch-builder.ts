@@ -158,11 +158,11 @@ export function patchActor(): string {
 }
 
 export function extractorName(): string {
-  return `tree-sitter/1.30`;
+  return `tree-sitter/1.31`;
 }
 
 /** Previous extractor versions — their patches are superseded when re-ingesting. */
-export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.29', 'tree-sitter/1.28', 'tree-sitter/1.27', 'tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
+export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.30', 'tree-sitter/1.29', 'tree-sitter/1.28', 'tree-sitter/1.27', 'tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
 
 /** Patch ids that may own the active graph entities for a stored source hash. */
 export function sourcePatchIdCandidates(
@@ -258,7 +258,7 @@ export function buildPatch(
   const { entities, chunks } = result;
   // A typed receiver call is resolved even within one file: its exact member
   // decides whether a receiver-only relationship becomes an edge at all.
-  if (result.relationships.some(r => r.receiverType || r.receiverFactory)) {
+  if (result.relationships.some(r => r.receiverType || r.receiverFactory || r.receiverOnly)) {
     return buildPatchWithResolution(result, sourceHash, workspaceId, resolveEdges([result]), previousSourceHash, multiRepo);
   }
   // A helper-literal import is inferred and only means something once resolved
@@ -582,7 +582,9 @@ export function buildPatchWithResolution(
    */
   resolutionSalt?: string,
 ): GraphPatchPayload {
-  // Build lookup: `${srcName}:${predicate}:${dstName}` → { dstFilePath, dstQualifiedKey }
+  // Python members retain call-site identity: one spelling may have several receivers.
+  const resolutionKey = (edge: { srcName: string; predicate: string; dstName: string; callSite?: number }): string =>
+    `${edge.srcName}:${edge.predicate}:${edge.dstName}${edge.callSite !== undefined ? `:python:${edge.callSite}` : ''}`;
   // Callers should pass only edges for this file (pre-grouped) for best performance,
   // but we still tolerate the full array for backward compatibility.
   const edgeResolution = new Map<string, {
@@ -594,7 +596,7 @@ export function buildPatchWithResolution(
   for (const edge of resolvedEdges) {
     if (edge.srcFilePath !== result.filePath) continue;
     const callKind = edge.phpCallKind ? `:${edge.phpCallKind}` : '';
-    edgeResolution.set(`${edge.srcName}:${edge.predicate}:${edge.dstName}${callKind}`, {
+    edgeResolution.set(`${resolutionKey(edge)}${callKind}`, {
       dstFilePath: edge.dstFilePath,
       dstQualifiedKey: edge.dstQualifiedKey,
       confidence: edge.confidence,
@@ -606,7 +608,7 @@ export function buildPatchWithResolution(
   // A helper-literal import (see ParsedRelationship.importVia) is inferred from a
   // string, so it is emitted only when resolveEdges tied it to exactly one file.
   const resolvedHere = (r: (typeof result.relationships)[number]): boolean =>
-    edgeResolution.has(`${r.srcName}:${r.predicate}:${r.dstName}`);
+    edgeResolution.has(resolutionKey(r));
   const relationships = [
     ...result.relationships.filter(r => !r.receiverOnly && (r.importVia !== 'helper' || resolvedHere(r))),
     // A receiver-only typed call (see ParsedRelationship.receiverOnly) exists only
@@ -748,6 +750,13 @@ export function buildPatchWithResolution(
   const emittedEdgeIdentities = new Map<string, PatchOp>();
   /** CALLS dropped for want of a destination node; recorded on their caller. */
   const unresolvedCalls = unresolvedCallRecorder(seenNodeIds2, fileNodeId2);
+  // Python's member relationship is the call itself, so retain an unknown
+  // receiver in diagnostics even though it cannot write an edge.
+  if (result.language === 'python') {
+    for (const r of result.relationships) {
+      if (r.receiverOnly && !resolvedHere(r)) unresolvedCalls.add(nodeId(idPath, resolveKey(r.srcName)), r.dstName);
+    }
+  }
   const relationshipShapeCounts = new Map<string, number>();
   for (const relationship of relationships) {
     const key = `${relationship.srcName}:${relationship.predicate}:${relationship.dstName}`;
@@ -766,7 +775,7 @@ export function buildPatchWithResolution(
     /** Set when resolveEdges tied the edge to another file. */
     resolution: { confidence: number; tier: ResolutionTier | undefined } | null;
   } => {
-    const baseKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
+    const baseKey = resolutionKey(r);
     const salted = r.phpCallKind ? `${baseKey}:${r.phpCallKind}` : baseKey;
     const matched = edgeResolution.has(salted) ? salted : baseKey;
 
@@ -911,9 +920,9 @@ export function buildPatchWithResolution(
   // arrives as two relationships that produce byte-identical claims. The kind is
   // not part of a claim, so nothing downstream can tell them apart.
   const emittedClaims = new Set<string>();
-  for (const r of relationships) {
+  for (const r of result.language === 'python' ? result.relationships : relationships) {
     // A receiver-only typed call claims nothing the call's own relationship does not.
-    if (r.receiverOnly) continue;
+    if (r.receiverOnly && result.language !== 'python') continue;
     const srcKey = resolveKey(r.srcName);
     const entityId = nodeId(idPath, srcKey);
     const field = `${r.predicate.toLowerCase()}:${r.dstName}`;

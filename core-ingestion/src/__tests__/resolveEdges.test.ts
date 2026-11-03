@@ -1660,7 +1660,8 @@ final class UseCase
       srcFilePath: '/repo/pkg/a/caller.py',
       srcName: 'caller',
       dstFilePath: '/repo/pkg/a/utils.py',
-      dstName: 'target',
+      dstName: 'utils.target',
+      callSite: expect.any(Number),
       dstQualifiedKey: 'target',
       predicate: 'CALLS',
       confidence: 0.9,
@@ -2102,33 +2103,13 @@ final class UseCase
     });
   });
 
-  it('Python: from X import ClassName resolves IMPORTS edge to the class node via Tier 2', () => {
-    // `from models import Column` produces two IMPORTS edges: one for the module
-    // (resolves to models.py as a file) and one for the symbol (dstName='Column',
-    // no file match). The PascalCase fallthrough should bind Column to the class node.
-    const consumer = fileResult(
-      '/repo/consumer.py',
-      SupportedLanguages.Python,
-      [entity('use_column', SupportedLanguages.Python)],
-      [
-        { srcName: 'consumer.py', dstName: 'models', predicate: 'IMPORTS' },
-        { srcName: 'consumer.py', dstName: 'Column', predicate: 'IMPORTS' },
-      ],
-    );
-    const models = fileResult(
-      '/repo/models.py',
-      SupportedLanguages.Python,
-      [entity('Column', SupportedLanguages.Python, 'class')],
-    );
-
+  it('Python: named imports bind the defining module file', () => {
+    const consumer = parseFile('/repo/consumer.py', 'from models import Column\n')!;
+    const models = parseFile('/repo/models.py', 'class Column: pass\n')!;
     expect(resolveEdges([consumer, models])).toContainEqual({
-      srcFilePath: '/repo/consumer.py',
-      srcName: 'consumer.py',
-      dstFilePath: '/repo/models.py',
-      dstName: 'Column',
-      dstQualifiedKey: 'Column',
-      predicate: 'IMPORTS',
-      confidence: 0.9,
+      srcFilePath: '/repo/consumer.py', srcName: 'consumer.py',
+      dstFilePath: '/repo/models.py', dstName: 'Column', dstQualifiedKey: 'models.py',
+      predicate: 'IMPORTS', confidence: 0.9,
     });
   });
 

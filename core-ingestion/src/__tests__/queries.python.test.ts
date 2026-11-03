@@ -36,6 +36,7 @@ def top_level():
       srcName: 'example.py',
       dstName: 'User',
       predicate: 'IMPORTS',
+      importRaw: '.models',
     });
     expect(result!.importBindings).toContainEqual({
       pkg: '.models',
@@ -59,19 +60,16 @@ def top_level():
       predicate: 'CALLS',
       bareCall: true,
     });
+    // Keep the source receiver and call site; the declared type directs resolution
+    // without adding a guessed bare-member edge.
     expect(result!.relationships).toContainEqual({
       srcName: 'Service.run',
-      dstName: 'save',
+      dstName: 'value.save',
+      callSite: expect.any(Number),
       predicate: 'CALLS',
-    });
-    // The qualifier pattern also emits the fully-qualified form so Tier-1b
-    // resolution can resolve e.g. Session.execute → session.py when the
-    // qualifier is a class name present in the caller's imports. Inside a
-    // method too, a typed parameter's qualifier is its declared type.
-    expect(result!.relationships).toContainEqual({
-      srcName: 'Service.run',
-      dstName: 'User.save',
-      predicate: 'CALLS',
+      receiverType: 'User',
+      receiverOnly: true,
+      importBinding: false,
     });
   });
 
@@ -85,10 +83,10 @@ def top_level():
       srcName: 'caller.py',
       dstName: 'utils',
       predicate: 'IMPORTS',
-      importRaw: '.utils',
+      importRaw: '.',
     });
     expect(result!.importBindings).toContainEqual({
-      pkg: '.utils',
+      pkg: '.',
       local: 'utils',
       imported: 'utils',
     });
@@ -128,11 +126,15 @@ def my_view(request):
     // conn resolved to MyClass via assignTypeMap → MyClass.execute
     expect(result!.relationships).toContainEqual({
       srcName: 'my_view',
-      dstName: 'MyClass.execute',
+      dstName: 'conn.execute',
+      callSite: expect.any(Number),
       predicate: 'CALLS',
+      receiverType: 'MyClass',
+      receiverOnly: true,
+      importBinding: false,
     });
-    // bare callee edge is also emitted
-    expect(result!.relationships).toContainEqual({
+    // No bare-member fallback can guess an unrelated method.
+    expect(result!.relationships).not.toContainEqual({
       srcName: 'my_view',
       dstName: 'execute',
       predicate: 'CALLS',
@@ -153,10 +155,10 @@ class Service:
 
     expect(result).not.toBeNull();
     const calls = result!.relationships.filter(r => r.predicate === 'CALLS' && r.srcName === 'Service.run');
-    expect(calls).toContainEqual({ srcName: 'Service.run', dstName: 'Query.filter', predicate: 'CALLS' });
-    expect(calls).toContainEqual({ srcName: 'Service.run', dstName: 'Builder.build', predicate: 'CALLS' });
-    expect(calls.map(c => c.dstName)).not.toContain('q.filter');
-    expect(calls.map(c => c.dstName)).not.toContain('x.build');
+    expect(calls).toContainEqual(expect.objectContaining({ srcName: 'Service.run', dstName: 'q.filter', predicate: 'CALLS', receiverType: 'Query', receiverOnly: true, callSite: expect.any(Number) }));
+    expect(calls).toContainEqual(expect.objectContaining({ srcName: 'Service.run', dstName: 'x.build', predicate: 'CALLS', receiverType: 'Builder', receiverOnly: true, callSite: expect.any(Number) }));
+    expect(calls.map(c => c.dstName)).not.toContain('filter');
+    expect(calls.map(c => c.dstName)).not.toContain('build');
   });
 
   it('records import a.b as m as an IMPORTS edge and a module alias', () => {
@@ -172,10 +174,10 @@ class Service:
       importRaw: 'pkg.sub.mod',
       importAliased: true,
     });
-    // The unaliased import carries no flag: it keeps the stem fallback.
+    // Unaliased dotted imports bind their head so the full member path is preserved.
     expect(result!.relationships).toContainEqual({ srcName: 'main.py', dstName: 'os.path', predicate: 'IMPORTS', importRaw: 'os.path' });
-    expect(result!.importAliases).toEqual({ m: 'pkg.sub.mod' });
-    expect(result!.relationships).toContainEqual({ srcName: 'main', dstName: 'm.load', predicate: 'CALLS' });
+    expect(result!.importAliases).toEqual({ m: 'pkg.sub.mod', os: 'os' });
+    expect(result!.relationships).toContainEqual(expect.objectContaining({ srcName: 'main', dstName: 'm.load', predicate: 'CALLS', receiverOnly: true, callSite: expect.any(Number) }));
   });
 
   it('emits REFERENCES edge for class passed as keyword argument value', () => {
@@ -198,7 +200,7 @@ class AdminSite:
     });
   });
 
-  it('resolves qualifier from Model.objects.method() assignment (Pattern 2)', () => {
+  it('keeps ORM factory results unresolved without a declared type', () => {
     const result = parseFile(
       '/repo/views.py',
       `
@@ -209,17 +211,24 @@ def list_items():
     );
 
     expect(result).not.toBeNull();
-    // ORM call emits MyModel.all via the two-level qualifier query
+    // Keep the actual receiver; a manager method need not return MyModel.
     expect(result!.relationships).toContainEqual({
       srcName: 'list_items',
-      dstName: 'MyModel.all',
+      dstName: 'MyModel.objects.all',
+      callSite: expect.any(Number),
+      importBinding: false,
       predicate: 'CALLS',
+      receiverOnly: true,
     });
-    // queryset resolved to MyModel via assignTypeMap → MyModel.filter
+    // No inferred concrete type for a dynamic factory result.
     expect(result!.relationships).toContainEqual({
       srcName: 'list_items',
-      dstName: 'MyModel.filter',
+      dstName: 'queryset.filter',
+      callSite: expect.any(Number),
       predicate: 'CALLS',
+      receiverOnly: true,
+      receiverType: 'MyModel.objects.all',
+      importBinding: false,
     });
   });
 
