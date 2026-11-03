@@ -783,6 +783,35 @@ endpoints by entity id; without it `src=`/`dst=` resolve to nothing the reader
 has seen. A `claim` record carries `statement=` for the same reason its `id=`
 is not enough: the id is the backend's, and the statement is what changed.
 
+`ix context --from-issue <file> --lean`:
+
+```
+issue confidence=high
+start path=src/config.ts lines=40-88 name=parseConfig kind=function why="the issue names `parseConfig`"
+used_in name=parseConfig files=src/cli/run.ts,src/server/boot.ts,src/tools/check.ts,src/tools/lint.ts,src/web/app.ts more=2 total=7
+start path=lib/deploy.js name=deploy.js kind=file why="the issue names this file"
+ranked path=src/a.ts
+ranked path=src/b.ts
+```
+
+The starting points Ix trusts (a path the issue names, or a specific
+identifier that resolved), then the next files by the issue's text. When it
+trusts none, one `issue confidence=low reason=...` record and nothing else.
+
+A `used_in` record follows the `start` record of each of the first two
+symbol starts (never a file start): the files outside the symbol's own file
+that call, import or reference it, tests excluded, most uses first, at most 5
+listed in `files` with the rest counted in `more` (absent when every file is
+listed). `total` counts them all. Above 25 files the list is dropped:
+`used_in name=parseConfig widely=true total=40`. No record when no other file
+uses it. It comes from one graph request for both symbols, bounded at 1.5 s;
+on a timeout, an error or a backend that does not answer it, the output is
+exactly what it would be without the line. Text prints the same as an
+indented `used in: a.ts, b.ts (+2 more)` or `used in: widely (40 files)` line
+under the start; json (`kind: "issue_lean"`) gives the start
+`usedIn: { files, total }`, with `widely: true` and an empty `files` above 25.
+A parser that skips record kinds it does not know reads the rest unchanged.
+
 `ix context --list`:
 
 ```

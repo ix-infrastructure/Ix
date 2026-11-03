@@ -196,6 +196,22 @@ export class IxClient {
     });
   }
 
+  /**
+   * The one-hop neighbourhood of several resolved nodes in ONE request: the
+   * same id slice `contextForNode` sends, with every id in it. `signal` makes
+   * it an optional probe (`post`): no shared memo, no retry, and it gives up
+   * the moment the caller stops waiting.
+   */
+  async contextForNodes(
+    nodeIds: string[],
+    opts: { depth?: string; signal?: AbortSignal } = {},
+  ): Promise<StructuredContext> {
+    return this.post("/v1/context", {
+      slices: [{ type: "nodes", nodeIds, expand: true, hops: 1 }],
+      ...(opts.depth !== undefined ? { depth: opts.depth } : {}),
+    }, { signal: opts.signal });
+  }
+
   async ingest(path: string, recursive?: boolean, force?: boolean): Promise<IngestResult> {
     const resp = await fetch(`${this.endpoint}/v1/ingest`, {
       method: "POST",

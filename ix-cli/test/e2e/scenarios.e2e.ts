@@ -362,6 +362,63 @@ describe("python callers through imports", () => {
   });
 });
 
+// The lean issue view's "used in" line (fixtures/polyglot). The two named
+// symbols are defined in DIFFERENT files -- formatPercent in web/src/format.ts,
+// multiply in web/src/math.ts -- because the view keeps one start per file:
+// two names from format.ts would leave the second with no start, and the
+// batched read below would only ever carry one id. Both lines come from ONE
+// /v1/context request with both ids in its node slice. Each symbol's line is
+// checked against what `ix callers` (/v1/expand, one id at a time) says, so a
+// backend that ignored the second id, or trimmed one id's neighbours, fails
+// here, and a failure says whether the graph lacks the edge or the batched
+// read does. multiply is also called from format.ts, the FIRST symbol's own
+// file: that is excluded for formatPercent only, never for multiply.
+describe("lean issue view: where the named symbols are used", () => {
+  it("lists the files outside each symbol's own that call it, for both symbols from one request", () => {
+    const co = checkout("polyglot");
+    map(env, co);
+    const issue = join(co.dir, "..", "issue.md");
+    writeFileSync(issue, "The tax line is wrong: `formatPercent` rounds 0.085 down, because `multiply` loses precision on fractional cents.\n");
+
+    // Per symbol, the files `ix callers` finds outside the symbol's own file.
+    const callerFiles = (symbol: string, own: string): string[] => {
+      const out = JSON.parse(ix(env, co, ["callers", symbol, "--format", "json"]).stdout) as {
+        resultSource: string; results: Array<{ path?: string }>;
+      };
+      expect(out.resultSource).toBe("graph");
+      return [...new Set(out.results.flatMap((r) => (r.path && r.path !== own ? [r.path] : [])))].sort();
+    };
+    const percentCallers = callerFiles("formatPercent", "web/src/format.ts");
+    const multiplyCallers = callerFiles("multiply", "web/src/math.ts");
+    expect(percentCallers).toContain("web/src/index.ts");
+    expect(multiplyCallers).toEqual(expect.arrayContaining(["web/src/cart.ts", "web/src/format.ts"]));
+
+    const lean = JSON.parse(ix(env, co, ["context", "--from-issue", issue, "--lean", "--format", "json"]).stdout) as {
+      kind: string; confidence: string;
+      startingPoints: Array<{ name: string; path: string; usedIn?: { files: string[]; total: number } }>;
+    };
+    expect(lean.kind).toBe("issue_lean");
+    expect(lean.confidence).toBe("high");
+    expect(lean.startingPoints.map((s) => `${s.name}@${s.path}`)).toEqual([
+      "formatPercent@web/src/format.ts",
+      "multiply@web/src/math.ts",
+    ]);
+    const byName = new Map(lean.startingPoints.map((s) => [s.name, s]));
+    const percent = byName.get("formatPercent")?.usedIn;
+    const mult = byName.get("multiply")?.usedIn;
+    // Every file `ix callers` names is in the batched answer, for each id.
+    expect(percent?.files).toEqual(expect.arrayContaining(percentCallers));
+    expect(mult?.files).toEqual(expect.arrayContaining(multiplyCallers));
+    expect(percent?.files).not.toContain("web/src/format.ts");
+    expect(mult?.files).toContain("web/src/format.ts");
+    for (const s of lean.startingPoints) expect(s.usedIn?.files ?? []).not.toContain(s.path);
+
+    const text = ix(env, co, ["context", "--from-issue", issue, "--lean"]).stdout;
+    expect(text).toMatch(/\n {4}used in: .*web\/src\/index\.ts/);
+    expect(text).toMatch(/\n {4}used in: .*web\/src\/cart\.ts/);
+  });
+});
+
 describe("an extractor upgrade over a real backend (IN-20)", () => {
   // The orphan sweep decides ownership from what POST /v1/nodes returns
   // (provenance.sourceUri, attrs.external, deletedRev). The unit suite proves

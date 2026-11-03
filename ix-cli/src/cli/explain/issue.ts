@@ -890,11 +890,28 @@ export function issueConfidence(plan: Pick<IssuePlan, "starts" | "fallback">): I
 /** Files after the starting points in a lean view. */
 export const LEAN_RANKED = 4;
 
+/**
+ * The files outside a symbol start's own file that call, import or reference
+ * it (tests excluded), best first: at most a few listed, or none and `widely`
+ * when there are too many to be worth listing. See issue-used-in.ts.
+ */
+export interface UsedIn {
+  files: string[];
+  /** Every such file, listed or not. */
+  total: number;
+  widely?: true;
+}
+
+/** A starting point of the lean view, with where it is used when Ix looked that up. */
+export interface LeanStart extends StartingPoint {
+  usedIn?: UsedIn;
+}
+
 /** `ix context --from-issue --lean`: where to start, and nothing else. */
 export interface LeanIssueView {
   confidence: "high" | "low";
   reason?: string;
-  startingPoints: StartingPoint[];
+  startingPoints: LeanStart[];
   /** The next files by BM25 against the issue, starting files excluded. */
   alsoRanked: RankedFile[];
   unresolved: string[];

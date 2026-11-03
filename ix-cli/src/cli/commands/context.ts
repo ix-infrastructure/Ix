@@ -34,10 +34,12 @@ import {
   type Closeness,
   type IssuePlan,
   type LeanIssueView,
+  type UsedIn,
   type RankedFile,
   type StartingPoint,
   type SymbolHit,
 } from "../explain/issue.js";
+import { addUsedIn } from "../explain/issue-used-in.js";
 import { collectIssueEntities, placeIssueMatches, rankIssueEntities, type IssueEntityRanking } from "../explain/issue-entities.js";
 import { symbolReadChecker } from "../symbol-read-check.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
@@ -1963,13 +1965,15 @@ async function planIssueWith(client: IxClient, text: string) {
  * `ix context --from-issue --lean`: the starting points Ix trusts and the
  * next few files, with no bundle around them. See `leanIssueView` for why.
  * Nothing here needs a centre node, so it is also the cheap path: one search
- * per name the issue mentions, and BM25 over the tracked files. Companion
+ * per name the issue mentions, BM25 over the tracked files, and one bounded
+ * request for where the first symbols are used (issue-used-in.ts). Companion
  * files (issue-companions.ts) are full-bundle only.
  */
 async function emitLeanIssue(arg: string, opts: ContextOptions): Promise<void> {
   const text = await readIssueOrReport(arg, opts.format);
   if (text === undefined) return;
-  const view = leanIssueView(await planIssueWith(createClient({ query: true }), text));
+  const client = createClient({ query: true });
+  const view = await addUsedIn(client, leanIssueView(await planIssueWith(client, text)));
   if (opts.format === "json") {
     printJson({ kind: "issue_lean", ...view });
   } else if (opts.format === "llm") {
@@ -1988,6 +1992,23 @@ function startWhy(s: StartingPoint): string {
   return s.via === "path in issue" ? "the issue names this file" : `the issue names \`${s.token}\``;
 }
 
+/** `a.ts, b.ts (+2 more)`, or `widely (40 files)`. */
+function usedInText(u: UsedIn): string {
+  if (u.widely) return `widely (${u.total} files)`;
+  const more = u.total - u.files.length;
+  return `${u.files.join(", ")}${more > 0 ? ` (+${more} more)` : ""}`;
+}
+
+function usedInLlm(name: string, u: UsedIn): string {
+  if (u.widely) return llmLine("used_in", [["name", name], ["widely", "true"], ["total", u.total]]);
+  const more = u.total - u.files.length;
+  return llmLine("used_in", [
+    ["name", name], ["files", u.files.join(",")],
+    ...(more > 0 ? [["more", more] as [string, number]] : []),
+    ["total", u.total],
+  ]);
+}
+
 export function renderLeanIssueText(view: LeanIssueView): string {
   if (view.confidence === "low") {
     return `Ix found no confident starting point for this issue: ${view.reason}.`;
@@ -1995,6 +2016,7 @@ export function renderLeanIssueText(view: LeanIssueView): string {
   const lines = ["Where to start (Ix resolved these from the issue's own words):"];
   for (const s of view.startingPoints) {
     lines.push(`  ${spanOf(s)}  ${s.kind === "file" ? "" : `${s.name} (${s.kind}) — `}${startWhy(s)}`);
+    if (s.usedIn) lines.push(`    used in: ${usedInText(s.usedIn)}`);
   }
   if (view.alsoRanked.length > 0) {
     lines.push(`Then, by the issue's text: ${view.alsoRanked.map((f) => f.path).join(", ")}`);
@@ -2013,6 +2035,7 @@ export function renderLeanIssueLlm(view: LeanIssueView): string[] {
       ...(s.lineStart !== undefined ? [["lines", `${s.lineStart}-${s.lineEnd ?? s.lineStart}`] as [string, string]] : []),
       ["name", s.name], ["kind", s.kind], ["why", startWhy(s)],
     ]));
+    if (s.usedIn) out.push(usedInLlm(s.name, s.usedIn));
   }
   for (const f of view.alsoRanked) out.push(llmLine("ranked", [["path", f.path]]));
   return out;
