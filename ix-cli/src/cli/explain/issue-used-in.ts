@@ -52,25 +52,37 @@ function str(v: unknown): string | undefined {
 /**
  * The files using each of `ids`, from one context response: the incoming
  * CALLS, IMPORTS and REFERENCES edges of each id, each mapped to the file its
- * other end was parsed from. Whole nodes (provenance) or summaries (`path`),
- * whichever the backend sent. An edge whose far end has no file is skipped.
+ * other end was parsed from. Whole nodes (provenance) and summaries (`path`,
+ * else `sourceUri`, as the bundle reader does) are both read, whole nodes
+ * winning, so a response that carries some neighbours only as summaries still
+ * locates them. An edge whose far end has no file is skipped.
+ *
+ * An id the response does not show it was seeded on -- in neither the returned
+ * nodes, the summaries nor `metadata.seedEntities` -- gets nothing: a backend
+ * that ignored it, or seeded somewhere else, has not answered for it, and a
+ * partial list would read as the whole answer.
  */
 export function usesFromContext(ctx: StructuredContext, ids: string[]): UsesById {
   const pathOf = new Map<string, string>();
-  if (Array.isArray(ctx.nodes) && ctx.nodes.length > 0) {
-    for (const n of ctx.nodes) {
-      const p = relativePath(str(n?.provenance?.sourceUri) ?? str((n?.provenance as { source_uri?: unknown })?.source_uri));
-      if (n?.id && p) pathOf.set(n.id, p);
-    }
-  } else {
-    for (const n of ctx.nodeSummaries ?? []) {
-      const p = relativePath(str(n?.path));
-      if (n?.id && p) pathOf.set(n.id, p);
-    }
+  const present = new Set<string>();
+  for (const n of Array.isArray(ctx.nodes) ? ctx.nodes : []) {
+    if (!n?.id) continue;
+    present.add(n.id);
+    const p = relativePath(str(n.provenance?.sourceUri) ?? str((n.provenance as { source_uri?: unknown } | undefined)?.source_uri));
+    if (p) pathOf.set(n.id, p);
   }
-  const edges: Array<{ id?: string; src: string; dst: string; predicate: string }> =
-    Array.isArray(ctx.edges) && ctx.edges.length > 0 ? ctx.edges : (ctx.edgeSummaries ?? []);
-  const wanted = new Set(ids);
+  for (const n of Array.isArray(ctx.nodeSummaries) ? ctx.nodeSummaries : []) {
+    if (!n?.id) continue;
+    present.add(n.id);
+    const p = relativePath(str(n.path) ?? str(n.sourceUri));
+    if (p && !pathOf.has(n.id)) pathOf.set(n.id, p);
+  }
+  for (const id of Array.isArray(ctx.metadata?.seedEntities) ? ctx.metadata.seedEntities : []) present.add(id);
+  const edges: Array<{ id?: string; src: string; dst: string; predicate: string }> = [
+    ...(Array.isArray(ctx.edges) ? ctx.edges : []),
+    ...(Array.isArray(ctx.edgeSummaries) ? ctx.edgeSummaries : []),
+  ];
+  const wanted = new Set(ids.filter((id) => present.has(id)));
   const seen = new Set<string>();
   const uses: UsesById = new Map();
   for (const e of edges) {

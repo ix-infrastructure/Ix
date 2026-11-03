@@ -38,7 +38,10 @@ function viewOf(starts: StartingPoint[], extra: Partial<IssuePlan> = {}): LeanIs
   } as IssuePlan);
 }
 
-/** A whole-node context response: `uses` maps a target id to [caller file, predicate] pairs. */
+/**
+ * A whole-node context response seeded on every target: `uses` maps a target
+ * id to [caller file, predicate] pairs.
+ */
 function context(uses: Record<string, Array<[string, string?]>>) {
   const nodes: any[] = [];
   const edges: any[] = [];
@@ -50,7 +53,8 @@ function context(uses: Record<string, Array<[string, string?]>>) {
       edges.push({ id: `e${n}`, src: id, dst, predicate });
     }
   }
-  return { nodes, edges, claims: [], conflicts: [], decisions: [], intents: [], metadata: {} };
+  return { nodes, edges, claims: [], conflicts: [], decisions: [], intents: [],
+    metadata: { seedEntities: Object.keys(uses) } };
 }
 
 function stubFetch(answer: (body: any) => Response | Promise<Response>) {
@@ -80,10 +84,65 @@ describe("usesFromContext", () => {
   it("reads summaries when the backend sent no whole nodes", () => {
     const uses = usesFromContext({
       nodes: [], edges: [],
-      nodeSummaries: [{ id: "a", kind: "function", name: "a", rev: 1, path: "src/x.ts" }, { id: "b", kind: "function", name: "b", rev: 1 }],
+      nodeSummaries: [
+        { id: "n", kind: "function", name: "n", rev: 1, path: "src/n.ts" },
+        { id: "a", kind: "function", name: "a", rev: 1, path: "src/x.ts" }, { id: "b", kind: "function", name: "b", rev: 1 },
+      ],
       edgeSummaries: [{ id: "e1", src: "a", dst: "n", predicate: "CALLS", rev: 1 }, { id: "e2", src: "b", dst: "n", predicate: "CALLS", rev: 1 }],
     } as any, ["n"]);
     expect([...uses.get("n")!]).toEqual([["src/x.ts", 1]]);
+  });
+
+  it("falls back to a summary's sourceUri when it has no path, as the bundle reader does", () => {
+    const uses = usesFromContext({
+      nodes: [], edges: [],
+      nodeSummaries: [
+        { id: "n", kind: "function", name: "n", rev: 1, path: "src/n.ts" },
+        { id: "a", kind: "function", name: "a", rev: 1, sourceUri: "src/y.ts" },
+        { id: "b", kind: "function", name: "b", rev: 1, path: null, sourceUri: "src/z.ts" },
+      ],
+      edgeSummaries: [{ id: "e1", src: "a", dst: "n", predicate: "CALLS", rev: 1 }, { id: "e2", src: "b", dst: "n", predicate: "IMPORTS", rev: 1 }],
+    } as any, ["n"]);
+    expect([...uses.get("n")!]).toEqual([["src/y.ts", 1], ["src/z.ts", 1]]);
+  });
+
+  it("reads whole nodes and summaries together, whole nodes winning", () => {
+    const uses = usesFromContext({
+      nodes: [
+        { id: "n", kind: "function", name: "n", attrs: {}, provenance: { sourceUri: "src/n.ts" } },
+        { id: "a", kind: "function", name: "a", attrs: {}, provenance: { sourceUri: "src/a.ts" } },
+      ],
+      edges: [{ id: "e1", src: "a", dst: "n", predicate: "CALLS" }],
+      nodeSummaries: [
+        { id: "a", kind: "function", name: "a", rev: 1, path: "src/elsewhere.ts" },
+        { id: "b", kind: "function", name: "b", rev: 1, path: "src/b.ts" },
+      ],
+      edgeSummaries: [
+        { id: "e1", src: "a", dst: "n", predicate: "CALLS", rev: 1 },
+        { id: "e2", src: "b", dst: "n", predicate: "REFERENCES", rev: 1 },
+      ],
+    } as any, ["n"]);
+    // The duplicate a->n edge counts once; b, only summarized, still counts.
+    expect([...uses.get("n")!]).toEqual([["src/a.ts", 1], ["src/b.ts", 1]]);
+  });
+
+  it("gives nothing for an id the response was not seeded on", () => {
+    // A backend that kept only the first id: its seed list and nodes name
+    // n-a alone. An edge into n-b found from n-a's side is not n-b's answer.
+    const ctx = {
+      nodes: [
+        { id: "n-a", kind: "function", name: "a", attrs: {}, provenance: { sourceUri: "src/a.ts" } },
+        { id: "c1", kind: "function", name: "c1", attrs: {}, provenance: { sourceUri: "src/c.ts" } },
+      ],
+      edges: [
+        { id: "e1", src: "c1", dst: "n-a", predicate: "CALLS" },
+        { id: "e2", src: "c1", dst: "n-b", predicate: "CALLS" },
+      ],
+      metadata: { seedEntities: ["n-a"] },
+    };
+    const uses = usesFromContext(ctx as any, ["n-a", "n-b"]);
+    expect([...uses.get("n-a")!]).toEqual([["src/c.ts", 1]]);
+    expect(uses.has("n-b")).toBe(false);
   });
 });
 
