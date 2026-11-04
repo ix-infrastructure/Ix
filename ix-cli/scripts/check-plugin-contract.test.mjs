@@ -1,11 +1,53 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { check, jsonInvocations, textInvocations } from "./check-plugin-contract.mjs";
 
 const surface = new Map([
   ["map", { flags: new Set(["--remap", "--silent"]), subcommands: new Set() }],
 ]);
+
+describe("plugin contract ignores", () => {
+  it("ignores the parameterized lookup fixture while still rejecting real contract violations", () => {
+    const root = mkdtempSync(fileURLToPath(new URL("../.plugin-contract-test-", import.meta.url)));
+    try {
+      for (const name of ["check-plugin-contract.mjs", "plugin-contract-ignore.json"]) {
+        copyFileSync(new URL(name, import.meta.url), join(root, name));
+      }
+      // Exercise the script and its real ignore list without a CLI build or network access.
+      writeFileSync(join(root, "dump-cli-surface.mjs"), 'console.log(JSON.stringify([{ command: "ix map", options: [{ long: "--remap" }] }]));');
+      const plugins = join(root, "plugins");
+      for (const name of ["claude", "codex", "cursor", "gemini", "openclaw", "opencode"]) {
+        mkdirSync(join(plugins, `ix-${name}-plugin`, "tests"), { recursive: true });
+      }
+      const fixture = join(plugins, "ix-codex-plugin", "tests", "test_lookup_exit_codes.py");
+      const source = 'common.run_ix_lookup(["ix", command, "x", "--format", "json"])\n';
+      const run = () => spawnSync(process.execPath, [join(root, "check-plugin-contract.mjs"), plugins], { encoding: "utf8" });
+      writeFileSync(fixture, source);
+      const ignored = run();
+      expect(ignored.status, ignored.stderr).toBe(0);
+      expect(ignored.stdout).toContain("checked 1 ix invocations in 6 plugins");
+
+      writeFileSync(fixture, source + 'common.run_ix_lookup(["ix", "x", "--format", "json"])\ncommon.run_ix_lookup(["ix", "map", "--missing"])\n');
+      const invalid = run();
+      expect(invalid.status).toBe(1);
+      expect(invalid.stderr).toContain('test_lookup_exit_codes.py:2  unknown command "x"');
+      expect(invalid.stderr).toContain('test_lookup_exit_codes.py:3  "map" has no --missing');
+
+      writeFileSync(fixture, source);
+      writeFileSync(join(plugins, "ix-codex-plugin", "tests", "other.py"), source);
+      const elsewhere = run();
+      expect(elsewhere.status).toBe(1);
+      expect(elsewhere.stderr).toContain('other.py:1  unknown command "x"');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("plugin prompt invocations", () => {
   it("recognizes escaped Markdown delimiters in raw TypeScript template strings", () => {
