@@ -11,6 +11,11 @@
       "why": "argv resolution test with a non-ix command"
     },
     {
+      "where": "ix-codex-plugin/tests/test_lookup_exit_codes.py:",
+      "match": "common.run_ix_lookup([\"ix\", command, \"x\", \"--format\", \"json\"]",
+      "why": "parameterized command is omitted by the string-only scanner, which mistakes the positional lookup argument x for the command"
+    },
+    {
       "where": "ix-openclaw-plugin/tests/cli-argv.test.mjs",
       "match": "--limit",
       "why": "asserts runIx is never called with `locate --limit`"
