@@ -48,11 +48,11 @@
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-unused-imports": "^4.4.1",
     "fast-check": "^4.10.2",
-    "knip": "^6.42.1",
+    "knip": "^6.44.0",
     "prettier": "^3.9.10",
     "tsx": "^4.23.15",
     "typescript": "^5.6.0",
-    "typescript-eslint": "^8.72.0",
+    "typescript-eslint": "^8.72.1",
     "vitest": "^4.1.0"
   },
   "overrides": {
