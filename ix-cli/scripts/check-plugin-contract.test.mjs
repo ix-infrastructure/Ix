@@ -3,15 +3,23 @@
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
-import { check, jsonInvocations, textInvocations } from "./check-plugin-contract.mjs";
+import { check, invocationLocation, jsonInvocations, textInvocations } from "./check-plugin-contract.mjs";
 
 const surface = new Map([
   ["map", { flags: new Set(["--remap", "--silent"]), subcommands: new Set() }],
 ]);
 
 describe("plugin contract ignores", () => {
+  it.each([posix, win32])("uses slash-delimited locations for native relative paths", (paths) => {
+    const root = paths.resolve("plugins", "ix-codex-plugin");
+    const file = paths.join(root, "tests", "test_lookup_exit_codes.py");
+    expect(invocationLocation("ix-codex-plugin", paths.relative(root, file), 1)).toBe(
+      "ix-codex-plugin/tests/test_lookup_exit_codes.py:1",
+    );
+  });
+
   it("ignores the parameterized lookup fixture while still rejecting real contract violations", () => {
     const root = mkdtempSync(fileURLToPath(new URL("../.plugin-contract-test-", import.meta.url)));
     try {
