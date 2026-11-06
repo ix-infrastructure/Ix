@@ -158,6 +158,31 @@ describe("check-links docs-site surface", () => {
     expect(status).toBe(1);
   });
 
+  it("rejects a root-relative path value in docs-site front matter, and only there", () => {
+    const fm = [
+      "---",
+      "title: Home",
+      "description: Mentions /v1/list mid-sentence, which is prose",
+      "hero:",
+      "  actions:",
+      "    - text: Start",
+      '      link: "/guide/"',
+      "    - text: Ok",
+      "      link: guide/",
+      "---",
+      "",
+      "Body.",
+      "",
+    ].join("\n");
+    const file = "docs-site/src/content/docs/index.mdx";
+    const inSite = run({ ...site(""), [file]: fm });
+    expect(inSite.errors).toEqual([expect.stringContaining(`/guide/ (root-relative link in front matter, in ${file})`)]);
+    expect(inSite.status).toBe(1);
+
+    const outside = run({ "docs/a.md": fm.replace('"/guide/"', '"/docs/a.md"') });
+    expect(outside.errors).toEqual([]);
+  });
+
   it("reports #_top as missing outside the docs site", () => {
     const { errors } = run({ "docs/a.md": "# A\n\n[top](#_top)\n" });
     expect(errors).toEqual(["#_top (anchor, in docs/a.md)"]);
