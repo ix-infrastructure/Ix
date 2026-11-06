@@ -1,7 +1,12 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import chalk from "chalk";
+import { currentRunSignal } from "../client/run-signal.js";
+import { isLocalEndpoint } from "./backend-version.js";
+import { ixHome } from "./ix-home.js";
 
 /**
  * Small helpers shared by `ix note` and `ix session` (commands/note.ts,
@@ -42,16 +47,94 @@ export function renderRows(headers: string[], rows: string[][]): string {
   return [chalk.dim(line(headers)), ...rows.map(line)].join("\n");
 }
 
-/** All of stdin, or "" when it is a terminal: text is only ever piped in, never typed at a prompt. */
-export function readStdin(): Promise<string> {
+/** The most a note may read from stdin. */
+export const STDIN_MAX_BYTES = 1024 * 1024;
+/** How long stdin may go without a byte (or EOF) before the read gives up. */
+export const STDIN_IDLE_MS = 30_000;
+
+/**
+ * All of stdin, or "" when it is a terminal: text is only ever piped in, never
+ * typed at a prompt. Rejects past `maxBytes`, and when the pipe stays silent
+ * for `idleMs`: a caller that leaves stdin open and sends nothing (an agent
+ * harness's inherited pipe) gets an error rather than a hang.
+ *
+ * Refuses inside an `ix mcp` in-process run (`currentRunSignal`): there,
+ * process.stdin is the MCP transport, and reading it would swallow the
+ * protocol stream.
+ */
+export function readStdin(opts: { maxBytes?: number; idleMs?: number } = {}): Promise<string> {
+  const maxBytes = opts.maxBytes ?? STDIN_MAX_BYTES;
+  const idleMs = opts.idleMs ?? STDIN_IDLE_MS;
+  if (currentRunSignal()) {
+    return Promise.reject(new Error("Pass the note text as an argument: stdin is the MCP transport under `ix mcp`."));
+  }
   return new Promise((resolve, reject) => {
-    if (process.stdin.isTTY) return resolve("");
-    let buf = "";
-    process.stdin.setEncoding("utf-8");
-    process.stdin.on("data", (chunk) => (buf += chunk));
-    process.stdin.on("end", () => resolve(buf));
-    process.stdin.on("error", reject);
+    const stdin = process.stdin;
+    if (stdin.isTTY) return resolve("");
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (err: Error | undefined, value?: string) => {
+      if (timer) clearTimeout(timer);
+      stdin.off("data", onData);
+      stdin.off("end", onEnd);
+      stdin.off("error", onError);
+      stdin.pause();
+      if (err) reject(err);
+      else resolve(value ?? "");
+    };
+    const arm = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => finish(new Error(`No input on stdin for ${Math.round(idleMs / 1000)}s: pass the text as an argument, or close stdin.`)), idleMs);
+      timer.unref?.();
+    };
+    const onData = (chunk: Buffer | string) => {
+      const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      size += buf.length;
+      if (size > maxBytes) return finish(new Error(`Input on stdin is over ${Math.round(maxBytes / 1024)} KiB; a note is limited to that.`));
+      chunks.push(buf);
+      arm();
+    };
+    const onEnd = () => finish(undefined, Buffer.concat(chunks).toString("utf-8"));
+    const onError = (err: Error) => finish(err);
+    stdin.on("data", onData);
+    stdin.on("end", onEnd);
+    stdin.on("error", onError);
+    arm();
   });
+}
+
+/**
+ * Say on stderr which backend a write went to -- with `--json` too, since the
+ * record on stdout does not. Without it, a Pro user whose `ix` cannot resolve
+ * `@ix/pro` (npx, a project-local bin, another prefix) would have notes land
+ * on the local backend, or fail against the cloud, with nothing saying why.
+ *
+ * Also, once per run, when config.yaml holds Pro's cloud state (`active`,
+ * `cluster` or a legacy `instances` map) but Pro did not load here.
+ */
+export function reportWriteTarget(endpoint: string): void {
+  if (!proWarningShown && hasProState()) {
+    proWarningShown = true;
+    process.stderr.write(
+      "ix: config.yaml has Ix Pro cloud settings, but this ix could not load @ix/pro, " +
+      "so this command uses the OSS backend below rather than your cloud org. " +
+      "Run the ix that has Pro installed for cloud notes.\n",
+    );
+  }
+  const where = isLocalEndpoint(endpoint) ? "local backend" : "backend";
+  process.stderr.write(chalk.dim(`→ ${where} ${endpoint}`) + "\n");
+}
+
+let proWarningShown = false;
+
+/** Whether config.yaml carries one of the top-level keys Ix Pro's cloud config writes. */
+function hasProState(): boolean {
+  try {
+    return /^(active|cluster|instances):/m.test(readFileSync(join(ixHome(), "config.yaml"), "utf-8"));
+  } catch {
+    return false;
+  }
 }
 
 /** A y/N question on stderr. False without asking when stdin is not a terminal: a script must pass --force. */

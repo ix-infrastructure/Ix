@@ -60,7 +60,8 @@ ix map --silent                             # refresh the graph after code chang
   registered by `register/oss-fallbacks.ts` only when Pro did not load (next
   to the Pro stubs in `run-cli.ts` and `mcp/runner.ts`), because Pro's versions
   of the same names go to the cloud org and must win. Do not add them to
-  `oss.ts`: OSS registers first, so Pro's would collide and lose.
+  `oss.ts`: OSS registers first, so Pro's would collide and lose. On the OSS
+  backend a note's `--actor` is a free-form label, not an authenticated identity.
 - **`ix patches` is OSS, not Pro** (#371). It is implemented here and registered
   in `oss.ts`. `@ix/pro` also registers a `patches`; commander throws on the
   duplicate and Pro's `tryRegister` swallows the throw, so the OSS one — which

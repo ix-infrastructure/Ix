@@ -150,9 +150,18 @@ Examples:
     .option("--force", "Skip the confirmation prompt")
     .action(async (arg: string, opts: { force?: boolean }, cmd: Command) => {
       const nameOrId = resolveRecent("session", arg);
-      if (!opts.force && !(await confirm(`Delete session "${nameOrId}"? (notes are preserved)`))) {
-        console.log(chalk.dim("Cancelled."));
-        return;
+      if (!opts.force) {
+        // A script cannot answer the prompt: refuse loudly, so a caller that
+        // forgot --force does not read exit 0 as "deleted".
+        if (!process.stdin.isTTY) {
+          console.error(chalk.red(`Refusing to delete session "${nameOrId}" without --force: no terminal to confirm on.`));
+          process.exitCode = 1;
+          return;
+        }
+        if (!(await confirm(`Delete session "${nameOrId}"? (notes are preserved)`))) {
+          console.error(chalk.dim("Cancelled."));
+          return;
+        }
       }
       const result = await (await createClient()).deleteSession(nameOrId);
       if (wantsJson(cmd)) return printJson(result);

@@ -4,7 +4,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { createClient } from "../config.js";
 import type { Note, NoteSearchResult, NoteTag } from "../../client/types.js";
-import { readStdin, relativeTime, renderRows, shortId } from "../memory-render.js";
+import { readStdin, relativeTime, renderRows, reportWriteTarget, shortId } from "../memory-render.js";
 import { rememberRecent, resolveRecent } from "../recent.js";
 
 /**
@@ -121,7 +121,7 @@ export function registerNoteCommand(program: Command): void {
     .option("--tag <tag>", "finding|decision|reminder|note", "note")
     .option("--session <name>", "Attach note to a session (by name or id)")
     .option("--node <ids...>", "Node IDs to reference (creates REFERENCES edges)")
-    .option("--actor <name>", "Actor recording the note")
+    .option("--actor <name>", "Actor recording the note (a label, not an identity, on the OSS backend)")
     .option("--json", "Output as JSON")
     .addHelpText(
       "after",
@@ -133,6 +133,9 @@ Examples:
   ix note show <id>
   ix note supersede <id> "Updated decision text" --tag decision
   ix note retract <id>
+
+Writes say on stderr which backend they went to. On the OSS backend, --actor is
+a label anyone can set, not an authenticated identity.
 `,
     )
     .action(async (text: string | undefined, opts: CreateOpts) => {
@@ -155,6 +158,7 @@ Examples:
         nodeIds: opts.node,
       });
       rememberRecent("note", created.id);
+      reportWriteTarget(client.endpoint);
       if (opts.json) return printJson(created);
       console.log(`${chalk.green("✓")} note ${shortId(created.id)} ${chalk.bold(`[${created.tag}]`)}`);
       if (opts.session) console.log(chalk.dim(`  session: ${opts.session}`));
@@ -181,6 +185,20 @@ Examples:
         return;
       }
 
+      if (opts.session && opts.excludeSuperseded) {
+        // A session's notes come back without their supersede links, so there
+        // is nothing to filter on: refuse rather than return superseded notes.
+        console.error(chalk.red("--exclude-superseded cannot be combined with --session."));
+        process.exitCode = 1;
+        return;
+      }
+      const since = opts.since ? Date.parse(opts.since) : undefined;
+      if (since !== undefined && Number.isNaN(since)) {
+        console.error(chalk.red(`--since must be an ISO timestamp, got "${opts.since}"`));
+        process.exitCode = 1;
+        return;
+      }
+
       const client = await createClient();
       let notes: NoteSearchResult[];
       if (opts.session) {
@@ -192,6 +210,7 @@ Examples:
           .filter((n) => (tag ? n.tag === tag : true))
           .filter((n) => (opts.actor ? n.actor === opts.actor : true))
           .filter((n) => (q ? n.text.toLowerCase().includes(q) : true))
+          .filter((n) => (since !== undefined ? Date.parse(n.at) > since : true))
           .slice(0, limit ?? 50);
       } else {
         notes = await client.listNotes({
@@ -227,7 +246,7 @@ Examples:
   note
     .command("supersede <id> [text]")
     .description("Replace a note (preserves SUPERSEDES edge). Pass `-` for the last-shown note.")
-    .option("--tag <tag>", "Tag for the new note (defaults to original)", "note")
+    .option("--tag <tag>", "Tag for the new note (defaults to the original's)")
     .option("--session <name>", "Attach replacement to session")
     .option("--node <ids...>", "Node IDs to reference")
     .option("--actor <name>", "Actor recording the supersede")
@@ -242,14 +261,19 @@ Examples:
         return;
       }
       const id = await noteId(idArg);
-      const result = await (await createClient()).supersedeNote(id, {
+      const client = await createClient();
+      // The backend tags a replacement "note" when the request names no tag,
+      // so keeping the original's means sending it.
+      const replacementTag = tag ?? (await client.getNote(id)).tag;
+      const result = await client.supersedeNote(id, {
         text: body,
-        tag,
+        tag: replacementTag,
         actor: opts.actor,
         sessionId: opts.session,
         nodeIds: opts.node,
       });
       rememberRecent("note", result.newNote.id);
+      reportWriteTarget(client.endpoint);
       if (wantsJson(cmd)) return printJson(result);
       console.log(`${chalk.green("✓")} superseded ${shortId(id)} → ${shortId(result.newNote.id)}`);
     });
@@ -261,7 +285,9 @@ Examples:
     .action(async (idArg: string, _opts: { actor?: string }, cmd: Command) => {
       const opts = subOpts<{ actor?: string }>(cmd);
       const id = await noteId(idArg);
-      const result = await (await createClient()).retractNote(id, opts.actor);
+      const client = await createClient();
+      const result = await client.retractNote(id, opts.actor);
+      reportWriteTarget(client.endpoint);
       if (wantsJson(cmd)) return printJson(result);
       console.log(`${chalk.green("✓")} retracted ${shortId(id)}`);
     });

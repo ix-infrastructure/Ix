@@ -2,7 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import * as nodeModule from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -93,8 +93,8 @@ beforeEach(() => { seen = []; });
 
 interface Run { stdout: string; stderr: string; status: number | null }
 
-function ix(args: string[], input = ""): Promise<Run> {
-  const env: NodeJS.ProcessEnv = { ...process.env, IX_HOME: home, IX_ENDPOINT: endpoint, IX_NO_UPDATE_CHECK: "1", NO_COLOR: "1" };
+function ix(args: string[], input = "", ixHome = home): Promise<Run> {
+  const env: NodeJS.ProcessEnv = { ...process.env, IX_HOME: ixHome, IX_ENDPOINT: endpoint, IX_NO_UPDATE_CHECK: "1", NO_COLOR: "1" };
   for (const key of ["FORCE_COLOR", "IX_FORMAT", "IX_LOAD_ALL_COMMANDS", "IX_TOKEN"]) delete env[key];
   return new Promise((done, fail) => {
     const child = spawn(process.execPath, ["--import", TSX, MAIN, ...args], { cwd: home, env, stdio: ["pipe", "pipe", "pipe"] });
@@ -119,6 +119,29 @@ describe("ix note against the local backend (Pro absent)", () => {
     expect(JSON.parse(r.stdout)).toEqual({
       id: NOTE_ID, text: "shared text", tag: "finding", actor: "p2p:alice", nodeIds: [], at: NOTE.at, stale: false,
     });
+    // Where it went, on stderr, so --json on stdout stays one record.
+    expect(r.stderr).toContain(`→ local backend ${endpoint}`);
+    expect(r.stderr).not.toContain("Ix Pro cloud settings");
+  });
+
+  it("says when config.yaml has Pro cloud state that this ix cannot use", async () => {
+    const proHome = mkdtempSync(join(tmpdir(), "ix-note-prohome-"));
+    try {
+      writeFileSync(join(proHome, "config.yaml"), "endpoint: http://localhost:8090\nactive:\n  org: acme\ncluster: https://tunnel.example\n");
+      const r = await ix(["note", "text", "--json"], "", proHome);
+      expect(r.status).toBe(0);
+      expect(r.stderr.match(/Ix Pro cloud settings/g)).toHaveLength(1);
+      expect(JSON.parse(r.stdout).id).toBe(NOTE_ID);
+    } finally {
+      rmSync(proHome, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses stdin over 1 MiB without calling the backend", async () => {
+    const r = await ix(["note", "--json"], "x".repeat(1024 * 1024 + 1));
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("over 1024 KiB");
+    expect(seen).toEqual([]);
   });
 
   it.each([
@@ -135,6 +158,7 @@ describe("ix note against the local backend (Pro absent)", () => {
     await ix(["note", "show", NOTE_ID, "--json"]);
     const recent = JSON.parse(readFileSync(join(home, "recent.json"), "utf-8"));
     expect(recent.note.local).toBe(NOTE_ID);
+    if (process.platform !== "win32") expect(statSync(join(home, "recent.json")).mode & 0o777).toBe(0o600);
     seen = [];
     const r = await ix(["note", "retract", "-", "--actor", "alice", "--json"]);
     expect(r.status).toBe(0);
@@ -146,6 +170,11 @@ describe("ix note against the local backend (Pro absent)", () => {
     const r = await ix(["note", "ls", "--session", "sprint", "--tag", "finding", "--json"]);
     expect(r.status).toBe(0);
     expect(JSON.parse(r.stdout)).toEqual([NOTE]);
+    const later = await ix(["note", "ls", "--session", "sprint", "--since", "2026-11-05T00:00:01Z", "--json"]);
+    expect(JSON.parse(later.stdout)).toEqual([]);
+    const both = await ix(["note", "ls", "--session", "sprint", "--exclude-superseded"]);
+    expect(both.status).toBe(1);
+    expect(both.stderr).toContain("--exclude-superseded cannot be combined with --session");
   });
 
   it("passes the list filters to /v1/notes", async () => {
@@ -164,6 +193,15 @@ describe("ix note against the local backend (Pro absent)", () => {
       body: { text: "new text", tag: "decision", actor: "bob", sessionId: "sprint" },
     }]);
     expect(JSON.parse(r.stdout).oldNoteId).toBe(NOTE_ID);
+  });
+
+  // The backend tags a replacement "note" when none is sent, so without
+  // --tag the CLI sends the original's.
+  it("keeps the original tag when supersede has no --tag", async () => {
+    const r = await ix(["note", "supersede", NOTE_ID, "new text", "--json"]);
+    expect(r.status).toBe(0);
+    expect(seen.map((s) => `${s.method} ${s.url}`)).toEqual([`GET /v1/note/${NOTE_ID}`, `POST /v1/note/${NOTE_ID}/supersede`]);
+    expect(seen[1]!.body).toEqual({ text: "new text", tag: "finding" });
   });
 
   it("refuses an unknown tag and empty text without calling the backend", async () => {
@@ -202,10 +240,11 @@ describe("ix session against the local backend (Pro absent)", () => {
     expect(JSON.parse((await ix(["session", "--json", "show", "sprint"])).stdout)).toEqual(SESSION);
     expect(JSON.parse((await ix(["session", "pin", "sprint", "n1", "n2", "--json"])).stdout)).toEqual({ status: "pinned", count: 2 });
 
-    // No terminal and no --force: nothing is deleted.
-    const refused = await ix(["session", "delete", "sprint"]);
-    expect(refused.status).toBe(0);
-    expect(refused.stdout).toContain("Cancelled.");
+    // No terminal and no --force: refused, loudly, and nothing is deleted.
+    const refused = await ix(["session", "delete", "sprint", "--json"]);
+    expect(refused.status).toBe(1);
+    expect(refused.stdout).toBe("");
+    expect(refused.stderr).toContain("without --force");
     expect(seen.some((s) => s.method === "DELETE")).toBe(false);
 
     const deleted = await ix(["session", "delete", "sprint", "--force", "--json"]);
@@ -244,3 +283,11 @@ describe("registration: Pro wins", () => {
   });
 });
 
+
+describe("readStdin", () => {
+  it("refuses inside an ix mcp in-process run, where stdin is the transport", async () => {
+    const { readStdin } = await import("../memory-render.js");
+    const { runWithSignal } = await import("../../client/run-signal.js");
+    await expect(runWithSignal(new AbortController().signal, () => readStdin())).rejects.toThrow(/MCP transport/);
+  });
+});
