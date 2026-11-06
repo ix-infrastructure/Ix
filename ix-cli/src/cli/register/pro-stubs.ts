@@ -5,7 +5,7 @@ import type { Command } from "commander";
 const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "briefing", desc: "Session-resume briefing" },
   { name: "bug", desc: "Manage bugs" },
-  { name: "decide", desc: "Record a design decision" },
+  { name: "decide", desc: "Record a design decision, or list them (decide list)" },
   { name: "goal", desc: "Manage project goals" },
   { name: "goals", desc: "List all goals" },
   // `patches` is deliberately absent: ix-cli owns the real implementation
@@ -14,7 +14,7 @@ const PRO_COMMANDS: { name: string; desc: string }[] = [
   // being registered, so `ix patches` answered "requires Ix Pro" on OSS and
   // shadowed a working command — see #371.
   { name: "plan", desc: "Manage plans and plan tasks" },
-  { name: "task", desc: "Manage tasks" },
+  { name: "task", desc: "Manage tasks, or list them (task list)" },
   { name: "plans", desc: "List all plans" },
   { name: "truth", desc: "Manage project intents (truth)" },
   { name: "workflow", desc: "Attach, show, validate, or run staged workflows" },

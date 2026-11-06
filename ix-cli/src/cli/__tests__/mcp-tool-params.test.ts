@@ -296,13 +296,14 @@ describe("ix_decisions", () => {
   // The switch keys on commander's own "unknown command" text, so drive it
   // through the real in-process runner and a command tree shaped like each
   // Pro release, not hand-written stderr.
-  function proTree(collapsed: boolean): Command {
+  type ProShape = "v0.2.0" | "lenient" | "collapsed";
+  function proTree(shape: ProShape): Command {
     const program = new Command();
     program.name("ix");
     const decide = program
       .command("decide <title>")
       .option("--format <fmt>", "Output format", "text");
-    if (collapsed) {
+    if (shape === "collapsed") {
       // Ix-pro#184 dd7358f5: plain --rationale, and a `list` that declares
       // --format for its help but reads the effective one via optsWithGlobals,
       // since the parent consumes the flag before dispatch.
@@ -317,8 +318,13 @@ describe("ix_decisions", () => {
           console.log(format === "json" ? JSON.stringify([{ via: "decide list", topic: opts.topic }]) : "TEXT OUTPUT");
         });
     } else {
-      // v0.2.0: `decide <title>` with a required --rationale, and a separate `decisions`.
-      decide.argument("<title>").requiredOption("--rationale <text>").action(() => console.log("RECORDED"));
+      // v0.2.0: a required --rationale, and a separate `decisions`. "lenient"
+      // is a build with plain --rationale but no `list` yet (partway to #184).
+      // There `decide list` would record a decision titled "list", which is
+      // why the read-only `decisions` has to be tried first.
+      if (shape === "v0.2.0") decide.requiredOption("--rationale <text>");
+      else decide.option("--rationale <text>");
+      decide.option("--topic <topic>").option("--limit <n>").action(() => console.log("RECORDED"));
       program
         .command("decisions")
         .option("--limit <n>")
@@ -330,10 +336,11 @@ describe("ix_decisions", () => {
   }
 
   it.each([
-    [false, "decisions"],
-    [true, "decide list"],
-  ])("lists through the real runner (collapsed Pro: %s) via %s", async (collapsed, via) => {
-    const runIx = createInProcessRunner({ version: "test", createProgram: () => proTree(collapsed) });
+    ["v0.2.0", "decisions"],
+    ["lenient", "decisions"],
+    ["collapsed", "decide list"],
+  ] as const)("lists through the real runner on a %s Pro via %s, never recording", async (shape, via) => {
+    const runIx = createInProcessRunner({ version: "test", createProgram: () => proTree(shape) });
     const client = await proClient(runIx);
     const result = (await client.callTool({ name: "ix_decisions", arguments: { topic: "auth", limit: 5 } })) as CallToolResult;
     const text = JSON.stringify(result.content);
