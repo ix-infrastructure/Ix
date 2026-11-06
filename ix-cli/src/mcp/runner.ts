@@ -294,11 +294,13 @@ async function buildProgram(version: string): Promise<Command> {
  *
  * Without this it calls process.exit, which the patch above turns into a bare
  * ProcessExitSignal carrying no explanation; a CommanderError carries the
- * actual message. Applied per run so an injected program gets it too.
+ * actual message. Applied per run so an injected program gets it too, and
+ * at every depth: a nested subcommand (`decide list`) keeps commander's
+ * default exit otherwise.
  */
 function throwOnUsageError(program: Command): Command {
   program.exitOverride();
-  for (const command of program.commands) command.exitOverride();
+  for (const command of program.commands) throwOnUsageError(command);
   return program;
 }
 
