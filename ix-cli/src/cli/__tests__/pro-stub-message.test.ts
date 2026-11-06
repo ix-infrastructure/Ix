@@ -108,15 +108,13 @@ describe("Pro stubs", () => {
   // through to commander's "unknown command" instead of the sentinel above, so
   // an agent told to stop on `requires Ix Pro.` had nothing to match.
   //
-  // Neither plural exists in Pro any more: Ix-pro#125 removed `plans`, and
-  // `tasks` (Ix-pro#182) has already left this table. `plans` is still
-  // stubbed by oversight, like `goals` below; #920 tracks removing both.
-  //
-  // `goals` is NOT in that category and is only still stubbed by oversight:
-  // Ix-pro#103 deleted the command, #327 correctly dropped the stub, and #384
-  // re-added it on the stated premise that Pro registers a plural for *every*
-  // singular — which was already false. Do not use this row as evidence that
-  // `ix goals` exists; removing it is a pending follow-up.
+  // Neither remaining row pins a live Pro command; both are stubbed only by
+  // oversight, and #920 tracks removing them. Ix-pro#125 removed `plans`
+  // (`tasks`, Ix-pro#182, has already left this table). `goals` never belonged
+  // here: Ix-pro#103 deleted the command, #327 correctly dropped the stub, and
+  // #384 re-added it on the stated premise that Pro registers a plural for
+  // *every* singular, which was already false. Do not use either row as
+  // evidence that `ix plans` or `ix goals` exists.
   it.each([
     ["plan", "plans"],
     ["goal", "goals"],
