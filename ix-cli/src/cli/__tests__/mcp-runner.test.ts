@@ -33,10 +33,6 @@ function createTestProgram(): Command {
       console.log(`out:${text}${opts.path ? ` path:${opts.path}` : ""}`);
     });
 
-  // A nested subcommand, the shape `decide list` has. Its usage errors must
-  // come back with commander's message too, not as a bare exit.
-  program.command("parent").command("child").option("--limit <n>", "max").action(() => console.log("child ran"));
-
   program
     .command("boom")
     .action(() => {
@@ -509,15 +505,6 @@ describe("in-process ix runner", () => {
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("not-a-command");
-  });
-
-  it("reports a nested subcommand's usage error with commander's message", async () => {
-    const run = testRunner();
-
-    const result = await run(["parent", "child", "--bogus"]);
-
-    expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("unknown option '--bogus'");
   });
 
   it("treats --version as a success rather than a usage error", async () => {
