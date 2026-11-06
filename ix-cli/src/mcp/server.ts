@@ -290,8 +290,11 @@ interface IxArgv {
   command: string;
   /**
    * Subcommand names (`decide list`). They go straight after the command, ahead
-   * of the options: an option placed before the subcommand name is parsed by
-   * the parent, which does not declare the subcommand's flags.
+   * of the options: a flag the parent does not declare (`--topic`), placed
+   * before the subcommand name, is an unknown option to the parent and stops
+   * the dispatch. A flag the parent does declare (`--format`) is consumed by
+   * the parent wherever it appears, which is why #184's `list` reads it back
+   * through optsWithGlobals.
    */
   subcommands?: string[];
   positionals: string[];
