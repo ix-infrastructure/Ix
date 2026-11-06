@@ -235,3 +235,29 @@ describe("bounds", () => {
     expect(first?.type === "text" && first.text.length).toBeLessThan(big.length);
   });
 });
+
+describe("ix_decisions", () => {
+  // Ix-pro#184 retired `ix decisions` for `ix decide list`. The subcommand has
+  // to come before `--`: past it, `list` is an operand, and `decide -- list`
+  // is a request to record a decision titled "list".
+  async function proClient(runIx: IxRunner): Promise<Client> {
+    const server = createIxMcpServer({ version: "test", runIx, tools: "all", proAvailable: true });
+    const client = new Client({ name: "ix-mcp-params-pro-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    clients.push(client);
+    return client;
+  }
+
+  it("runs `decide list` with the filters the CLI has", async () => {
+    const { calls, runIx } = recorder("[]");
+    const client = await proClient(runIx);
+    await client.callTool({ name: "ix_decisions", arguments: { topic: "ingestion", limit: 10 } });
+    await client.callTool({ name: "ix_decisions", arguments: {} });
+    expect(calls).toEqual([
+      ["decide", "list", "--topic=ingestion", "--limit=10", "--format=json"],
+      ["decide", "list", "--format=json"],
+    ]);
+  });
+});

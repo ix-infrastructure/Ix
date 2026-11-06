@@ -288,6 +288,13 @@ type ToolInput = Record<string, unknown>;
  */
 interface IxArgv {
   command: string;
+  /**
+   * Subcommand names (`decide list`). They go straight after the command, ahead
+   * of the options and the `--` separator: past `--` commander reads them as
+   * operands, and `decide -- list` would be an attempt to record a decision
+   * titled "list".
+   */
+  subcommands?: string[];
   positionals: string[];
   options: string[];
 }
@@ -747,12 +754,19 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     registerTool(
       ctx,
       "ix_decisions",
-      "List Ix Pro architecture decisions, optionally scoped to a path",
-      { path: z.string().min(1).optional() },
+      "List Ix Pro architecture decisions, optionally filtered by topic keyword",
+      {
+        topic: z.string().min(1).optional().describe("keyword the decision's topic must match"),
+        limit: z.number().int().min(1).max(500).optional(),
+      },
       async (input) => {
+        // `ix decisions` is gone: Ix-pro#184 folded it into `ix decide list`.
+        // That command takes --topic and --limit; it never had the --path this
+        // tool used to pass, so every scoped call failed on an unknown option.
         const options: string[] = [];
-        pushOption(options, "--path", input.path);
-        return runJson(runIx, "ix_decisions", ix("decisions", [], options));
+        pushOption(options, "--topic", input.topic);
+        if (typeof input.limit === "number") options.push(`--limit=${input.limit}`);
+        return runJson(runIx, "ix_decisions", { ...ix("decide", [], options), subcommands: ["list"] });
       },
     );
     registerTool(
@@ -908,7 +922,7 @@ function registerTool(
  * `--rationale` cannot be mistaken for the next flag.
  */
 function toArgv(argv: IxArgv, format: string): string[] {
-  const args = [argv.command, ...argv.options, `--format=${format}`];
+  const args = [argv.command, ...(argv.subcommands ?? []), ...argv.options, `--format=${format}`];
   if (argv.positionals.length > 0) args.push("--", ...argv.positionals);
   return args;
 }
