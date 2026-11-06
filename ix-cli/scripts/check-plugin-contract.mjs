@@ -33,7 +33,7 @@ const PLUGINS = [
 ];
 /** Ix Pro commands: registered by @ix/pro, not by this build. */
 const PRO_COMMANDS = new Set([
-  "plan", "plans", "task", "tasks", "workflow", "workflows", "decide", "decisions",
+  "plan", "plans", "task", "workflow", "workflows", "decide",
   "goal", "goals", "truth", "bug", "bugs", "briefing",
 ]);
 /** Accepted by every command (commander adds --help; --version is the root's). */

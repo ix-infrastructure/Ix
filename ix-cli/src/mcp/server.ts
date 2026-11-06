@@ -288,6 +288,15 @@ type ToolInput = Record<string, unknown>;
  */
 interface IxArgv {
   command: string;
+  /**
+   * Subcommand names (`decide list`). They go straight after the command, ahead
+   * of the options: a flag the parent does not declare (`--topic`), placed
+   * before the subcommand name, is an unknown option to the parent and stops
+   * the dispatch. A flag the parent does declare (`--format`) is consumed by
+   * the parent wherever it appears, which is why #184's `list` reads it back
+   * through optsWithGlobals.
+   */
+  subcommands?: string[];
   positionals: string[];
   options: string[];
 }
@@ -747,12 +756,43 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     registerTool(
       ctx,
       "ix_decisions",
-      "List Ix Pro architecture decisions, optionally scoped to a path",
-      { path: z.string().min(1).optional() },
+      "List Ix Pro architecture decisions, optionally filtered by topic keyword",
+      {
+        topic: z.string().min(1).optional().describe("keyword the decision's topic must match"),
+        limit: z.number().int().min(1).max(500).optional(),
+        // Kept only to refuse it. Dropped from the schema, zod would strip it
+        // and a caller asking for one symbol's decisions would silently get
+        // every decision instead.
+        path: z.string().optional().describe("not supported: decisions cannot be filtered by path; use topic"),
+      },
       async (input) => {
+        // `ix decisions` is gone: Ix-pro#184 folded it into `ix decide list`.
+        // That command takes --topic and --limit; it never had the --path this
+        // tool used to pass, so every scoped call failed on an unknown option.
+        if (input.path !== undefined) {
+          return textResult(
+            JSON.stringify({ error: "ix_decisions cannot filter by path; pass topic instead", tool: "ix_decisions" }),
+            true,
+          );
+        }
         const options: string[] = [];
-        pushOption(options, "--path", input.path);
-        return runJson(runIx, "ix_decisions", ix("decisions", [], options));
+        pushOption(options, "--topic", input.topic);
+        if (typeof input.limit === "number") options.push(`--limit=${numberArg(input, "limit")}`);
+        // Read-only form first. Pro releases from before Ix-pro#184 still
+        // have `decisions`; trying `decide list` on them first would rely on
+        // their `decide <title>` rejecting `list` as a title while parsing,
+        // and `decide` is the command that records. A Pro that has retired
+        // `decisions` says so with commander's "unknown command", and nothing
+        // runs. Only then is `decide list` tried.
+        //
+        // Decided per call, not remembered: Pro is loaded on every run, so one
+        // run where it failed to load (stubs, and no `decisions` stub any more)
+        // or a Pro swapped mid-session would otherwise pin a pre-#184 Pro to
+        // `decide list`. The extra run on a post-#184 Pro is the price; drop
+        // the `decisions` attempt once the Pro floor is past #184.
+        const legacy = await runJson(runIx, "ix_decisions", ix("decisions", [], options));
+        if (!legacy.isError || !/unknown command 'decisions'/.test(resultText(legacy))) return legacy;
+        return runJson(runIx, "ix_decisions", { ...ix("decide", [], options), subcommands: ["list"] });
       },
     );
     registerTool(
@@ -902,13 +942,14 @@ function registerTool(
 }
 
 /**
- * Flatten to argv: options first, then every positional behind `--`.
+ * Flatten to argv: subcommand names, then options, then every positional
+ * behind `--`.
  *
  * Option values use the `--flag=value` form for the same reason, so a value of
  * `--rationale` cannot be mistaken for the next flag.
  */
 function toArgv(argv: IxArgv, format: string): string[] {
-  const args = [argv.command, ...argv.options, `--format=${format}`];
+  const args = [argv.command, ...(argv.subcommands ?? []), ...argv.options, `--format=${format}`];
   if (argv.positionals.length > 0) args.push("--", ...argv.positionals);
   return args;
 }
@@ -1143,6 +1184,10 @@ async function withIssueFile<T>(text: string, work: (file: string) => Promise<T>
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+function resultText(result: CallToolResult): string {
+  return result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
 }
 
 function textResult(text: string, isError = false): CallToolResult {

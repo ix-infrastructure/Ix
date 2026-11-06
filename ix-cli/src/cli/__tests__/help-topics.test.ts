@@ -88,6 +88,8 @@ describe("collapsed plural help topics resolve", () => {
   it.each([
     ["bugs", "bug"],
     ["goals", "goal"],
+    ["tasks", "task"],
+    ["decisions", "decide"],
   ])("ix help %s forwards to the %s command instead of erroring", (plural, singular) => {
     const { stdout, stderr, exitCode } = runHelp(plural);
     expect(stderr).not.toContain("Unknown help topic");
@@ -97,6 +99,33 @@ describe("collapsed plural help topics resolve", () => {
     // `Usage: ix goal`. Without the boundary this assertion passes with the
     // forwarder deleted outright, which is exactly how it was first written.
     expect(stdout).toMatch(new RegExp(`^Usage: ix ${singular}\\b`, "m"));
+  });
+
+  // A Pro release from before the collapse still registers the real plural.
+  // Forwarding then would print the singular's help, which on that release has
+  // no `list`, in place of the command the user actually has.
+  it.each([
+    ["tasks", "task"],
+    ["decisions", "decide"],
+  ])("ix help %s shows a real %s command's own help when one is registered", (plural, singular) => {
+    const program = new Command();
+    program.name("ix").exitOverride();
+    program.command(plural).description("real pre-collapse plural").option("--limit <n>", "Max results");
+    program.command(singular).description("real singular");
+    registerProStubs(program);
+    registerWorkflowsHelpCommand(program);
+    const stdout: string[] = [];
+    const origWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: unknown) => {
+      stdout.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      program.parse(["node", "ix", "help", plural]);
+    } finally {
+      process.stdout.write = origWrite;
+    }
+    expect(stdout.join("")).toMatch(new RegExp(`^Usage: ix ${plural}\\b`, "m"));
   });
 
   it("still rejects a topic that was never a command", () => {

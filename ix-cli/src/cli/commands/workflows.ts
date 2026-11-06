@@ -2,6 +2,8 @@
 
 import type { Command } from "commander";
 
+import { isProStub } from "../register/pro-stubs.js";
+
 const WORKFLOWS_TEXT = `
 Recommended Development Loop:
 
@@ -38,11 +40,12 @@ Bug Workflow:
 
 Decision Recording:
   ix decide "Use X" --rationale "..." --affects Entity
+  ix decide list                          List recorded decisions
 
 Task Listing:
-  ix tasks                                List all tasks
-  ix tasks --status pending               Only pending tasks
-  ix tasks --plan <id>                    Tasks in a specific plan
+  ix task list                            List all tasks
+  ix task list --status pending           Only pending tasks
+  ix task list --plan <id>                Tasks in a specific plan
 `;
 
 const ADVANCED_TEXT = `
@@ -65,6 +68,8 @@ Use "ix <command> --help" for details on any command.
 const COLLAPSED_HELP_TOPICS: Record<string, string> = {
   goals: "goal",
   bugs: "bug",
+  tasks: "task",
+  decisions: "decide",
 };
 
 export function registerWorkflowsHelpCommand(program: Command): void {
@@ -90,11 +95,18 @@ export function registerWorkflowsHelpCommand(program: Command): void {
 
       // Plural commands @ix/pro collapsed into a subcommand of the singular
       // (`ix goals` -> `ix goal list`, Ix-pro#103; `ix bugs` -> `ix bug list`,
-      // Ix-pro#108). The plural is no longer a command anywhere, so `ix help
-      // bugs` would fall through to "Unknown help topic". Forward it to the
-      // singular, whose help documents the new subcommand.
+      // Ix-pro#108; `ix tasks` -> `ix task list`, Ix-pro#182; `ix decisions`
+      // -> `ix decide list`, Ix-pro#184). Once the plural is no longer a
+      // command, `ix help bugs` would fall through to "Unknown help topic".
+      // Forward it to the singular, whose help (with Pro installed) documents
+      // the new subcommand. A Pro release from before the collapse still
+      // registers the real plural, and its own help is the right answer there,
+      // so forward only when the plural is absent or just an OSS stub.
       const collapsed = COLLAPSED_HELP_TOPICS[topic];
-      if (collapsed) {
+      const cmd = program.commands.find(
+        (c: Command) => c.name() === topic
+      );
+      if (collapsed && (!cmd || isProStub(cmd))) {
         const target = program.commands.find(
           (c: Command) => c.name() === collapsed
         );
@@ -104,10 +116,7 @@ export function registerWorkflowsHelpCommand(program: Command): void {
         }
       }
 
-      // Look up the topic as a registered command and show its help
-      const cmd = program.commands.find(
-        (c: Command) => c.name() === topic
-      );
+      // Otherwise show the topic's own command help, if it is one
       if (cmd) {
         cmd.outputHelp();
       } else {

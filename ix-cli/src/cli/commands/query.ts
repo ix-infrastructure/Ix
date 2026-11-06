@@ -26,7 +26,7 @@ export function registerQueryCommand(program: Command): void {
       stderr("  ix depends <symbol>       Dependency impact analysis");
       stderr("  ix text <term>            Fast lexical search (ripgrep)");
       stderr("  ix read <target>          Read source code directly");
-      stderr("  ix decisions              List design decisions");
+      stderr("  ix decide list            List design decisions");
       stderr("  ix history <entityId>     Provenance chain");
       stderr("  ix diff <from> <to>       Changes between revisions\n");
       if (!opts.unsafe) {

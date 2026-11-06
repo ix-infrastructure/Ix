@@ -3,9 +3,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { capRecordStream, createIxMcpServer, type IxRunner } from "../../mcp/server.js";
+import { createInProcessRunner } from "../../mcp/runner.js";
 
 const clients: Client[] = [];
 afterEach(async () => {
@@ -233,5 +235,133 @@ describe("bounds", () => {
     const first = result.content?.[0];
     expect(first?.type === "text" && first.text.includes("truncated tool=ix_text")).toBe(true);
     expect(first?.type === "text" && first.text.length).toBeLessThan(big.length);
+  });
+});
+
+describe("ix_decisions", () => {
+  // Ix-pro#184 retired `ix decisions` for `ix decide list`. The subcommand has
+  // to come before the options, which the parent `decide` would otherwise
+  // parse (and reject: it has no --topic or --limit). The read-only
+  // `decisions` is tried first so the tool can never reach a `decide` that
+  // might record something.
+  async function proClient(runIx: IxRunner): Promise<Client> {
+    const server = createIxMcpServer({ version: "test", runIx, tools: "all", proAvailable: true });
+    const client = new Client({ name: "ix-mcp-params-pro-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    clients.push(client);
+    return client;
+  }
+
+  const UNKNOWN_DECISIONS = { ok: false, stdout: "", stderr: "error: unknown command 'decisions'" };
+
+  it("uses `decisions` on a Pro release from before the collapse, and never runs `decide`", async () => {
+    const { calls, runIx } = recorder('[{"id":"d1"}]');
+    const client = await proClient(runIx);
+    const result = (await client.callTool({ name: "ix_decisions", arguments: { topic: "ingestion", limit: 10 } })) as CallToolResult;
+    expect(JSON.stringify(result.content)).toContain("d1");
+    expect(calls).toEqual([["decisions", "--topic=ingestion", "--limit=10", "--format=json"]]);
+  });
+
+  it("moves to `decide list` when `decisions` is unknown, deciding again on every call", async () => {
+    // Not latched: one run where Pro failed to load also says "unknown command
+    // 'decisions'" (there is no stub for it any more), and a pre-#184 Pro that
+    // loads on the next run must get `decisions` again, not `decide list`.
+    const calls: string[][] = [];
+    let retired = true;
+    const client = await proClient(async (args) => {
+      calls.push(args);
+      if (args[0] === "decisions") return retired ? UNKNOWN_DECISIONS : { ok: true, stdout: '[{"id":"d1"}]', stderr: "" };
+      return { ok: true, stdout: '[{"id":"d2"}]', stderr: "" };
+    });
+    const first = (await client.callTool({ name: "ix_decisions", arguments: { topic: "auth", limit: 5 } })) as CallToolResult;
+    retired = false;
+    const second = (await client.callTool({ name: "ix_decisions", arguments: {} })) as CallToolResult;
+    expect(JSON.stringify(first.content)).toContain("d2");
+    expect(JSON.stringify(second.content)).toContain("d1");
+    expect(calls).toEqual([
+      ["decisions", "--topic=auth", "--limit=5", "--format=json"],
+      ["decide", "list", "--topic=auth", "--limit=5", "--format=json"],
+      ["decisions", "--format=json"],
+    ]);
+  });
+
+  it("returns a real `decisions` failure instead of trying `decide`", async () => {
+    const calls: string[][] = [];
+    const client = await proClient(async (args) => {
+      calls.push(args);
+      return { ok: false, stdout: "", stderr: "backend offline" };
+    });
+    const result = (await client.callTool({ name: "ix_decisions", arguments: {} })) as CallToolResult;
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("backend offline");
+    expect(calls).toEqual([["decisions", "--format=json"]]);
+  });
+
+  // The switch keys on commander's own "unknown command" text, so drive it
+  // through the real in-process runner and a command tree shaped like each
+  // Pro release, not hand-written stderr.
+  type ProShape = "v0.2.0" | "lenient" | "collapsed";
+  function proTree(shape: ProShape): Command {
+    const program = new Command();
+    program.name("ix");
+    const decide = program
+      .command("decide <title>")
+      .option("--format <fmt>", "Output format", "text");
+    if (shape === "collapsed") {
+      // Ix-pro#184 dd7358f5: plain --rationale, and a `list` that declares
+      // --format for its help but reads the effective one via optsWithGlobals,
+      // since the parent consumes the flag before dispatch.
+      decide.option("--rationale <text>");
+      decide
+        .command("list")
+        .option("--limit <n>")
+        .option("--topic <topic>")
+        .option("--format <fmt>", "Output format", "text")
+        .action((opts: { topic?: string }, cmd: Command) => {
+          const format = cmd.optsWithGlobals<{ format: string }>().format;
+          console.log(format === "json" ? JSON.stringify([{ via: "decide list", topic: opts.topic }]) : "TEXT OUTPUT");
+        });
+    } else {
+      // v0.2.0: a required --rationale, and a separate `decisions`. "lenient"
+      // is a build with plain --rationale but no `list` yet (partway to #184).
+      // There `decide list` would record a decision titled "list", which is
+      // why the read-only `decisions` has to be tried first.
+      if (shape === "v0.2.0") decide.requiredOption("--rationale <text>");
+      else decide.option("--rationale <text>");
+      decide.option("--topic <topic>").option("--limit <n>").action(() => console.log("RECORDED"));
+      program
+        .command("decisions")
+        .option("--limit <n>")
+        .option("--topic <topic>")
+        .option("--format <fmt>", "Output format", "text")
+        .action((opts: { topic?: string }) => console.log(JSON.stringify([{ via: "decisions", topic: opts.topic }])));
+    }
+    return program;
+  }
+
+  it.each([
+    ["v0.2.0", "decisions"],
+    ["lenient", "decisions"],
+    ["collapsed", "decide list"],
+  ] as const)("lists through the real runner on a %s Pro via %s, never recording", async (shape, via) => {
+    const runIx = createInProcessRunner({ version: "test", createProgram: () => proTree(shape) });
+    const client = await proClient(runIx);
+    const result = (await client.callTool({ name: "ix_decisions", arguments: { topic: "auth", limit: 5 } })) as CallToolResult;
+    const text = JSON.stringify(result.content);
+    expect(result.isError, text).toBeUndefined();
+    expect(text).toContain(via);
+    expect(text).toContain("auth");
+    expect(text).not.toContain("RECORDED");
+  });
+
+  it("refuses path rather than silently listing every decision", async () => {
+    const { calls, runIx } = recorder("[]");
+    const client = await proClient(runIx);
+    const result = (await client.callTool({ name: "ix_decisions", arguments: { path: "src/cli" } })) as CallToolResult;
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("cannot filter by path");
+    expect(calls).toEqual([]);
   });
 });
