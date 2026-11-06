@@ -6,7 +6,7 @@ import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import { activeReadScope, ensureReadScope } from "../resolve.js";
 import { llmLine } from "../llm.js";
-import { normalizePathSeparators } from "../path-match.js";
+import { normalizeForPathMatch, normalizePathSeparators } from "../path-match.js";
 import { printJson } from "../format.js";
 import { mapLimit } from "../../client/request-memo.js";
 
@@ -52,9 +52,9 @@ export function getSourceUri(node: any): string {
 /**
  * Apply path inclusion and exclusion filters to a list of nodes.
  *
- * Both sides go through `normalizePathSeparators`, so `--path src\cli` (what a
- * Windows user types) matches the `src/cli` that is actually stored. Case is
- * left alone — see `path-match.ts` and Ix#636.
+ * Both sides go through `normalizeForPathMatch`, so `--path src\cli` (what a
+ * Windows user types) matches the `src/cli` that is actually stored, and
+ * `--path ix-memory` matches `IX-Memory/` like the resolver does (Ix#636).
  */
 export function applyPathFilters(
   nodes: any[],
@@ -63,12 +63,12 @@ export function applyPathFilters(
 ): any[] {
   let result = nodes;
   if (includePath) {
-    const needle = normalizePathSeparators(includePath);
-    result = result.filter((node: any) => normalizePathSeparators(getSourceUri(node)).includes(needle));
+    const needle = normalizeForPathMatch(includePath);
+    result = result.filter((node: any) => normalizeForPathMatch(getSourceUri(node)).includes(needle));
   }
   if (excludePath) {
-    const needle = normalizePathSeparators(excludePath);
-    result = result.filter((node: any) => !normalizePathSeparators(getSourceUri(node)).includes(needle));
+    const needle = normalizeForPathMatch(excludePath);
+    result = result.filter((node: any) => !normalizeForPathMatch(getSourceUri(node)).includes(needle));
   }
   return result;
 }
@@ -400,9 +400,11 @@ export function registerRankCommand(program: Command): void {
 
         // 1. Fetch all entities of the given kind
         await ensureReadScope(client); // fold in a Path-2 stitched system (Ix#225 Half B)
-        // The backend's scope is a raw AQL CONTAINS against source_uri, which is
+        // The backend's scope is an AQL CONTAINS against source_uri, which is
         // always POSIX — send the separator-normalized needle or a Windows-style
-        // --path silently matches nothing server-side too (Ix#636).
+        // --path silently matches nothing server-side too (Ix#636). Case is
+        // kept as typed: a current backend lowercases both sides itself, and
+        // an older, case-sensitive one still matches the case the user gave.
         const scopeNeedle = opts.path ? normalizePathSeparators(opts.path) : undefined;
         const allNodes = await client.listByKind(opts.kind, { limit: 2000, scope: scopeNeedle, ...activeReadScope() });
 

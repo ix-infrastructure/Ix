@@ -8,7 +8,7 @@ import { resolveReadSystemId } from "../resolve.js";
 import { relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
 import { projectRow } from "../output-shape.js";
-import { normalizePathSeparators } from "../path-match.js";
+import { normalizeForPathMatch, normalizePathSeparators } from "../path-match.js";
 import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
 
 /**
@@ -141,11 +141,14 @@ Examples:
       // the client-side filter below ever sees it). The client-side filter is
       // kept as a fallback for older servers that ignore the scope field.
       const systemId = await resolveReadSystemId(client);
-      // Separators only, on both the scope sent to the backend and the
-      // client-side fallback below. source_uris are always POSIX, so a Windows
-      // `--path src\cli` matched nothing in either place (Ix#636). Case is
-      // untouched — see path-match.ts.
+      // Separators are normalized on the scope sent to the backend: source_uris
+      // are always POSIX, so a Windows `--path src\cli` matched nothing there
+      // (Ix#636). Its case is kept as typed: a current backend lowercases both
+      // sides itself, and an older, case-sensitive one still matches the case
+      // the user gave. The client-side fallback below is case-insensitive, like
+      // the resolver — see path-match.ts.
       const pathNeedle = opts.path ? normalizePathSeparators(opts.path) : undefined;
+      const pathKey = opts.path ? normalizeForPathMatch(opts.path) : undefined;
       // One past the limit, so a full window is distinguishable from an exact
       // fit. The backend has no count endpoint, so this is the only honest
       // answer available: "there is at least one more". /v1/list has no
@@ -168,15 +171,15 @@ Examples:
       const moreFetched = nodes.length > offset + limit;
       const truncated = moreFetched || capped;
 
-      if (pathNeedle) {
+      if (pathKey) {
         nodes = nodes.filter((n) => {
-          const uri = normalizePathSeparators(String(
+          const uri = normalizeForPathMatch(String(
             (n as any).provenance?.source_uri ??
             n.provenance?.sourceUri ??
             n.attrs?.path ??
             ""
           ));
-          return uri.includes(pathNeedle);
+          return uri.includes(pathKey);
         });
       }
 

@@ -8,18 +8,18 @@
  * `rel.split(nodePath.sep).join('/')`, so a graph ingested on Windows stores
  * `src/cli/rank.ts` exactly as one ingested on Linux does.
  *
- * The user's input is not normalized anywhere, which is the bug: on Windows
- * `--path src\cli` is the natural thing to type (it is what tab-completion and
- * every error message give you) and it matched nothing at all in `rank` and
- * `inventory`, and nothing on the backend either, because no stored source_uri
- * ever contains a backslash. See Ix#636.
+ * The user's input was not normalized anywhere: on Windows `--path src\cli` is
+ * the natural thing to type (it is what tab-completion and every error message
+ * give you) and it matched nothing at all in `rank` and `inventory`, and nothing
+ * on the backend either, because no stored source_uri ever contains a
+ * backslash. See Ix#636.
  *
- * Separators only — case is deliberately left alone. `--path` is
- * case-INSENSITIVE in the resolver (`read`, `explain`, `locate`, …) and
- * case-SENSITIVE in `rank`, `inventory` and the backend's AQL `CONTAINS`.
- * Reconciling that is a product decision with an index cost on the backend
- * side, and is tracked separately in Ix#636; this helper changes no case
- * behaviour in either direction.
+ * `--path` is also case-INSENSITIVE everywhere (Ix#636): the resolver (`read`,
+ * `explain`, `locate`, …), the client-side filters in `rank` and `inventory`,
+ * and the backend's `/v1/search` and `/v1/list` scopes all lowercase both
+ * sides. A backend older than the release that made `/v1/list`'s scope
+ * case-insensitive still matches the pushed-down scope case-sensitively, so
+ * there `rank` and `inventory` can only find what that exact case matches.
  */
 
 /**
@@ -33,4 +33,12 @@
  */
 export function normalizePathSeparators(value: string | undefined | null): string {
   return (value ?? "").replace(/\\/g, "/");
+}
+
+/**
+ * The `--path` comparison key: separators normalized as above, then lowercased.
+ * Applied to both sides, so `--path ix-memory\src` matches `IX-Memory/src/a.ts`.
+ */
+export function normalizeForPathMatch(value: string | undefined | null): string {
+  return normalizePathSeparators(value).toLowerCase();
 }
