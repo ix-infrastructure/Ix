@@ -61,9 +61,10 @@ describe("Pro stubs", () => {
     ["goals", ["goals", "--status", "active", "--format", "json"]],
     ["decide", ["decide", "Use X", "--rationale", "because", "--affects", "Entity"]],
     ["briefing", ["briefing", "--format", "json"]],
-    ["decisions", ["decisions", "--topic", "ingestion", "--limit", "10"]],
+    ["decide", ["decide", "list", "--topic", "ingestion", "--limit", "10"]],
     ["plan", ["plan", "task", "title", "--plan", "p1", "--resolves", "b1"]],
     ["task", ["task", "show", "t1"]],
+    ["task", ["task", "list", "--status", "pending", "--plan", "p1"]],
     ["workflow", ["workflow", "attach", "w1"]],
   ])("reports Pro for %s with arguments", (name, argv) => {
     const { err, exitCode } = runStub(argv);
@@ -102,8 +103,8 @@ describe("Pro stubs", () => {
     expect(patches?.options.map(o => o.long)).toContain("--format");
   });
 
-  // @ix/pro registers a plural list command alongside `plan` and `task`
-  // (register.ts: registerPlansCommand, registerTasksCommand). Stubbing only the
+  // @ix/pro registers a plural list command alongside `plan`
+  // (register.ts: registerPlansCommand). Stubbing only the
   // singular is the failure this pins: the plural fell through to commander's
   // "unknown command" instead of the sentinel above, so an agent told to stop on
   // `requires Ix Pro.` saw an unrecognized error and had nothing to match.
@@ -115,7 +116,6 @@ describe("Pro stubs", () => {
   // `ix goals` exists; removing it is a pending follow-up.
   it.each([
     ["plan", "plans"],
-    ["task", "tasks"],
     ["goal", "goals"],
   ])("stubs both %s and %s", (singular, plural) => {
     for (const name of [singular, plural]) {
@@ -132,6 +132,21 @@ describe("Pro stubs", () => {
       "The 'bug' command requires Ix Pro.",
     );
     expect(runStub(["bugs"]).err).not.toContain("requires Ix Pro");
+  });
+
+  // Same shape for the next two collapses: Ix-pro#182 moved `ix tasks` into
+  // `ix task list`, and Ix-pro#184 moves `ix decisions` into `ix decide list`.
+  // Stubbing the retired plural would tell an OSS user that installing Pro
+  // provides it, so it must fall through to commander instead, while the
+  // singular stub still covers the new `list` subcommand.
+  it.each([
+    ["task", "tasks"],
+    ["decide", "decisions"],
+  ])("stubs the collapsed '%s list' subcommand, not a '%s' command", (singular, plural) => {
+    expect(runStub([singular, "list", "--format", "json"]).err).toContain(
+      `The '${singular}' command requires Ix Pro.`,
+    );
+    expect(runStub([plural]).err).not.toContain("requires Ix Pro");
   });
 
   it("emits the message verbatim as CLAUDE.md quotes it", () => {

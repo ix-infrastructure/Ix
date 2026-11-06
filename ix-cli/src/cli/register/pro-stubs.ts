@@ -6,7 +6,6 @@ const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "briefing", desc: "Session-resume briefing" },
   { name: "bug", desc: "Manage bugs" },
   { name: "decide", desc: "Record a design decision" },
-  { name: "decisions", desc: "List recorded design decisions" },
   { name: "goal", desc: "Manage project goals" },
   { name: "goals", desc: "List all goals" },
   // `patches` is deliberately absent: ix-cli owns the real implementation
@@ -17,7 +16,6 @@ const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "plan", desc: "Manage plans and plan tasks" },
   { name: "task", desc: "Manage tasks" },
   { name: "plans", desc: "List all plans" },
-  { name: "tasks", desc: "List all tasks across plans" },
   { name: "truth", desc: "Manage project intents (truth)" },
   { name: "workflow", desc: "Attach, show, validate, or run staged workflows" },
 ];
