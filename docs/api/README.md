@@ -27,6 +27,7 @@ from what the CLI actually calls.
    - [Patches & Provenance](#patches--provenance)
    - [Analysis (Diff, Conflicts, Smells, Subsystems)](#analysis)
    - [Stats & Savings](#stats--savings)
+   - [Notes & Sessions](#notes--sessions)
    - [Reset](#reset)
 6. [Visualizer Proxy Surface](#visualizer-proxy-surface)
 7. [Data Models](#data-models)
@@ -659,6 +660,82 @@ Token-savings metrics. **Query**: `detail=true` for detail.
 #### DELETE `/v1/savings`
 
 Reset savings metrics.
+
+### Notes & Sessions
+
+The memory layer's notes and sessions, behind `ix note` and `ix session`. The
+OSS backend serves every route here; with Ix Pro installed, those commands go
+to the active cloud org instead. A session may be addressed by name or by id
+wherever a path says `{nameOrId}`, and `sessionId` in a note body may be a name.
+
+#### POST `/v1/note`
+
+Create a note. **Body** — `CreateNoteRequest`: `text` (required), `tag`
+(`finding` \| `decision` \| `reminder` \| `note`, default `note`), `actor`,
+`nodeIds`, `sessionId`. **Response** — `Note`:
+
+```json
+{ "id": "…", "text": "…", "tag": "note", "actor": "p2p:alice", "nodeIds": [], "at": "2026-11-05T00:00:00Z", "stale": false }
+```
+
+#### GET `/v1/note/{id}`
+
+One note. **Response** — `NoteSearchResult`: a `Note` plus `sessionId`,
+`sessionName`, `lifecycleStatus`, `supersedes`, `supersededBy`. 404 when there
+is no such note.
+
+#### POST `/v1/note/{id}/supersede`
+
+Replace a note. **Body** — `CreateNoteRequest`. **Response** —
+`{ status: "superseded", oldNoteId, newNote }`. Not idempotent: each call
+creates a new note. Only the note's author (or an org admin) may supersede it.
+
+#### POST `/v1/note/{id}/retract`
+
+Soft-delete a note. **Body**: `actor`. **Response** —
+`{ status: "retracted", noteId }`.
+
+#### GET `/v1/notes`
+
+List or search notes. **Query**: `q`, `tag`, `actor`, `since` (ISO),
+`limit` (default 50), `includeSuperseded` (default true). **Response** — array
+of `NoteSearchResult`.
+
+#### POST `/v1/session`
+
+Create a session. **Body** — `CreateSessionRequest`: `purpose` and `actor`
+(required), `ttlHours` (default 24), `name` (generated when absent).
+**Response** — `SessionInfo`:
+
+```json
+{ "sessionId": "…", "name": "sprint-23", "purpose": "…", "actor": "alice", "actors": ["alice"], "ttlHours": 24, "createdAt": "…", "lastLoadedAt": null }
+```
+
+#### GET `/v1/session/{nameOrId}`
+
+One session, by name first and then by id. 404 when there is none.
+
+#### DELETE `/v1/session/{nameOrId}`
+
+Delete a session's metadata; its notes are kept. **Response** —
+`{ status: "deleted" }`.
+
+#### POST `/v1/session/{nameOrId}/join`
+
+Add an actor. **Body**: `{ actor }`. **Response** — `SessionInfo`.
+
+#### POST `/v1/session/{nameOrId}/pin`
+
+Pin graph nodes. **Body**: `{ nodeIds }`. **Response** —
+`{ status: "pinned", count }`.
+
+#### GET `/v1/session/{nameOrId}/notes`
+
+A session's notes. **Response** — array of `Note`.
+
+#### GET `/v1/sessions`
+
+List sessions. **Query**: `actor`. **Response** — array of `SessionInfo`.
 
 ### Reset
 

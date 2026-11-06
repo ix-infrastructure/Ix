@@ -3,6 +3,7 @@
 import type { Command } from "commander";
 import { applyOssSetup } from "./oss-setup.js";
 import { proIsAbsent } from "./pro-loader.js";
+import { OSS_FALLBACK_TABLE, registerOssFallbacks } from "./oss-fallbacks.js";
 
 /**
  * Which module registers each OSS command, so the CLI can load only the one
@@ -83,7 +84,8 @@ export const LOAD_ALL_COMMANDS_ENV = "IX_LOAD_ALL_COMMANDS";
 export type StartupPlan =
   | { kind: "all" }
   | { kind: "version" }
-  | { kind: "command"; name: string; load: () => Promise<RegisterCommand> };
+  | { kind: "command"; name: string; load: () => Promise<RegisterCommand> }
+  | { kind: "fallback"; name: string };
 
 /**
  * How much of the command registry this invocation needs. `args` is argv
@@ -93,7 +95,8 @@ export type StartupPlan =
  *
  * - `ix --version` / `ix -V` alone: no command at all.
  * - `ix <name> ...` where `<name>` is the first token and in the table: that
- *   command's module.
+ *   command's module. Likewise for a name in `OSS_FALLBACK_TABLE`
+ *   (`ix note`, `ix session`), which with Pro absent are OSS's to answer.
  *
  * Everything else registers all of them, because commander needs the whole
  * list to answer it: root help (`ix`, `ix --help`, `ix help ...`), an unknown
@@ -112,10 +115,15 @@ export function planStartup(
   if (word === undefined) return { kind: "all" };
   const versionOnly = args.length === 1 && (word === "--version" || word === "-V");
   const known = !NEEDS_EVERY_COMMAND.has(word) && Object.hasOwn(OSS_COMMAND_TABLE, word);
-  if (!versionOnly && !known) return { kind: "all" };
+  const fallback = Object.hasOwn(OSS_FALLBACK_TABLE, word);
+  if (!versionOnly && !known && !fallback) return { kind: "all" };
   // Last: the only check here that touches the filesystem.
   if (!isProAbsent()) return { kind: "all" };
-  return versionOnly ? { kind: "version" } : { kind: "command", name: word, load: OSS_COMMAND_TABLE[word] };
+  if (versionOnly) return { kind: "version" };
+  // A fallback (`register/oss-fallbacks.ts`) is only ever OSS's with Pro absent,
+  // which is the one case this plan is made in.
+  if (fallback) return { kind: "fallback", name: word };
+  return { kind: "command", name: word, load: OSS_COMMAND_TABLE[word] };
 }
 
 /**
@@ -131,5 +139,8 @@ export async function registerForPlan(program: Command, plan: StartupPlan): Prom
   }
   if (plan.kind === "command") (await plan.load())(program);
   applyOssSetup(program);
+  // After the setup, as in the full path: a fallback is configured like Pro's
+  // command it stands in for, not like an OSS one.
+  if (plan.kind === "fallback") await registerOssFallbacks(program, plan.name);
   return true;
 }

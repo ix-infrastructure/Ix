@@ -55,6 +55,16 @@ const OSS_HELP = [
   ``,
 ].join("\n");
 
+/**
+ * The commands `register/oss-fallbacks.ts` registers when Ix Pro is absent.
+ * With Pro loaded, its own `note` and `session` are listed in its section.
+ */
+const OSS_MEMORY_HELP = [
+  chalk.bold(`Memory:`),
+  `  note [text]           Record a note (ls, show, supersede, retract)`,
+  `  session [actor]       List and manage sessions`,
+].join("\n");
+
 const FOOTER = `Use "ix <command> --help" for details.
 `;
 
@@ -62,6 +72,9 @@ export function buildHelpText(
   proCommands?: { name: string; desc: string }[],
 ): string {
   let text = OSS_HELP;
+
+  // No list means Pro did not load, so the OSS fallbacks are what answer.
+  if (proCommands === undefined) text += `\n${OSS_MEMORY_HELP}\n\n`;
 
   if (proCommands && proCommands.length > 0) {
     text += "\nPro:\n";

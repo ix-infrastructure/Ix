@@ -13,6 +13,16 @@ import type {
   PatchCommitResult,
   CapabilitiesResponse,
   DegreeResponse,
+  CreateNoteRequest,
+  Note,
+  NoteSearchResult,
+  ListNotesParams,
+  SupersedeNoteResult,
+  RetractNoteResult,
+  SessionInfo,
+  CreateSessionRequest,
+  PinSessionResult,
+  DeleteSessionResult,
 } from "./types.js";
 
 export interface ListSubsystemsOptions {
@@ -83,6 +93,9 @@ const SHARED_READ_PREFIXES = [
   "/v1/expand", "/v1/degree", "/v1/search", "/v1/context", "/v1/list",
   "/v1/entity/", "/v1/provenance/", "/v1/resolve-prefix/",
 ];
+
+/** Per-request bound on the single-row note and session writes. */
+const NOTE_WRITE_TIMEOUT_MS = 15_000;
 
 function isSharedRead(path: string): boolean {
   return SHARED_READ_PREFIXES.some((prefix) => path.startsWith(prefix));
@@ -390,6 +403,76 @@ export class IxClient {
 
   async getPatch(id: string): Promise<unknown> {
     return this.get(`/v1/patches/${encodeURIComponent(id)}`);
+  }
+
+  // ── Notes and sessions ──────────────────────────────────────────────
+  // The memory layer's note/session routes (`ix note`, `ix session`). Writes
+  // go through `post`, which never retries a non-read, so a dropped connection
+  // cannot create a note twice. Bounded at 15 s like Ix Pro's client for the
+  // same routes: these are single-row operations.
+
+  async createNote(body: CreateNoteRequest): Promise<Note> {
+    return this.post("/v1/note", body, { timeoutMs: NOTE_WRITE_TIMEOUT_MS });
+  }
+
+  async getNote(id: string): Promise<NoteSearchResult> {
+    return this.get(`/v1/note/${encodeURIComponent(id)}`);
+  }
+
+  async listNotes(params: ListNotesParams = {}): Promise<NoteSearchResult[]> {
+    const qs = new URLSearchParams();
+    if (params.q) qs.set("q", params.q);
+    if (params.tag) qs.set("tag", params.tag);
+    if (params.actor) qs.set("actor", params.actor);
+    if (params.since) qs.set("since", params.since);
+    if (params.limit != null) qs.set("limit", String(params.limit));
+    if (params.includeSuperseded != null) qs.set("includeSuperseded", String(params.includeSuperseded));
+    const query = qs.toString();
+    return this.get(`/v1/notes${query ? `?${query}` : ""}`);
+  }
+
+  async supersedeNote(id: string, body: CreateNoteRequest): Promise<SupersedeNoteResult> {
+    return this.post(`/v1/note/${encodeURIComponent(id)}/supersede`, body, { timeoutMs: NOTE_WRITE_TIMEOUT_MS });
+  }
+
+  async retractNote(id: string, actor?: string): Promise<RetractNoteResult> {
+    return this.post(`/v1/note/${encodeURIComponent(id)}/retract`, { actor }, { timeoutMs: NOTE_WRITE_TIMEOUT_MS });
+  }
+
+  async sessionNotes(nameOrId: string): Promise<Note[]> {
+    return this.get(`/v1/session/${encodeURIComponent(nameOrId)}/notes`);
+  }
+
+  async listSessions(actor?: string): Promise<SessionInfo[]> {
+    return this.get(`/v1/sessions${actor ? `?actor=${encodeURIComponent(actor)}` : ""}`);
+  }
+
+  async createSession(body: CreateSessionRequest): Promise<SessionInfo> {
+    return this.post("/v1/session", body, { timeoutMs: NOTE_WRITE_TIMEOUT_MS });
+  }
+
+  async getSession(nameOrId: string): Promise<SessionInfo> {
+    return this.get(`/v1/session/${encodeURIComponent(nameOrId)}`);
+  }
+
+  async joinSession(nameOrId: string, actor: string): Promise<SessionInfo> {
+    return this.post(`/v1/session/${encodeURIComponent(nameOrId)}/join`, { actor }, { timeoutMs: NOTE_WRITE_TIMEOUT_MS });
+  }
+
+  async pinSessionNodes(nameOrId: string, nodeIds: string[]): Promise<PinSessionResult> {
+    return this.post(`/v1/session/${encodeURIComponent(nameOrId)}/pin`, { nodeIds }, { timeoutMs: NOTE_WRITE_TIMEOUT_MS });
+  }
+
+  async deleteSession(nameOrId: string): Promise<DeleteSessionResult> {
+    const path = `/v1/session/${encodeURIComponent(nameOrId)}`;
+    const resp = await fetch(`${this.endpoint}/v1/session/${encodeURIComponent(nameOrId)}`, {
+      method: "DELETE",
+      headers: this.headers(false, "DELETE", path),
+      signal: this.signalFor(NOTE_WRITE_TIMEOUT_MS),
+    });
+    const text = await resp.text();
+    if (!resp.ok) throw httpError(resp.status, text);
+    return parseOrThrowWithStatus<DeleteSessionResult>({ status: resp.status, text });
   }
 
   /**
