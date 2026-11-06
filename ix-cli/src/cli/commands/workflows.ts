@@ -38,11 +38,12 @@ Bug Workflow:
 
 Decision Recording:
   ix decide "Use X" --rationale "..." --affects Entity
+  ix decide list                          List recorded decisions
 
 Task Listing:
-  ix tasks                                List all tasks
-  ix tasks --status pending               Only pending tasks
-  ix tasks --plan <id>                    Tasks in a specific plan
+  ix task list                            List all tasks
+  ix task list --status pending           Only pending tasks
+  ix task list --plan <id>                Tasks in a specific plan
 `;
 
 const ADVANCED_TEXT = `
@@ -65,6 +66,8 @@ Use "ix <command> --help" for details on any command.
 const COLLAPSED_HELP_TOPICS: Record<string, string> = {
   goals: "goal",
   bugs: "bug",
+  tasks: "task",
+  decisions: "decide",
 };
 
 export function registerWorkflowsHelpCommand(program: Command): void {
@@ -90,9 +93,11 @@ export function registerWorkflowsHelpCommand(program: Command): void {
 
       // Plural commands @ix/pro collapsed into a subcommand of the singular
       // (`ix goals` -> `ix goal list`, Ix-pro#103; `ix bugs` -> `ix bug list`,
-      // Ix-pro#108). The plural is no longer a command anywhere, so `ix help
-      // bugs` would fall through to "Unknown help topic". Forward it to the
-      // singular, whose help documents the new subcommand.
+      // Ix-pro#108; `ix tasks` -> `ix task list`, Ix-pro#182; `ix decisions`
+      // -> `ix decide list`, Ix-pro#184). The plural is no longer a command
+      // anywhere, so `ix help bugs` would fall through to "Unknown help
+      // topic". Forward it to the singular, whose help documents the new
+      // subcommand.
       const collapsed = COLLAPSED_HELP_TOPICS[topic];
       if (collapsed) {
         const target = program.commands.find(

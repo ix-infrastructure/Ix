@@ -111,14 +111,14 @@ used as a workaround.
 
 Commands marked **[Pro]** require Ix Pro (server-side). The **Planning** and
 **Workflows** sections of the CLI are entirely Pro-only — including `plan`,
-`plans`, `task`, `tasks`, and `workflow`.
+`plans`, `task`, and `workflow`.
 
 If any Pro command prints `The '<name>' command requires Ix Pro.`, this install
 does not have them — skip that step, do not retry it, and do not mention it
 again for the rest of the session. Nothing outside those marks is Pro-gated.
 
-Pro-only surface: `plan`, `plans`, `task`, `tasks`, `workflow`, `decide`,
-`decisions`, `goal`, `truth`, `bug`, `briefing`.
+Pro-only surface: `plan`, `plans`, `task`, `workflow`, `decide`, `goal`,
+`truth`, `bug`, `briefing`.
 
 ### Semantic boundaries (Pro record types)
 
