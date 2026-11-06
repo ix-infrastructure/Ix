@@ -103,11 +103,14 @@ describe("Pro stubs", () => {
     expect(patches?.options.map(o => o.long)).toContain("--format");
   });
 
-  // @ix/pro registers a plural list command alongside `plan`
-  // (register.ts: registerPlansCommand). Stubbing only the
-  // singular is the failure this pins: the plural fell through to commander's
-  // "unknown command" instead of the sentinel above, so an agent told to stop on
-  // `requires Ix Pro.` saw an unrecognized error and had nothing to match.
+  // These pairs were added when @ix/pro registered a plural list command next
+  // to the singular. Stubbing only the singular then let the plural fall
+  // through to commander's "unknown command" instead of the sentinel above, so
+  // an agent told to stop on `requires Ix Pro.` had nothing to match.
+  //
+  // Neither plural exists in Pro any more: Ix-pro#125 removed `plans`, and
+  // `tasks` (Ix-pro#182) has already left this table. `plans` is still
+  // stubbed by oversight, like `goals` below; #920 tracks removing both.
   //
   // `goals` is NOT in that category and is only still stubbed by oversight:
   // Ix-pro#103 deleted the command, #327 correctly dropped the stub, and #384
