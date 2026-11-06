@@ -3,9 +3,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { capRecordStream, createIxMcpServer, type IxRunner } from "../../mcp/server.js";
+import { createInProcessRunner } from "../../mcp/runner.js";
 
 const clients: Client[] = [];
 afterEach(async () => {
@@ -310,6 +312,49 @@ describe("ix_decisions", () => {
     const result = (await client.callTool({ name: "ix_decisions", arguments: {} })) as CallToolResult;
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result.content)).toContain("--rationale");
+  });
+
+  // The fallback keys on commander's own error text, so drive it through the
+  // real in-process runner and a command tree shaped like each Pro release,
+  // not hand-written stderr.
+  function proTree(collapsed: boolean): Command {
+    const program = new Command();
+    program.name("ix");
+    const decide = program
+      .command("decide")
+      .option("--format <fmt>", "Output format", "text");
+    if (collapsed) {
+      decide.argument("[title]").option("--rationale <text>");
+      decide
+        .command("list")
+        .option("--limit <n>")
+        .option("--topic <topic>")
+        .action((opts: { topic?: string }) => console.log(JSON.stringify([{ via: "decide list", topic: opts.topic }])));
+    } else {
+      // v0.2.0: `decide <title>` with a required --rationale, and a separate `decisions`.
+      decide.argument("<title>").requiredOption("--rationale <text>").action(() => console.log("RECORDED"));
+      program
+        .command("decisions")
+        .option("--limit <n>")
+        .option("--topic <topic>")
+        .option("--format <fmt>", "Output format", "text")
+        .action((opts: { topic?: string }) => console.log(JSON.stringify([{ via: "decisions", topic: opts.topic }])));
+    }
+    return program;
+  }
+
+  it.each([
+    [false, "decisions"],
+    [true, "decide list"],
+  ])("lists through the real runner (collapsed Pro: %s) via %s", async (collapsed, via) => {
+    const runIx = createInProcessRunner({ version: "test", createProgram: () => proTree(collapsed) });
+    const client = await proClient(runIx);
+    const result = (await client.callTool({ name: "ix_decisions", arguments: { topic: "auth", limit: 5 } })) as CallToolResult;
+    const text = JSON.stringify(result.content);
+    expect(result.isError, text).toBeUndefined();
+    expect(text).toContain(via);
+    expect(text).toContain("auth");
+    expect(text).not.toContain("RECORDED");
   });
 
   it("refuses path rather than silently listing every decision", async () => {
