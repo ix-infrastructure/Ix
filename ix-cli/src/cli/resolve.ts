@@ -23,6 +23,7 @@ import { findTargetCandidates, rowsInclude, type TargetCandidate } from "./targe
 import {
   candidateOrigin, isFileStemMatch, looksLikeCodeIdentifier, requestsNonCode,
 } from "./candidate-origin.js";
+import { normalizeForPathMatch } from "./path-match.js";
 
 /**
  * The read scope for the current working directory: a co-ingested multi-repo system
@@ -353,10 +354,6 @@ function toSuggestions(nodes: any[], limit = 3): Suggestion[] {
 
 function looksTypeLikeSymbol(symbol: string): boolean {
   return /^[A-Z][A-Za-z0-9_]*$/.test(symbol);
-}
-
-function normalizeForPathMatch(value: string | undefined): string {
-  return (value ?? "").toLowerCase().replace(/\\/g, "/");
 }
 
 // ── Scoring ───────────────────────────────────────────────────────────────
