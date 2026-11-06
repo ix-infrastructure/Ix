@@ -39,6 +39,7 @@ import { registerViewCommand } from "../commands/view.js";
 import { registerSavingsCommand } from "../commands/savings.js";
 import { registerPatchesCommand } from "../commands/patches.js";
 import { registerMcpCommand } from "../commands/mcp.js";
+import { registerInstallCommand } from "../commands/install.js";
 import { registerContextCommand } from "../commands/context.js";
 import { registerAroundCommand } from "../commands/around.js";
 import { registerHookCommand } from "../commands/hook.js";
@@ -95,6 +96,7 @@ export function registerOssCommands(program: Command): void {
   registerSavingsCommand(program);
   registerPatchesCommand(program);
   registerMcpCommand(program);
+  registerInstallCommand(program);
   registerContextCommand(program);
   registerAroundCommand(program);
   registerHookCommand(program);

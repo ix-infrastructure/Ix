@@ -607,6 +607,17 @@ Ingest source files or GitHub data into the knowledge graph.
 
 No flags.
 
+### `ix install [harness-ids...]`
+
+Install the Ix skill into this machine's agent harnesses. A menu over `bash scripts/install-skill.sh` on a terminal; off one, `--dry-run` and `--yes` pass straight through to the script and anything else prints a hint and writes nothing. Nothing is written before you confirm. Needs an Ix source checkout.
+
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--dry-run` | — | `false` | Show what would be written, write nothing |
+| `--force` | — | `false` | Overwrite a same-name skill that is not the Ix skill |
+| `--json` | — | `false` | Print the installer's per-host JSON report on stdout (prompts stay on stderr) |
+| `--yes` | — | `false` | Skip the menu and apply now (needed off a terminal); `-y` |
+
 ### `ix inventory`
 
 List entities by kind with optional path scoping.
