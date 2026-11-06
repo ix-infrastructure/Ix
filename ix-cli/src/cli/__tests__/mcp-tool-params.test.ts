@@ -264,20 +264,26 @@ describe("ix_decisions", () => {
     expect(calls).toEqual([["decisions", "--topic=ingestion", "--limit=10", "--format=json"]]);
   });
 
-  it("moves to `decide list` once `decisions` is unknown, and remembers that", async () => {
+  it("moves to `decide list` when `decisions` is unknown, deciding again on every call", async () => {
+    // Not latched: one run where Pro failed to load also says "unknown command
+    // 'decisions'" (there is no stub for it any more), and a pre-#184 Pro that
+    // loads on the next run must get `decisions` again, not `decide list`.
     const calls: string[][] = [];
+    let retired = true;
     const client = await proClient(async (args) => {
       calls.push(args);
-      return args[0] === "decisions" ? UNKNOWN_DECISIONS : { ok: true, stdout: '[{"id":"d2"}]', stderr: "" };
+      if (args[0] === "decisions") return retired ? UNKNOWN_DECISIONS : { ok: true, stdout: '[{"id":"d1"}]', stderr: "" };
+      return { ok: true, stdout: '[{"id":"d2"}]', stderr: "" };
     });
     const first = (await client.callTool({ name: "ix_decisions", arguments: { topic: "auth", limit: 5 } })) as CallToolResult;
-    await client.callTool({ name: "ix_decisions", arguments: {} });
-    expect(first.isError).toBeUndefined();
+    retired = false;
+    const second = (await client.callTool({ name: "ix_decisions", arguments: {} })) as CallToolResult;
     expect(JSON.stringify(first.content)).toContain("d2");
+    expect(JSON.stringify(second.content)).toContain("d1");
     expect(calls).toEqual([
       ["decisions", "--topic=auth", "--limit=5", "--format=json"],
       ["decide", "list", "--topic=auth", "--limit=5", "--format=json"],
-      ["decide", "list", "--format=json"],
+      ["decisions", "--format=json"],
     ]);
   });
 

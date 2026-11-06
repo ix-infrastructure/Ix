@@ -747,12 +747,6 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   );
 
   if (options.proAvailable) {
-    // Set once this server's Pro has answered `ix decisions` with "unknown
-    // command" (Ix-pro#184). The in-process runner loads one Pro for the
-    // server's life. Under IX_MCP_SUBPROCESS each call spawns a fresh `ix`, so
-    // a Pro downgraded mid-session keeps getting `decide list` (which a
-    // pre-#184 Pro rejects on --rationale) until the server restarts.
-    let decisionsRetired = false;
     registerTool(ctx, "ix_briefing", "Load the Ix Pro session briefing", {}, async () =>
       runJson(runIx, "ix_briefing", ix("briefing")),
     );
@@ -786,12 +780,15 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
         // their `decide <title>` rejecting `list` as a title while parsing,
         // and `decide` is the command that records. A Pro that has retired
         // `decisions` says so with commander's "unknown command", and nothing
-        // runs. Then use `decide list` for the rest of this server's life.
-        if (!decisionsRetired) {
-          const legacy = await runJson(runIx, "ix_decisions", ix("decisions", [], options));
-          if (!legacy.isError || !/unknown command 'decisions'/.test(resultText(legacy))) return legacy;
-          decisionsRetired = true;
-        }
+        // runs. Only then is `decide list` tried.
+        //
+        // Decided per call, not remembered: Pro is loaded on every run, so one
+        // run where it failed to load (stubs, and no `decisions` stub any more)
+        // or a Pro swapped mid-session would otherwise pin a pre-#184 Pro to
+        // `decide list`. The extra run on a post-#184 Pro is the price; drop
+        // the `decisions` attempt once the Pro floor is past #184.
+        const legacy = await runJson(runIx, "ix_decisions", ix("decisions", [], options));
+        if (!legacy.isError || !/unknown command 'decisions'/.test(resultText(legacy))) return legacy;
         return runJson(runIx, "ix_decisions", { ...ix("decide", [], options), subcommands: ["list"] });
       },
     );
