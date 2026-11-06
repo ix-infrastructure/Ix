@@ -321,15 +321,22 @@ describe("ix_decisions", () => {
     const program = new Command();
     program.name("ix");
     const decide = program
-      .command("decide")
+      .command("decide <title>")
       .option("--format <fmt>", "Output format", "text");
     if (collapsed) {
-      decide.argument("[title]").option("--rationale <text>");
+      // Ix-pro#184 dd7358f5: plain --rationale, and a `list` that declares
+      // --format for its help but reads the effective one via optsWithGlobals,
+      // since the parent consumes the flag before dispatch.
+      decide.option("--rationale <text>");
       decide
         .command("list")
         .option("--limit <n>")
         .option("--topic <topic>")
-        .action((opts: { topic?: string }) => console.log(JSON.stringify([{ via: "decide list", topic: opts.topic }])));
+        .option("--format <fmt>", "Output format", "text")
+        .action((opts: { topic?: string }, cmd: Command) => {
+          const format = cmd.optsWithGlobals<{ format: string }>().format;
+          console.log(format === "json" ? JSON.stringify([{ via: "decide list", topic: opts.topic }]) : "TEXT OUTPUT");
+        });
     } else {
       // v0.2.0: `decide <title>` with a required --rationale, and a separate `decisions`.
       decide.argument("<title>").requiredOption("--rationale <text>").action(() => console.log("RECORDED"));
