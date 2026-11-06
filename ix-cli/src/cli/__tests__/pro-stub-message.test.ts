@@ -98,7 +98,7 @@ describe("Pro stubs", () => {
     const patches = program.commands.find(c => c.name() === "patches");
     expect(patches).toBeDefined();
     // --format llm is why the OSS implementation is the one worth keeping when
-    // commander drops @ix/pro's duplicate registration on a Kartr install.
+    // commander drops @ix/pro's duplicate registration on a Pro install.
     expect(patches?.options.map(o => o.long)).toContain("--format");
   });
 

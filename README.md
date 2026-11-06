@@ -26,23 +26,6 @@
 
 ---
 
-### Kartr
-
-**[Kartr](https://www.ix-infra.com)** is an agent platform built on the same memory
-engine we use for Ix, extended to the sources a codebase does not contain: docs and
-files, email and calendar, meetings and notes, and team chat. Agents carry context
-across all of them.
-
-Kartr is in alpha and onboarding early users.
-
-<p align="center">
-  <a href="https://docs.google.com/forms/d/e/1FAIpQLSdh5IXVGW9mNBUtyBAsP_uysS38GgilpTNMbKRAVQf1FZ1eBg/viewform?usp=pp_url&amp;entry.2087374943=ix_github" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/Sign%20up%20for%20the%20Kartr%20alpha-%E2%86%92-8A2BE2?style=for-the-badge" alt="Sign up for the Kartr alpha" />
-  </a>
-</p>
-
----
-
 ### Try Ix
 
 ```bash

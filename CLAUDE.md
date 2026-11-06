@@ -59,7 +59,7 @@ ix map --silent                             # refresh the graph after code chang
 - **`ix patches` is OSS, not Pro** (#371). It is implemented here and registered
   in `oss.ts`. `@ix/pro` also registers a `patches`; commander throws on the
   duplicate and Pro's `tryRegister` swallows the throw, so the OSS one — which
-  registers first — wins on a Kartr install too. Do not re-add it to
+  registers first — wins on a Pro install too. Do not re-add it to
   `PRO_COMMANDS` (`register/pro-stubs.ts`): a stub for a command that exists
   in OSS shadows the real implementation, and the failure is silent rather
   than a crash.

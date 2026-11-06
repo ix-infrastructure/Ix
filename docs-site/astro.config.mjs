@@ -12,7 +12,7 @@ const apiSidebarGroup = createOpenAPISidebarGroup()
 
 export default defineConfig({
   site: 'https://docs.ix-infra.com',
-  // Served at docs.ix-infra.com/oss/, with the Kartr docs to sit beside it.
+  // Served at docs.ix-infra.com/oss/.
   // Astro does not nest the output under the base, so it is built into
   // dist/oss/ and dist/ stays the root of the domain (scripts/finalize-dist.mjs).
   base: DOCS_BASE,
