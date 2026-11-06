@@ -49,8 +49,21 @@ export function renderRows(headers: string[], rows: string[][]): string {
 
 /** The most a note may read from stdin. */
 export const STDIN_MAX_BYTES = 1024 * 1024;
-/** How long stdin may go without a byte (or EOF) before the read gives up. */
-export const STDIN_IDLE_MS = 30_000;
+/**
+ * How long stdin may go without a byte (or EOF) before the read gives up,
+ * reset by every chunk. Generous, so a slow producer (`git log | ix note`, an
+ * LLM streaming into a pipe) is never cut off; `IX_STDIN_IDLE_MS` overrides
+ * it, and 0 turns it off.
+ */
+export const STDIN_IDLE_MS = 5 * 60_000;
+
+/** The idle bound in effect: `IX_STDIN_IDLE_MS` when it is a non-negative number, else STDIN_IDLE_MS. */
+export function stdinIdleMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.IX_STDIN_IDLE_MS?.trim();
+  if (!raw) return STDIN_IDLE_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : STDIN_IDLE_MS;
+}
 
 /**
  * All of stdin, or "" when it is a terminal: text is only ever piped in, never
@@ -64,7 +77,7 @@ export const STDIN_IDLE_MS = 30_000;
  */
 export function readStdin(opts: { maxBytes?: number; idleMs?: number } = {}): Promise<string> {
   const maxBytes = opts.maxBytes ?? STDIN_MAX_BYTES;
-  const idleMs = opts.idleMs ?? STDIN_IDLE_MS;
+  const idleMs = opts.idleMs ?? stdinIdleMs();
   if (currentRunSignal()) {
     return Promise.reject(new Error("Pass the note text as an argument: stdin is the MCP transport under `ix mcp`."));
   }
@@ -85,6 +98,7 @@ export function readStdin(opts: { maxBytes?: number; idleMs?: number } = {}): Pr
     };
     const arm = () => {
       if (timer) clearTimeout(timer);
+      if (idleMs <= 0) return;
       timer = setTimeout(() => finish(new Error(`No input on stdin for ${Math.round(idleMs / 1000)}s: pass the text as an argument, or close stdin.`)), idleMs);
       timer.unref?.();
     };
@@ -123,7 +137,22 @@ export function reportWriteTarget(endpoint: string): void {
     );
   }
   const where = isLocalEndpoint(endpoint) ? "local backend" : "backend";
-  process.stderr.write(chalk.dim(`→ ${where} ${endpoint}`) + "\n");
+  process.stderr.write(chalk.dim(`→ ${where} ${displayEndpoint(endpoint)}`) + "\n");
+}
+
+/**
+ * `endpoint` without credentials or query: origin and path only, so a URL
+ * carrying `user:pass@` or a `?token=` is never echoed into a log or an
+ * agent's tool output. Unparseable input is not printed at all.
+ */
+export function displayEndpoint(endpoint: string): string {
+  try {
+    const url = new URL(endpoint);
+    const path = url.pathname.replace(/\/+$/, "");
+    return `${url.origin}${path}`;
+  } catch {
+    return "(unparseable endpoint)";
+  }
 }
 
 let proWarningShown = false;

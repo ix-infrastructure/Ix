@@ -4,7 +4,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { createClient } from "../config.js";
 import type { SessionInfo } from "../../client/types.js";
-import { confirm, relativeTime, renderRows, shortId } from "../memory-render.js";
+import { confirm, relativeTime, renderRows, reportWriteTarget, shortId } from "../memory-render.js";
 import { rememberRecent, resolveRecent } from "../recent.js";
 
 /**
@@ -103,8 +103,10 @@ Examples:
           return;
         }
       }
-      const s = await (await createClient()).createSession({ name, purpose: opts.purpose, actor: opts.actor, ttlHours });
+      const client = await createClient();
+      const s = await client.createSession({ name, purpose: opts.purpose, actor: opts.actor, ttlHours });
       rememberRecent("session", s.sessionId);
+      reportWriteTarget(client.endpoint);
       if (wantsJson(cmd)) return printJson(s);
       console.log(`${chalk.green("✓")} ${chalk.bold(s.name)} ${shortId(s.sessionId)}`);
       console.log(`  purpose: ${s.purpose}`);
@@ -128,7 +130,9 @@ Examples:
     .description("Add an actor to a session. Pass `-` for the last-shown session.")
     .requiredOption("--actor <name>", "Actor joining the session")
     .action(async (arg: string, opts: { actor: string }, cmd: Command) => {
-      const s = await (await createClient()).joinSession(resolveRecent("session", arg), opts.actor);
+      const client = await createClient();
+      const s = await client.joinSession(resolveRecent("session", arg), opts.actor);
+      reportWriteTarget(client.endpoint);
       if (wantsJson(cmd)) return printJson(s);
       console.log(`${chalk.green("✓")} ${chalk.bold(opts.actor)} joined ${chalk.bold(s.name)} (${s.actors.length} actors)`);
     });
@@ -138,7 +142,9 @@ Examples:
     .description("Pin node IDs to a session. Pass `-` for the last-shown session.")
     .action(async (arg: string, nodeIds: string[], _opts: unknown, cmd: Command) => {
       const nameOrId = resolveRecent("session", arg);
-      const result = await (await createClient()).pinSessionNodes(nameOrId, nodeIds);
+      const client = await createClient();
+      const result = await client.pinSessionNodes(nameOrId, nodeIds);
+      reportWriteTarget(client.endpoint);
       if (wantsJson(cmd)) return printJson(result);
       console.log(`${chalk.green("✓")} pinned ${result.count} node(s) to ${chalk.bold(nameOrId)}`);
     });
@@ -163,7 +169,9 @@ Examples:
           return;
         }
       }
-      const result = await (await createClient()).deleteSession(nameOrId);
+      const client = await createClient();
+      const result = await client.deleteSession(nameOrId);
+      reportWriteTarget(client.endpoint);
       if (wantsJson(cmd)) return printJson(result);
       console.log(`${chalk.green("✓")} deleted session ${chalk.dim(nameOrId)}`);
     });

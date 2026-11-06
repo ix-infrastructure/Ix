@@ -73,6 +73,7 @@ beforeAll(async () => {
       if (method === "POST" && url === "/v1/session") return send(200, { ...SESSION, ...(body as object) });
       if (method === "GET" && url === "/v1/session/sprint") return send(200, SESSION);
       if (method === "GET" && url === "/v1/session/sprint/notes") return send(200, [NOTE, { ...NOTE, id: "other", tag: "note" }]);
+      if (method === "POST" && url === "/v1/session/sprint/join") return send(200, { ...SESSION, actors: ["alice", (body as { actor: string }).actor] });
       if (method === "POST" && url === "/v1/session/sprint/pin") return send(200, { status: "pinned", count: (body as { nodeIds: string[] }).nodeIds.length });
       if (method === "DELETE" && url === "/v1/session/sprint") return send(200, { status: "deleted" });
       send(404, { error: "not_found", message: `no route ${method} ${url}` });
@@ -93,9 +94,14 @@ beforeEach(() => { seen = []; });
 
 interface Run { stdout: string; stderr: string; status: number | null }
 
-function ix(args: string[], input = "", ixHome = home): Promise<Run> {
+/**
+ * Run the CLI. `input` is written to stdin and stdin closed; with `delayMs`,
+ * stdin stays open and silent that long first, as a slow producer would.
+ */
+function ix(args: string[], input = "", ixHome = home, extra: { env?: Record<string, string>; delayMs?: number } = {}): Promise<Run> {
   const env: NodeJS.ProcessEnv = { ...process.env, IX_HOME: ixHome, IX_ENDPOINT: endpoint, IX_NO_UPDATE_CHECK: "1", NO_COLOR: "1" };
-  for (const key of ["FORCE_COLOR", "IX_FORMAT", "IX_LOAD_ALL_COMMANDS", "IX_TOKEN"]) delete env[key];
+  for (const key of ["FORCE_COLOR", "IX_FORMAT", "IX_LOAD_ALL_COMMANDS", "IX_TOKEN", "IX_STDIN_IDLE_MS"]) delete env[key];
+  Object.assign(env, extra.env ?? {});
   return new Promise((done, fail) => {
     const child = spawn(process.execPath, ["--import", TSX, MAIN, ...args], { cwd: home, env, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
@@ -104,7 +110,8 @@ function ix(args: string[], input = "", ixHome = home): Promise<Run> {
     child.stderr.setEncoding("utf-8").on("data", (d: string) => { stderr += d; });
     child.on("error", fail);
     child.on("close", (status) => done({ stdout, stderr, status }));
-    child.stdin.end(input);
+    if (extra.delayMs === undefined) child.stdin.end(input);
+    else setTimeout(() => child.stdin.end(input), extra.delayMs);
   });
 }
 
@@ -135,6 +142,23 @@ describe("ix note against the local backend (Pro absent)", () => {
     } finally {
       rmSync(proHome, { recursive: true, force: true });
     }
+  });
+
+  it("waits for a slow producer, and gives up only after IX_STDIN_IDLE_MS of silence", async () => {
+    // The text arrives after 1.5 s: well inside the default, so it is a note.
+    const slow = await ix(["note", "--json"], "late text", home, { delayMs: 1500 });
+    expect(slow.status).toBe(0);
+    expect(seen[0]!.body).toMatchObject({ text: "late text" });
+    seen = [];
+    // 0 turns the bound off.
+    const off = await ix(["note", "--json"], "later text", home, { env: { IX_STDIN_IDLE_MS: "0" }, delayMs: 800 });
+    expect(off.status).toBe(0);
+    seen = [];
+    // A short override fires before the text comes, and nothing is written.
+    const idle = await ix(["note", "--json"], "too late", home, { env: { IX_STDIN_IDLE_MS: "200" }, delayMs: 1500 });
+    expect(idle.status).toBe(1);
+    expect(idle.stderr).toContain("No input on stdin");
+    expect(seen).toEqual([]);
   });
 
   it("refuses stdin over 1 MiB without calling the backend", async () => {
@@ -249,6 +273,11 @@ describe("ix session against the local backend (Pro absent)", () => {
 
     const deleted = await ix(["session", "delete", "sprint", "--force", "--json"]);
     expect(JSON.parse(deleted.stdout)).toEqual({ status: "deleted" });
+    // Every session write says where it went, as note writes do.
+    expect(created.stderr).toContain(`→ local backend ${endpoint}`);
+    expect(deleted.stderr).toContain(`→ local backend ${endpoint}`);
+    const joined = await ix(["session", "join", "sprint", "--actor", "bob", "--json"]);
+    expect(joined.stderr).toContain(`→ local backend ${endpoint}`);
   });
 });
 
@@ -289,5 +318,14 @@ describe("readStdin", () => {
     const { readStdin } = await import("../memory-render.js");
     const { runWithSignal } = await import("../../client/run-signal.js");
     await expect(runWithSignal(new AbortController().signal, () => readStdin())).rejects.toThrow(/MCP transport/);
+  });
+});
+
+describe("displayEndpoint", () => {
+  it("never echoes credentials, a query or a fragment", async () => {
+    const { displayEndpoint } = await import("../memory-render.js");
+    expect(displayEndpoint("https://user:s3cret@tunnel.example/org/acme/?token=abc#x")).toBe("https://tunnel.example/org/acme");
+    expect(displayEndpoint("http://localhost:8090")).toBe("http://localhost:8090");
+    expect(displayEndpoint("not a url")).toBe("(unparseable endpoint)");
   });
 });
