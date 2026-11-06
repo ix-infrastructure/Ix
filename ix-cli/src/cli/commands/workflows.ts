@@ -103,10 +103,10 @@ export function registerWorkflowsHelpCommand(program: Command): void {
       // registers the real plural, and its own help is the right answer there,
       // so forward only when the plural is absent or just an OSS stub.
       const collapsed = COLLAPSED_HELP_TOPICS[topic];
-      const realPlural = program.commands.find(
-        (c: Command) => c.name() === topic && !isProStub(c)
+      const cmd = program.commands.find(
+        (c: Command) => c.name() === topic
       );
-      if (collapsed && !realPlural) {
+      if (collapsed && (!cmd || isProStub(cmd))) {
         const target = program.commands.find(
           (c: Command) => c.name() === collapsed
         );
@@ -116,10 +116,7 @@ export function registerWorkflowsHelpCommand(program: Command): void {
         }
       }
 
-      // Look up the topic as a registered command and show its help
-      const cmd = program.commands.find(
-        (c: Command) => c.name() === topic
-      );
+      // Otherwise show the topic's own command help, if it is one
       if (cmd) {
         cmd.outputHelp();
       } else {

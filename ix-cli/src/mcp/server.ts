@@ -758,14 +758,24 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       {
         topic: z.string().min(1).optional().describe("keyword the decision's topic must match"),
         limit: z.number().int().min(1).max(500).optional(),
+        // Kept only to refuse it. Dropped from the schema, zod would strip it
+        // and a caller asking for one symbol's decisions would silently get
+        // every decision instead.
+        path: z.string().optional().describe("not supported: decisions cannot be filtered by path; use topic"),
       },
       async (input) => {
         // `ix decisions` is gone: Ix-pro#184 folded it into `ix decide list`.
         // That command takes --topic and --limit; it never had the --path this
         // tool used to pass, so every scoped call failed on an unknown option.
+        if (input.path !== undefined) {
+          return textResult(
+            JSON.stringify({ error: "ix_decisions cannot filter by path; pass topic instead", tool: "ix_decisions" }),
+            true,
+          );
+        }
         const options: string[] = [];
         pushOption(options, "--topic", input.topic);
-        if (typeof input.limit === "number") options.push(`--limit=${input.limit}`);
+        if (typeof input.limit === "number") options.push(`--limit=${numberArg(input, "limit")}`);
         return runJson(runIx, "ix_decisions", { ...ix("decide", [], options), subcommands: ["list"] });
       },
     );

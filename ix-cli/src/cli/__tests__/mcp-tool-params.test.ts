@@ -260,4 +260,13 @@ describe("ix_decisions", () => {
       ["decide", "list", "--format=json"],
     ]);
   });
+
+  it("refuses path rather than silently listing every decision", async () => {
+    const { calls, runIx } = recorder("[]");
+    const client = await proClient(runIx);
+    const result = (await client.callTool({ name: "ix_decisions", arguments: { path: "src/cli" } })) as CallToolResult;
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("cannot filter by path");
+    expect(calls).toEqual([]);
+  });
 });
