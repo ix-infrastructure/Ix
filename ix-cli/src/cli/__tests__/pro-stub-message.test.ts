@@ -146,7 +146,9 @@ describe("Pro stubs", () => {
     expect(runStub([singular, "list", "--format", "json"]).err).toContain(
       `The '${singular}' command requires Ix Pro.`,
     );
-    expect(runStub([plural]).err).not.toContain("requires Ix Pro");
+    const err = runStub([plural]).err;
+    expect(err).not.toContain("requires Ix Pro");
+    expect(err).toContain(`unknown command '${plural}'`);
   });
 
   it("emits the message verbatim as CLAUDE.md quotes it", () => {

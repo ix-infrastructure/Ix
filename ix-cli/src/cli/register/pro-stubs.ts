@@ -20,6 +20,13 @@ const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "workflow", desc: "Attach, show, validate, or run staged workflows" },
 ];
 
+const stubs = new WeakSet<Command>();
+
+/** True for a placeholder registered here, false for a real (Pro or OSS) command. */
+export function isProStub(cmd: Command): boolean {
+  return stubs.has(cmd);
+}
+
 export function registerProStubs(program: Command): void {
   const registered = new Set(program.commands.map((c: Command) => c.name()));
   for (const { name, desc } of PRO_COMMANDS) {
@@ -44,5 +51,6 @@ export function registerProStubs(program: Command): void {
         process.exitCode = 1;
       });
     (stub as any).hidden = true;
+    stubs.add(stub);
   }
 }

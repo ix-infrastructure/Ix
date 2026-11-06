@@ -2,6 +2,8 @@
 
 import type { Command } from "commander";
 
+import { isProStub } from "../register/pro-stubs.js";
+
 const WORKFLOWS_TEXT = `
 Recommended Development Loop:
 
@@ -94,12 +96,17 @@ export function registerWorkflowsHelpCommand(program: Command): void {
       // Plural commands @ix/pro collapsed into a subcommand of the singular
       // (`ix goals` -> `ix goal list`, Ix-pro#103; `ix bugs` -> `ix bug list`,
       // Ix-pro#108; `ix tasks` -> `ix task list`, Ix-pro#182; `ix decisions`
-      // -> `ix decide list`, Ix-pro#184). The plural is no longer a command
-      // anywhere, so `ix help bugs` would fall through to "Unknown help
-      // topic". Forward it to the singular, whose help documents the new
-      // subcommand.
+      // -> `ix decide list`, Ix-pro#184). Once the plural is no longer a
+      // command, `ix help bugs` would fall through to "Unknown help topic".
+      // Forward it to the singular, whose help (with Pro installed) documents
+      // the new subcommand. A Pro release from before the collapse still
+      // registers the real plural, and its own help is the right answer there,
+      // so forward only when the plural is absent or just an OSS stub.
       const collapsed = COLLAPSED_HELP_TOPICS[topic];
-      if (collapsed) {
+      const realPlural = program.commands.find(
+        (c: Command) => c.name() === topic && !isProStub(c)
+      );
+      if (collapsed && !realPlural) {
         const target = program.commands.find(
           (c: Command) => c.name() === collapsed
         );
