@@ -241,7 +241,9 @@ describe("bounds", () => {
 describe("ix_decisions", () => {
   // Ix-pro#184 retired `ix decisions` for `ix decide list`. The subcommand has
   // to come before the options, which the parent `decide` would otherwise
-  // parse (and reject: it has no --topic or --limit).
+  // parse (and reject: it has no --topic or --limit). The read-only
+  // `decisions` is tried first so the tool can never reach a `decide` that
+  // might record something.
   async function proClient(runIx: IxRunner): Promise<Client> {
     const server = createIxMcpServer({ version: "test", runIx, tools: "all", proAvailable: true });
     const client = new Client({ name: "ix-mcp-params-pro-test", version: "1.0.0" });
@@ -252,71 +254,48 @@ describe("ix_decisions", () => {
     return client;
   }
 
-  it("runs `decide list` with the filters the CLI has", async () => {
-    const { calls, runIx } = recorder("[]");
+  const UNKNOWN_DECISIONS = { ok: false, stdout: "", stderr: "error: unknown command 'decisions'" };
+
+  it("uses `decisions` on a Pro release from before the collapse, and never runs `decide`", async () => {
+    const { calls, runIx } = recorder('[{"id":"d1"}]');
     const client = await proClient(runIx);
-    await client.callTool({ name: "ix_decisions", arguments: { topic: "ingestion", limit: 10 } });
+    const result = (await client.callTool({ name: "ix_decisions", arguments: { topic: "ingestion", limit: 10 } })) as CallToolResult;
+    expect(JSON.stringify(result.content)).toContain("d1");
+    expect(calls).toEqual([["decisions", "--topic=ingestion", "--limit=10", "--format=json"]]);
+  });
+
+  it("moves to `decide list` once `decisions` is unknown, and remembers that", async () => {
+    const calls: string[][] = [];
+    const client = await proClient(async (args) => {
+      calls.push(args);
+      return args[0] === "decisions" ? UNKNOWN_DECISIONS : { ok: true, stdout: '[{"id":"d2"}]', stderr: "" };
+    });
+    const first = (await client.callTool({ name: "ix_decisions", arguments: { topic: "auth", limit: 5 } })) as CallToolResult;
     await client.callTool({ name: "ix_decisions", arguments: {} });
+    expect(first.isError).toBeUndefined();
+    expect(JSON.stringify(first.content)).toContain("d2");
     expect(calls).toEqual([
-      ["decide", "list", "--topic=ingestion", "--limit=10", "--format=json"],
+      ["decisions", "--topic=auth", "--limit=5", "--format=json"],
+      ["decide", "list", "--topic=auth", "--limit=5", "--format=json"],
       ["decide", "list", "--format=json"],
     ]);
   });
 
-  it("falls back to `decisions` on a Pro release from before the collapse", async () => {
+  it("returns a real `decisions` failure instead of trying `decide`", async () => {
     const calls: string[][] = [];
     const client = await proClient(async (args) => {
       calls.push(args);
-      return args[0] === "decide"
-        ? { ok: false, stdout: "", stderr: "error: required option '--rationale <text>' not specified" }
-        : { ok: true, stdout: '[{"id":"d1"}]', stderr: "" };
-    });
-    const result = (await client.callTool({ name: "ix_decisions", arguments: { topic: "auth" } })) as CallToolResult;
-    expect(result.isError).toBeUndefined();
-    expect(JSON.stringify(result.content)).toContain("d1");
-    expect(calls).toEqual([
-      ["decide", "list", "--topic=auth", "--format=json"],
-      ["decisions", "--topic=auth", "--format=json"],
-    ]);
-  });
-
-  it("does not retry `decisions` when a real `decide list` fails", async () => {
-    const calls: string[][] = [];
-    const client = await proClient(async (args) => {
-      calls.push(args);
-      return { ok: false, stdout: "", stderr: args[0] === "decide" ? "backend offline" : "error: unknown command 'decisions'" };
+      return { ok: false, stdout: "", stderr: "backend offline" };
     });
     const result = (await client.callTool({ name: "ix_decisions", arguments: {} })) as CallToolResult;
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result.content)).toContain("backend offline");
-    expect(calls).toEqual([["decide", "list", "--format=json"]]);
+    expect(calls).toEqual([["decisions", "--format=json"]]);
   });
 
-  it("reports the legacy error, not the parse error, when an older Pro's `decisions` fails", async () => {
-    const client = await proClient(async (args) => ({
-      ok: false,
-      stdout: "",
-      stderr: args[0] === "decide" ? "error: unknown option '--topic'" : "backend offline",
-    }));
-    const result = (await client.callTool({ name: "ix_decisions", arguments: { topic: "auth" } })) as CallToolResult;
-    expect(result.isError).toBe(true);
-    expect(JSON.stringify(result.content)).toContain("backend offline");
-  });
-
-  it("keeps the `decide list` error when neither form exists", async () => {
-    const client = await proClient(async (args) => ({
-      ok: false,
-      stdout: "",
-      stderr: args[0] === "decide" ? "error: required option '--rationale <text>' not specified" : "error: unknown command 'decisions'",
-    }));
-    const result = (await client.callTool({ name: "ix_decisions", arguments: {} })) as CallToolResult;
-    expect(result.isError).toBe(true);
-    expect(JSON.stringify(result.content)).toContain("--rationale");
-  });
-
-  // The fallback keys on commander's own error text, so drive it through the
-  // real in-process runner and a command tree shaped like each Pro release,
-  // not hand-written stderr.
+  // The switch keys on commander's own "unknown command" text, so drive it
+  // through the real in-process runner and a command tree shaped like each
+  // Pro release, not hand-written stderr.
   function proTree(collapsed: boolean): Command {
     const program = new Command();
     program.name("ix");

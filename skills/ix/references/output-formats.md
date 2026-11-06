@@ -118,7 +118,8 @@ does not have them — skip that step, do not retry it, and do not mention it
 again for the rest of the session. Nothing outside those marks is Pro-gated.
 
 Pro-only surface: `plan`, `plans`, `task`, `workflow`, `decide`, `goal`,
-`truth`, `bug`, `briefing`.
+`truth`, `bug`, `briefing`. Listing is a subcommand of the singular:
+`task list`, `decide list`, `goal list`, `bug list`.
 
 ### Semantic boundaries (Pro record types)
 
