@@ -290,9 +290,8 @@ interface IxArgv {
   command: string;
   /**
    * Subcommand names (`decide list`). They go straight after the command, ahead
-   * of the options and the `--` separator: past `--` commander reads them as
-   * operands, and `decide -- list` would be an attempt to record a decision
-   * titled "list".
+   * of the options: an option placed before the subcommand name is parsed by
+   * the parent, which does not declare the subcommand's flags.
    */
   subcommands?: string[];
   positionals: string[];
@@ -776,7 +775,15 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
         const options: string[] = [];
         pushOption(options, "--topic", input.topic);
         if (typeof input.limit === "number") options.push(`--limit=${numberArg(input, "limit")}`);
-        return runJson(runIx, "ix_decisions", { ...ix("decide", [], options), subcommands: ["list"] });
+        const listed = await runJson(runIx, "ix_decisions", { ...ix("decide", [], options), subcommands: ["list"] });
+        if (!listed.isError) return listed;
+        // Pro releases from before Ix-pro#184 have no `decide list`: their
+        // `decide <title>` rejects it on the missing --rationale before doing
+        // anything, so nothing is recorded. They still have `decisions`. If
+        // that fails as well, the first error is the one that describes a
+        // current install.
+        const legacy = await runJson(runIx, "ix_decisions", ix("decisions", [], options));
+        return legacy.isError ? listed : legacy;
       },
     );
     registerTool(

@@ -238,8 +238,8 @@ describe("bounds", () => {
 
 describe("ix_decisions", () => {
   // Ix-pro#184 retired `ix decisions` for `ix decide list`. The subcommand has
-  // to come before `--`: past it, `list` is an operand, and `decide -- list`
-  // is a request to record a decision titled "list".
+  // to come before the options, which the parent `decide` would otherwise
+  // parse (and reject: it has no --topic or --limit).
   async function proClient(runIx: IxRunner): Promise<Client> {
     const server = createIxMcpServer({ version: "test", runIx, tools: "all", proAvailable: true });
     const client = new Client({ name: "ix-mcp-params-pro-test", version: "1.0.0" });
@@ -259,6 +259,34 @@ describe("ix_decisions", () => {
       ["decide", "list", "--topic=ingestion", "--limit=10", "--format=json"],
       ["decide", "list", "--format=json"],
     ]);
+  });
+
+  it("falls back to `decisions` on a Pro release from before the collapse", async () => {
+    const calls: string[][] = [];
+    const client = await proClient(async (args) => {
+      calls.push(args);
+      return args[0] === "decide"
+        ? { ok: false, stdout: "", stderr: "error: required option '--rationale <text>' not specified" }
+        : { ok: true, stdout: '[{"id":"d1"}]', stderr: "" };
+    });
+    const result = (await client.callTool({ name: "ix_decisions", arguments: { topic: "auth" } })) as CallToolResult;
+    expect(result.isError).toBeUndefined();
+    expect(JSON.stringify(result.content)).toContain("d1");
+    expect(calls).toEqual([
+      ["decide", "list", "--topic=auth", "--format=json"],
+      ["decisions", "--topic=auth", "--format=json"],
+    ]);
+  });
+
+  it("reports the `decide list` error when the fallback fails too", async () => {
+    const client = await proClient(async (args) => ({
+      ok: false,
+      stdout: "",
+      stderr: args[0] === "decide" ? "backend offline" : "error: unknown command 'decisions'",
+    }));
+    const result = (await client.callTool({ name: "ix_decisions", arguments: {} })) as CallToolResult;
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("backend offline");
   });
 
   it("refuses path rather than silently listing every decision", async () => {
