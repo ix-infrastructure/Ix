@@ -1182,7 +1182,7 @@ async function withIssueFile<T>(text: string, work: (file: string) => Promise<T>
 }
 
 /** How a pre-#184 `decide <title>` rejects `decide list ...` at parse time. */
-const PRE_COLLAPSE_DECIDE = /required option '--rationale|unknown option '--(?:topic|limit)'/;
+const PRE_COLLAPSE_DECIDE = /required option '--rationale|unknown option '--(?:topic|limit)\b/;
 
 function resultText(result: CallToolResult): string {
   return result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
