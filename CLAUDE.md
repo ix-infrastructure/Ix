@@ -56,6 +56,11 @@ ix map --silent                             # refresh the graph after code chang
   run. A command missing from the table still works (it takes the full path),
   but `startup-fast-path.test.ts` fails until it is added. The shared
   per-command setup is in `register/oss-setup.ts`.
+- **`ix note` / `ix session` are OSS fallbacks, not OSS commands.** They are
+  registered by `register/oss-fallbacks.ts` only when Pro did not load (next
+  to the Pro stubs in `run-cli.ts` and `mcp/runner.ts`), because Pro's versions
+  of the same names go to the cloud org and must win. Do not add them to
+  `oss.ts`: OSS registers first, so Pro's would collide and lose.
 - **`ix patches` is OSS, not Pro** (#371). It is implemented here and registered
   in `oss.ts`. `@ix/pro` also registers a `patches`; commander throws on the
   duplicate and Pro's `tryRegister` swallows the throw, so the OSS one — which

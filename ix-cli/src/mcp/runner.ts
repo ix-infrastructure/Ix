@@ -12,6 +12,7 @@ import { Command, CommanderError } from "commander";
 
 import { registerOssCommands, registerProStubs } from "../cli/register/oss.js";
 import { tryLoadProCommands } from "../cli/register/pro-loader.js";
+import { registerOssFallbacks } from "../cli/register/oss-fallbacks.js";
 import { resetResolutionNotices } from "../cli/format.js";
 import { resetReadScope } from "../cli/resolve.js";
 import { releaseLocksOwnedBy, setLockOwnerResolver } from "../cli/single-flight.js";
@@ -284,7 +285,10 @@ async function buildProgram(version: string): Promise<Command> {
   program.name("ix").version(version);
   registerOssCommands(program);
 
-  if (!(await tryLoadProCommands(program))) registerProStubs(program);
+  if (!(await tryLoadProCommands(program))) {
+    await registerOssFallbacks(program);
+    registerProStubs(program);
+  }
 
   return program;
 }

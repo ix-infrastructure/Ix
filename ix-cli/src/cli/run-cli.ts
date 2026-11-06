@@ -10,6 +10,7 @@ import { Command } from "commander";
 import { registerProStubs } from "./register/pro-stubs.js";
 import { planStartup, registerForPlan } from "./register/oss-table.js";
 import { tryLoadProCommands } from "./register/pro-loader.js";
+import { registerOssFallbacks } from "./register/oss-fallbacks.js";
 import { isRepairInvocation } from "./register/pro-failure.js";
 import { buildHelpText } from "./help-text.js";
 import { stderrIsTerminal } from "./stderr.js";
@@ -105,6 +106,10 @@ const lazy = await registerForPlan(program, planStartup(process.argv.slice(2)));
 
     program.helpInformation = () => buildHelpText(proCommands);
   } else {
+    // `ix note` / `ix session` against the local backend, where Pro's would
+    // otherwise be. A lazy plan already registered the one this run needs, if
+    // any (see register/oss-fallbacks.ts).
+    if (!lazy) await registerOssFallbacks(program);
     registerProStubs(program);
   }
 

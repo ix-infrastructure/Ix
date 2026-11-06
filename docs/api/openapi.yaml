@@ -32,6 +32,11 @@ tags:
   - name: patches
   - name: analysis
   - name: stats
+  - name: notes
+    description: >-
+      Notes and sessions in the memory layer, read and written by `ix note`
+      and `ix session`. Served by the OSS backend; with Ix Pro installed the
+      same commands go to the active cloud org instead.
   - name: reset
 
 paths:
@@ -966,6 +971,270 @@ paths:
         "200":
           description: Reset confirmation
 
+  /v1/note:
+    post:
+      tags: [notes]
+      summary: Create a note
+      operationId: createNote
+      description: >-
+        `sessionId` may be a session name; the backend resolves it to the id.
+        `tag` defaults to `note`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateNoteRequest"
+      responses:
+        "200":
+          description: The created note
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Note"
+
+  /v1/note/{id}:
+    get:
+      tags: [notes]
+      summary: Fetch one note
+      operationId: getNote
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The note, with its session and lifecycle
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NoteSearchResult"
+        "404":
+          description: "No such note: `{ error: not_found, message }`"
+
+  /v1/note/{id}/supersede:
+    post:
+      tags: [notes]
+      summary: Replace a note, linking the new one to it
+      operationId: supersedeNote
+      description: >-
+        Not idempotent: every call creates a new note. Only the note's author
+        (or an org admin) may supersede it.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateNoteRequest"
+      responses:
+        "200":
+          description: The old note's id and the new note
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SupersedeNoteResult"
+
+  /v1/note/{id}/retract:
+    post:
+      tags: [notes]
+      summary: Soft-delete a note
+      operationId: retractNote
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                actor: { type: string }
+      responses:
+        "200":
+          description: Retraction confirmation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetractNoteResult"
+
+  /v1/notes:
+    get:
+      tags: [notes]
+      summary: List or search notes
+      operationId: listNotes
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: tag, in: query, schema: { type: string } }
+        - { name: actor, in: query, schema: { type: string } }
+        - { name: since, in: query, schema: { type: string, description: ISO timestamp } }
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: includeSuperseded, in: query, schema: { type: boolean, default: true } }
+      responses:
+        "200":
+          description: Matching notes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/NoteSearchResult"
+
+  /v1/session:
+    post:
+      tags: [notes]
+      summary: Create a session
+      operationId: createSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+      responses:
+        "200":
+          description: The created session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfo"
+
+  /v1/session/{nameOrId}:
+    get:
+      tags: [notes]
+      summary: Fetch a session by name, then by id
+      operationId: getSession
+      parameters:
+        - name: nameOrId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfo"
+        "404":
+          description: "No such session: `{ error: not_found, message }`"
+    delete:
+      tags: [notes]
+      summary: Delete a session's metadata (its notes are kept)
+      operationId: deleteSession
+      parameters:
+        - name: nameOrId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Deletion confirmation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteSessionResult"
+
+  /v1/session/{nameOrId}/join:
+    post:
+      tags: [notes]
+      summary: Add an actor to a session
+      operationId: joinSession
+      parameters:
+        - name: nameOrId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actor]
+              properties:
+                actor: { type: string }
+      responses:
+        "200":
+          description: The session, with the actor added
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfo"
+
+  /v1/session/{nameOrId}/pin:
+    post:
+      tags: [notes]
+      summary: Pin graph nodes to a session
+      operationId: pinSessionNodes
+      parameters:
+        - name: nameOrId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nodeIds]
+              properties:
+                nodeIds:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: How many nodes were pinned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PinSessionResult"
+
+  /v1/session/{nameOrId}/notes:
+    get:
+      tags: [notes]
+      summary: A session's notes
+      operationId: sessionNotes
+      parameters:
+        - name: nameOrId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The session's notes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Note"
+
+  /v1/sessions:
+    get:
+      tags: [notes]
+      summary: List sessions
+      operationId: listSessions
+      parameters:
+        - { name: actor, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionInfo"
+
   /v1/reset:
     post:
       tags: [reset]
@@ -1174,6 +1443,77 @@ components:
         status: { type: string }
         nodeId: { type: string }
         rev: { type: integer }
+    CreateNoteRequest:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string }
+        tag: { type: string, enum: [finding, decision, reminder, note], default: note }
+        actor: { type: string }
+        nodeIds: { type: array, items: { type: string } }
+        sessionId: { type: string, description: Session name or id }
+    Note:
+      type: object
+      required: [id, text, tag, nodeIds, at, stale]
+      properties:
+        id: { type: string }
+        text: { type: string }
+        tag: { type: string }
+        actor: { type: string, nullable: true }
+        nodeIds: { type: array, items: { type: string } }
+        at: { type: string, description: ISO timestamp }
+        stale: { type: boolean }
+        staleReason: { type: string, nullable: true }
+    NoteSearchResult:
+      allOf:
+        - $ref: "#/components/schemas/Note"
+        - type: object
+          properties:
+            sessionId: { type: string, nullable: true }
+            sessionName: { type: string, nullable: true }
+            lifecycleStatus: { type: string, nullable: true }
+            supersedes: { type: array, nullable: true, items: { type: string } }
+            supersededBy: { type: array, nullable: true, items: { type: string } }
+    SupersedeNoteResult:
+      type: object
+      properties:
+        status: { type: string, enum: [superseded] }
+        oldNoteId: { type: string }
+        newNote: { $ref: "#/components/schemas/Note" }
+    RetractNoteResult:
+      type: object
+      properties:
+        status: { type: string, enum: [retracted] }
+        noteId: { type: string }
+    SessionInfo:
+      type: object
+      required: [sessionId, name, purpose, actor, actors, ttlHours, createdAt]
+      properties:
+        sessionId: { type: string }
+        name: { type: string }
+        purpose: { type: string }
+        actor: { type: string }
+        actors: { type: array, items: { type: string } }
+        ttlHours: { type: integer }
+        createdAt: { type: string }
+        lastLoadedAt: { type: string, nullable: true }
+    CreateSessionRequest:
+      type: object
+      required: [purpose, actor]
+      properties:
+        purpose: { type: string }
+        actor: { type: string }
+        ttlHours: { type: integer, default: 24 }
+        name: { type: string, description: Generated when absent }
+    PinSessionResult:
+      type: object
+      properties:
+        status: { type: string, enum: [pinned] }
+        count: { type: integer }
+    DeleteSessionResult:
+      type: object
+      properties:
+        status: { type: string, enum: [deleted] }
     PatchSummary:
       type: object
       properties:
