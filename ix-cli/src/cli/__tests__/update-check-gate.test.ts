@@ -58,6 +58,10 @@ describe("updateCheckEnabled", () => {
     expect(tty(["status"], { IX_MCP_CHILD: "1" })).toBe(false);
   });
 
+  it("stays out of the `ix install` menu, whose prompts are on stderr", () => {
+    expect(tty(["install"])).toBe(false);
+  });
+
   it("does not mistake another flag's value for a format", () => {
     expect(tty(["text", "--format-ish", "json"])).toBe(true);
     expect(tty(["search", "--path", "--format"])).toBe(true);

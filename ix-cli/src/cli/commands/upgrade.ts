@@ -1271,9 +1271,10 @@ export function updateCheckEnabled(
   env: NodeJS.ProcessEnv,
   stderrIsTerminal: boolean,
 ): boolean {
-  // `upgrade` reports versions itself, and `mcp` speaks JSON-RPC on stdio
-  // where a stray notice is a protocol error.
-  if (argv[0] === "upgrade" || argv[0] === "mcp") return false;
+  // `upgrade` reports versions itself, `mcp` speaks JSON-RPC on stdio
+  // where a stray notice is a protocol error, and `install` asks questions on
+  // stderr that a notice arriving mid-prompt would break up.
+  if (argv[0] === "upgrade" || argv[0] === "mcp" || argv[0] === "install") return false;
   if (env.IX_MCP_CHILD === "1") return false;
   if (isTruthyEnv(env.IX_NO_UPDATE_CHECK)) return false;
   if (!stderrIsTerminal) return false;

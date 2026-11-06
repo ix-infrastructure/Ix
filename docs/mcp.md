@@ -21,6 +21,10 @@ ix mcp doctor             # check each client's registration
 `install` knows Claude Code, Codex, Cursor, VS Code, Gemini CLI, OpenClaw and
 opencode.
 
+The top-level `ix install` is a different command: it installs the agent skill
+(`skills/ix`) through `scripts/install-skill.sh` and does not register MCP. See
+[skill-harnesses.md](skill-harnesses.md).
+
 ### How each client is written
 
 It writes through each client's own MCP command where one exists — `claude mcp

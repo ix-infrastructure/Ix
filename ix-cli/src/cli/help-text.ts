@@ -47,6 +47,7 @@ const OSS_HELP = [
   `  doctor                Diagnose issues`,
   `  verify                Compare graph to a re-parse`,
   `  mcp [install|doctor]  Serve agent tools over MCP`,
+  `  install               Install the Ix skill into agent harnesses`,
   `  docker <action>       Manage backend`,
   `  view                  Open visualizer`,
   `  reset                 Reset map`,
