@@ -748,7 +748,10 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
 
   if (options.proAvailable) {
     // Set once this server's Pro has answered `ix decisions` with "unknown
-    // command" (Ix-pro#184). It cannot come back within one process.
+    // command" (Ix-pro#184). The in-process runner loads one Pro for the
+    // server's life. Under IX_MCP_SUBPROCESS each call spawns a fresh `ix`, so
+    // a Pro downgraded mid-session keeps getting `decide list` (which a
+    // pre-#184 Pro rejects on --rationale) until the server restarts.
     let decisionsRetired = false;
     registerTool(ctx, "ix_briefing", "Load the Ix Pro session briefing", {}, async () =>
       runJson(runIx, "ix_briefing", ix("briefing")),
