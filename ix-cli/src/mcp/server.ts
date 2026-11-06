@@ -776,14 +776,19 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
         pushOption(options, "--topic", input.topic);
         if (typeof input.limit === "number") options.push(`--limit=${numberArg(input, "limit")}`);
         const listed = await runJson(runIx, "ix_decisions", { ...ix("decide", [], options), subcommands: ["list"] });
-        if (!listed.isError) return listed;
         // Pro releases from before Ix-pro#184 have no `decide list`: their
-        // `decide <title>` rejects it on the missing --rationale before doing
-        // anything, so nothing is recorded. They still have `decisions`. If
-        // that fails as well, the first error is the one that describes a
-        // current install.
+        // `decide <title>` takes `list` as a title and rejects the call while
+        // parsing (no --rationale, or no such option as --topic), so nothing
+        // is recorded. They still have `decisions`. Only that parse failure
+        // means "older Pro"; a timeout or backend error from a real
+        // `decide list` is the answer, and retrying `decisions` there cannot
+        // help.
+        if (!listed.isError || !PRE_COLLAPSE_DECIDE.test(resultText(listed))) return listed;
         const legacy = await runJson(runIx, "ix_decisions", ix("decisions", [], options));
-        return legacy.isError ? listed : legacy;
+        // A Pro that rejected both has neither form; the `decide list` error
+        // is the more useful one then. Otherwise the legacy result is the
+        // real answer, success or failure, from the release that is installed.
+        return legacy.isError && /unknown command 'decisions'/.test(resultText(legacy)) ? listed : legacy;
       },
     );
     registerTool(
@@ -1174,6 +1179,13 @@ async function withIssueFile<T>(text: string, work: (file: string) => Promise<T>
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+/** How a pre-#184 `decide <title>` rejects `decide list ...` at parse time. */
+const PRE_COLLAPSE_DECIDE = /required option '--rationale|unknown option '--(?:topic|limit)'/;
+
+function resultText(result: CallToolResult): string {
+  return result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
 }
 
 function textResult(text: string, isError = false): CallToolResult {

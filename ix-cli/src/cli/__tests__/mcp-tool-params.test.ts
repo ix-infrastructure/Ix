@@ -278,15 +278,38 @@ describe("ix_decisions", () => {
     ]);
   });
 
-  it("reports the `decide list` error when the fallback fails too", async () => {
-    const client = await proClient(async (args) => ({
-      ok: false,
-      stdout: "",
-      stderr: args[0] === "decide" ? "backend offline" : "error: unknown command 'decisions'",
-    }));
+  it("does not retry `decisions` when a real `decide list` fails", async () => {
+    const calls: string[][] = [];
+    const client = await proClient(async (args) => {
+      calls.push(args);
+      return { ok: false, stdout: "", stderr: args[0] === "decide" ? "backend offline" : "error: unknown command 'decisions'" };
+    });
     const result = (await client.callTool({ name: "ix_decisions", arguments: {} })) as CallToolResult;
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result.content)).toContain("backend offline");
+    expect(calls).toEqual([["decide", "list", "--format=json"]]);
+  });
+
+  it("reports the legacy error, not the parse error, when an older Pro's `decisions` fails", async () => {
+    const client = await proClient(async (args) => ({
+      ok: false,
+      stdout: "",
+      stderr: args[0] === "decide" ? "error: unknown option '--topic'" : "backend offline",
+    }));
+    const result = (await client.callTool({ name: "ix_decisions", arguments: { topic: "auth" } })) as CallToolResult;
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("backend offline");
+  });
+
+  it("keeps the `decide list` error when neither form exists", async () => {
+    const client = await proClient(async (args) => ({
+      ok: false,
+      stdout: "",
+      stderr: args[0] === "decide" ? "error: required option '--rationale <text>' not specified" : "error: unknown command 'decisions'",
+    }));
+    const result = (await client.callTool({ name: "ix_decisions", arguments: {} })) as CallToolResult;
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("--rationale");
   });
 
   it("refuses path rather than silently listing every decision", async () => {

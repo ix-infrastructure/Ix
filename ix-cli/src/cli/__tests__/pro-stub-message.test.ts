@@ -66,7 +66,7 @@ describe("Pro stubs", () => {
     ["task", ["task", "show", "t1"]],
     ["task", ["task", "list", "--status", "pending", "--plan", "p1"]],
     ["workflow", ["workflow", "attach", "w1"]],
-  ])("reports Pro for %s with arguments", (name, argv) => {
+  ])("reports Pro for %s with arguments %j", (name, argv) => {
     const { err, exitCode } = runStub(argv);
     expect(err).toContain(`The '${name}' command requires Ix Pro.`);
     expect(err).not.toContain("too many arguments");
