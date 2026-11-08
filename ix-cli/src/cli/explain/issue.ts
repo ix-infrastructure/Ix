@@ -291,6 +291,8 @@ export interface IssueCandidates {
   snippetIdentifiers?: string[];
   /** Each traceback's frames, innermost first, separate from explicit paths. */
   tracebacks?: string[][];
+  /** Names in a traceback's exception type (`app.errors.ConfigurationError`). */
+  exceptionIdentifiers?: string[];
 }
 
 function tracebackCandidates(text: string): { text: string; groups: string[][]; exceptions: string[] } {
@@ -452,12 +454,17 @@ export function extractCandidates(text: string): IssueCandidates {
     seen.add(token);
     identifiers.push(token);
   }
+  // The raised class names what failed, not where: it stays a start but is
+  // never pinned ahead of the traceback's own frame.
+  const exceptionIdentifiers = unique(trace.exceptions.flatMap((line) =>
+    [...line.split(":")[0].matchAll(WORD)].map((m) => m[0]))).filter((name) => seen.has(name));
   const snippetIdentifiers = unique(snippets.flatMap((code) => [...code.matchAll(WORD)].map((m) => m[0])))
     .filter((name) => !seen.has(name) && !isGenericIdentifier(name) && !SNIPPET_NOISE.has(name) && !/^__\w+__$/.test(name));
   return {
     paths, identifiers: [...identifiers, ...snippetIdentifiers].slice(0, MAX_CANDIDATES),
     ...(snippetIdentifiers.length ? { snippetIdentifiers } : {}),
     ...(trace.groups.length ? { tracebacks: trace.groups } : {}),
+    ...(exceptionIdentifiers.length ? { exceptionIdentifiers } : {}),
   };
 }
 
@@ -477,6 +484,8 @@ export type StartVia = "path in issue" | "identifier in issue" | "bm25 fallback"
 const PINNED_IDENTIFIER = Symbol("pinned issue identifier");
 // Allow a few platform-specific definitions without pinning ubiquitous names.
 const MAX_PINNED_DEFINITION_FILES = 3;
+/** Search candidates fetched per name the issue mentions; only exact names are kept. */
+export const ISSUE_SEARCH_LIMIT = 20;
 
 export interface StartingPoint {
   /** What the issue said: the path or name as written. */
@@ -532,7 +541,7 @@ export async function pickStartingPoints(
   deps: PickDeps,
   max = MAX_STARTS,
 ): Promise<{ starts: StartingPoint[]; unresolved: string[] }> {
-  const { paths, identifiers, snippetIdentifiers, tracebacks } = extractCandidates(text);
+  const { paths, identifiers, snippetIdentifiers, tracebacks, exceptionIdentifiers } = extractCandidates(text);
   const starts: StartingPoint[] = [];
   const unresolved: string[] = [];
   const taken = (path: string) => starts.some((s) => s.path === path);
@@ -575,7 +584,10 @@ export async function pickStartingPoints(
     if (starts.length >= max) break;
     // Not caught: a backend that cannot answer is an error to report, not an
     // issue that names nothing.
-    const hits = (await deps.search(token))
+    const found = await deps.search(token);
+    // A full page of exact-name hits may hide more definitions than it shows.
+    const saturated = found.filter((h) => h.name === token).length >= ISSUE_SEARCH_LIMIT;
+    const hits = found
       .filter((h): h is SymbolHit & { path: string } =>
         h.name === token && !!h.path && !NOT_DEFINITIONS.has(h.kind.toLowerCase()) && source(h.path))
       .sort((a, b) =>
@@ -592,7 +604,8 @@ export async function pickStartingPoints(
       ...(best.lineEnd !== undefined ? { lineEnd: best.lineEnd } : {}),
       via: "identifier in issue",
       ...(snippetIdentifiers?.includes(token) ? { snippet: true } : {}),
-      ...(!snippetIdentifiers?.includes(token) && !isGenericIdentifier(token)
+      ...(!snippetIdentifiers?.includes(token) && !exceptionIdentifiers?.includes(token)
+        && !isGenericIdentifier(token) && !saturated
         && new Set(hits.map((h) => h.path)).size <= MAX_PINNED_DEFINITION_FILES
         ? { [PINNED_IDENTIFIER]: true as const } : {}),
     });

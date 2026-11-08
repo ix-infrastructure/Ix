@@ -27,6 +27,7 @@ import {
   chooseCentre,
   CLOSENESS_BOOST,
   leanIssueView,
+  ISSUE_SEARCH_LIMIT,
   planIssue,
   rankIssueFiles,
   readIssueText,
@@ -1765,8 +1766,6 @@ export async function findFileNode(client: IxClient, path: string): Promise<stri
   return nodes.find((n) => relativePath(n.provenance?.sourceUri) === path)?.id;
 }
 
-/** Search candidates fetched per name the issue mentions; only exact names are kept. */
-const ISSUE_SEARCH_LIMIT = 20;
 
 /**
  * `ix context --from-issue`: a bundle built from an issue's text rather than a

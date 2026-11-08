@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { chooseCentre, pickStartingPoints, rankIssueFiles, type SymbolHit } from "../explain/issue.js";
+import { chooseCentre, ISSUE_SEARCH_LIMIT, pickStartingPoints, rankIssueFiles, type SymbolHit } from "../explain/issue.js";
 
 const noise = Array.from({ length: 25 }, (_, i) => ({ path: `src/noise${i}.py`, score: 300 - i }));
 const definition = (name: string, path: string, id = path): SymbolHit => ({ id, name, path, kind: "function" });
@@ -88,5 +88,48 @@ describe("strong issue starts", () => {
     ].join("\n"), { files: ["src/outer.py", "src/inner.py"], search: async () => [] });
     expect(starts.map((s) => s.path)).toEqual(["src/inner.py"]);
     expect(rank(starts, "src/inner.py").at(-1)?.path).toBe("src/inner.py");
+  });
+
+  it("does not pin a traceback's exception class ahead of its frame", async () => {
+    const files = ["src/app/run.py", "src/app/settings.py", "src/app/errors.py"];
+    const { starts } = await pickStartingPoints([
+      "Startup fails:", "", "Traceback (most recent call last):",
+      '  File "src/app/run.py", line 1, in main', '  File "src/app/settings.py", line 9, in load',
+      "app.errors.ConfigurationError: bad value",
+    ].join("\n"), {
+      files, search: async (token) => token === "ConfigurationError" ? [{ ...definition(token, files[2]), kind: "class" }] : [],
+    });
+    expect(starts.map((s) => [s.path, s.via])).toEqual([
+      ["src/app/settings.py", "path in issue"], ["src/app/errors.py", "identifier in issue"],
+    ]);
+    const ranked = rankIssueFiles({ starts, bm25: [
+      ...noise.slice(0, 4).map((h, i) => ({ ...h, score: 50 - i })),
+      { path: files[1], score: 40 }, { path: files[2], score: 2 },
+    ], near: new Map() }, 5);
+    expect(ranked[0].path).not.toBe(files[2]);
+    expect(ranked.map((r) => r.path)).toContain(files[1]);
+    expect(ranked.some((r) => r.reason.includes("pinned"))).toBe(false);
+  });
+
+  it("still pins a prose name that a traceback did not raise", async () => {
+    const path = "src/app/settings.py";
+    const { starts } = await pickStartingPoints(
+      ["`load_settings` drops the value", "", "Traceback (most recent call last):",
+        '  File "src/app/run.py", line 1, in main', "ValueError: bad value"].join("\n"),
+      { files: [path, "src/app/run.py"], search: async (token) => token === "load_settings" ? [definition(token, path)] : [] },
+    );
+    expect(rank(starts, path)[0]).toMatchObject({ path });
+  });
+
+  it("does not pin a name whose exact-name search filled a whole page", async () => {
+    const path = "src/definition.py";
+    // One definition among a full page of test and reference hits: more may lie past the page.
+    const page = [definition("renderValue", path), ...Array.from({ length: ISSUE_SEARCH_LIMIT - 1 }, (_, i) =>
+      ({ ...definition("renderValue", `tests/test_${i}.py`), kind: "reference" }))];
+    const { starts } = await pickStartingPoints("renderValue fails", { files: [path], search: async () => page });
+    expect(starts[0].path).toBe(path);
+    expect(rank(starts, path)[0].path).toBe(noise[0].path);
+    const { starts: fewer } = await pickStartingPoints("renderValue fails", { files: [path], search: async () => page.slice(0, -1) });
+    expect(rank(fewer, path)[0].path).toBe(path);
   });
 });
