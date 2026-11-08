@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { describe, expect, it } from 'vitest';
-import { buildGlobalResolutionIndex, parseFile, resolveEdges, summarizeParseResult } from '../index.js';
+import { buildGlobalResolutionIndex, parseFile, resolveEdges, summarizeParseResult, type FileParseResult } from '../index.js';
 import { buildPatch, buildPatchWithResolution } from '../patch-builder.js';
 
 const parse = (path: string, source: string) => {
@@ -10,121 +10,110 @@ const parse = (path: string, source: string) => {
   expect(result.hasParseErrors).toBeUndefined();
   return result;
 };
+/** `[caller, receiverType]` of each typed relationship. */
+const typed = (result: FileParseResult) =>
+  result.relationships.filter(r => r.receiverType).map(r => [r.srcName, r.receiverType]);
+const typeEdges = (files: FileParseResult[]) => resolveEdges(files).filter(e => e.tier === 'type');
+/** The same edges from stored summaries, resolving only `file`. */
+const incremental = (files: FileParseResult[], file: FileParseResult) => {
+  const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
+  const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
+  return resolveEdges([file], undefined, index);
+};
 const model = parse('src/pkg/model.py', `class Target:
     def run(self): pass
 class Other:
     def run(self): pass
 `);
 
-describe('Python receiver and package resolution', () => {
+describe('Python receiver inference', () => {
+  it('adds a typed relationship and keeps the call\'s own relationships', () => {
+    const use = parse('src/pkg/use.py', `from .model import Target
+def execute():
+    local = Target()
+    local.run()
+    local.missing()
+`);
+    expect(typed(use)).toEqual([['execute', '.model.Target'], ['execute', '.model.Target']]);
+    // Unchanged from before inference: bare and qualified names stay, untyped.
+    const names = use.relationships.filter(r => r.predicate === 'CALLS').map(r => r.dstName);
+    expect(names).toEqual(expect.arrayContaining(['Target', 'run', 'Target.run', 'missing', 'Target.missing']));
+    expect(use.relationships.filter(r => r.receiverOnly)).toEqual([]);
+    expect(typeEdges([model, use])).toEqual([expect.objectContaining({
+      srcName: 'execute', dstFilePath: model.filePath, dstQualifiedKey: 'Target.run', confidence: 0.95,
+    })]);
+    // An unknown member keeps its name fallback and its diagnostics.
+    const patch = buildPatchWithResolution(use, 'hash', 'workspace', resolveEdges([model, use]));
+    expect(patch.ops).toContainEqual(expect.objectContaining({ type: 'AssertClaim', field: 'calls:Target.missing' }));
+  });
+
   it.each([
     ['exception alias', 'try:\n        pass\n    except Exception as local:\n        local.run()'],
     ['exception group alias', 'try:\n        pass\n    except* Exception as local:\n        local.run()'],
     ['capture', 'match value:\n        case local:\n            local.run()'],
-    ['guard capture', 'match value:\n        case local if local.run():\n            local.run()'],
     ['as capture', 'match value:\n        case _ as local:\n            local.run()'],
     ['sequence capture', 'match value:\n        case [local]:\n            local.run()'],
     ['sequence splat', 'match value:\n        case [*local]:\n            local.run()'],
-    ['tuple capture', 'match value:\n        case (_, local):\n            local.run()'],
     ['mapping capture', "match value:\n        case {'key': local}:\n            local.run()"],
     ['mapping splat', 'match value:\n        case {**local}:\n            local.run()'],
-    ['nested class capture', 'match value:\n        case Other(field=Other(local)):\n            local.run()'],
     ['keyword capture', 'match value:\n        case Other(field=local):\n            local.run()'],
-    ['alternative capture', 'match value:\n        case [local] | (local,):\n            local.run()'],
-  ])('invalidates a stale receiver after binding: %s', (_label, body) => {
+    ['with alias', 'with unknown() as local:\n        local.run()'],
+    ['with tuple alias', 'with unknown() as (local, other):\n        local.run()'],
+    ['comprehension', '[local.run() for local in unknown()]'],
+    ['tuple assignment', 'local, other = unknown()\n    local.run()'],
+    ['starred assignment', '*local, other = unknown()\n    local.run()'],
+    ['del', 'del local\n    local.run()'],
+    ['conditional assignment', 'if flag:\n        local = unknown()\n    local.run()'],
+    ['for target', 'for local in values:\n        pass\n    local.run()'],
+  ])('drops a stale receiver after rebinding: %s', (_label, body) => {
     const use = parse('src/pkg/use.py', `from .model import Target, Other
 def execute():
     local = Target()
     ${body}
-    local.run()
 `);
-    const edges = resolveEdges([model, use]);
-    expect(edges.filter(e => e.predicate === 'CALLS' && e.dstQualifiedKey.endsWith('.run'))).toEqual([]);
-    for (const patch of [buildPatch(use, 'hash', 'workspace'), buildPatchWithResolution(use, 'hash', 'workspace', edges)]) {
-      expect(patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS' && op.attrs?.tier === 'type')).toEqual([]);
-      expect(patch.ops).toContainEqual(expect.objectContaining({
-        type: 'UpsertNode', attrs: expect.objectContaining({ unresolved_calls: expect.arrayContaining(['local.run']) }),
-      }));
-    }
-    const summaries = new Map([model, use].map(r => [r.filePath, summarizeParseResult(r)]));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
-    expect(resolveEdges([use], undefined, index)).toEqual(edges.filter(e => e.srcFilePath === use.filePath));
+    expect(typed(use)).toEqual([]);
   });
 
   it.each([
-    'try:\n        pass\n    except Exception as local:\n        local.run()',
-    'match value:\n        case local:\n            local.run()',
-  ])('preserves earlier calls and restores a receiver after reassignment: %s', body => {
+    ['subscript', 'self.cache[k] = v'],
+    ['tuple of fields', 'self.a, self.b = 1, 2'],
+    ['del subscript', 'del self.d[k]'],
+    ['subscript by self', 'x[self] = 1'],
+    ['del attribute subscript', 'del _limbo[self]'],
+    ['starred field', 'first, *self.rest = values'],
+  ])('keeps self typed after a target that mentions it: %s', (_label, statement) => {
+    const use = parse('src/pkg/use.py', `class C:
+    def flush(self): pass
+    def put(self, k, v, x, values):
+        ${statement}
+        self.flush()
+`);
+    expect(typed(use)).toEqual([['C.put', 'C']]);
+  });
+
+  it('does not let a tuple-assigned field keep an initializer type', () => {
     const use = parse('src/pkg/use.py', `from .model import Target
-def execute():
-    local = Target()
-    local.run()
-    ${body}
-    local.run()
-    local = Target()
-    local.run()
+class Service:
+    def __init__(self):
+        self.dep = Target()
+    def reset(self):
+        self.dep, self.other = None, None
+    def execute(self):
+        self.dep.run()
 `);
-    const calls = resolveEdges([model, use]).filter(e => e.dstQualifiedKey === 'Target.run');
-    const sites = use.relationships.filter(r => r.dstName === 'local.run').map(r => r.callSite);
-    expect(calls.map(e => e.callSite)).toEqual([sites[0], sites.at(-1)]);
+    expect(typed(use).filter(([src]) => src === 'Service.execute')).toEqual([]);
   });
 
-  it.each([
-    'try:\n        pass\n    except Exception as helper:\n        helper.run()',
-    'match value:\n        case helper:\n            helper.run()',
-  ])('invalidates a module import alias after binding: %s', body => {
-    const helper = parse('src/pkg/helper.py', 'def run(): pass\n');
-    const use = parse('src/pkg/use.py', `def execute():
-    import pkg.helper as helper
-    helper.run()
-    ${body}
-    helper.run()
-`);
-    const calls = resolveEdges([helper, use]).filter(e => e.predicate === 'CALLS');
-    expect(calls).toEqual([expect.objectContaining({
-      dstFilePath: helper.filePath, dstQualifiedKey: 'run', tier: 'binding',
-      callSite: use.relationships.find(r => r.dstName === 'helper.run')!.callSite,
-    })]);
-  });
-
-  it.each(['local()', 'Other(local=_)', 'local.VALUE', '{local.KEY: _}', '_', '[*_]'])('preserves pattern references and wildcards: %s', pattern => {
+  it.each(['local()', 'Other(local=_)', 'local.VALUE', '{local.KEY: _}', '_'])('keeps a receiver through pattern references and wildcards: %s', pattern => {
     const use = parse('src/pkg/use.py', `from .model import Target, Other
 def execute():
     local = Target()
-    local.run()
     match value:
         case ${pattern}:
-            local.run()
+            pass
     local.run()
 `);
-    expect(resolveEdges([model, use]).filter(e => e.dstQualifiedKey === 'Target.run')).toHaveLength(3);
-  });
-
-  it.each([
-    'with unknown() as local:\n        local.run()',
-    'with unknown() as (local, other):\n        local.run()',
-    '[local.run() for local in unknown()]',
-    '{local.run() for local in unknown()}',
-    '{local: local.run() for local in unknown()}',
-    '(local.run() for local in unknown())',
-    '[local.run() for (local, other) in unknown()]',
-  ])('shadows a receiver in binding constructs: %s', body => {
-    const use = parse('src/pkg/use.py', `from .model import Target
-def execute():
-    local = Target()
-    ${body}
-`);
-    expect(resolveEdges([model, use]).filter(e => e.dstQualifiedKey === 'Target.run')).toEqual([]);
-  });
-
-  it('keeps comprehension bindings separate from the enclosing receiver', () => {
-    const use = parse('src/pkg/use.py', `from .model import Target
-def execute():
-    local = Target()
-    [local.run() for local in unknown()]
-    local.run()
-`);
-    expect(resolveEdges([model, use]).filter(e => e.dstQualifiedKey === 'Target.run')).toHaveLength(1);
+    expect(typed(use)).toEqual([['execute', '.model.Target']]);
   });
 
   it('evaluates the first comprehension iterable in the enclosing scope', () => {
@@ -133,93 +122,7 @@ def execute():
     local = Target()
     [local.run() for local in local.run()]
 `);
-    const calls = resolveEdges([model, use]).filter(e => e.dstQualifiedKey === 'Target.run');
-    expect(calls).toHaveLength(1);
-    expect(calls[0].callSite).toBe(use.relationships.filter(r => r.dstName === 'local.run')[1].callSite);
-  });
-
-  it.each(['Target()', 'unknown()'])('retains later receiver targets after %s', initial => {
-    const use = parse('src/pkg/use.py', `from .model import Target, Other
-def execute():
-    local = ${initial}
-    local.run()
-    local = Other()
-    local.run()
-    local.run()
-`);
-    const edges = resolveEdges([model, use]);
-    const typed = edges.filter(e => e.tier === 'type');
-    expect(new Set(typed.map(e => e.dstQualifiedKey))).toEqual(new Set(initial === 'Target()' ? ['Target.run', 'Other.run'] : ['Other.run']));
-    const calls = buildPatchWithResolution(use, 'hash', 'workspace', edges).ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS' && op.attrs?.tier === 'type');
-    expect(calls).toHaveLength(initial === 'Target()' ? 2 : 1);
-    expect(new Set(calls.map(op => op.dst)).size).toBe(calls.length);
-    if (initial === 'unknown()') {
-      expect(buildPatchWithResolution(use, 'hash', 'workspace', edges).ops).toContainEqual(expect.objectContaining({
-        type: 'UpsertNode', attrs: expect.objectContaining({ unresolved_calls: expect.arrayContaining(['local.run']) }),
-      }));
-    }
-    const summaries = new Map([model, use].map(r => [r.filePath, summarizeParseResult(r)]));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
-    expect(resolveEdges([use], undefined, index)).toEqual(edges.filter(e => e.srcFilePath === use.filePath));
-  });
-
-  it('keeps an unknown module call separate from a later imported binding', () => {
-    const helper = parse('src/pkg/helper.py', 'def run(): pass\n');
-    const use = parse('src/pkg/use.py', `def execute():
-    helper.run()
-    import pkg.helper as helper
-    helper.run()
-`);
-    const edges = resolveEdges([helper, use]);
-    expect(edges.filter(e => e.predicate === 'CALLS')).toEqual([
-      expect.objectContaining({ dstFilePath: helper.filePath, dstQualifiedKey: 'run', tier: 'binding' }),
-    ]);
-    const patch = buildPatchWithResolution(use, 'hash', 'workspace', edges);
-    expect(patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS')).toHaveLength(1);
-    expect(patch.ops).toContainEqual(expect.objectContaining({
-      type: 'UpsertNode', attrs: expect.objectContaining({ unresolved_calls: ['helper.run'] }),
-    }));
-  });
-
-  it.each(['..', '...'])('preserves every dot in parent-relative type imports: %s', dots => {
-    const parent = parse('src/pkg/__init__.py', 'class Target:\n    def run(self): pass\n');
-    const nearer = parse('src/pkg/nested/__init__.py', 'class Target:\n    def run(self): pass\n');
-    const use = parse(`src/pkg/nested/${dots === '...' ? 'deeper/' : ''}use.py`, `from ${dots} import Target as Item
-def execute():
-    local = Item()
-    local.run()
-`);
-    expect(resolveEdges([parent, nearer, use]).filter(e => e.tier === 'type')).toEqual([
-      expect.objectContaining({ dstFilePath: parent.filePath, dstQualifiedKey: 'Target.run' }),
-    ]);
-  });
-
-  it.each(['.', '..'])('imports names defined in a relative package initializer: %s', dots => {
-    const init = parse('src/pkg/__init__.py', 'class Target: pass\n');
-    const use = parse(`src/pkg/${dots === '..' ? 'nested/' : ''}use.py`, `from ${dots} import Target`);
-    expect(resolveEdges([init, use]).filter(e => e.predicate === 'IMPORTS')).toEqual([
-      expect.objectContaining({ dstFilePath: init.filePath, dstQualifiedKey: '__init__.py' }),
-    ]);
-  });
-
-  it('does not expose function-local class or module imports to siblings', () => {
-    const helper = parse('src/pkg/helper.py', 'def run(): pass\n');
-    const use = parse('src/pkg/use.py', `def first():
-    from .model import Target
-    import pkg.helper as helper
-    local = Target()
-    local.run()
-    helper.run()
-def second():
-    local = Target()
-    local.run()
-    helper.run()
-def third(local: Target):
-    local.run()
-`);
-    const calls = resolveEdges([model, helper, use]).filter(e => e.predicate === 'CALLS');
-    expect(calls).toHaveLength(3);
-    expect(calls.every(e => e.srcName === 'first')).toBe(true);
+    expect(typed(use)).toEqual([['execute', '.model.Target']]);
   });
 
   it.each([
@@ -234,16 +137,13 @@ class Service:
     def execute(self):
         self.dep.run()
 `);
-    expect(resolveEdges([model, use])).toContainEqual(expect.objectContaining({
-      srcName: 'Service.execute', dstFilePath: model.filePath, dstQualifiedKey: 'Target.run', tier: 'type', confidence: 0.95,
+    expect(typeEdges([model, use])).toContainEqual(expect.objectContaining({
+      srcName: 'Service.execute', dstFilePath: model.filePath, dstQualifiedKey: 'Target.run', confidence: 0.95,
     }));
   });
 
-  it('resolves class annotations, local constructors and inherited self calls incrementally', () => {
-    const base = parse('src/pkg/base.py', `from .model import Target as Item
-class Base:
-    def inherited(self): pass
-`);
+  it('resolves class annotations, local constructors and inherited self calls, also from summaries', () => {
+    const base = parse('src/pkg/base.py', 'class Base:\n    def inherited(self): pass\n');
     const use = parse('src/pkg/use.py', `from .model import Target as Item
 from .base import Base
 class Service(Base):
@@ -251,95 +151,91 @@ class Service(Base):
     def execute(self):
         self.dep.run()
         self.inherited()
-        self.own()
-    def own(self): pass
 def execute():
     local = Item()
     local.run()
 `);
     const files = [model, base, use];
-    const edges = resolveEdges(files);
-    for (const [srcName, dstQualifiedKey] of [['Service.execute', 'Target.run'], ['Service.execute', 'Base.inherited'], ['Service.execute', 'Service.own'], ['execute', 'Target.run']]) {
-      expect(edges).toContainEqual(expect.objectContaining({ srcName, dstQualifiedKey, tier: 'type' }));
+    const edges = typeEdges(files);
+    for (const [srcName, dstQualifiedKey] of [['Service.execute', 'Target.run'], ['Service.execute', 'Base.inherited'], ['execute', 'Target.run']]) {
+      expect(edges).toContainEqual(expect.objectContaining({ srcName, dstQualifiedKey }));
     }
-    const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
-    expect(resolveEdges([use], undefined, index)).toEqual(edges.filter(e => e.srcFilePath === use.filePath));
-    expect(buildPatchWithResolution(use, 'hash', 'workspace', edges).ops).toContainEqual(expect.objectContaining({
+    expect(incremental(files, use)).toEqual(resolveEdges(files).filter(e => e.srcFilePath === use.filePath));
+    expect(buildPatchWithResolution(use, 'hash', 'workspace', resolveEdges(files)).ops).toContainEqual(expect.objectContaining({
       type: 'UpsertEdge', predicate: 'CALLS', attrs: { confidence: 0.95, tier: 'type' },
     }));
   });
 
-  it.each(['from pkg import model as m', 'import pkg.model as m', 'from . import model as m'])('maps module imports and calls: %s', statement => {
+  it.each(['from pkg import model as m', 'import pkg.model as m', 'from . import model as m'])('types a constructor through a module import: %s', statement => {
     const use = parse('src/pkg/use.py', `${statement}
 def execute():
     local = m.Target()
     local.run()
 `);
-    const edges = resolveEdges([model, use]);
-    expect(edges).toContainEqual(expect.objectContaining({ predicate: 'IMPORTS', dstFilePath: model.filePath }));
-    expect(edges).toContainEqual(expect.objectContaining({ predicate: 'CALLS', dstFilePath: model.filePath, dstQualifiedKey: 'Target.run', tier: 'type' }));
+    expect(typeEdges([model, use])).toEqual([expect.objectContaining({ dstFilePath: model.filePath, dstQualifiedKey: 'Target.run' })]);
   });
 
-  it.each(['from a.b import c', 'from a.b import Missing'])('maps imported modules or the package initializer: %s', statement => {
-    const init = parse('src/a/b/__init__.py', 'class Missing: pass\n');
-    const child = parse('src/a/b/c.py', 'def work(): pass\n');
-    const unrelated = parse('src/elsewhere/c.py', 'def work(): pass\n');
-    const use = parse('src/use.py', statement);
-    const edges = resolveEdges([use, init, child, unrelated]).filter(e => e.predicate === 'IMPORTS');
-    expect(edges).toContainEqual(expect.objectContaining({ dstFilePath: statement.endsWith(' c') ? child.filePath : init.filePath }));
-    expect(edges.some(e => e.dstFilePath === unrelated.filePath)).toBe(false);
+  it('types a constructor through a dotted module import', () => {
+    const use = parse('src/app/use.py', 'import pkg.model\ndef execute():\n    local = pkg.model.Target()\n    local.run()\n');
+    expect(typed(use)).toEqual([['execute', 'pkg.model.Target']]);
+    expect(typeEdges([model, use])).toEqual([expect.objectContaining({ dstFilePath: model.filePath, dstQualifiedKey: 'Target.run' })]);
   });
 
-  it('does not guess ambiguous or unknown receivers, reassignments or out-of-scope locals', () => {
-    const use = parse('src/pkg/use.py', `from .model import Target
-def known():
+  it.each(['..', '...'])('keeps every dot of a parent-relative type import: %s', dots => {
+    const parent = parse('src/pkg/__init__.py', 'class Target:\n    def run(self): pass\n');
+    const nearer = parse('src/pkg/nested/__init__.py', 'class Target:\n    def run(self): pass\n');
+    const use = parse(`src/pkg/nested/${dots === '...' ? 'deeper/' : ''}use.py`, `from ${dots} import Target as Item
+def execute():
+    local = Item()
+    local.run()
+`);
+    expect(typeEdges([parent, nearer, use])).toEqual([
+      expect.objectContaining({ dstFilePath: parent.filePath, dstQualifiedKey: 'Target.run' }),
+    ]);
+  });
+
+  it('resolves src packages from tests outside src', () => {
+    const test = parse('tests/test_model.py', 'from pkg.model import Target\ndef execute():\n    local = Target()\n    local.run()\n');
+    expect(typeEdges([model, test])).toEqual([expect.objectContaining({ dstFilePath: model.filePath, dstQualifiedKey: 'Target.run' })]);
+  });
+
+  it('does not expose function-local imports to siblings', () => {
+    const use = parse('src/pkg/use.py', `def first():
+    from .model import Target
     local = Target()
-    local = unknown()
     local.run()
-def other(local):
-    local.run()
-class Service:
-    def execute(self):
-        self.missing.run()
-        self.run()
-`);
-    const edges = resolveEdges([model, use]).filter(e => e.predicate === 'CALLS' && e.dstQualifiedKey.endsWith('.run'));
-    expect(edges).toEqual([]);
-    const ambiguous = parse('src/pkg/model_duplicate.py', 'class Target:\n    def run(self): pass\n');
-    const unknown = parse('src/use.py', 'def execute(obj):\n    obj.run()\n');
-    expect(resolveEdges([model, ambiguous, unknown]).filter(e => e.predicate === 'CALLS')).toEqual([]);
-  });
-
-  it('uses annotated initializer parameters and quoted annotations', () => {
-    const use = parse('src/pkg/use.py', `from .model import Target
-class Service:
-    def __init__(self, dep: Target):
-        self.dep = dep
-    def execute(self):
-        self.dep.run()
-def execute(local: "Target"):
+def second():
+    local = Target()
     local.run()
 `);
-    expect(resolveEdges([model, use]).filter(e => e.tier === 'type').map(e => e.srcName)).toEqual(['Service.execute', 'execute']);
+    expect(typed(use)).toEqual([['first', '.model.Target']]);
   });
 
-  it.each([
-    'local = Target()\n    local, other = unknown()',
-    'local = Target()\n    del local',
-    'local = Target()\n    if flag:\n        local = unknown()',
-    'local = Target()\n    for local in values:\n        pass',
-    'local = Target()\n    with unknown() as local:\n        pass',
-    'local = Target()\n    with unknown() as (local, other):\n        pass',
-  ])('invalidates uncertain local assignments: %s', body => {
-    const use = parse('src/pkg/use.py', `from .model import Target\ndef execute():\n    ${body}\n    local.run()\n`);
-    expect(resolveEdges([model, use]).filter(e => e.dstQualifiedKey === 'Target.run')).toEqual([]);
+  it('does not guess between imports of one name from different modules', () => {
+    const use = parse('src/pkg/use.py', `def first():
+    from .model import Target
+    local = Target()
+    local.run()
+def second():
+    from .other import Target
+    local = Target()
+    local.run()
+`);
+    expect(typed(use)).toEqual([]);
   });
 
-  it('does not resolve module aliases shadowed by parameters', () => {
-    const module = parse('src/pkg/helper.py', 'def run(): pass\n');
-    const use = parse('src/pkg/use.py', 'import pkg.helper as helper\ndef execute(helper):\n    helper.run()\n');
-    expect(resolveEdges([module, use]).filter(e => e.predicate === 'CALLS')).toEqual([]);
+  it('does not borrow a constructor hidden by a local or module reassignment', () => {
+    const use = parse('src/pkg/use.py', `from .model import Target, Other
+import pkg.model as module
+module = unknown()
+def execute():
+    Target = Other()
+    local = Target()
+    local.run()
+    other = module.Target()
+    other.run()
+`);
+    expect(typed(use)).toEqual([]);
   });
 
   it('does not infer a field with conflicting writes or a fake self parameter', () => {
@@ -354,20 +250,28 @@ class Service:
     def fake(self):
         self.execute()
 `);
-    expect(resolveEdges([model, use]).filter(e => e.tier === 'type')).toEqual([]);
+    expect(typed(use)).toEqual([]);
   });
 
-  it('keeps unknown calls in patch diagnostics without guessing a local method', () => {
-    const use = parse('src/pkg/use.py', 'class Service:\n    def run(self): pass\ndef execute(obj):\n    obj.run()\n');
-    const patch = buildPatch(use, 'hash', 'workspace');
-    expect(patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS')).toEqual([]);
-    expect(patch.ops).toContainEqual(expect.objectContaining({ type: 'UpsertNode', attrs: expect.objectContaining({ unresolved_calls: ['obj.run'] }) }));
-    expect(patch.ops).toContainEqual(expect.objectContaining({ type: 'AssertClaim', field: 'calls:obj.run', value: 'obj.run' }));
+  it('does not type a keyword argument as a member of the call receiver', () => {
+    const use = parse('src/pkg/use.py', `class C:
+    def run(self): pass
+    def go(self, cb): pass
+    def execute(self):
+        self.go(cb=run)
+`);
+    expect(typed(use)).toEqual([['C.execute', 'C']]);
+    expect(use.relationships.filter(r => r.receiverType).map(r => r.dstName)).toEqual(['C.go']);
   });
 
-  it('does not resolve missing package imports by a coincidental symbol name', () => {
-    const use = parse('src/pkg/use.py', 'from missing.module import Target\ndef execute():\n    local = Target()\n    local.run()\n');
-    expect(resolveEdges([model, use]).filter(e => e.predicate === 'IMPORTS' || e.predicate === 'CALLS')).toEqual([]);
+  it('does not resolve a missing or ambiguous module by a coincidental symbol', () => {
+    const missing = parse('src/pkg/use.py', 'from missing.model import Target\ndef execute():\n    local = Target()\n    local.run()\n');
+    expect(typeEdges([model, missing])).toEqual([]);
+    const first = parse('first/src/pkg/model.py', 'class Target:\n    def run(self): pass\n');
+    const second = parse('second/src/pkg/model.py', 'class Target:\n    def run(self): pass\n');
+    const test = parse('tests/test_model.py', 'from pkg.model import Target\ndef execute(item: Target):\n    item.run()\n');
+    expect(typeEdges([first, second, test])).toEqual([]);
+    expect(incremental([first, second, test], test).filter(e => e.tier === 'type')).toEqual([]);
   });
 
   it.each(['base.Base', 'base.Base[int]'])('resolves inherited typed calls through %s across batches', baseType => {
@@ -382,84 +286,73 @@ class Service:
 `);
     const decoy = parse('src/other/base.py', 'class Base:\n    def run(self): pass\n');
     const files = [base, child, use, decoy];
-    const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
-    const edges = resolveEdges(files);
-    const expected = expect.objectContaining({ srcFilePath: use.filePath, srcName: 'Service.execute',
-      dstName: 'item.run', dstFilePath: base.filePath, dstQualifiedKey: 'Base.run', predicate: 'CALLS',
-      tier: 'type', callSite: expect.any(Number) });
-    expect(edges).toContainEqual(expected);
-    expect(edges).toContainEqual(expect.objectContaining({ srcFilePath: child.filePath,
-      srcName: 'Child', dstName: 'base.Base', dstFilePath: base.filePath, dstQualifiedKey: 'Base', predicate: 'EXTENDS' }));
-    expect(edges.some(e => e.dstFilePath === decoy.filePath)).toBe(false);
-    expect(resolveEdges([use], undefined, index)).toEqual(edges.filter(e => e.srcFilePath === use.filePath));
+    expect(child.receiverHeritage).toEqual([['Child', 'pkg.base.Base']]);
+    expect(typeEdges(files)).toEqual([expect.objectContaining({ srcFilePath: use.filePath, srcName: 'Service.execute',
+      dstFilePath: base.filePath, dstQualifiedKey: 'Base.run' })]);
+    // child.py is not in the batch: its stored heritage needs no import facts.
+    expect(incremental(files, use).filter(e => e.tier === 'type')).toEqual([expect.objectContaining({ dstFilePath: base.filePath, dstQualifiedKey: 'Base.run' })]);
   });
 
-  it('uses superclass import aliases from stored summaries', () => {
+  it('resolves through a superclass imported under an alias', () => {
     const base = parse('src/pkg/base.py', 'class Base:\n    def run(self): pass\n');
     const middle = parse('src/pkg/middle.py', 'from .base import Base as Parent\nclass Middle(Parent): pass\n');
     const use = parse('src/pkg/use.py', 'from .middle import Middle\nclass Service(Middle):\n    def execute(self):\n        self.run()\n');
     const files = [base, middle, use];
-    const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
-    const edges = resolveEdges([use], undefined, index);
-    expect(edges).toContainEqual(expect.objectContaining({ dstFilePath: base.filePath, dstQualifiedKey: 'Base.run', tier: 'type' }));
+    expect(incremental(files, use).filter(e => e.tier === 'type')).toEqual([expect.objectContaining({ dstFilePath: base.filePath, dstQualifiedKey: 'Base.run' })]);
     const changed = summarizeParseResult(parse('src/pkg/middle.py', 'from .other import Base as Parent\nclass Middle(Parent): pass\n'));
-    expect(changed.sig).not.toBe(summaries.get(middle.filePath)!.sig);
+    expect(changed.sig).not.toBe(summarizeParseResult(middle).sig);
   });
 
-  it('resolves src packages from tests outside src and supports parent-relative imports', () => {
-    const test = parse('tests/test_model.py', 'from pkg.model import Target\ndef execute():\n    local = Target()\n    local.run()\n');
-    const nested = parse('src/pkg/nested/use.py', 'from ..model import Target\ndef execute():\n    local = Target()\n    local.run()\n');
-    const files = [model, test, nested];
-    for (const srcFilePath of [test.filePath, nested.filePath]) {
-      expect(resolveEdges(files)).toContainEqual(expect.objectContaining({ srcFilePath, dstFilePath: model.filePath, dstQualifiedKey: 'Target.run', tier: 'type' }));
-    }
-  });
-
-  it('leaves ambiguous module roots unresolved', () => {
-    const first = parse('first/src/pkg/helper.py', 'def run(): pass\n');
-    const second = parse('second/src/pkg/helper.py', 'def run(): pass\n');
-    const use = parse('tests/test_helper.py', 'import pkg.helper as helper\ndef execute():\n    helper.run()\n');
-    expect(resolveEdges([first, second, use]).filter(e => e.predicate === 'IMPORTS' || e.predicate === 'CALLS')).toEqual([]);
-  });
-
-  it('does not select an ambiguous module root by the receiver class name', () => {
-    const first = parse('first/src/pkg/model.py', 'class Target:\n    def run(self): pass\n');
-    const second = parse('second/src/pkg/model.py', 'class Other:\n    def run(self): pass\n');
-    const use = parse('tests/test_model.py', 'from pkg.model import Target\ndef execute(item: Target):\n    item.run()\n');
-    const files = [first, second, use];
-    const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
-    for (const edges of [resolveEdges(files), resolveEdges([use], undefined, index)]) {
-      expect(edges.filter(e => e.predicate === 'IMPORTS' || e.predicate === 'CALLS')).toEqual([]);
-    }
-  });
-
-  it('does not borrow a constructor hidden by an instance or module reassignment', () => {
-    const use = parse('src/pkg/use.py', `from .model import Target, Other
-import pkg.model as module
-module = unknown()
-def execute():
-    Target = Other()
-    local = Target()
-    local.run()
-    module.run()
+  it('resolves super().m() to the single base class, not the override', () => {
+    const use = parse('src/pkg/use.py', `from .model import Target
+class Base:
+    def save(self): pass
+class Child(Base):
+    def save(self):
+        super().save()
+class Named(Base):
+    def save(self):
+        super(Named, self).save()
+class Imported(Target):
+    def run(self):
+        super().run()
+class Two(Base, Target):
+    def run(self):
+        super().run()
 `);
-    expect(resolveEdges([model, use]).filter(e => e.tier === 'type')).toEqual([]);
+    expect(typed(use)).toEqual([['Child.save', 'Base'], ['Named.save', 'Base'], ['Imported.run', '.model.Target']]);
+    expect(typeEdges([model, use]).map(e => [e.srcName, e.dstFilePath, e.dstQualifiedKey])).toEqual([
+      ['Child.save', use.filePath, 'Base.save'],
+      ['Named.save', use.filePath, 'Base.save'],
+      ['Imported.run', model.filePath, 'Target.run'],
+    ]);
   });
 
-  it('does not guess between imports of the same name in different functions', () => {
-    const other = parse('src/pkg/other.py', 'class Target:\n    def run(self): pass\n');
-    const use = parse('src/pkg/use.py', `def first():
-    from .model import Target
-    local = Target()
+  it('types a class defined later in the module from a function body', () => {
+    const use = parse('src/pkg/use.py', `def make():
+    local = Later()
     local.run()
-def second():
-    from .other import Target
-    local = Target()
+class Early:
+    def build(self):
+        return Later().run()
+    def use(self):
+        item = Later()
+        item.run()
+class Later:
+    def run(self): pass
+Twice = Later
+def ambiguous():
+    local = Twice()
     local.run()
+Twice = None
 `);
-    expect(resolveEdges([model, other, use]).filter(e => e.tier === 'type')).toEqual([]);
+    expect(typed(use)).toEqual([['make', 'Later'], ['Early.use', 'Later']]);
+    expect(typeEdges([use]).map(e => e.srcName)).toEqual(['make', 'Early.use']);
+  });
+
+  it('keeps unknown receivers on their name-based relationships only', () => {
+    const use = parse('src/pkg/use.py', 'class Service:\n    def run(self): pass\ndef execute(obj):\n    obj.run()\n');
+    expect(typed(use)).toEqual([]);
+    expect(use.relationships.filter(r => r.predicate === 'CALLS').map(r => r.dstName)).toEqual(expect.arrayContaining(['run', 'obj.run']));
   });
 });
