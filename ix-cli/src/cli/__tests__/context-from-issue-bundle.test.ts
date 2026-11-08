@@ -207,6 +207,8 @@ describe("ix context --from-issue bundle", () => {
     const shown = row.title.replace(/^ranked files: /, "").split(", ");
     expect(shown).toEqual([...ranked(20).slice(0, 10).map((f) => f.path), "src/client/index.ts"]);
     expect(row.reason).toContain("then companion files");
+    // The header describes the pinned-first order, not a pure score order.
+    expect(row.reason).toMatch(/^pinned first: paths the issue names, then specific code names .*; then the rest by bm25/);
     expect(row.reason).toContain("index.ts (companion (re-export of src/client/api.ts))");
     expect(captureLog(() => renderBundle(b, "llm")).join("\n")).toMatch(/^evidence .*title="ranked files: .*src\/client\/index.ts"/m);
     expect(captureLog(() => renderBundle(b, "text")).join("\n")).toContain("src/client/index.ts");
