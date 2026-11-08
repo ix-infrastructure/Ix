@@ -35,6 +35,12 @@ surfaces (#575).
 
 ## Flags with behaviour worth knowing
 
+- **`--path` is a case-insensitive substring match, in every command.**
+  `--path ix-memory` matches `IX-Memory/src/a.ts`, and `\` counts as `/`, so
+  `--path src\cli` works on Windows. One limit: `rank` and `inventory` pass
+  `--path` to the backend so it is applied before the row limit, and a backend
+  older than the Ix-memory release with case-insensitive `/v1/list` scopes
+  matches it case-sensitively. Against one of those, type the case as stored.
 - **`ix diff` refuses conflicting volume flags rather than picking a winner.**
   `--summary` ignores both `--limit` and `--full`, and `--full --limit` is
   rejected on its own; each combination errors with which flag to drop.

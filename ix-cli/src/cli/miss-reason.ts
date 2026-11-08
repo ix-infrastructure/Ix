@@ -9,6 +9,7 @@ import { resolveWorkspaceRoot } from "./config.js";
 import { SKIPPED_DIRS, isGeneratedFile, isSupportedSourceFile } from "./file-discovery.js";
 import { isFileStale } from "./stale.js";
 import type { TextMatch } from "./text-matches.js";
+import { normalizeForPathMatch } from "./path-match.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -43,10 +44,6 @@ function chargeProbeTime(ms: number): void {
 /** A file `ix map` would hand to the parser: the only kind the graph can lack for a reason `ix map` fixes. */
 function isParsedFile(file: string): boolean {
   return isSupportedSourceFile(file) && !isGeneratedFile(path.posix.basename(file));
-}
-
-function normalizeForPathMatch(value: string): string {
-  return value.toLowerCase().replace(/\\/g, "/");
 }
 
 export interface SymbolMissReason {
