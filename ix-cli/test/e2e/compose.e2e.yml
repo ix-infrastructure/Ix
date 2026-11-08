@@ -17,7 +17,7 @@ name: ${IX_E2E_PROJECT:-ix-e2e}
 
 services:
   arangodb:
-    image: arangodb:3.12.12
+    image: arangodb:3.12.13
     networks: [backend]
     ports:
       # Published only for the graph-signature reads in graph-sig.mjs.
