@@ -66,6 +66,7 @@ export const OSS_COMMAND_TABLE: Readonly<Record<string, () => Promise<RegisterCo
   savings: async () => (await import("../commands/savings.js")).registerSavingsCommand,
   patches: async () => (await import("../commands/patches.js")).registerPatchesCommand,
   mcp: async () => (await import("../commands/mcp.js")).registerMcpCommand,
+  install: async () => (await import("../commands/install.js")).registerInstallCommand,
   context: async () => (await import("../commands/context.js")).registerContextCommand,
   around: async () => (await import("../commands/around.js")).registerAroundCommand,
   hook: async () => (await import("../commands/hook.js")).registerHookCommand,
