@@ -71,7 +71,9 @@ export function collectPythonReceiverFacts(root: any, checkBudget: () => void): 
    * scopes have finished binding, and an annotation names the class it means:
    * from there (`deferred`), a name an enclosing scope binds one way only
    * (`class Later:` below the function) is that binding wherever it is. A
-   * name bound several ways stays positional.
+   * name an enclosing scope binds several ways is unknown from there: which
+   * binding holds depends on when the function runs (`x = A()`, `def f():
+   * x.run()`, `x = B()` calls B.run once the module has loaded).
    */
   const latest = (scope: Scope | undefined, name: string, at: number, deferred = false): { found: boolean; binding?: Binding } => {
     for (let s = scope; s; s = s.parent) {
@@ -79,7 +81,7 @@ export function collectPythonReceiverFacts(root: any, checkBudget: () => void): 
       if (deferred && s.node.type === 'class_definition') continue;
       const events = s.bindings.get(name);
       if (events) {
-        if (deferred && events.every(e => sameBinding(e, events[0]))) return { found: true, binding: events[0] };
+        if (deferred) return { found: true, binding: events.every(e => sameBinding(e, events[0])) ? events[0] : undefined };
         return { found: true, binding: events.filter(e => e.at <= at).at(-1) };
       }
       if (deferredScope(s)) deferred = true;
@@ -212,8 +214,10 @@ export function collectPythonReceiverFacts(root: any, checkBudget: () => void): 
       }
       continue;
     }
-    while (frames.length > 1 && frames.at(-1)!.end <= node.startIndex) frames.pop();
-    while (branches.length && branches.at(-1)!.end <= node.startIndex) branches.pop();
+    // Each position getter marshals the node across the native boundary: read once.
+    const start: number = node.startIndex, end: number = node.endIndex;
+    while (frames.length > 1 && frames.at(-1)!.end <= start) frames.pop();
+    while (branches.length && branches.at(-1)!.end <= start) branches.pop();
     let current = frames.at(-1)!;
     // Only the first iterable is evaluated outside a comprehension's scope.
     while (current.parent && inOuterIterable(current, node)) current = current.parent;
@@ -221,8 +225,8 @@ export function collectPythonReceiverFacts(root: any, checkBudget: () => void): 
     if (node.type === 'class_definition' || node.type === 'function_definition' || node.type === 'lambda' || comprehensionTypes.has(node.type)) {
       const isClass = node.type === 'class_definition';
       const name = node.childForFieldName('name')?.text;
-      if (name) bind(current, name, node.startIndex, isClass ? name : undefined, isClass ? 'class' : undefined);
-      scope = { node, start: node.startIndex, end: node.endIndex, name, parent: current, bindings: new Map(), fields: new Map(), owner: isClass ? undefined : current.owner };
+      if (name) bind(current, name, start, isClass ? name : undefined, isClass ? 'class' : undefined);
+      scope = { node, start: start, end: end, name, parent: current, bindings: new Map(), fields: new Map(), owner: isClass ? undefined : current.owner };
       if (isClass) {
         scope.owner = scope;
         const bases: Array<() => string | undefined> = [];
@@ -232,9 +236,9 @@ export function collectPythonReceiverFacts(root: any, checkBudget: () => void): 
           // keyword arguments (metaclass=...) and *bases are not bases.
           if (base.type === 'keyword_argument' || base.type === 'list_splat' || base.type === 'dictionary_splat') continue;
           const raw = concrete(base.type === 'subscript' ? base.childForFieldName('value') : base);
-          bases.push(() => visibleType(raw, outer, node.startIndex));
+          bases.push(() => visibleType(raw, outer, start));
         }
-        basesByClass.set(node.startIndex, { name, bases });
+        basesByClass.set(start, { name, bases });
       } else if (comprehensionTypes.has(node.type)) {
         // The body precedes its for-clauses in the syntax tree. All iteration
         // targets shadow outer bindings throughout this separate Python scope.
@@ -247,21 +251,21 @@ export function collectPythonReceiverFacts(root: any, checkBudget: () => void): 
           const id = param.type === 'identifier' ? param : param.childForFieldName('name') ?? param.namedChildren.find((c: any) => c.type === 'identifier');
           const annotation = concrete(param.childForFieldName('type'));
           const outer = current;
-          if (id) bind(scope, id.text, 0, annotation ? () => visibleType(annotation, outer, node.startIndex, true) : undefined);
+          if (id) bind(scope, id.text, 0, annotation ? () => visibleType(annotation, outer, start, true) : undefined);
         }
         // Only a direct instance/class method owns its first parameter.
         const first = params?.firstNamedChild;
         const firstName = first?.type === 'identifier' ? first.text : first?.childForFieldName('name')?.text;
-        if (current.node.type === 'class_definition' && (firstName === 'self' || firstName === 'cls') && !staticMethods.has(node.startIndex)) {
+        if (current.node.type === 'class_definition' && (firstName === 'self' || firstName === 'cls') && !staticMethods.has(start)) {
           bind(scope, firstName, 0, current.name);
         }
       }
       scopes.push(scope);
       frames.push(scope);
     }
-    if (branchTypes.has(node.type)) branches.push({ end: node.endIndex, scope });
+    if (branchTypes.has(node.type)) branches.push({ end: end, scope });
     if (node.type === 'import_from_statement' || node.type === 'import_statement') {
-      for (const [local, target] of importedBindings(node)) bind(scope, local, node.endIndex, undefined, 'import', target);
+      for (const [local, target] of importedBindings(node)) bind(scope, local, end, undefined, 'import', target);
     }
     if (node.type === 'assignment' || node.type === 'augmented_assignment' || node.type === 'named_expression') {
       const conditional = branches.some(branch => branch.scope === scope);
@@ -271,34 +275,34 @@ export function collectPythonReceiverFacts(root: any, checkBudget: () => void): 
       const annotation = node.type === 'assignment' ? concrete(node.childForFieldName('type')) : undefined;
       const at = scope;
       const type: LazyType = conditional || node.type === 'augmented_assignment' ? undefined
-        : () => visibleType(annotation, at, node.startIndex, true) ?? expressionType(value, at);
+        : () => visibleType(annotation, at, start, true) ?? expressionType(value, at);
       if (left?.type === 'identifier') {
         if (scope.node.type === 'class_definition') setField(scope, left.text, type);
-        else bind(scope, left.text, node.endIndex, type);
+        else bind(scope, left.text, end, type);
       } else if (left?.type === 'attribute') {
-        if (scope.owner && isOwnSelf(scope, left.childForFieldName('object'), node.startIndex)) {
+        if (scope.owner && isOwnSelf(scope, left.childForFieldName('object'), start)) {
           setField(scope.owner, left.childForFieldName('attribute').text, scope.name === '__init__' ? type : undefined);
         }
       } else if (left?.type !== 'subscript') {
-        bindTarget(scope, left, node.endIndex);
+        bindTarget(scope, left, end);
       }
     }
     if (node.type === 'delete_statement') {
       // `del x` / `del x, y` unbind those names. `del d[k]`, `del self.d[k]`
       // and `del obj.attr` unbind none.
       for (const target of node.namedChildren) {
-        if (target.type === 'identifier') bind(scope, target.text, node.endIndex);
+        if (target.type === 'identifier') bind(scope, target.text, end);
         else if (/^(expression_list|tuple|list|parenthesized_expression)$/.test(target.type)) {
-          for (const id of target.namedChildren.filter((c: any) => c.type === 'identifier')) bind(scope, id.text, node.endIndex);
+          for (const id of target.namedChildren.filter((c: any) => c.type === 'identifier')) bind(scope, id.text, end);
         }
       }
     }
     if (node.type === 'for_statement') {
-      bindTarget(scope, node.childForFieldName('left'), node.startIndex);
+      bindTarget(scope, node.childForFieldName('left'), start);
     }
     if (node.type === 'with_item') {
       const value = node.childForFieldName('value');
-      if (value?.type === 'as_pattern') bindTarget(scope, value.childForFieldName('alias'), node.endIndex);
+      if (value?.type === 'as_pattern') bindTarget(scope, value.childForFieldName('alias'), end);
     }
     if (node.type === 'except_clause') {
       const value = node.childForFieldName('value');
@@ -354,14 +358,15 @@ export function collectPythonReceiverFacts(root: any, checkBudget: () => void): 
   }
   /**
    * Per call node (several query patterns match one call): its member name's
-   * start and typed receiver. Keyed by span: `a.b().c()` starts where `a.b()` does.
+   * start and typed receiver. Keyed by node id (one native read, unlike a
+   * span): `a.b().c()` starts where `a.b()` does, so a start alone would not do.
    */
-  const callReceivers = new Map<string, { name: number; receiver?: ReceiverType & { receiver: string } } | undefined>();
+  const callReceivers = new Map<number, { name: number; receiver?: ReceiverType & { receiver: string } } | undefined>();
   return {
     factories: [], heritage, typedNames: new Set(), lookup,
     receiverOfCall(nameNode: any, callNode?: any) {
       if (!callNode) return;
-      const key = `${callNode.startIndex}:${callNode.endIndex}`;
+      const key: number = callNode.id;
       if (!callReceivers.has(key)) {
         const member = callNode.childForFieldName('function');
         if (member?.type !== 'attribute') {

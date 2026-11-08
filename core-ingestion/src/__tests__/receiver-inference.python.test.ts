@@ -350,6 +350,25 @@ Twice = None
     expect(typeEdges([use]).map(e => e.srcName)).toEqual(['make', 'Early.use']);
   });
 
+  it('does not type a module name rebound to another class from a function body', () => {
+    const use = parse('src/pkg/use.py', `class A:
+    def run(self): pass
+class B:
+    def run(self): pass
+x = A()
+def use():
+    x.run()
+x = B()
+x.run()
+def annotated(item: x):
+    item.run()
+`);
+    // Module-level `x.run()` runs after `x = B()`: positional typing holds there.
+    expect(typed(use).filter(([src]) => src === 'use' || src === 'annotated')).toEqual([]);
+    expect(typeEdges([use]).filter(e => e.srcName === 'use' || e.srcName === 'annotated')).toEqual([]);
+    expect(use.relationships.filter(r => r.predicate === 'CALLS' && r.srcName === 'use').map(r => r.dstName)).toEqual(expect.arrayContaining(['run']));
+  });
+
   it('keeps unknown receivers on their name-based relationships only', () => {
     const use = parse('src/pkg/use.py', 'class Service:\n    def run(self): pass\ndef execute(obj):\n    obj.run()\n');
     expect(typed(use)).toEqual([]);
