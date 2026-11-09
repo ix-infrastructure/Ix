@@ -5,8 +5,7 @@ import type { Command } from "commander";
 const PRO_COMMANDS: { name: string; desc: string }[] = [
   { name: "briefing", desc: "Session-resume briefing" },
   { name: "bug", desc: "Manage bugs" },
-  { name: "decide", desc: "Record a design decision" },
-  { name: "decisions", desc: "List recorded design decisions" },
+  { name: "decide", desc: "Record a design decision, or list them (decide list)" },
   { name: "goal", desc: "Manage project goals" },
   { name: "goals", desc: "List all goals" },
   // `patches` is deliberately absent: ix-cli owns the real implementation
@@ -15,12 +14,18 @@ const PRO_COMMANDS: { name: string; desc: string }[] = [
   // being registered, so `ix patches` answered "requires Ix Pro" on OSS and
   // shadowed a working command — see #371.
   { name: "plan", desc: "Manage plans and plan tasks" },
-  { name: "task", desc: "Manage tasks" },
+  { name: "task", desc: "Manage tasks, or list them (task list)" },
   { name: "plans", desc: "List all plans" },
-  { name: "tasks", desc: "List all tasks across plans" },
   { name: "truth", desc: "Manage project intents (truth)" },
   { name: "workflow", desc: "Attach, show, validate, or run staged workflows" },
 ];
+
+const stubs = new WeakSet<Command>();
+
+/** True for a placeholder registered here, false for a real (Pro or OSS) command. */
+export function isProStub(cmd: Command): boolean {
+  return stubs.has(cmd);
+}
 
 export function registerProStubs(program: Command): void {
   const registered = new Set(program.commands.map((c: Command) => c.name()));
@@ -46,5 +51,6 @@ export function registerProStubs(program: Command): void {
         process.exitCode = 1;
       });
     (stub as any).hidden = true;
+    stubs.add(stub);
   }
 }

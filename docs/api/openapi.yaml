@@ -28,7 +28,7 @@ tags:
     description: >-
       Goals, truth statements and decisions. The OSS backend serves these
       endpoints, but the ix commands that read and write them (goal, truth,
-      decide, decisions and the rest) are part of Ix Pro.
+      decide and the rest) are part of Ix Pro.
   - name: patches
   - name: analysis
   - name: stats

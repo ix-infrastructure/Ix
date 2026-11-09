@@ -491,12 +491,14 @@ Explain an entity — infers role, importance, and structural context.
 
 Additional help topics. With no topic, prints the top-level help. `workflows`
 (or `workflow`) and `advanced` are prose topics; any other topic is looked up as
-a registered command and shows that command's help. The retired plurals `goals`
-and `bugs` forward to `goal` and `bug` — but that only pays off with Ix Pro
-installed. On OSS both are `registerProStubs` placeholders carrying no
-subcommands, so `ix help bugs` prints `Usage: ix bug [options] [args...]` and
-its `-h` line, and nothing about `ix bug list`. An unrecognised topic exits
-non-zero.
+a registered command and shows that command's help. The retired plurals `goals`,
+`bugs`, `tasks` and `decisions` forward to `goal`, `bug`, `task` and `decide`,
+unless a real (non-stub) command of that plural name is registered, as on a Pro
+release from before the collapse. Then its own help is shown. Forwarding only
+pays off with Ix Pro installed. On OSS the singulars are `registerProStubs`
+placeholders carrying no subcommands, so `ix help bugs` prints
+`Usage: ix bug [options] [args...]` and its `-h` line, and nothing about
+`ix bug list`. An unrecognised topic exits non-zero.
 
 No flags.
 
