@@ -182,8 +182,8 @@ describe("ix context --from-issue bundle", () => {
       const start: StartingPoint = { token: "worker.py", name: "worker.py", kind: "file", path: "worker.py", via: "path in issue" };
       const files = await issueRankedFiles("run_job fails in worker.py",
         { starts: [start], bm25: [{ path: "other.py", score: 2 }], near: new Map() }, gitRepoAccess(dir), dir);
-      // The named file keeps its boosted place in the primary ranking (here below a stronger BM25 hit); the companion follows it.
-      expect(files.map((f) => f.path)).toEqual(["other.py", "worker.py", "schema.py"]);
+      // The named file precedes lexical hits; companions follow the whole primary ranking.
+      expect(files.map((f) => f.path)).toEqual(["worker.py", "other.py", "schema.py"]);
       expect(files[2]).toMatchObject({ companion: { source: "co-change", seed: "worker.py" } });
 
       const b = build(issue({ rankedFiles: files }));
@@ -207,6 +207,8 @@ describe("ix context --from-issue bundle", () => {
     const shown = row.title.replace(/^ranked files: /, "").split(", ");
     expect(shown).toEqual([...ranked(20).slice(0, 10).map((f) => f.path), "src/client/index.ts"]);
     expect(row.reason).toContain("then companion files");
+    // The header describes the pinned-first order, not a pure score order.
+    expect(row.reason).toMatch(/^pinned first: paths the issue names, then specific code names .*; then the rest by bm25/);
     expect(row.reason).toContain("index.ts (companion (re-export of src/client/api.ts))");
     expect(captureLog(() => renderBundle(b, "llm")).join("\n")).toMatch(/^evidence .*title="ranked files: .*src\/client\/index.ts"/m);
     expect(captureLog(() => renderBundle(b, "text")).join("\n")).toContain("src/client/index.ts");

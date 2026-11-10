@@ -237,10 +237,13 @@ export async function expandIssueCompanions(
     controller.abort();
     signal.removeEventListener("abort", onAbort!);
   }
+  // Primary rows can lead by precedence (a pinned start), not score: scale
+  // companions off the strongest score so they stay comparable to the rest.
+  const top = Math.max(0, ...primary.map((f) => f.score));
   const companions: RankedFile[] = [...found.values()]
     .sort((a, b) => b.weight - a.weight || b.strength - a.strength || a.order - b.order || a.path.localeCompare(b.path))
     .slice(0, MAX_COMPANIONS)
-    .map((c) => ({ path: c.path, score: Math.max(0, primary[0].score) * 0.8 * c.weight,
+    .map((c) => ({ path: c.path, score: top * 0.8 * c.weight,
       reason: `companion (${c.source} of ${c.seed})`, companion: { source: c.source, seed: c.seed } }));
   return [...primary.slice(0, limit), ...companions];
 }

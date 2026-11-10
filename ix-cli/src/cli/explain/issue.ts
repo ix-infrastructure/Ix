@@ -291,6 +291,8 @@ export interface IssueCandidates {
   snippetIdentifiers?: string[];
   /** Each traceback's frames, innermost first, separate from explicit paths. */
   tracebacks?: string[][];
+  /** Names in a traceback's exception type (`app.errors.ConfigurationError`). */
+  exceptionIdentifiers?: string[];
 }
 
 function tracebackCandidates(text: string): { text: string; groups: string[][]; exceptions: string[] } {
@@ -452,12 +454,17 @@ export function extractCandidates(text: string): IssueCandidates {
     seen.add(token);
     identifiers.push(token);
   }
+  // The raised class names what failed, not where: it stays a start but is
+  // never pinned ahead of the traceback's own frame.
+  const exceptionIdentifiers = unique(trace.exceptions.flatMap((line) =>
+    [...line.split(":")[0].matchAll(WORD)].map((m) => m[0]))).filter((name) => seen.has(name));
   const snippetIdentifiers = unique(snippets.flatMap((code) => [...code.matchAll(WORD)].map((m) => m[0])))
     .filter((name) => !seen.has(name) && !isGenericIdentifier(name) && !SNIPPET_NOISE.has(name) && !/^__\w+__$/.test(name));
   return {
     paths, identifiers: [...identifiers, ...snippetIdentifiers].slice(0, MAX_CANDIDATES),
     ...(snippetIdentifiers.length ? { snippetIdentifiers } : {}),
     ...(trace.groups.length ? { tracebacks: trace.groups } : {}),
+    ...(exceptionIdentifiers.length ? { exceptionIdentifiers } : {}),
   };
 }
 
@@ -473,6 +480,13 @@ export interface SymbolHit {
 
 export type StartVia = "path in issue" | "identifier in issue" | "bm25 fallback";
 
+// Ranking evidence stays off the wire, but survives chooseCentre's object spread.
+const PINNED_IDENTIFIER = Symbol("pinned issue identifier");
+// Allow a few platform-specific definitions without pinning ubiquitous names.
+const MAX_PINNED_DEFINITION_FILES = 3;
+/** Search candidates fetched per name the issue mentions; only exact names are kept. */
+export const ISSUE_SEARCH_LIMIT = 20;
+
 export interface StartingPoint {
   /** What the issue said: the path or name as written. */
   token: string;
@@ -487,6 +501,7 @@ export interface StartingPoint {
   /** Snippet-only names are hints, not evidence of a broken definition. */
   snippet?: boolean;
   traceback?: boolean;
+  [PINNED_IDENTIFIER]?: true;
 }
 
 /** Kinds a definition has, most navigable first. Anything else ranks after. */
@@ -526,7 +541,7 @@ export async function pickStartingPoints(
   deps: PickDeps,
   max = MAX_STARTS,
 ): Promise<{ starts: StartingPoint[]; unresolved: string[] }> {
-  const { paths, identifiers, snippetIdentifiers, tracebacks } = extractCandidates(text);
+  const { paths, identifiers, snippetIdentifiers, tracebacks, exceptionIdentifiers } = extractCandidates(text);
   const starts: StartingPoint[] = [];
   const unresolved: string[] = [];
   const taken = (path: string) => starts.some((s) => s.path === path);
@@ -569,7 +584,10 @@ export async function pickStartingPoints(
     if (starts.length >= max) break;
     // Not caught: a backend that cannot answer is an error to report, not an
     // issue that names nothing.
-    const hits = (await deps.search(token))
+    const found = await deps.search(token);
+    // A full page of exact-name hits may hide more definitions than it shows.
+    const saturated = found.filter((h) => h.name === token).length >= ISSUE_SEARCH_LIMIT;
+    const hits = found
       .filter((h): h is SymbolHit & { path: string } =>
         h.name === token && !!h.path && !NOT_DEFINITIONS.has(h.kind.toLowerCase()) && source(h.path))
       .sort((a, b) =>
@@ -586,6 +604,10 @@ export async function pickStartingPoints(
       ...(best.lineEnd !== undefined ? { lineEnd: best.lineEnd } : {}),
       via: "identifier in issue",
       ...(snippetIdentifiers?.includes(token) ? { snippet: true } : {}),
+      ...(!snippetIdentifiers?.includes(token) && !exceptionIdentifiers?.includes(token)
+        && !isGenericIdentifier(token) && !saturated
+        && new Set(hits.map((h) => h.path)).size <= MAX_PINNED_DEFINITION_FILES
+        ? { [PINNED_IDENTIFIER]: true as const } : {}),
     });
   }
   return { starts, unresolved };
@@ -997,9 +1019,9 @@ export interface Closeness {
 }
 
 /**
- * Lexical ranking with a start boost capped at 10% of the best lexical hit.
- * Snippet-only starts receive no boost. Closeness remains a small relative
- * nudge. The existing reason field explains every contribution.
+ * Resolved issue paths precede specific prose definitions, then lexical hits.
+ * Other starts retain a boost capped at 10% of the best lexical hit; snippet
+ * names receive none. Scores remain bounded evidence, not precedence ranks.
  */
 export function rankIssueFiles(
   input: { starts: StartingPoint[]; bm25: Bm25Hit[]; near: ReadonlyMap<string, Closeness>; sourcePaths?: SourcePaths },
@@ -1022,22 +1044,26 @@ export function rankIssueFiles(
       const near = input.near.get(path);
       const closeness = near?.weight ?? 0;
       const start = starts.get(path);
+      const pin = start && !start.snippet && !start.traceback
+        ? start.via === "path in issue" ? 2 : start[PINNED_IDENTIFIER] ? 1 : 0
+        : 0;
       const boost = start && !start.snippet ? best * START_BOOST : 0;
       const reason = [
         bm25 > 0 ? `bm25 ${bm25.toFixed(2)}` : "no bm25 match",
-        start ? `starting point (${start.traceback ? "traceback" : start.via}: ${start.token}); ${start.snippet ? "snippet only; " : ""}boost ${boost.toFixed(2)}` : undefined,
+        start ? `starting point (${start.traceback ? "traceback" : start.via}: ${start.token}); ${pin ? "pinned; " : ""}${start.snippet ? "snippet only; " : ""}boost ${boost.toFixed(2)}` : undefined,
         near?.reason,
       ]
         .filter(Boolean).join("; ");
-      return { path, score: bm25 * (1 + CLOSENESS_BOOST * closeness) + boost, closeness, start: !!start, reason };
+      return { path, score: bm25 * (1 + CLOSENESS_BOOST * closeness) + boost, bm25, pin, closeness, start: !!start, reason };
     })
-    .sort((a, b) => b.score - a.score || Number(b.start) - Number(a.start) || b.closeness - a.closeness || cmp(a.path, b.path));
-  // A file the issue names, or its traceback's frame, stays in the list
-  // whatever its BM25 score: an agent reads rankedFiles as the files to open.
-  // It keeps its place by score; it only displaces the weakest other file.
+    .sort((a, b) => b.pin - a.pin || (a.pin ? b.bm25 - a.bm25 : b.score - a.score)
+      || Number(b.start) - Number(a.start) || b.closeness - a.closeness || cmp(a.path, b.path));
+  // Pinned starts and the traceback's frame stay in the list whatever their
+  // BM25 score. The frame retains its score order and displaces the weakest
+  // unreserved file, rather than gaining precedence.
   const named = new Set(rows.filter((r) => {
     const start = starts.get(r.path);
-    return start?.via === "path in issue" && !start.snippet && source(r.path);
+    return (r.pin > 0 || (start?.via === "path in issue" && !start.snippet)) && source(r.path);
   }).slice(0, limit).map((r) => r.path));
   let others = limit - named.size;
   for (const r of rows) {

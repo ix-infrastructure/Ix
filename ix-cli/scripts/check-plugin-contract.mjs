@@ -182,6 +182,11 @@ export function check(argv, surface) {
   return bad.length ? `"${name}" has no ${bad.join(", ")}` : null;
 }
 
+/** Stable locations shared by diagnostics and the slash-delimited ignore list. */
+export function invocationLocation(repo, relativePath, line) {
+  return `${repo}/${relativePath.replaceAll("\\", "/")}:${line}`;
+}
+
 function main(argv) {
   let dir = argv.find((a) => !a.startsWith("--"));
   if (argv.includes("--clone")) {
@@ -215,7 +220,7 @@ function main(argv) {
         checked++;
         const problem = check(inv.argv, surface);
         if (!problem) continue;
-        const where = `${repo}/${relative(root, file)}:${inv.line}`;
+        const where = invocationLocation(repo, relative(root, file), inv.line);
         if (ignores.some((ig) => where.startsWith(ig.where) && (!ig.match || inv.snippet.includes(ig.match)))) continue;
         problems.push(`${where}  ${problem}\n    ${inv.snippet}`);
       }

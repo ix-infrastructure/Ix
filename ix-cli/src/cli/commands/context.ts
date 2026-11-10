@@ -27,6 +27,7 @@ import {
   chooseCentre,
   CLOSENESS_BOOST,
   leanIssueView,
+  ISSUE_SEARCH_LIMIT,
   planIssue,
   rankIssueFiles,
   readIssueText,
@@ -1765,8 +1766,6 @@ export async function findFileNode(client: IxClient, path: string): Promise<stri
   return nodes.find((n) => relativePath(n.provenance?.sourceUri) === path)?.id;
 }
 
-/** Search candidates fetched per name the issue mentions; only exact names are kept. */
-const ISSUE_SEARCH_LIMIT = 20;
 
 /**
  * `ix context --from-issue`: a bundle built from an issue's text rather than a
@@ -2844,7 +2843,7 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
       source: "issue.ranking",
       title: `ranked files: ${shown.map((f) => f.path).join(", ")}`,
       score: tierScore(TIER.issue, 1),
-      reason: `bm25 against the issue text, starting points boosted by up to ${Math.round(START_BOOST * 100)}% of the best bm25 score, graph neighbours of a starting point boosted up to ${Math.round(CLOSENESS_BOOST * 100)}%${companions.length > 0 ? ", then companion files of a leading file" : ""}; `
+      reason: `pinned first: paths the issue names, then specific code names it mentions, each group by bm25; then the rest by bm25 against the issue text, other starting points boosted by up to ${Math.round(START_BOOST * 100)}% of the best bm25 score, graph neighbours of a starting point boosted up to ${Math.round(CLOSENESS_BOOST * 100)}%${companions.length > 0 ? ", then companion files of a leading file" : ""}; `
         + shown.map((f) => `${f.path.split("/").pop()} (${f.reason})`).join("; "),
       refs: [],
     });
