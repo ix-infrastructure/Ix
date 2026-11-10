@@ -7,7 +7,7 @@ import * as nodePath from "node:path";
 import { parse } from "yaml";
 
 import { ixHome } from "../ix-home.js";
-import { ingestMtimeCachePath, mapBaselinePath, saveConfig, stitchScopeCachePath } from "../config.js";
+import { DEFAULT_ENDPOINT, getEndpoint, ingestMtimeCachePath, mapBaselinePath, saveConfig, stitchScopeCachePath } from "../config.js";
 import { ensureLocalConfig } from "../bootstrap.js";
 
 // IX_HOME, not HOME. `os.homedir()` answers from the process environment that
@@ -113,8 +113,37 @@ describe("ensureLocalConfig under IX_HOME", () => {
   afterEach(() => {
     process.env.HOME = savedHome;
     process.env.USERPROFILE = savedProfile;
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
     try { fs.rmSync(fakeHome, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it("keeps IX_ENDPOINT as a per-invocation override when creating config", () => {
+    const override = "http://override.example:8090";
+    vi.stubEnv("IX_ENDPOINT", override);
+
+    expect(ensureLocalConfig()).toBe(true);
+
+    const written = fs.readFileSync(nodePath.join(home, "config.yaml"), "utf8");
+    expect(written).not.toContain(override);
+    expect(parse(written)).toEqual({ endpoint: DEFAULT_ENDPOINT, format: "text" });
+    expect(getEndpoint()).toBe(override);
+
+    vi.stubEnv("IX_ENDPOINT", undefined);
+    expect(getEndpoint()).toBe(DEFAULT_ENDPOINT);
+  });
+
+  it("preserves an existing config while IX_ENDPOINT is set", () => {
+    const configPath = nodePath.join(home, "config.yaml");
+    const existing = "endpoint: http://configured.example:8090\nformat: json\n";
+    fs.writeFileSync(configPath, existing);
+    vi.stubEnv("IX_ENDPOINT", "http://override.example:8090");
+
+    expect(ensureLocalConfig()).toBe(false);
+    expect(fs.readFileSync(configPath, "utf8")).toBe(existing);
+
+    vi.stubEnv("IX_ENDPOINT", undefined);
+    expect(getEndpoint()).toBe("http://configured.example:8090");
   });
 
   it("names the untouched legacy ~/.ix/config.yaml when it creates a fresh config under IX_HOME", () => {

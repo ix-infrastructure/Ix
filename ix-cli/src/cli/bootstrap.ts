@@ -13,7 +13,7 @@ import { ixHome } from "./ix-home.js";
 import { stderr } from "./stderr.js";
 import { workspaceIdForPath } from "./system.js";
 import { IX_CALLER_ENV } from "./next-step.js";
-import { isLoopbackEndpoint, isManagedLocalBackend } from "./endpoint.js";
+import { DEFAULT_ENDPOINT, isLoopbackEndpoint, isManagedLocalBackend } from "./endpoint.js";
 
 export interface BootstrapResult {
   createdConfig: boolean;
@@ -23,7 +23,8 @@ export interface BootstrapResult {
 
 /**
  * Ensure `$IX_HOME/config.yaml` (default `~/.ix/config.yaml`) exists. Creates
- * it silently if missing. Returns true if it was just created.
+ * it silently if missing, using the default endpoint so IX_ENDPOINT stays a
+ * per-invocation override. Returns true if it was just created.
  */
 export function ensureLocalConfig(): boolean {
   const configDir = ixHome();
@@ -35,7 +36,7 @@ export function ensureLocalConfig(): boolean {
     try {
       // 'wx' creates the file atomically and throws EEXIST if it already exists,
       // avoiding the existsSync-then-write TOCTOU (CodeQL js/file-system-race).
-      writeFileSync(configPath, `endpoint: ${getEndpoint()}\nformat: text\n`, { flag: "wx" });
+      writeFileSync(configPath, `endpoint: ${DEFAULT_ENDPOINT}\nformat: text\n`, { flag: "wx" });
       return true;
     } catch (err: any) {
       if (err?.code === "EEXIST") return false;
