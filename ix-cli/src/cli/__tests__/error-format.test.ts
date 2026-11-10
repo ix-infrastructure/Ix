@@ -14,12 +14,14 @@ import {
   CliResolutionError,
   CliUsageError,
   WorkspaceNotMappedError,
+  bindCommanderErrors,
   commandFormat,
   renderCliError,
   resolveErrorFormat,
   setErrorFormat,
   setErrorFormatFallback,
   throwCommanderExit,
+  usageErrorFormat,
   writeCommanderError,
 } from "../errors.js";
 import { exitCodeFor } from "../outcome.js";
@@ -29,6 +31,9 @@ import { exitCodeFor } from "../outcome.js";
  * format came from: a typed `--format`, `IX_FORMAT`, or `format` in
  * config.yaml. Before this, only a typed `--format llm` got a record; json, and
  * either configured default, got prose on stderr and an empty stdout.
+ *
+ * json adds the record and keeps the prose on stderr, where callers already
+ * read their error guidance; llm's record is the whole report.
  */
 
 // ── Capture ────────────────────────────────────────────────────────────────
@@ -197,7 +202,9 @@ describe("renderCliError answers every failure in the requested format", () => {
         expect(record.message).not.toMatch(/^error:/);
         if (failure.next) expect(typeof record.next).toBe("string");
         else expect(record).not.toHaveProperty("next");
-        expect(err).toBe("");
+        // The prose stays on stderr, as text has it: callers read it there.
+        expect(err).toContain(record.message);
+        expect(err).not.toContain('"error"');
         expect(exitCode).toBe(failure.exit);
       });
 
@@ -227,6 +234,22 @@ describe("renderCliError answers every failure in the requested format", () => {
     const { out } = capture(() => renderCliError(new WorkspaceNotMappedError("/tmp/elsewhere")));
     expect(Object.keys(JSON.parse(out))).toEqual(["error", "message", "dir", "next"]);
   });
+
+  it("writes json's record to stdout and the same prose as text to stderr", () => {
+    const failure = () => unreachable();
+    setErrorFormat("text");
+    const text = capture(() => renderCliError(failure(), false, "http://localhost:8090"));
+    setErrorFormat("json");
+    const json = capture(() => renderCliError(failure(), false, "http://localhost:8090"));
+    expect(JSON.parse(json.out)).toEqual({
+      error: "backend_unreachable",
+      message: "Ix backend not reachable at http://localhost:8090.",
+      next: "Start it with `ix docker start`, then check `ix status`.",
+    });
+    expect(json.err).toBe(text.err);
+    expect(json.err).toContain("Start it with `ix docker start`");
+    expect(json.exitCode).toBe(text.exitCode);
+  });
 });
 
 describe("commander's own exits", () => {
@@ -246,7 +269,7 @@ describe("commander's own exits", () => {
     expect(result).toEqual({ out: "", err: "", exitCode: 1 });
   });
 
-  it("print commander's message once in text, and not at all for records", () => {
+  it("print commander's message once in text and json, and not at all for llm", () => {
     const writes: string[] = [];
     const command = new Command("ix").exitOverride(throwCommanderExit)
       .configureOutput({ outputError: writeCommanderError, writeErr: (s) => writes.push(s) });
@@ -259,12 +282,69 @@ describe("commander's own exits", () => {
     expect(text).toEqual({ out: "", err: "", exitCode: 1 });
 
     writes.length = 0;
+    setErrorFormat("json");
+    try { command.error("error: unknown option '--bogus'"); } catch (e) { thrown = e; }
+    expect(writes).toEqual(["error: unknown option '--bogus'\n"]);
+    const json = capture(() => renderCliError(thrown));
+    expect(JSON.parse(json.out)).toEqual({ error: "usage_error", message: "unknown option '--bogus'" });
+    expect(json.err).toBe("");
+    expect(json.exitCode).toBe(1);
+
+    writes.length = 0;
     setErrorFormat("llm");
     try { command.error("error: unknown option '--bogus'"); } catch (e) { thrown = e; }
     expect(writes).toEqual([]);
     const llm = capture(() => renderCliError(thrown));
     expect(llm.out.trim()).toBe(`error code=usage_error message="unknown option '--bogus'"`);
+    expect(llm.err).toBe("");
     expect(llm.exitCode).toBe(1);
+  });
+});
+
+describe("usage errors answer in records only for commands that take --format", () => {
+  /** `ix` with a prose-only command and one that renders records. */
+  function program(argv: string[], writes: string[]): Command {
+    const root = new Command("ix").exitOverride(throwCommanderExit)
+      .configureOutput({ outputError: writeCommanderError, writeErr: (s) => writes.push(s) });
+    root.command("hook").option("--quiet").action(() => {});
+    root.command("mcp").command("serve").action(() => {});
+    root.command("patches").option("--limit <n>").option("--format <fmt>", "", "text").action(() => {});
+    bindCommanderErrors(root, argv);
+    return root;
+  }
+
+  function parse(argv: string[]): { writes: string[]; result: Captured } {
+    const writes: string[] = [];
+    let thrown: unknown;
+    try { program(argv, writes).parse(argv, { from: "user" }); } catch (e) { thrown = e; }
+    return { writes, result: capture(() => renderCliError(thrown)) };
+  }
+
+  for (const argv of [["hook", "--bogus"], ["mcp", "serve", "--bogus"], ["bogus"]]) {
+    it(`\`ix ${argv.join(" ")}\` stays prose under IX_FORMAT=json`, () => {
+      setErrorFormatFallback(() => resolveErrorFormat(argv, { IX_FORMAT: "json" }, () => undefined));
+      const { writes, result } = parse(argv);
+      expect(result.out).toBe("");
+      expect(writes.join("")).toMatch(/^error: unknown (option|command)/);
+      expect(result.exitCode).toBe(1);
+    });
+  }
+
+  it("a command with --format answers in it, typed before or after the bad option", () => {
+    for (const argv of [["patches", "--bogus", "--format", "json"], ["patches", "--format", "json", "--bogus"]]) {
+      const { writes, result } = parse(argv);
+      expect(JSON.parse(result.out)).toMatchObject({ error: "usage_error" });
+      expect(writes.join("")).toContain("unknown option '--bogus'");
+      expect(result.exitCode).toBe(1);
+    }
+  });
+
+  it("usageErrorFormat: text without --format, else the typed flag, else the command's default", () => {
+    const hook = new Command("hook");
+    const patches = new Command("patches").option("--format <fmt>", "", "llm");
+    expect(usageErrorFormat(hook, ["hook", "--format", "json"])).toBe("text");
+    expect(usageErrorFormat(patches, ["patches", "--format", "json"])).toBe("json");
+    expect(usageErrorFormat(patches, ["patches"])).toBe("llm");
   });
 });
 
@@ -337,8 +417,10 @@ describe.concurrent("ix, against a backend that is not there", () => {
     for (const { source, run } of CLI_SOURCES) {
       it(`${failure.kind} · json · ${source}`, async () => {
         const { stdout, stderr, status } = await run(failure.args, "json");
-        expect(JSON.parse(stdout.trim())).toMatchObject({ error: failure.code });
-        expect(stderr).toBe("");
+        const record = JSON.parse(stdout.trim());
+        expect(record).toMatchObject({ error: failure.code });
+        // The prose is still on stderr, where the plugin runners read it.
+        expect(stderr).toContain(record.message);
         expect(status).toBe(1);
       }, 30_000);
 
@@ -358,6 +440,35 @@ describe.concurrent("ix, against a backend that is not there", () => {
       expect(status).toBe(1);
     }, 30_000);
   }
+
+  it("keeps prose-only commands' usage errors as prose under IX_FORMAT=json", async () => {
+    for (const args of [["hook", "--bogus"], ["mcp", "serve", "--bogus"]]) {
+      const { stdout, stderr, status } = await runCli(args, { IX_FORMAT: "json" });
+      expect(stdout).toBe("");
+      expect(stderr).toContain("unknown option '--bogus'");
+      expect(status).toBe(1);
+    }
+  }, 30_000);
+
+  it("ix status, which catches the failure itself, answers json and llm too", async () => {
+    const json = await runCli(["status", "--format", "json"], {});
+    const record = JSON.parse(json.stdout.trim());
+    expect(record).toMatchObject({ error: "backend_unreachable", message: expect.stringContaining(endpoint) });
+    expect(typeof record.next).toBe("string");
+    expect(json.stderr).toContain(record.message);
+    expect(json.status).toBe(1);
+
+    const llm = await runCli(["status", "--format", "llm"], {});
+    expect(llm.stdout.trimEnd().split("\n")).toHaveLength(1);
+    expect(llm.stdout).toMatch(/^error code=backend_unreachable message=.* hint=/);
+    expect(llm.stderr).toBe("");
+    expect(llm.status).toBe(1);
+
+    const text = await runCli(["status"], {});
+    expect(text.stdout).toBe("");
+    expect(text.stderr).toContain(record.message);
+    expect(text.status).toBe(1);
+  }, 30_000);
 
   it("keeps --version and --help successes under a records format", async () => {
     const version = await runCli(["--version"], { IX_FORMAT: "llm" });

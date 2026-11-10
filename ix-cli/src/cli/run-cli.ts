@@ -15,6 +15,7 @@ import { isRepairInvocation } from "./register/pro-failure.js";
 import { buildHelpText } from "./help-text.js";
 import { stderrIsTerminal } from "./stderr.js";
 import {
+  bindCommanderErrors,
   commandFormat,
   renderCliError,
   resolveErrorFormat,
@@ -152,6 +153,11 @@ const lazy = await registerForPlan(program, planStartup(process.argv.slice(2)));
     // unhandledRejection handler then aborts a command that already succeeded.
     updates.checkForUpdate().catch(() => {});
   }
+
+  // Every command is registered now. Give each its own usage-error format, so
+  // only a command that takes --format answers a bad flag in records: `ix hook`
+  // and `ix mcp` print prose, whatever IX_FORMAT says.
+  bindCommanderErrors(program, args);
 
   // parseAsync (not parse) so rejections from async action handlers surface
   // here instead of floating off as unhandled rejections.
