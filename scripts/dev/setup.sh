@@ -9,7 +9,9 @@ set -euo pipefail
 # Starts the IX backend (ArangoDB + Memory Layer) and builds the CLI.
 # This runs from the Ix repo — it does NOT touch your projects.
 #
-# To connect a project, run: ./scripts/connect.sh ~/my-project
+# To map a project afterwards:
+#   ix map <dir>
+#   ix mcp install
 #
 # Usage:
 #   ./setup.sh                     # Start backend + build CLI + install global ix command
@@ -88,15 +90,13 @@ while [[ $# -gt 0 ]]; do
       echo "  --skip-global-ix Skip installing ~/.local/bin/ix shim"
       echo "  -h, --help       Show this help"
       echo ""
-      echo "After setup, connect a project:"
-      echo "  ./scripts/connect.sh ~/my-project"
+      echo "After setup, map a project and register your AI clients:"
+      echo "  ix map <dir>"
+      echo "  ix mcp install"
       echo ""
       echo "Individual scripts:"
       echo "  ./scripts/backend.sh        Start/stop Docker containers"
       echo "  ./scripts/build-cli.sh      Build the TypeScript CLI"
-      echo "  ./scripts/connect.sh        Connect a project (CLAUDE.md + ingest)"
-      echo "  ./scripts/disconnect.sh     Disconnect a project"
-      echo "  ./scripts/ingest.sh         Ingest files into the graph"
       exit 0
       ;;
     *)
@@ -190,6 +190,7 @@ echo ""
 echo "  CLI:      ix status"
 echo "            (open a new shell, or run: export PATH=\"\$HOME/.local/bin:\$PATH\")"
 echo ""
-echo "  Next: connect a project to IX:"
-echo "    ./scripts/connect.sh ~/my-project"
+echo "  Next: map a project and register your AI clients:"
+echo "    ix map <dir>"
+echo "    ix mcp install"
 echo ""
