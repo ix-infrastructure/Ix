@@ -2820,6 +2820,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     const assignTypeMap = new Map<string, Map<string, string>>();
     // Map enclosing scope → (variable/member name → declared type)
     const declaredTypeMap = new Map<string, Map<string, string>>();
+    // PHP heritage as [lookup rank, class, parent as written], for the inherited member walk.
+    const phpHeritage: Array<[number, string, string]> = [];
     // Import aliases keyed by the in-file alias name (Go explicit aliases, etc.).
     const importAliases: Record<string, string> = {};
     // JS/TS named/default import bindings (local → public symbol) for cross-repo
@@ -3052,6 +3054,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           dstName: heritageExtends.node.text,
           predicate: 'EXTENDS',
         });
+        if (language === SupportedLanguages.PHP) {
+          // PHP looks a method up on the class, then its traits, then its parent.
+          phpHeritage.push([heritageExtends.name === 'heritage.trait' ? 0 : 1, heritageClass.node.text, heritageExtends.node.text]);
+        }
         continue;
       }
 
@@ -3073,6 +3079,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           dstName: heritageImpl.node.text,
           predicate: 'EXTENDS',
         });
+        if (language === SupportedLanguages.PHP) phpHeritage.push([2, heritageClass.node.text, heritageImpl.node.text]);
         continue;
       }
 
@@ -3751,6 +3758,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       ...(tree.rootNode.hasError ? { hasParseErrors: true as const } : {}),
       ...(receiverFacts?.factories.length ? { receiverFactories: receiverFacts.factories } : {}),
       ...(receiverFacts?.heritage.length ? { receiverHeritage: receiverFacts.heritage } : {}),
+      ...(phpHeritage.length
+        ? { receiverHeritage: phpHeritage.sort((a, b) => a[0] - b[0]).map(([, child, parent]): [string, string] => [child, parent]) }
+        : {}),
       ...(receiverFacts?.package ? { receiverPackage: receiverFacts.package } : {}),
       ...(receiverTypedCalls.length ? { receiverTypedCalls } : {}),
       ...(tsGlobalTypes.length ? { tsGlobalTypes } : {}),
@@ -4467,8 +4477,16 @@ export function resolveEdges(
     }
   }
   const phpFqcnImportsByLocal = new Map<string, Map<string, string | null>>();
+  // The namespace of a batch file with exactly one, for a receiver type named
+  // in a file that declares no type of its own (see phpReceiverProviders).
+  const phpCallerNamespace = new Map<string, string>();
   for (const result of results) {
     if (result.language !== SupportedLanguages.PHP) continue;
+    if (result.phpNamespaceBlocks === undefined) phpCallerNamespace.set(result.filePath, '');
+    else if (result.phpNamespaceBlocks === 1) {
+      const scopes = new Set(result.entities.filter(e => e.packageScope).map(e => trimPhpNamespace(e.packageScope).toLowerCase()));
+      if (scopes.size === 1) phpCallerNamespace.set(result.filePath, [...scopes][0]);
+    }
     // A `use` is scoped to its namespace *block*, but this index is per file.
     // In a file with several namespaces, an import in one block would be
     // applied to the others — resolving a name that a later block declares
@@ -5370,6 +5388,7 @@ export function resolveEdges(
   function findReceiverProviders(context: string, rawType: string): Array<{ fp: string; type: string }> {
     const summary = summaries.get(context);
     const language = summary?.language ?? languageFromPath(context);
+    if (language === SupportedLanguages.PHP) return phpReceiverProviders(context, summary, rawType);
     const parts = rawType.split('.');
     let type = parts.pop()!;
     if (language === SupportedLanguages.Scala) {
@@ -5427,6 +5446,34 @@ export function resolveEdges(
     const compatible = (fp: string): boolean => importLanguageCompatible(language, fileLanguage.get(fp) ?? languageFromPath(fp));
     return (symbolToFiles.get(type) ?? []).filter(compatible)
       .filter(fp => goPackageKey(fp) === goPackageKey(context)).map(fp => ({ fp, type }));
+  }
+
+  /**
+   * A PHP class name as `context` sees it, by exact FQCN. It is a type this
+   * file declares, one a `use` imports, else the same name in this file's
+   * namespace. `\App\Base` names itself. A name the repo does not define (a
+   * framework base class) has no provider. Neither does a name this cannot
+   * place, which is a relative `Models\Base`, any name in a file with several
+   * namespaces, or an unbound name in a file with a `use ... as` alias, since
+   * it may be that alias.
+   */
+  function phpReceiverProviders(context: string, summary: FileSummary | undefined, rawType: string): Array<{ fp: string; type: string }> {
+    const typesOf = (fqcn: string) => (phpFqcnToTypes.get(fqcn.toLowerCase()) ?? []).map(entry => ({ fp: entry.filePath, type: entry.typeName }));
+    if (rawType.startsWith('\\')) return typesOf(trimPhpNamespace(rawType));
+    if (rawType.includes('\\') || !summary) return [];
+    const local = rawType.toLowerCase();
+    const declared = (summary.phpTypes ?? []).filter(([, name]) => name.toLowerCase() === local);
+    if (declared.length) return [{ fp: context, type: declared[0][1] }];
+    const namespaces = new Set((summary.phpTypes ?? []).map(([fqcn]) => fqcn.slice(0, Math.max(0, fqcn.lastIndexOf('\\')))));
+    // A file that declares no type is only ever the calling file.
+    const namespace = namespaces.size === 1 ? [...namespaces][0] : namespaces.size === 0 ? phpCallerNamespace.get(context) : undefined;
+    if (namespace === undefined) return [];
+    const imported = summary.imports.filter(i => !i.importAliased && typeof i.importRaw === 'string')
+      .map(i => trimPhpNamespace(i.importRaw).toLowerCase())
+      .filter(fqcn => fqcn.split('\\').pop() === local);
+    if (imported.length) return new Set(imported).size === 1 ? typesOf(imported[0]) : [];
+    if (summary.imports.some(i => i.importAliased)) return [];
+    return typesOf(namespace ? `${namespace}\\${local}` : local);
   }
 
   /**
@@ -5504,9 +5551,10 @@ export function resolveEdges(
     // overloads in one class are one node (one key), so they are one target.
     if (exact.length) return exact.length === 1 || java ? [{ fp, key }] : [];
     const parents = (summaries.get(fp)?.receiverHeritage ?? []).filter(([child]) => child === name);
-    if (java) {
+    if (java || summaries.get(fp)?.language === SupportedLanguages.PHP) {
       // The nearest declaration: the superclass chain (listed first), then
-      // each interface in declaration order.
+      // each interface in declaration order. PHP lists a class's traits
+      // before its superclass, the order PHP itself looks a method up.
       for (const [, parent] of parents) {
         const found = receiverMembers(fp, parent, member, nextSeen);
         if (found.length) return found;
@@ -5516,6 +5564,19 @@ export function resolveEdges(
     const inherited = parents.flatMap(([, parent]) => receiverMembers(fp, parent, member, nextSeen));
     const unique = new Map(inherited.map(target => [`${target.fp}\0${target.key}`, target]));
     return [...unique.values()];
+  }
+
+  /**
+   * PHP `$this->m()` or `$typed->m()` where the receiver's class does not
+   * declare `m`. Returns the nearest declaration among its traits and ancestors. A
+   * member the class declares itself is left to the tiers that already
+   * resolve it.
+   */
+  function phpInheritedMember(context: string, type: string, member: string): { fp: string; key: string } | undefined {
+    const owners = receiverProviders(context, type);
+    if (owners.length !== 1 || fileDefinesQualifiedMember(owners[0].fp, owners[0].type, member)) return;
+    const targets = receiverMembers(context, type, member);
+    return targets.length === 1 ? targets[0] : undefined;
   }
 
   /**
@@ -5903,12 +5964,16 @@ export function resolveEdges(
           const preferredQKey = phpType.memberName
             ? `${entry.typeName}.${phpType.memberName}`
             : entry.typeName;
-          const dstQualifiedKey = bestPhpQKey(fileQKeys, entry.filePath, plainName, preferredQKey);
+          // A member the type does not declare is inherited, if anything.
+          const inherited = rel.predicate === 'CALLS' && phpType.memberName
+            ? phpInheritedMember(entry.filePath, entry.typeName, phpType.memberName)
+            : undefined;
+          const dstQualifiedKey = inherited?.key ?? bestPhpQKey(fileQKeys, entry.filePath, plainName, preferredQKey);
           if (dstQualifiedKey !== null) {
             resolved.push({
               srcFilePath,
               srcName: rel.srcName,
-              dstFilePath: entry.filePath,
+              dstFilePath: inherited?.fp ?? entry.filePath,
               dstName: rel.dstName,
               dstQualifiedKey,
               predicate: rel.predicate,
@@ -6100,6 +6165,19 @@ export function resolveEdges(
         const qualifierPart = dstName.slice(0, qualDot);
         const memberPart = dstName.slice(qualDot + 1);
         if (memberPart && qualifierPart) {
+          // PHP `$this->m()` / `$typed->m()` on a class that inherits `m`.
+          const phpInherited = srcLanguage === SupportedLanguages.PHP && rel.predicate === 'CALLS'
+            ? phpInheritedMember(srcFilePath, qualifierPart, memberPart)
+            : undefined;
+          if (phpInherited) {
+            resolved.push({
+              srcFilePath, srcName, dstFilePath: phpInherited.fp, dstName: origDstName, dstQualifiedKey: phpInherited.key,
+              predicate: rel.predicate, confidence: 0.9, tier: 'qualifier',
+              ...(rel.phpCallKind ? { phpCallKind: rel.phpCallKind } : {}),
+            });
+            stats.resolvedQualifier++;
+            continue;
+          }
           const elixirAliasedModule = srcLanguage === SupportedLanguages.Elixir ? result.importAliases?.[qualifierPart]: undefined;
           // Python `import a.b as m`: `m.f` is `f` in the one file a.b names.
           // An ambiguous module stays unresolved here, as without the alias.

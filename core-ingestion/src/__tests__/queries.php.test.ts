@@ -214,6 +214,26 @@ final class UseCase
     });
   });
 
+  it('records class heritage in the order PHP looks a method up', () => {
+    const result = parseFile(
+      '/repo/Child.php',
+      `<?php
+namespace App;
+class Child extends Base implements Named
+{
+    use Loud, Quiet;
+}
+      `,
+    );
+
+    expect(result?.receiverHeritage).toEqual([
+      ['Child', 'Loud'],
+      ['Child', 'Quiet'],
+      ['Child', 'Base'],
+      ['Child', 'Named'],
+    ]);
+  });
+
   it('preserves bare-name fallback when the receiver type is unknown', () => {
     const result = parseFile(
       '/repo/Runner.php',
