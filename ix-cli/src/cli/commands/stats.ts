@@ -5,7 +5,7 @@ import chalk from "chalk";
 import { createClient } from "../../client/factory.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
-import { llmLine, llmError, type LlmValue } from "../llm.js";
+import { llmLine, type LlmValue } from "../llm.js";
 import { printJson } from "../format.js";
 
 /** Render `ix stats` as llm records: one `nodes` line and one `edges` line. */
@@ -30,15 +30,7 @@ export function registerStatsCommand(program: Command): void {
       // /v1/stats takes seconds on a large graph: no read deadline.
       const client = createClient({ longRunning: true });
       const systemId = await resolveReadSystemId(client);
-      let result;
-      try {
-        result = await client.stats({ workspaceId: systemId ? undefined : resolveWorkspaceId(), systemId });
-      } catch (err: any) {
-        if (opts.format === "llm") console.log(llmError("backend_error", err.message ?? "stats request failed"));
-        else console.error(chalk.red("Error:"), err.message);
-        process.exitCode = 1;
-        return;
-      }
+      const result = await client.stats({ workspaceId: systemId ? undefined : resolveWorkspaceId(), systemId });
 
       if (opts.format === "json") {
         printJson(result);

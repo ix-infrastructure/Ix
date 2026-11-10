@@ -273,15 +273,7 @@ last completed run are shown instead, marked stale.`)
       const systemId = await resolveReadSystemId(client);
 
       if (opts.list) {
-        let result: any;
-        try {
-          result = await client.listSmells({ workspaceId: systemId ? undefined : resolveWorkspaceId(), systemId });
-        } catch (err: any) {
-          if (opts.format === "llm") console.log(llmError("backend_error", err.message ?? "smells request failed"));
-          else console.error(chalk.red("Error:"), err.message);
-          process.exitCode = 1;
-          return;
-        }
+        const result = await client.listSmells({ workspaceId: systemId ? undefined : resolveWorkspaceId(), systemId });
         // Without --limit, --list prints every stored claim, as before. With
         // one, it keeps the highest-confidence claims (0 = all). Claim rows
         // carry only an entity id, so no path filter applies here.
@@ -316,7 +308,7 @@ last completed run are shown instead, marked stale.`)
         return;
       }
 
-      if (opts.format !== "json") {
+      if (opts.format !== "json" && opts.format !== "llm") {
         process.stderr.write(chalk.dim("Running smell detection...\n"));
       }
 
@@ -342,10 +334,7 @@ last completed run are shown instead, marked stale.`)
           await printStoredSmells(client, { workspaceId: systemId ? undefined : resolveWorkspaceId(), systemId }, opts, staleCause(reason, waitSeconds), reason);
           return;
         }
-        if (opts.format === "llm") console.log(llmError("backend_error", err.message ?? "smells request failed"));
-        else console.error(chalk.red("Error:"), err.message);
-        process.exitCode = 1;
-        return;
+        throw err;
       }
       stopProgress();
 
@@ -520,7 +509,8 @@ async function printStoredSmells(
     ? "Run ix smells interactively, or with a longer --wait."
     : "Ask someone permitted to run analysis on this backend to run ix smells.";
   const fail = (message: string) => {
-    if (opts.format === "llm") console.log(llmError("backend_error", `${message}. ${hint}`));
+    if (opts.format === "json") printJson({ error: "backend_error", message, next: hint });
+    else if (opts.format === "llm") console.log(llmError("backend_error", `${message}. ${hint}`));
     else console.error(chalk.red("Error:"), `${message}. ${hint}`);
     process.exitCode = 1;
   };

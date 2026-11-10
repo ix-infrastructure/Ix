@@ -33,8 +33,8 @@ const debug = process.env.IX_DEBUG === "1";
 
 // Before anything can throw. The handlers below are installed for
 // `unhandledRejection` and `uncaughtException`, which can fire before
-// commander has parsed a thing, so the error boundary gets the format from
-// argv rather than from a parsed command.
+// commander has parsed a thing, so resolve argv and the configured defaults
+// without relying on a parsed command.
 setErrorFormat(detectRequestedFormat(process.argv.slice(2)));
 
 // Resolving the endpoint reads config off disk, which can itself fail. An
@@ -61,7 +61,11 @@ process.on("uncaughtException", (err: unknown) => {
 const program = new Command();
 program
   .name("ix")
-  .version(cliVersion);
+  .version(cliVersion)
+  .exitOverride()
+  // The boundary renders usage errors too. Commander must not print a
+  // second copy to stderr before throwing, especially for machine formats.
+  .configureOutput({ outputError: () => {} });
 
 // Start with OSS-only help; updated after Pro probe.
 program.helpInformation = () => buildHelpText();

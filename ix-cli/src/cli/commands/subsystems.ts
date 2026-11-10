@@ -172,19 +172,11 @@ Examples:
       const sayStaleLlm = (): void => { for (const line of mapStaleLlm(mapState)) console.log(line); };
 
       if (opts.list) {
-        let result: SubsystemListResult;
-        try {
+        let result = await loadSubsystemScores(client, detailedQuery.value ?? {}, scope);
+        // Auto-trigger scoring if no persisted scores exist yet
+        if (result.scores.length === 0) {
+          await client.scoreSubsystems(scope);
           result = await loadSubsystemScores(client, detailedQuery.value ?? {}, scope);
-          // Auto-trigger scoring if no persisted scores exist yet
-          if (result.scores.length === 0) {
-            await client.scoreSubsystems(scope);
-            result = await loadSubsystemScores(client, detailedQuery.value ?? {}, scope);
-          }
-        } catch (err: any) {
-          if (opts.format === "llm") console.log(llmError("backend_error", err.message ?? "subsystems request failed"));
-          else console.error(chalk.red("Error:"), err.message);
-          process.exitCode = 1;
-          return;
         }
 
         warnSubsystemListTruncation(result);
@@ -235,16 +227,14 @@ Examples:
         }) as MapResult;
       } catch (err: any) {
         const body = parseErrorBody(err);
-        if (body) {
+        if (isAmbiguousSubsystemResult(body) || isUnknownSubsystemTargetResult(body)) {
           if (opts.format === "json") printJson(body);
           else if (opts.format === "llm") console.log(renderSubsystemErrorLlm(body));
           else renderSubsystemError(body, Boolean(opts.explain));
           setSubsystemErrorExit(body);
           return;
         }
-        console.error(chalk.red("Error:"), err.message);
-        process.exitCode = 1;
-        return;
+        throw err;
       }
 
       if (opts.explain) {
@@ -254,16 +244,9 @@ Examples:
           return;
         }
 
-        let scoreResult: { scores?: SubsystemScore[] };
-        try {
-          scoreResult = await client.listSubsystems(scope);
-          if ((scoreResult.scores ?? []).length === 0) {
-            scoreResult = await client.scoreSubsystems(scope);
-          }
-        } catch (err: any) {
-          console.error(chalk.red("Error:"), err.message);
-          process.exitCode = 1;
-          return;
+        let scoreResult: { scores?: SubsystemScore[] } = await client.listSubsystems(scope);
+        if ((scoreResult.scores ?? []).length === 0) {
+          scoreResult = await client.scoreSubsystems(scope);
         }
 
         const score = (scoreResult.scores ?? []).find((candidate) => candidate.region_id === result.target.id) ?? null;

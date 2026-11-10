@@ -14,6 +14,8 @@ import { registerOssCommands, registerProStubs } from "../cli/register/oss.js";
 import { tryLoadProCommands } from "../cli/register/pro-loader.js";
 import { registerOssFallbacks } from "../cli/register/oss-fallbacks.js";
 import { resetResolutionNotices } from "../cli/format.js";
+import { getEndpoint } from "../cli/config.js";
+import { detectRequestedFormat, renderCliError } from "../cli/errors.js";
 import { resetReadScope } from "../cli/resolve.js";
 import { releaseLocksOwnedBy, setLockOwnerResolver } from "../cli/single-flight.js";
 import { IX_CALLER_ENV } from "../cli/next-step.js";
@@ -301,8 +303,9 @@ async function buildProgram(version: string): Promise<Command> {
  * actual message. Applied per run so an injected program gets it too.
  */
 function throwOnUsageError(program: Command): Command {
-  program.exitOverride();
-  for (const command of program.commands) command.exitOverride();
+  // The shared boundary renders usage errors, including their machine format.
+  program.exitOverride().configureOutput({ writeErr: () => {} });
+  for (const command of program.commands) throwOnUsageError(command);
   return program;
 }
 
@@ -449,7 +452,18 @@ async function executeInProcess(
   // rather than leaving the command running behind the next tool call.
   const abort = new AbortController();
   const work = runContext.run(run, () =>
-    runWithSignal(abort.signal, () => program.parseAsync(args, { from: "user" })));
+    runWithSignal(abort.signal, async () => {
+      try {
+        await program.parseAsync(args, { from: "user" });
+      } catch (error) {
+        // Explicit exits already have output; aborted work is reported as a
+        // timeout. Once capped, keep the runner's bounded failure detail.
+        if (error instanceof ProcessExitSignal || abort.signal.aborted || run.truncated) throw error;
+        let endpoint: string | undefined;
+        try { endpoint = getEndpoint(); } catch { /* Broken config must still be renderable. */ }
+        renderCliError(error, args.includes("--debug") || process.env.IX_DEBUG === "1", endpoint, detectRequestedFormat(args));
+      }
+    }));
   // Settles either way and never rejects, so it can be watched without adding a
   // second rejection handler to `work`.
   let commandSettled = false;

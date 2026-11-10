@@ -218,17 +218,19 @@ describe("ix smells wait budget and stored-results fallback", () => {
       fakeClient.listSmells.mockResolvedValue({ smells: [] });
       const out = await run(["--format", "json"], 20_000);
 
-      expect(out).toBe("");
+      expect(JSON.parse(out)).toEqual({
+        error: "backend_error",
+        message: "fresh analysis did not finish within 20 s and no stored results exist",
+        next: "Run ix smells interactively, or with a longer --wait.",
+      });
       expect(process.exitCode).toBe(1);
-      expect(errs.join("\n")).toContain("fresh analysis did not finish within 20 s and no stored results exist");
-      expect(errs.join("\n")).toContain("Run ix smells interactively, or with a longer --wait");
+      expect(errs).toEqual([]);
     });
 
     it("keeps today's error for any other failure, without reading stored results", async () => {
       fakeClient.runSmells.mockRejectedValue(new Error("500: boom"));
-      await run(["--format", "json"]);
-      expect(process.exitCode).toBe(1);
-      expect(errs.join("\n")).toContain("500: boom");
+      await expect(run(["--format", "json"])).rejects.toThrow("500: boom");
+      expect(errs).toEqual([]);
       expect(fakeClient.listSmells).not.toHaveBeenCalled();
     });
   });
@@ -360,10 +362,10 @@ describe("ix smells wait budget and stored-results fallback", () => {
 
     it("a fetch failure without that code is still today's error", async () => {
       fakeClient.runSmells.mockRejectedValue(new TypeError("fetch failed", { cause: Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" }) }));
-      await run(["--format", "json"]);
+      await expect(run(["--format", "json"])).rejects.toThrow("fetch failed");
       expect(fakeClient.listSmells).not.toHaveBeenCalled();
-      expect(errs.join("\n")).toContain("fetch failed");
-      expect(process.exitCode).toBe(1);
+      expect(errs).toEqual([]);
+      expect(process.exitCode).toBeUndefined();
     });
   });
 
@@ -463,7 +465,7 @@ describe("ix smells wait budget and stored-results fallback", () => {
         "smell kind=has_smell.god_module file=src/big.ts confidence=0.9 chunks=42 fan_in=18 fan_out=9",
         "smell kind=has_smell.orphan_file file=src/a.ts confidence=0.5 connections=0",
       ].join("\n"));
-      expect(stderr).toEqual(["Running smell detection...\n"]);
+      expect(stderr).toEqual([]);
     });
 
     it("text", async () => {

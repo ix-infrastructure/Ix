@@ -1,16 +1,19 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import chalk from "chalk";
+import { CommanderError } from "commander";
 import { PRE_CONNECTION_CODES, RESET_RECONCILIATION_ERROR } from "../client/transport.js";
 
 import { DEFAULT_ENDPOINT, isLoopbackEndpoint, isManagedLocalBackend } from "./endpoint.js";
 import { llmError } from "./llm.js";
 import { exitCodeFor } from "./outcome.js";
+import { readConfiguredFormat } from "./config.js";
+import { isFormat, resolveDefaultFormat } from "./default-format.js";
 
 // ── Answering in the format the caller asked for ───────────────────────────
 
 /**
- * The `--format` this run was invoked with, or undefined for the default.
+ * The effective format for this run, or undefined before initialization.
  *
  * A failure is the one answer an agent is least equipped to guess at, and it
  * was the only one this CLI would not give in the format it had been asked
@@ -26,7 +29,7 @@ export function setErrorFormat(format: string | undefined): void {
 }
 
 /**
- * The `--format` the caller typed, read straight off argv.
+ * Resolve the flag, IX_FORMAT, config.format, then the built-in default.
  *
  * Read from argv rather than from the parsed command because this has to work
  * before commander has parsed anything: the handler that calls
@@ -34,21 +37,23 @@ export function setErrorFormat(format: string | undefined): void {
  * `uncaughtException`, which can fire at any point, including during
  * registration.
  *
- * Only what was typed. `IX_FORMAT` and `config.format` choose the default
- * elsewhere (#682); until that lands, honouring them here would answer in
- * records for a run whose payload came out as text.
- *
  * Stops at `--`, so a term that merely looks like a flag —
  * `ix text -- "--format llm"` — is not read as one.
  */
-export function detectRequestedFormat(argv: readonly string[]): string | undefined {
+export function detectRequestedFormat(argv: readonly string[]): string {
+  let flag: string | undefined;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === "--") return undefined;
-    if (arg.startsWith("--format=")) return arg.slice("--format=".length);
-    if (arg === "--format") return argv[i + 1];
+    if (arg === "--") break;
+    if (arg.startsWith("--format=")) flag = arg.slice("--format=".length);
+    if (arg === "--format") flag = argv[i + 1];
   }
-  return undefined;
+  if (flag && isFormat(flag)) return flag;
+  // Registration uses the same guarded scalar read. A broken config must
+  // never prevent the error boundary from reporting the original failure.
+  return resolveDefaultFormat(process.env, () => {
+    try { return readConfiguredFormat(); } catch { return undefined; }
+  }).format;
 }
 
 /**
@@ -59,13 +64,18 @@ export function detectRequestedFormat(argv: readonly string[]): string | undefin
  * answer, because X" is an answer. The human prose is then skipped rather than
  * printed alongside, so the caller gets exactly one report.
  */
-function emitLlmError(
+function emitMachineError(
+  format: string | undefined,
   code: string,
   message: string,
   hint?: string,
   extra: Array<[string, string]> = [],
 ): boolean {
-  if (requestedFormat !== "llm") return false;
+  if (format === "json") {
+    console.log(JSON.stringify({ error: code, message, ...Object.fromEntries(extra), ...(hint ? { next: hint } : {}) }));
+    return true;
+  }
+  if (format !== "llm") return false;
   console.log(llmError(code, message, [...extra, ...(hint ? [["hint", hint] as [string, string]] : [])]));
   return true;
 }
@@ -370,25 +380,28 @@ export function localTokenRequiredError(endpoint?: string): StructuredError {
   };
 }
 
-export function renderCliError(err: unknown, debug = false, endpoint?: string): void {
-  if (err instanceof CliUsageError || err instanceof CliResolutionError) {
-    const code = err instanceof CliUsageError ? "usage_error" : "resolution_failed";
-    if (!emitLlmError(code, err.message, err.hint)) {
-      process.stderr.write(chalk.red(`Error: ${err.message}\n`));
-      if (err.hint) {
-        process.stderr.write(chalk.dim(`${err.hint}\n`));
+/** An explicit format keeps in-process calls independent of the CLI boundary's default. */
+export function renderCliError(err: unknown, debug = false, endpoint?: string, format = requestedFormat): void {
+  // Commander uses the same exception mechanism for successful help/version.
+  if (err instanceof CommanderError && err.exitCode === 0) return;
+  if (err instanceof CliUsageError || err instanceof CliResolutionError || err instanceof CommanderError) {
+    const code = err instanceof CliResolutionError ? "resolution_failed" : "usage_error";
+    const hint = err instanceof CommanderError ? undefined : err.hint;
+    const message = err instanceof CommanderError ? err.message.replace(/^error: /, "") : err.message;
+    if (!emitMachineError(format, code, message, hint)) {
+      process.stderr.write(chalk.red(`Error: ${message}\n`));
+      if (hint) {
+        process.stderr.write(chalk.dim(`${hint}\n`));
       }
     }
     if (debug && err instanceof CliResolutionError && err.detail) {
       process.stderr.write(chalk.dim(`Detail: ${err.detail}\n`));
     }
-    process.exit(1);
+    process.exit(err instanceof CommanderError ? err.exitCode : 1);
   }
 
   if (err instanceof WorkspaceNotMappedError) {
-    if (requestedFormat === "json") {
-      console.log(JSON.stringify({ error: err.code, message: err.summary, dir: err.dir, next: err.hint }));
-    } else if (!emitLlmError(err.code, err.summary, err.hint, [["dir", err.dir]])) {
+    if (!emitMachineError(format, err.code, err.summary, err.hint, [["dir", err.dir]])) {
       renderStructuredError({ error: err.code, message: err.summary, next: err.hint });
     }
     // Its own code, so an agent knows to map rather than retry (outcome.ts).
@@ -399,7 +412,7 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string): 
 
   if (isBackendUnreachable(err)) {
     const unreachable = backendUnreachableError(endpoint);
-    if (!emitLlmError(unreachable.error, unreachable.message, unreachable.next)) {
+    if (!emitMachineError(format, unreachable.error, unreachable.message, unreachable.next)) {
       renderStructuredError(unreachable);
     }
     if (debug) writeDebugDetail(err);
@@ -408,21 +421,21 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string): 
 
   if (e?.name === "ConfigParseError") {
     const broken = configParseError(e.path, e.detail);
-    if (!emitLlmError(broken.error, broken.message, broken.next)) renderStructuredError(broken);
+    if (!emitMachineError(format, broken.error, broken.message, broken.next)) renderStructuredError(broken);
     if (debug) writeDebugDetail(err);
     process.exit(1);
   }
 
   if (e?.name === "ConfigLockError") {
     const locked = configLockError(e.detail);
-    if (!emitLlmError(locked.error, locked.message, locked.next)) renderStructuredError(locked);
+    if (!emitMachineError(format, locked.error, locked.message, locked.next)) renderStructuredError(locked);
     if (debug) writeDebugDetail(err);
     process.exit(1);
   }
 
   if (e?.name === "LocalTokenRequiredError") {
     const refused = localTokenRequiredError(endpoint);
-    if (!emitLlmError(refused.error, refused.message, refused.next)) {
+    if (!emitMachineError(format, refused.error, refused.message, refused.next)) {
       renderStructuredError(refused);
     }
     if (debug) writeDebugDetail(err);
@@ -431,7 +444,7 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string): 
 
   const structured = typeof e?.message === "string" ? parseBackendError(e.message) : null;
   if (structured) {
-    if (!emitLlmError(structured.error, structured.message, structured.next)) {
+    if (!emitMachineError(format, structured.error, structured.message, structured.next)) {
       renderStructuredError(structured);
     }
     if (debug) writeDebugDetail(err);
@@ -443,7 +456,7 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string): 
   const msg = err === null || err === undefined ? String(err) : formatFetchError(err);
   // `cli_error` because nothing above recognised it: the code has to stay
   // stable and honest rather than guess at a class from the message text.
-  if (!emitLlmError("cli_error", msg)) {
+  if (!emitMachineError(format, "cli_error", msg)) {
     process.stderr.write(chalk.red(`Error: ${msg}\n`));
   }
 

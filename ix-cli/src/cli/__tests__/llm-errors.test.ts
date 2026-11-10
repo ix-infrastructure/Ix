@@ -65,20 +65,20 @@ describe("detectRequestedFormat", () => {
     expect(detectRequestedFormat(["status", "--format", "json"])).toBe("json");
   });
 
-  it("is undefined when the caller did not ask", () => {
-    expect(detectRequestedFormat(["status"])).toBeUndefined();
-    expect(detectRequestedFormat([])).toBeUndefined();
+  it("uses the built-in default when the caller did not ask", () => {
+    expect(detectRequestedFormat(["status"])).toBe("text");
+    expect(detectRequestedFormat([])).toBe("text");
   });
 
   it("stops at `--`, so a search term is never read as a flag", () => {
-    expect(detectRequestedFormat(["text", "--", "--format", "llm"])).toBeUndefined();
+    expect(detectRequestedFormat(["text", "--", "--format", "llm"])).toBe("text");
   });
 
-  it("does not read IX_FORMAT — that default is not in effect yet", () => {
+  it("honours IX_FORMAT when there is no flag", () => {
     const original = process.env.IX_FORMAT;
     process.env.IX_FORMAT = "llm";
     try {
-      expect(detectRequestedFormat(["status"])).toBeUndefined();
+      expect(detectRequestedFormat(["status"])).toBe("llm");
     } finally {
       if (original === undefined) delete process.env.IX_FORMAT;
       else process.env.IX_FORMAT = original;
