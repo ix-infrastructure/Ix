@@ -1107,6 +1107,10 @@ export const RUST_QUERIES = `
 (call_expression function: (scoped_identifier
   path: (identifier) @_qualifier
   name: (identifier) @call.name)) @call
+; A call spelled with a longer path: crate::stats::report()
+(call_expression function: (scoped_identifier
+  path: (scoped_identifier) @_qualifier
+  name: (identifier) @call.name)) @call
 (call_expression function: (generic_function function: (identifier) @call.name)) @call
 
 ; Struct literal construction: User { name: value }
