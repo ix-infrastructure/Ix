@@ -15,6 +15,7 @@ import {
   tryGitLsFiles,
 } from '../commands/ingest.js';
 import { discoverSourceFiles, emptyDiscoveryCounts, walkFiles } from '../file-discovery.js';
+import { SUPPORTED_FILE_NAMES } from '../supported-extensions.js';
 
 describe('dedupeDiscoveredFilePaths', () => {
   it('collapses alternate discovered paths that point at the same canonical file', () => {
@@ -48,6 +49,27 @@ describe('dedupeDiscoveredFilePaths', () => {
     expect(isSupportedSourceFile('GNUmakefile')).toBe(true);
     expect(isSupportedSourceFile('build/common.mk')).toBe(true);
     expect(isSupportedSourceFile('README.txt')).toBe(false);
+  });
+
+  it('discovers the shell dotfiles core-ingestion parses as Bash', () => {
+    // languageFromPath maps these extensionless names to Bash, but
+    // path.extname('.bashrc') is '', so the extension check alone never
+    // matched them and `ix map` never handed them to the parser (Ix#960).
+    for (const f of [
+      '.bashrc', '.bash_profile', '.bash_aliases', '.bash_logout',
+      '.zshrc', '.zprofile', '.zshenv', '.profile', 'home/.bashrc', 'dotfiles/.ZSHRC',
+    ]) {
+      expect(isSupportedSourceFile(f), f).toBe(true);
+    }
+    expect(isSupportedSourceFile('.gitignore')).toBe(false);
+    expect(isSupportedSourceFile('.bashrc.bak')).toBe(false);
+  });
+
+  it('accepts every special file name it lists', () => {
+    // The other half of core-ingestion's extension-parity test, which checks
+    // these names against languageFromPath.
+    expect(SUPPORTED_FILE_NAMES.size).toBeGreaterThan(5);
+    expect([...SUPPORTED_FILE_NAMES].filter((name) => !isSupportedSourceFile(`repo/${name}`))).toEqual([]);
   });
 
   it('discovers TeX/LaTeX source files', () => {
@@ -299,4 +321,24 @@ describe('discovery symlink containment', () => {
       expect(counts.unreadable).toBe(0);
     },
   );
+
+  it('walks and lists shell dotfiles, with or without git', () => {
+    const repo = scratchDir('ix-dotfiles-');
+    writeFileSync(join(repo, '.bashrc'), 'alias ll="ls -l"\n');
+    mkdirSync(join(repo, 'zsh'), { recursive: true });
+    writeFileSync(join(repo, 'zsh', '.zshrc'), 'export EDITOR=vim\n');
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n');
+
+    const walked = [...walkFiles(repo, true)].map((p) => p.slice(repo.length + 1).replace(/\\/g, '/')).sort();
+    expect(walked).toEqual(['.bashrc', 'zsh/.zshrc']);
+
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: repo });
+      execFileSync('git', ['add', '-A'], { cwd: repo });
+    } catch {
+      return; // no git — the walk above is the whole check
+    }
+    const listed = discoverSourceFiles(repo).map((p) => p.slice(repo.length + 1).replace(/\\/g, '/')).sort();
+    expect(listed).toEqual(['.bashrc', 'zsh/.zshrc']);
+  });
 });
