@@ -401,6 +401,22 @@ Two commands cannot know a true total and say so rather than inventing one:
   `offset_past_end`: more matches exist). `--format json` stays a bare array of matches with no
   paging fields; the next offset is the offset plus its length.
 
+`ix rank` scores at most 2000 entities of the kind, the first 2000 `/v1/list`
+returns. `/v1/list` has no offset and does not order by degree, so an entity
+past that window is never a candidate, whatever its score. When more than
+2000 exist the header carries `truncated=true` and a
+`diagnostic code=candidates_truncated` record follows it (json:
+`summary.truncated: true` and the message in `diagnostics`; text: the message
+under the ranking). `evaluated` is then the window, not the workspace, and the
+ranking is of that window only. `--path` is applied by the server before the
+cut, so narrowing with it (or a more specific `--kind`) brings the rest in.
+
+```
+rank metric=callers kind=function evaluated=2000 returned=3 truncated=true
+diagnostic code=candidates_truncated message="More than 2000 function entities exist; only the first 2000 the server returned were ranked, so entities that belong in this ranking may be missing. Narrow with --path (or a more specific --kind)."
+entity name=hotZ kind=function score=3
+```
+
 `ix read` caps a read at 400 lines and marks the `file` record with
 `truncated=true total_lines=<n> next=<target>`. `total_lines` is always a
 count, never a line number:
