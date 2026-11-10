@@ -58,6 +58,18 @@ describe("ix explain on a function with unresolved calls", () => {
     expect(renderExplainLlm(facts, role, importance, rendered).join("\n")).toContain("fetch, JSON.parse, retry");
   });
 
+  it("names them once in the llm output, on the diagnostic", async () => {
+    const facts = await collectFacts(graphWith(RECORDED), TARGET, "runJob", "function");
+    const role = inferRole(facts);
+    const importance = inferImportance(facts);
+    const lines = renderExplainLlm(facts, role, importance, renderExplanation(facts, role, importance));
+
+    expect(lines.filter((l) => l.includes("fetch, JSON.parse, retry"))).toEqual([
+      'diagnostic code=unresolved_call_target message="5 called name(s) have no definition in the graph: fetch, JSON.parse, retry and 2 more."',
+    ]);
+    expect(lines.filter((l) => l.startsWith("note "))).toEqual([]);
+  });
+
   it("says nothing when ingest recorded none", async () => {
     const facts = await collectFacts(graphWith({}), TARGET, "runJob", "function");
 

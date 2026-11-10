@@ -339,7 +339,10 @@ export function renderReadAmbiguityLlm(result: AmbiguityResult, target: string):
       ? "Provide a more specific path to disambiguate."
       : disambiguationHint("Use --pick <n>, --kind, or --path to disambiguate."),
   ]]));
+  // `ambiguous_resolution` is the hint line above, as in resolve.ts's notice;
+  // anything else stays.
   for (const d of result.diagnostics ?? []) {
+    if (d.code === "ambiguous_resolution") continue;
     lines.push(llmLine("diagnostic", [["code", d.code], ["message", d.message]]));
   }
   return lines;
