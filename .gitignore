@@ -46,4 +46,5 @@ ix-cli/.watch-child-runtime-*
 !.env.example
 
 # SBT boot artifacts
-.sbt-boot/ix-cli/scripts/ranking-eval/results/*.jsonl
+.sbt-boot/
+ix-cli/scripts/ranking-eval/results/*.jsonl
