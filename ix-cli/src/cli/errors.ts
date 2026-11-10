@@ -3,6 +3,7 @@
 import chalk from "chalk";
 import { PRE_CONNECTION_CODES, RESET_RECONCILIATION_ERROR } from "../client/transport.js";
 
+import { DEFAULT_ENDPOINT, isLoopbackEndpoint, isManagedLocalBackend } from "./endpoint.js";
 import { llmError } from "./llm.js";
 import { exitCodeFor } from "./outcome.js";
 
@@ -246,11 +247,8 @@ function isUnreachableCode(e: { code?: unknown } | null | undefined): boolean {
   return typeof e?.code === "string" && UNREACHABLE_CODES.has(e.code);
 }
 
-/** True for an endpoint served from this machine, where `ix docker start` applies. */
-function isLocalEndpoint(endpoint?: string): boolean {
-  if (!endpoint) return true; // unresolved endpoint defaults to the local install
-  return /^\w+:\/\/(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(:\d+)?(\/|$)/i.test(endpoint);
-}
+/** An unresolved endpoint means the default local install. */
+const orDefault = (endpoint?: string): string => endpoint || DEFAULT_ENDPOINT;
 
 /**
  * Under IX_DEBUG, print the error *and its cause chain*.
@@ -320,7 +318,9 @@ export function backendUnreachableError(endpoint?: string): StructuredError {
     // `ix docker start` only fixes a backend this machine is supposed to run.
     // Pro points `config.endpoint` at a cloud instance, where that advice is
     // both useless and actively wrong — it starts a backend you aren't using.
-    next: isLocalEndpoint(endpoint)
+    // A loopback backend on another port is not one either: that command
+    // starts the standalone compose on the default port, not this one.
+    next: isManagedLocalBackend(orDefault(endpoint))
       ? "Start it with `ix docker start`, then check `ix status`."
       : "Check your network, and that the endpoint is right (`ix config get endpoint`).",
   };
@@ -359,11 +359,14 @@ export function localTokenRequiredError(endpoint?: string): StructuredError {
   return {
     error: "local_token_required",
     message: `The Ix backend${endpoint ? ` at ${endpoint}` : ""} requires a token this CLI did not send or that it refused.`,
-    next: isLocalEndpoint(endpoint)
+    next: isManagedLocalBackend(orDefault(endpoint))
       ? "Run `ix docker start --local-token` to give the backend this CLI's stored token, or set IX_TOKEN to the backend's token."
-      : "This CLI sends its token (IX_TOKEN or the stored one) only to a backend on this machine. " +
-        "Reach that backend through a local port forward (for example `ssh -L 8090:localhost:8090 <host>`) " +
-        "and point IX_ENDPOINT at http://localhost:8090.",
+      : isLoopbackEndpoint(orDefault(endpoint))
+        ? // The token IS sent here, but `ix docker start` would start a different backend.
+          "Set IX_TOKEN to that backend's token."
+        : "This CLI sends its token (IX_TOKEN or the stored one) only to a backend on this machine. " +
+          "Reach that backend through a local port forward (for example `ssh -L 8090:localhost:8090 <host>`) " +
+          `and point IX_ENDPOINT at ${DEFAULT_ENDPOINT}.`,
   };
 }
 

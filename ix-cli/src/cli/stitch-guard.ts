@@ -2,6 +2,7 @@
 
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { isLoopbackEndpoint } from "./endpoint.js";
 import { acquireLockAt, namedLockPath, type LockHandle } from "./single-flight.js";
 
 // ---------------------------------------------------------------------------
@@ -102,10 +103,10 @@ export function stitchWaitMs(): number {
  * exists to prevent — an `ix mcp` server launched with an IP and a shell
  * `ix map` reading the config both stitching at once.
  *
- * Loopback spellings are folded together deliberately. `localhost`,
- * `127.0.0.1` and `::1` are not the same host in general — and the endpoint
- * is not always local either; `IxClient.isLocalEndpoint` exists precisely
- * because a remote backend is supported. The folding is justified by its cost,
+ * Loopback spellings (whatever `isLoopbackEndpoint` accepts) are folded
+ * together deliberately. `localhost`, `127.0.0.1` and `::1` are not the same
+ * host in general — and the endpoint is not always local either;
+ * `isLoopbackEndpoint` exists precisely because a remote backend is supported. The folding is justified by its cost,
  * not by a claim about deployments: two loopback spellings that really did
  * name different backends cost one deferred stitch, while not folding them
  * costs the concurrency this guard exists to prevent.
@@ -113,7 +114,7 @@ export function stitchWaitMs(): number {
 export function stitchKey(endpoint: string): string {
   try {
     const u = new URL(endpoint);
-    const host = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(u.hostname.toLowerCase())
+    const host = isLoopbackEndpoint(endpoint)
       ? "localhost"
       : u.hostname.toLowerCase();
     const path = u.pathname.replace(/\/+$/, "");

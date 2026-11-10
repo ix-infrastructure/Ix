@@ -13,7 +13,7 @@ import { ixHome } from "./ix-home.js";
 import { stderr } from "./stderr.js";
 import { workspaceIdForPath } from "./system.js";
 import { IX_CALLER_ENV } from "./next-step.js";
-import { isLocalEndpoint } from "./backend-version.js";
+import { isLoopbackEndpoint, isManagedLocalBackend } from "./endpoint.js";
 
 export interface BootstrapResult {
   createdConfig: boolean;
@@ -239,7 +239,7 @@ export function clearPendingPrune(root: string, prune: PendingPrune): void {
  * - it was recorded against the endpoint configured now;
  * - no other workspace in this config still uses it;
  * - the ingest under the new id completed cleanly;
- * - the endpoint is loopback (`isLocalEndpoint`). On any other endpoint the CLI cannot
+ * - the endpoint is loopback (`isLoopbackEndpoint`). On any other endpoint the CLI cannot
  *   establish that the id is the caller's own -- a teammate may have it pinned -- so it
  *   never deletes there, flag or no flag.
  *
@@ -269,7 +269,7 @@ export function staleWorkspaceCleanup(input: {
   const keep = (reason: StaleWorkspaceKeepReason): StaleWorkspaceCleanup => ({ action: "keep", reason, workspaceId: old });
   if (!input.pruneOptIn) return keep("not_opted_in");
   if (old === input.currentWorkspaceId) return keep("current_id");
-  if (!isLocalEndpoint(input.endpoint)) return keep("non_local_endpoint");
+  if (!isLoopbackEndpoint(input.endpoint)) return keep("non_local_endpoint");
   if (input.prune.endpoint !== input.endpoint) return keep("endpoint_changed");
   if (input.otherRegisteredIds.includes(old)) return keep("shared_in_config");
   if (!input.ingestClean) return keep("ingest_unclean");
@@ -284,7 +284,7 @@ export function staleWorkspaceCleanup(input: {
  * {@link staleWorkspaceCleanup}).
  */
 export function assertStaleWorkspacePruneAllowed(endpoint: string): void {
-  if (isLocalEndpoint(endpoint)) return;
+  if (isLoopbackEndpoint(endpoint)) return;
   throw new Error(
     "--prune-stale-workspace deletes a workspace's graph and only runs against a local (loopback) backend; " +
     "the configured endpoint is not one. Nothing was changed.",
@@ -387,12 +387,7 @@ export function requireReadWorkspaceId(cwd = process.cwd()): string {
  * someone else's on 8090), while the real endpoint stays down.
  */
 export function canAutoStartBackend(endpoint: string): boolean {
-  if (!isLocalEndpoint(endpoint)) return false;
-  try {
-    return new URL(endpoint).port === "8090";
-  } catch {
-    return false;
-  }
+  return isManagedLocalBackend(endpoint);
 }
 
 /**

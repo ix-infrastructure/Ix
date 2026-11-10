@@ -19,7 +19,7 @@ import {
   type WorkspaceConfig,
 } from "../config.js";
 import { ixHome } from "../ix-home.js";
-import { isLocalEndpoint } from "../backend-version.js";
+import { isLoopbackEndpoint } from "../endpoint.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { assessGraphStats } from "../graph-health.js";
 import { llmLine, printLlmLines } from "../llm.js";
@@ -335,7 +335,7 @@ function doctorClient(): { endpoint: string; client: IxClient } {
     if (!isConfigParseError(e)) throw e;
     // createClient read the stored token from the file that does not parse.
     // Loopback only, as getLocalToken would have decided.
-    const token = isLocalEndpoint(endpoint) ? process.env.IX_TOKEN?.trim() : undefined;
+    const token = isLoopbackEndpoint(endpoint) ? process.env.IX_TOKEN?.trim() : undefined;
     // eslint-disable-next-line no-restricted-syntax -- the factory cannot build a client without config.yaml
     return { endpoint, client: new IxClient(endpoint, undefined, token ? { token } : {}) };
   }
@@ -571,7 +571,7 @@ export function registerDoctorCommand(program: Command): void {
               // indistinguishable from "not started yet". Say what the stack
               // actually reported. Ix#614.
               const base = e.message ?? "unreachable";
-              const failure = isLocalEndpoint(endpoint) && dockerAvailable() ? diagnoseBackendStack() : null;
+              const failure = isLoopbackEndpoint(endpoint) && dockerAvailable() ? diagnoseBackendStack() : null;
               if (!failure) return { ok: false, detail: base };
               const parts = [`${base} — ${failure.service} is ${failure.state}`];
               if (failure.lastError) parts.push(`  last log: ${failure.lastError}`);
@@ -601,7 +601,7 @@ export function registerDoctorCommand(program: Command): void {
             } catch (e) {
               caps = e instanceof Error ? e : new Error(String(e));
             }
-            return assessLocalAuth(caps, client.sendsToken === true, isLocalEndpoint(endpoint));
+            return assessLocalAuth(caps, client.sendsToken === true, isLoopbackEndpoint(endpoint));
           },
         },
         {
