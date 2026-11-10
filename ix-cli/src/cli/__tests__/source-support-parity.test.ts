@@ -54,7 +54,9 @@ describe('source support parity between parser and discovery', () => {
   );
 
   it('discovers repository shell dotfiles through both walking and Git', () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'ix-shell-discovery-')));
+    // Match Git discovery's native canonicalization: plain realpathSync can keep
+    // Windows 8.3 temp paths (RUNNER~1) that native resolution expands.
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'ix-shell-discovery-')));
     try {
       for (const name of shellDotfiles) writeFileSync(join(root, name), 'hello() { echo hello; }\n');
       writeFileSync(join(root, '.bashrc.bak'), 'backup\n');
