@@ -27,7 +27,14 @@ function edgeLine(id: string, e: { src: unknown; dst: unknown; predicate: unknow
   return `${id} ${String(e.src)} ${String(e.dst)} ${String(e.predicate)} tier=${String(attrs.tier)} confidence=${String(attrs.confidence)}`;
 }
 
-/** A backend that answers the endpoints an ingest touches, and records them. */
+/**
+ * A backend that answers the endpoints an ingest touches, and records them.
+ *
+ * With `semantics` set, commits are stored and the reads a graph command
+ * makes (`/v1/search`, `/v1/expand`, `/v1/expand-by-name`, `/v1/entity`,
+ * `/v1/stats`) are answered from that graph. Without it those reads stay
+ * unknown, as they were when the fake only counted commits.
+ */
 export class FakeBackend {
   readonly requests: Array<{ path: string; patches: number; code?: number }> = [];
   /** `source.uri` of every patch sent in a commit request, accepted or not. */
@@ -214,7 +221,10 @@ export class FakeBackend {
    * report none, as a pre-#157 backend does. `null` reports none in any mode.
    */
   releaseVersion: string | null | undefined = undefined;
-  private readonly nodes = new Map<string, { kind: unknown; name: unknown; attrs?: unknown; uri?: string; hash?: string; extractor?: string; live: boolean }>();
+  private readonly nodes = new Map<string, {
+    kind: unknown; name: unknown; attrs?: unknown; uri?: string; hash?: string;
+    extractor?: string; workspaceId?: string; live: boolean;
+  }>();
   private readonly edges = new Map<string, {
     src: unknown; dst: unknown; predicate: unknown; attrs?: unknown; workspaceId: string; uri: string; live: boolean;
   }>();
@@ -299,7 +309,10 @@ export class FakeBackend {
       const id = String(op.id);
       if (op.type === "UpsertNode") {
         // As the bulk route does, every upsert takes the patch's provenance.
-        this.nodes.set(id, { kind: op.kind, name: op.name, attrs: op.attrs, uri, hash: patch.source?.sourceHash, extractor: patch.source?.extractor, live: true });
+        this.nodes.set(id, {
+          kind: op.kind, name: op.name, attrs: op.attrs, uri, hash: patch.source?.sourceHash,
+          extractor: patch.source?.extractor, workspaceId, live: true,
+        });
       }
       else if (op.type === "UpsertEdge") {
         this.edges.set(id, { src: op.src, dst: op.dst, predicate: op.predicate, attrs: op.attrs, workspaceId, uri, live: true });
@@ -450,8 +463,128 @@ export class FakeBackend {
     }
   }
 
+  /** A stored node in the shape `IxClient.search` / `entity` hand to commands. */
+  private graphNode(id: string, node: {
+    kind: unknown; name: unknown; attrs?: unknown; uri?: string; hash?: string; extractor?: string;
+  }): Record<string, unknown> {
+    return {
+      id,
+      kind: node.kind,
+      name: node.name,
+      attrs: node.attrs ?? {},
+      provenance: {
+        sourceUri: node.uri ?? "",
+        ...(node.hash !== undefined ? { sourceHash: node.hash } : {}),
+        ...(node.extractor !== undefined ? { extractor: node.extractor } : {}),
+      },
+    };
+  }
+
+  private readBody(body: string): Record<string, unknown> {
+    try {
+      const parsed = JSON.parse(body) as unknown;
+      return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : {};
+    } catch {
+      return {};
+    }
+  }
+
+  /** Substring name search, the match `rankEntity` expects from `/v1/search`. */
+  private searchNodes(body: string): unknown[] {
+    const req = this.readBody(body);
+    const term = String(req.term ?? "").toLowerCase();
+    const limit = typeof req.limit === "number" && req.limit > 0 ? req.limit : 30;
+    const kind = typeof req.kind === "string" ? req.kind.toLowerCase() : undefined;
+    const workspaceId = typeof req.workspaceId === "string" ? req.workspaceId : undefined;
+    const scope = typeof req.scope === "string" ? req.scope.toLowerCase() : undefined;
+    // `nameOnly` is what resolution sends. A content search also matches the path.
+    const nameOnly = req.nameOnly !== false;
+    const out: unknown[] = [];
+    for (const [id, node] of this.nodes) {
+      if (!node.live) continue;
+      if (workspaceId && node.workspaceId && node.workspaceId !== workspaceId) continue;
+      if (kind && String(node.kind ?? "").toLowerCase() !== kind) continue;
+      const name = String(node.name ?? "").toLowerCase();
+      const uri = (node.uri ?? "").toLowerCase();
+      if (scope && !uri.includes(scope)) continue;
+      if (nameOnly ? !name.includes(term) : !name.includes(term) && !uri.includes(term)) continue;
+      out.push(this.graphNode(id, node));
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  /**
+   * One-or-more-hop neighbourhood. `in` walks incoming edges (callers, the
+   * region that contains a node); `out` walks outgoing ones.
+   */
+  private expandNodes(path: string, body: string): { nodes: unknown[]; edges: unknown[] } {
+    const req = this.readBody(body);
+    const direction = typeof req.direction === "string" ? req.direction : "both";
+    const predicates = Array.isArray(req.predicates) ? new Set(req.predicates.map((p) => String(p))) : null;
+    const hops = typeof req.hops === "number" && req.hops > 0 ? Math.min(Math.floor(req.hops), 8) : 1;
+    const name = String(req.name ?? "");
+    const starts = path === "/v1/expand-by-name"
+      ? [...this.nodes].filter(([, n]) => n.live && String(n.name ?? "") === name).map(([id]) => id)
+      : [String(req.nodeId ?? "")];
+    const nodes = new Map<string, unknown>();
+    const edges = new Map<string, unknown>();
+    for (const start of starts) {
+      const visited = new Set<string>([start]);
+      let frontier = [start];
+      for (let hop = 0; hop < hops && frontier.length > 0; hop++) {
+        const next: string[] = [];
+        for (const id of frontier) {
+          for (const [edgeId, edge] of this.edges) {
+            if (!edge.live) continue;
+            if (predicates && !predicates.has(String(edge.predicate))) continue;
+            const src = String(edge.src);
+            const dst = String(edge.dst);
+            let other: string | undefined;
+            if ((direction === "out" || direction === "both") && src === id) other = dst;
+            else if ((direction === "in" || direction === "both") && dst === id) other = src;
+            if (other === undefined) continue;
+            if (!edges.has(edgeId)) {
+              edges.set(edgeId, { id: edgeId, src, dst, predicate: edge.predicate, attrs: edge.attrs ?? {} });
+            }
+            if (!visited.has(other)) {
+              visited.add(other);
+              next.push(other);
+              const neighbour = this.nodes.get(other);
+              if (neighbour?.live) nodes.set(other, this.graphNode(other, neighbour));
+            }
+          }
+        }
+        frontier = next;
+      }
+    }
+    return { nodes: [...nodes.values()], edges: [...edges.values()] };
+  }
+
+  /** Workspace totals in the shape `assessGraphStats` reads. */
+  private graphStats(url: URL): unknown {
+    const workspaceId = url.searchParams.get("workspace_id") ?? undefined;
+    const inWorkspace = (id: string | undefined): boolean => !workspaceId || !id || id === workspaceId;
+    const liveNodes = [...this.nodes].filter(([, n]) => n.live && inWorkspace(n.workspaceId));
+    const liveEdges = [...this.edges].filter(([, e]) => e.live && inWorkspace(e.workspaceId));
+    const byKind = new Map<string, number>();
+    for (const [, n] of liveNodes) byKind.set(String(n.kind ?? ""), (byKind.get(String(n.kind ?? "")) ?? 0) + 1);
+    const byPredicate = new Map<string, number>();
+    for (const [, e] of liveEdges) {
+      const predicate = String(e.predicate ?? "");
+      byPredicate.set(predicate, (byPredicate.get(predicate) ?? 0) + 1);
+    }
+    return {
+      nodes: { total: liveNodes.length, byKind: [...byKind].map(([kind, count]) => ({ kind, count })) },
+      edges: { total: liveEdges.length, byPredicate: [...byPredicate].map(([predicate, count]) => ({ predicate, count })) },
+    };
+  }
+
   private route(url: string, body: string, res: ServerResponse): void {
-    const path = new URL(url, "http://x").pathname;
+    const parsedUrl = new URL(url, "http://x");
+    const path = parsedUrl.pathname;
     const send = (code: number, payload: unknown, headers: Record<string, string> = {}): void => {
       // Stamp the answer onto the request that produced it. Whether a bulk was
       // ACCEPTED or refused is the difference between two completely different
@@ -670,7 +803,16 @@ export class FakeBackend {
       const edges = [...this.edges]
         .filter(([, e]) => e.live && (e.src === id || e.dst === id))
         .map(([edgeId, e]) => ({ id: edgeId, predicate: e.predicate, provenance: { sourceUri: e.uri } }));
-      return send(200, { node: { id, kind: node.kind, name: node.name, attrs: node.attrs ?? {} }, edges });
+      return send(200, { node: this.graphNode(id, node), edges });
+    }
+    if (this.semantics !== undefined && path === "/v1/search") {
+      return send(200, this.searchNodes(body));
+    }
+    if (this.semantics !== undefined && (path === "/v1/expand" || path === "/v1/expand-by-name")) {
+      return send(200, this.expandNodes(path, body));
+    }
+    if (this.semantics !== undefined && path === "/v1/stats") {
+      return send(200, this.graphStats(parsedUrl));
     }
     if (path === "/v1/stitch") {
       this.requests.push({ path, patches: 0 });
