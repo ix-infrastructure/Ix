@@ -9,7 +9,8 @@ import { describe, expect, it } from 'vitest';
 
 import { isSupportedSourceFile, tryGitLsFiles, walkFiles } from '../file-discovery.js';
 
-const { languageFromPath, SupportedLanguages }: {
+const { FILE_NAME_MAP, languageFromPath, SupportedLanguages }: {
+  FILE_NAME_MAP: Readonly<Record<string, string>>;
   languageFromPath: (filePath: string) => string | null;
   SupportedLanguages: Record<string, string>;
 } = await import(new URL('../../../../core-ingestion/dist/languages.js', import.meta.url).href);
@@ -37,7 +38,9 @@ describe('source support parity between parser and discovery', () => {
 
   it('discovers every extension the parser handles', () => {
     const source = readFileSync(new URL('../../../../core-ingestion/src/languages.ts', import.meta.url), 'utf8');
-    const map = source.slice(source.indexOf('const EXT_MAP'));
+    const start = source.indexOf('const EXT_MAP');
+    // FILE_NAME_MAP follows EXT_MAP; its dotfile keys are names, not extensions.
+    const map = source.slice(start, source.indexOf('\n};', start));
     const extensions = [...map.matchAll(/'(\.[a-z0-9]+)'\s*:/gi)].map((match) => match[1]);
     expect(extensions.length).toBeGreaterThan(50);
     for (const ext of extensions) {
@@ -46,7 +49,17 @@ describe('source support parity between parser and discovery', () => {
     }
   });
 
-  it.each(['README.txt', '.unknown', '.bashrc.bak', 'config', 'config/.zshrc.backup'])(
+  it('discovers every special file name the parser handles', () => {
+    expect(Object.keys(FILE_NAME_MAP).length).toBeGreaterThan(5);
+    for (const [name, language] of Object.entries(FILE_NAME_MAP)) {
+      for (const filePath of [`repo/${name}`, `C:\\repo\\${name.toUpperCase()}`]) {
+        expect(languageFromPath(filePath), filePath).toBe(language);
+        expect(isSupportedSourceFile(filePath), filePath).toBe(true);
+      }
+    }
+  });
+
+  it.each(['README.txt', '.unknown', '.bashrc.bak', 'config', 'config/.zshrc.backup', 'constructor'])(
     'rejects unsupported name %s on both sides', (filePath) => {
       expect(languageFromPath(filePath)).toBeNull();
       expect(isSupportedSourceFile(filePath)).toBe(false);
