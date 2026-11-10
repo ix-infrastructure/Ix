@@ -1412,8 +1412,10 @@ components:
     ConfidenceBreakdown:
       type: object
       description: >-
-        The factors behind a claim's confidence. There is no combined score in
-        this object; the claim's number is ScoredClaim.finalScore.
+        The factors behind a claim's confidence. The combined confidence is the
+        product of the six factor values, clamped to [0, 1]; it is not
+        serialized in this object (compactClaims[].confidence.score carries
+        it). ScoredClaim.finalScore is relevance × confidence, not confidence.
       required: [baseAuthority, verification, recency, corroboration, conflictPenalty, intentAlignment]
       properties:
         baseAuthority: { $ref: "#/components/schemas/Factor" }
@@ -1422,21 +1424,38 @@ components:
         corroboration: { $ref: "#/components/schemas/Factor" }
         conflictPenalty: { $ref: "#/components/schemas/Factor" }
         intentAlignment: { $ref: "#/components/schemas/Factor" }
+    Claim:
+      type: object
+      required: [id, entityId, statement, status]
+      properties:
+        id: { type: string }
+        entityId: { type: string }
+        statement: { type: string }
+        status:
+          type: string
+          enum: [Active, Stale, Retracted]
+        value:
+          description: The claimed value (any JSON value)
+        confidence:
+          description: Confidence stored on the claim itself; the scored breakdown is ScoredClaim.confidence
+        provenance:
+          type: object
+          properties:
+            sourceUri: { type: string, description: Workspace-relative path }
+            sourceHash: { type: string }
+            extractor: { type: string }
+            sourceType: { type: string }
+            observedAt: { type: string, format: date-time }
+        createdRev: { type: integer }
+        deletedRev: { type: integer }
     ScoredClaim:
       type: object
       required: [claim, confidence, relevance, finalScore]
       properties:
-        claim:
-          type: object
-          required: [id, entityId, statement, status]
-          properties:
-            id: { type: string }
-            entityId: { type: string }
-            statement: { type: string }
-            status: { type: string }
+        claim: { $ref: "#/components/schemas/Claim" }
         confidence: { $ref: "#/components/schemas/ConfidenceBreakdown" }
         relevance: { type: number }
-        finalScore: { type: number }
+        finalScore: { type: number, description: relevance × confidence }
     StructuredContext:
       type: object
       properties:
