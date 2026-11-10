@@ -617,3 +617,101 @@ describe('EXTENDS edges in the patch', () => {
     }, widget)).toEqual([`${id(widget, 'Widget')} -> ${id('/repo/src/base.js', 'Base')}`]);
   });
 });
+
+describe('super calls', () => {
+  /** Every CALLS relationship parsed from `filePath`: `src -> dst`. */
+  function parsedCalls(filePath: string, source: string): string[] {
+    return parseFile(filePath, source)!.relationships
+      .filter(rel => rel.predicate === 'CALLS')
+      .map(rel => `${rel.srcName} -> ${rel.dstName}`);
+  }
+
+  /** Where each CALLS edge resolves: `src -> dstFile:dstKey`. */
+  function resolvedCalls(files: Record<string, string>): string[] {
+    const parsed = Object.entries(files).map(([filePath, source]) => parseFile(filePath, source)!);
+    return resolveEdges(parsed)
+      .filter(edge => edge.predicate === 'CALLS')
+      .map(edge => `${edge.srcName} -> ${edge.dstFilePath}:${edge.dstQualifiedKey}`)
+      .sort();
+  }
+
+  it('resolves a TypeScript super call to the base method', () => {
+    expect(resolvedCalls({
+      '/repo/src/base.ts': 'export class Base {\n  run() { return 1; }\n}\n',
+      '/repo/src/child.ts': [
+        "import { Base } from './base';",
+        'export class Child extends Base {',
+        '  run() { return super.run() + 1; }',
+        '}',
+        '',
+      ].join('\n'),
+    })).toEqual(['Child.run -> /repo/src/base.ts:Base.run']);
+  });
+
+  it('resolves a JavaScript super call to the base method', () => {
+    expect(resolvedCalls({
+      '/repo/src/base.js': 'export class Base {\n  run() { return 1; }\n}\n',
+      '/repo/src/child.js': [
+        "import { Base } from './base.js';",
+        'export class Child extends Base {',
+        '  run() { return super.run() + 1; }',
+        '}',
+        '',
+      ].join('\n'),
+    })).toEqual(['Child.run -> /repo/src/base.js:Base.run']);
+  });
+
+  it('resolves a Python super() call to the base method', () => {
+    expect(resolvedCalls({
+      '/repo/app/__init__.py': '',
+      '/repo/app/models.py': 'class Base:\n    def save(self):\n        pass\n',
+      '/repo/app/user.py': [
+        'from .models import Base',
+        '',
+        'class User(Base):',
+        '    def save(self):',
+        '        return super().save()',
+        '',
+        'class Legacy(Base):',
+        '    def save(self):',
+        '        return super(Legacy, self).save()',
+        '',
+      ].join('\n'),
+    })).toEqual([
+      'Legacy.save -> /repo/app/models.py:Base.save',
+      'User.save -> /repo/app/models.py:Base.save',
+    ]);
+  });
+
+  it('names a base in the same file', () => {
+    expect(parsedCalls('/repo/app/user.py', [
+      'class Base:',
+      '    def save(self):',
+      '        pass',
+      '',
+      'class User(Base):',
+      '    def save(self):',
+      '        return super().save()',
+      '',
+    ].join('\n'))).toEqual(['User.save -> save', 'User.save -> Base.save']);
+  });
+
+  it('keeps the bare name when the base is not a single plain name', () => {
+    expect(parsedCalls('/repo/app/user.py', [
+      'class User(Base, Mixin):',
+      '    def save(self):',
+      '        return super().save()',
+      '',
+      'class Admin(models.Base):',
+      '    def save(self):',
+      '        return super().save()',
+      '',
+    ].join('\n'))).toEqual(['User.save -> save', 'Admin.save -> save']);
+    expect(parsedCalls('/repo/src/plain.ts', [
+      'export class Plain {',
+      '  run() { return super.run(); }',
+      '}',
+      '',
+    ].join('\n'))).toEqual(['Plain.run -> run']);
+  });
+});

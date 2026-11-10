@@ -2799,6 +2799,15 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
 
     // Track class ranges for containment: [name, startLine, endLine]
     const classRanges: Array<{ name: string; start: number; end: number }> = [];
+    // class name → the bases it extends. A `super` call is rewritten to the
+    // base only when there is exactly one and it is a plain name: with several
+    // bases, or a dotted one, the target is not known here.
+    const classBases = new Map<string, string[]>();
+    const soleBaseAt = (line: number): string | undefined => {
+      const enclosingClass = findEnclosing(classRanges, line, '');
+      const bases = enclosingClass ? classBases.get(enclosingClass) : undefined;
+      return bases?.length === 1 && /^[\w$]+$/.test(bases[0]) ? bases[0] : undefined;
+    };
     // Python: key the typed-receiver maps the way the lookup does
     // (findEnclosingDefinition): `Container.name` for a function inside a
     // class, the bare name otherwise. The container is found exactly as for
@@ -3052,6 +3061,11 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           dstName: heritageExtends.node.text,
           predicate: 'EXTENDS',
         });
+        if (heritageExtends.name === 'heritage.extends') {
+          const bases = classBases.get(heritageClass.node.text) ?? [];
+          bases.push(heritageExtends.node.text);
+          classBases.set(heritageClass.node.text, bases);
+        }
         continue;
       }
 
@@ -3495,6 +3509,12 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
             }
           }
           if (!phpReceiverIsSupported) return callee;
+          // `super.m()` (JS/TS) and `super().m()` (Python) are `m` of the class
+          // this one extends. Without a known base the call keeps its bare name.
+          if (qualifier === 'super' && (isJsTs || language === SupportedLanguages.Python)) {
+            const base = soleBaseAt(callLine);
+            return base ? `${base}.${callee}` : callee;
+          }
           // Python: 'self'/'cls' always refers to the enclosing class — substitute it
           // so the edge reads 'Query.filter' instead of 'self.filter', enabling
           // same-file resolution without type inference.
