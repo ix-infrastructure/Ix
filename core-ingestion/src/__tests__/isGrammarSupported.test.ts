@@ -7,8 +7,9 @@ import { SupportedLanguages } from '../languages.js';
 
 // `ix verify` picks the files it re-parses with isGrammarSupported, so a format
 // parseFile handles but isGrammarSupported rejects is never verified (#959:
-// every .proto file). Parse a small sample per language and require that
-// isGrammarSupported agrees whenever parseFile produced a result.
+// every .proto file). Parse a small sample per language and check each path on
+// its own: languages available on every install must parse and be supported;
+// optional grammars must agree with parseFile either way.
 
 // One sample per language. The guard test below fails when a language is added
 // to SupportedLanguages without an entry here.
@@ -51,11 +52,53 @@ const SAMPLES: Partial<Record<SupportedLanguages, { path: string; source: string
 };
 
 // Paths whose grammar is not the one languageFromPath names: TSX has its own
-// grammar, and a .h that looks like C++ is parsed as C++.
+// grammar, and a .h that looks like C++ is parsed as C++. Both grammars are
+// statically imported, so these must always parse.
 const EXTRA_SAMPLES = [
   { path: 'a.tsx', source: 'const A = () => <div />;\n' },
   { path: 'a.h', source: 'class A { public: void f(); };\n' },
 ];
+
+// Languages that parse on every install: the hand-written parsers (no
+// tree-sitter grammar) and the grammars index.ts imports statically. Every
+// other grammar is optional: the loader returns null when it has no native
+// prebuild for this platform, and its files simply go unparsed. Those are
+// checked only when isGrammarSupported says they loaded, so a machine without
+// them does not fail this test.
+const ALWAYS_AVAILABLE = new Set<SupportedLanguages>([
+  SupportedLanguages.YAML,
+  SupportedLanguages.Dockerfile,
+  SupportedLanguages.SQL,
+  SupportedLanguages.JSON,
+  SupportedLanguages.TOML,
+  SupportedLanguages.Markdown,
+  SupportedLanguages.LaTeX,
+  SupportedLanguages.Proto,
+  SupportedLanguages.JavaScript,
+  SupportedLanguages.TypeScript,
+  SupportedLanguages.Python,
+  SupportedLanguages.Java,
+  SupportedLanguages.C,
+  SupportedLanguages.CPlusPlus,
+  SupportedLanguages.CSharp,
+  SupportedLanguages.Go,
+  SupportedLanguages.Rust,
+  SupportedLanguages.Ruby,
+  SupportedLanguages.PHP,
+  SupportedLanguages.Scala,
+]);
+
+const parses = (path: string, source: string) => parseFile(path, source, { budgetMs: 0 }) !== null;
+
+const requiredSamples = [
+  ...Object.entries(SAMPLES)
+    .filter(([language]) => ALWAYS_AVAILABLE.has(language as SupportedLanguages))
+    .map(([, sample]) => sample!),
+  ...EXTRA_SAMPLES,
+];
+const optionalSamples = Object.entries(SAMPLES)
+  .filter(([language]) => !ALWAYS_AVAILABLE.has(language as SupportedLanguages))
+  .map(([, sample]) => sample!);
 
 describe('isGrammarSupported agrees with parseFile', () => {
   it('has a sample for every language', () => {
@@ -63,13 +106,16 @@ describe('isGrammarSupported agrees with parseFile', () => {
     expect(missing).toEqual([]);
   });
 
-  it('is true for every path parseFile returns a result for', () => {
-    const samples = [...Object.values(SAMPLES), ...EXTRA_SAMPLES];
-    const parsed = samples.filter(({ path, source }) => parseFile(path, source, { budgetMs: 0 }) !== null);
-    // Guards against a sample set that silently parses nothing, which would make
-    // the assertion below vacuously true.
-    expect(parsed.length).toBeGreaterThan(30);
-    expect(parsed.filter(({ path }) => !isGrammarSupported(path)).map(({ path }) => path)).toEqual([]);
+  it.each(requiredSamples)('always parses and supports $path', ({ path, source }) => {
+    expect(parses(path, source)).toBe(true);
+    expect(isGrammarSupported(path)).toBe(true);
+  });
+
+  // An optional grammar may be absent on this platform. When it is, parseFile
+  // must return null too (nothing to verify); when isGrammarSupported says it
+  // loaded, the sample must parse.
+  it.each(optionalSamples)('agrees with parseFile for optional grammar $path', ({ path, source }) => {
+    expect(parses(path, source)).toBe(isGrammarSupported(path));
   });
 
   it('accepts Protocol Buffers', () => {
