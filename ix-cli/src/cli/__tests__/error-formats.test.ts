@@ -4,11 +4,13 @@ import { CommanderError } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CliResolutionError, CliUsageError, WorkspaceNotMappedError,
-  detectRequestedFormat, renderCliError, setErrorFormat,
+  errorFormat, resolveErrorFormat, renderCliError, setErrorFormat,
 } from "../errors.js";
 import { readConfiguredFormat } from "../config.js";
 
 vi.mock("../config.js", () => ({ readConfiguredFormat: vi.fn() }));
+
+const resolvedFormat = (argv: string[]) => resolveErrorFormat(argv, process.env, readConfiguredFormat);
 
 beforeEach(() => {
   vi.mocked(readConfiguredFormat).mockReset();
@@ -36,19 +38,20 @@ const failures = [
   { kind: "null", code: "cli_error", error: () => null },
 ];
 
-describe.each(["flag", "env", "config"])("error format from %s", (source) => {
+describe.each(["flag", "env", "config"])("per-call error format from %s", (source) => {
   describe.each(["text", "json", "llm"])("%s", (format) => {
     it.each(failures)("$kind keeps its exit and output contract", ({ code, error, exit = 1, legacy = false }) => {
       vi.stubEnv("IX_FORMAT", source === "env" ? format : "");
       vi.stubEnv("IX_LEGACY_EXIT_CODES", legacy ? "1" : "");
       vi.mocked(readConfiguredFormat).mockReturnValue(source === "config" ? format : undefined);
       const argv = source === "flag" ? ["patches", "--format", format] : ["patches"];
-      setErrorFormat(detectRequestedFormat(argv));
+      setErrorFormat("text");
       const out = vi.spyOn(console, "log").mockImplementation(() => {});
       const err = vi.spyOn(console, "error").mockImplementation(() => {});
       const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
       const quit = vi.spyOn(process, "exit").mockImplementation(() => { throw new Error("exit"); });
-      expect(() => renderCliError(error())).toThrow("exit");
+      expect(() => renderCliError(error(), false, undefined, resolvedFormat(argv))).toThrow("exit");
+      expect(errorFormat()).toBe("text");
       expect(quit).toHaveBeenCalledWith(exit);
       if (format === "text") {
         expect(out).not.toHaveBeenCalled();
@@ -62,8 +65,12 @@ describe.each(["flag", "env", "config"])("error format from %s", (source) => {
           expect(line).toMatch(new RegExp(`^error code=${code} message=`));
           expect(line.split("\n")).toHaveLength(1);
         }
-        expect(err).not.toHaveBeenCalled();
-        expect(stderr).not.toHaveBeenCalled();
+        if (format === "llm") {
+          expect(err).not.toHaveBeenCalled();
+          expect(stderr).not.toHaveBeenCalled();
+        } else {
+          expect(err.mock.calls.length + stderr.mock.calls.length).toBeGreaterThan(0);
+        }
       }
     });
   });
@@ -73,39 +80,39 @@ describe("error format precedence and recovery", () => {
   it("lets a flag override the environment and config without reading config", () => {
     vi.stubEnv("IX_FORMAT", "json");
     vi.mocked(readConfiguredFormat).mockImplementation(() => { throw new Error("unreadable"); });
-    expect(detectRequestedFormat(["patches", "--format", "text"])).toBe("text");
+    expect(resolvedFormat(["patches", "--format", "text"])).toBe("text");
     expect(readConfiguredFormat).not.toHaveBeenCalled();
   });
 
   it("lets the environment override config without reading config", () => {
     vi.stubEnv("IX_FORMAT", "json");
     vi.mocked(readConfiguredFormat).mockImplementation(() => { throw new Error("unreadable"); });
-    expect(detectRequestedFormat(["patches"])).toBe("json");
+    expect(resolvedFormat(["patches"])).toBe("json");
     expect(readConfiguredFormat).not.toHaveBeenCalled();
   });
 
   it("uses the last flag, like Commander", () => {
-    expect(detectRequestedFormat(["patches", "--format", "llm", "--format=json"])).toBe("json");
+    expect(resolvedFormat(["patches", "--format", "llm", "--format=json"])).toBe("json");
   });
 
   it("honours the environment after -- and normalizes it like the default resolver", () => {
     vi.stubEnv("IX_FORMAT", " JSON ");
-    expect(detectRequestedFormat(["text", "--", "--format", "llm"])).toBe("json");
+    expect(resolvedFormat(["text", "--", "--format", "llm"])).toBe("json");
   });
 
   it("does not skip -- when a format argument is missing", () => {
-    expect(detectRequestedFormat(["text", "--format", "--", "--format", "llm"])).toBe("text");
+    expect(resolvedFormat(["text", "--format", "--", "--format", "llm"])).toBe("text");
   });
 
-  it("ignores invalid formats and guards a config read that throws", () => {
+  it("ignores invalid environment formats and guards a config read that throws", () => {
     vi.stubEnv("IX_FORMAT", "invalid");
     vi.mocked(readConfiguredFormat).mockImplementation(() => { throw new Error("unreadable"); });
-    expect(detectRequestedFormat(["patches", "--format", "invalid"])).toBe("text");
+    expect(resolvedFormat(["patches"])).toBe("text");
   });
 
   it("falls back from an invalid environment value to normalized config", () => {
     vi.stubEnv("IX_FORMAT", "invalid");
     vi.mocked(readConfiguredFormat).mockReturnValue(" LLM ");
-    expect(detectRequestedFormat(["patches"])).toBe("llm");
+    expect(resolvedFormat(["patches"])).toBe("llm");
   });
 });

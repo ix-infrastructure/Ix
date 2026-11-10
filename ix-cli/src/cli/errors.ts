@@ -1,19 +1,19 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import chalk from "chalk";
-import { CommanderError } from "commander";
+import { CommanderError, type Command } from "commander";
 import { PRE_CONNECTION_CODES, RESET_RECONCILIATION_ERROR } from "../client/transport.js";
 
 import { DEFAULT_ENDPOINT, isLoopbackEndpoint, isManagedLocalBackend } from "./endpoint.js";
 import { llmError } from "./llm.js";
 import { exitCodeFor } from "./outcome.js";
-import { readConfiguredFormat } from "./config.js";
-import { isFormat, resolveDefaultFormat } from "./default-format.js";
+import { BUILT_IN_DEFAULT_FORMAT, resolveDefaultFormat } from "./default-format.js";
 
 // ── Answering in the format the caller asked for ───────────────────────────
 
 /**
- * The effective format for this run, or undefined before initialization.
+ * The format this run answers in, once it is known, or undefined while it is
+ * still the configured default.
  *
  * A failure is the one answer an agent is least equipped to guess at, and it
  * was the only one this CLI would not give in the format it had been asked
@@ -23,13 +23,55 @@ import { isFormat, resolveDefaultFormat } from "./default-format.js";
  */
 let requestedFormat: string | undefined;
 
-/** Record the format for the error boundary. Called once, from `run-cli.ts`. */
+/** Where the format comes from before a command has been parsed. */
+let formatFallback: (() => string | undefined) | undefined;
+let fallbackFormat: { value: string | undefined } | undefined;
+
+/**
+ * Record the format for the error boundary. `run-cli.ts` calls it with the
+ * parsed command's own `--format` value as soon as commander has one, so a
+ * failure is answered in exactly the format the payload would have been.
+ */
 export function setErrorFormat(format: string | undefined): void {
   requestedFormat = format;
 }
 
 /**
- * Resolve the flag, IX_FORMAT, config.format, then the built-in default.
+ * How to find the format when nothing has been recorded yet: an error thrown
+ * while the commands are being registered, or a usage error commander raises
+ * while parsing. Resolved only if such an error is rendered, so a run that
+ * succeeds never pays for it, and resolved at most once.
+ */
+export function setErrorFormatFallback(resolve: (() => string | undefined) | undefined): void {
+  formatFallback = resolve;
+  fallbackFormat = undefined;
+}
+
+/** The format a failure is answered in right now. Never throws. */
+export function errorFormat(): string | undefined {
+  if (requestedFormat !== undefined) return requestedFormat;
+  if (!formatFallback) return undefined;
+  if (!fallbackFormat) {
+    let value: string | undefined;
+    try { value = formatFallback(); } catch { value = undefined; }
+    fallbackFormat = { value };
+  }
+  return fallbackFormat.value;
+}
+
+/**
+ * True when the record on stdout replaces the prose on stderr rather than
+ * accompanying it. Only llm: it is read whole into an agent's context, where
+ * the same failure twice is noise. json keeps the prose on stderr as text does,
+ * because callers already read their error guidance from there (the plugin
+ * runners build their message from stderr, and log failures that have it).
+ */
+function recordReplacesProse(format: string | undefined): boolean {
+  return format === "llm";
+}
+
+/**
+ * The `--format` the caller typed, read straight off argv.
  *
  * Read from argv rather than from the parsed command because this has to work
  * before commander has parsed anything: the handler that calls
@@ -40,44 +82,155 @@ export function setErrorFormat(format: string | undefined): void {
  * Stops at `--`, so a term that merely looks like a flag —
  * `ix text -- "--format llm"` — is not read as one.
  */
-export function detectRequestedFormat(argv: readonly string[]): string {
-  let flag: string | undefined;
+export function detectRequestedFormat(argv: readonly string[]): string | undefined {
+  let format: string | undefined;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--") break;
-    if (arg.startsWith("--format=")) flag = arg.slice("--format=".length);
-    if (arg === "--format") flag = argv[i + 1];
+    if (arg.startsWith("--format=")) format = arg.slice("--format=".length);
+    if (arg === "--format" && argv[i + 1] !== "--") format = argv[++i];
   }
-  if (flag && isFormat(flag)) return flag;
-  // Registration uses the same guarded scalar read. A broken config must
-  // never prevent the error boundary from reporting the original failure.
-  return resolveDefaultFormat(process.env, () => {
-    try { return readConfiguredFormat(); } catch { return undefined; }
+  return format;
+}
+
+/**
+ * The format to answer a failure in before a command has been parsed, resolved
+ * the way a command's default `--format` is: the flag that was typed, then
+ * `IX_FORMAT`, then `format` in config.yaml, then text.
+ *
+ * `readConfigFormat` is guarded: this runs inside the error boundary, which
+ * must never throw, and a config.yaml that does not parse is the very failure
+ * it may be in the middle of reporting.
+ */
+export function resolveErrorFormat(
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv,
+  readConfigFormat: () => string | undefined,
+): string {
+  const typed = detectRequestedFormat(argv);
+  if (typed !== undefined) return typed;
+  return resolveDefaultFormat(env, () => {
+    try { return readConfigFormat(); } catch { return undefined; }
   }).format;
 }
 
 /**
- * Emit the failure as one record on stdout, or return false if the caller did
- * not ask for records.
- *
- * On stdout, not stderr: stdout is where the answer goes, and "there is no
- * answer, because X" is an answer. The human prose is then skipped rather than
- * printed alongside, so the caller gets exactly one report.
+ * The format a parsed command answers in: its own `--format` value, which
+ * commander has already resolved from the flag or the configured default. A
+ * command with no `--format` prints prose, so its failures do too.
  */
-function emitMachineError(
-  format: string | undefined,
+export function commandFormat(command: Command): string {
+  const value = declaresFormat(command) ? command.opts().format : undefined;
+  return typeof value === "string" ? value : BUILT_IN_DEFAULT_FORMAT;
+}
+
+function declaresFormat(command: Command): boolean {
+  return command.options.some((option) => option.long === "--format");
+}
+
+/**
+ * The format a usage error commander raises on `command` is answered in.
+ *
+ * Only a command that takes `--format` answers in records: `ix hook --bogus`
+ * or `ix mcp serve --bogus` under IX_FORMAT=json is still prose on stderr, as
+ * every other failure of those commands is. For one that does, the typed flag
+ * is read off argv first, because commander may raise the error before it has
+ * reached `--format` (a bad value for an earlier option); otherwise it is the
+ * command's own resolved default.
+ */
+export function usageErrorFormat(command: Command, argv: readonly string[]): string {
+  if (!declaresFormat(command)) return BUILT_IN_DEFAULT_FORMAT;
+  return detectRequestedFormat(argv) ?? commandFormat(command);
+}
+
+/**
+ * Emit the failure as one record on stdout when the format is json or llm.
+ * Returns true when that record is the whole report (llm), so the caller skips
+ * its prose; false when the caller still writes the prose to stderr (text, and
+ * json, where stdout carries the one record and stderr keeps the prose).
+ *
+ * On stdout: stdout is where the answer goes, and "there is no answer, because
+ * X" is an answer.
+ *
+ * One shape per format, whatever failed: `error code=… message=… hint=…` for
+ * llm, and `{"error": code, "message": …, "next": …}` for json, with any extra
+ * fields between the message and the next step.
+ *
+ * Exported for the commands that catch a failure themselves (`ix status`,
+ * `ix verify`), so their record is this one; they pass their own `--format`.
+ */
+export function emitErrorRecord(
   code: string,
   message: string,
   hint?: string,
   extra: Array<[string, string]> = [],
+  format: string | undefined = errorFormat(),
 ): boolean {
   if (format === "json") {
-    console.log(JSON.stringify({ error: code, message, ...Object.fromEntries(extra), ...(hint ? { next: hint } : {}) }));
-    return true;
+    console.log(JSON.stringify({
+      error: code,
+      message,
+      ...Object.fromEntries(extra),
+      ...(hint ? { next: hint } : {}),
+    }));
+  } else if (format === "llm") {
+    console.log(llmError(code, message, [...extra, ...(hint ? [["hint", hint] as [string, string]] : [])]));
   }
-  if (format !== "llm") return false;
-  console.log(llmError(code, message, [...extra, ...(hint ? [["hint", hint] as [string, string]] : [])]));
-  return true;
+  return recordReplacesProse(format);
+}
+
+// ── Commander's own failures ───────────────────────────────────────────────
+
+/** Commander's exits that are answers, not failures. */
+const COMMANDER_SUCCESS_CODES = new Set(["commander.helpDisplayed", "commander.help", "commander.version"]);
+
+/**
+ * The format each commander exit was raised in, keyed by the error. Its
+ * presence also means commander has already written its own message to
+ * stderr unless that format is llm.
+ */
+const commanderFormats = new WeakMap<object, string | undefined>();
+
+/**
+ * The `exitOverride` callback for the CLI's commands: throw commander's exit as
+ * an error so `renderCliError` can answer it in the caller's format.
+ * `bindCommanderErrors` passes the format for the command that raised it;
+ * without one, it is the run's.
+ *
+ * `executeSubCommandAsync` is commander's own exception, as in its default
+ * override: it reports a spawned child, and there is nothing to throw to.
+ */
+export function throwCommanderExit(err: CommanderError, format: string | undefined = errorFormat()): void {
+  if (err.code === "commander.executeSubCommandAsync") return;
+  commanderFormats.set(err, format);
+  throw err;
+}
+
+/**
+ * Commander's `outputError`: its own message on stderr, unless the format is
+ * llm, in which case `renderCliError` prints the one report on stdout.
+ */
+export function writeCommanderError(
+  str: string,
+  write: (str: string) => void,
+  format: string | undefined = errorFormat(),
+): void {
+  if (!recordReplacesProse(format)) write(str);
+}
+
+/**
+ * Point every command's commander exits at the boundary, each with its own
+ * format (`usageErrorFormat`). Run once every command is registered and before
+ * parsing; a command added later keeps the inherited, run-wide handlers.
+ */
+export function bindCommanderErrors(root: Command, argv: readonly string[]): void {
+  const visit = (command: Command): void => {
+    const format = () => usageErrorFormat(command, argv);
+    command.exitOverride((err) => throwCommanderExit(err, format()));
+    command.configureOutput({ outputError: (str, write) => writeCommanderError(str, write, format()) });
+    for (const sub of command.commands) visit(sub);
+  };
+  visit(root);
 }
 
 /**
@@ -380,28 +533,42 @@ export function localTokenRequiredError(endpoint?: string): StructuredError {
   };
 }
 
-/** An explicit format keeps in-process calls independent of the CLI boundary's default. */
-export function renderCliError(err: unknown, debug = false, endpoint?: string, format = requestedFormat): void {
-  // Commander uses the same exception mechanism for successful help/version.
-  if (err instanceof CommanderError && err.exitCode === 0) return;
-  if (err instanceof CliUsageError || err instanceof CliResolutionError || err instanceof CommanderError) {
-    const code = err instanceof CliResolutionError ? "resolution_failed" : "usage_error";
-    const hint = err instanceof CommanderError ? undefined : err.hint;
-    const message = err instanceof CommanderError ? err.message.replace(/^error: /, "") : err.message;
-    if (!emitMachineError(format, code, message, hint)) {
-      process.stderr.write(chalk.red(`Error: ${message}\n`));
-      if (hint) {
-        process.stderr.write(chalk.dim(`${hint}\n`));
+// MCP supplies a per-run format rather than changing the process-wide boundary.
+export function renderCliError(err: unknown, debug = false, endpoint?: string, format = errorFormat()): void {
+  // Commander's usage errors (unknown option, bad value, missing argument), and
+  // its help and version exits, which are successes and keep their exit code.
+  // Commander has already printed its own message unless the caller asked for
+  // records; an InvalidArgumentError thrown by our own validation has not.
+  if (err instanceof CommanderError) {
+    if (err.exitCode !== 0 && !COMMANDER_SUCCESS_CODES.has(err.code)) {
+      const message = err.message.replace(/^error:\s*/i, "");
+      const raised = commanderFormats.has(err);
+      const commanderFormat = raised ? commanderFormats.get(err) : format;
+      // Raised through commander's exit, it has written its message already.
+      if (!emitErrorRecord("usage_error", message, undefined, [], commanderFormat) && !raised) {
+        process.stderr.write(chalk.red(`Error: ${message}\n`));
+      }
+      if (debug) writeDebugDetail(err);
+    }
+    process.exit(err.exitCode);
+  }
+
+  if (err instanceof CliUsageError || err instanceof CliResolutionError) {
+    const code = err instanceof CliUsageError ? "usage_error" : "resolution_failed";
+    if (!emitErrorRecord(code, err.message, err.hint, [], format)) {
+      process.stderr.write(chalk.red(`Error: ${err.message}\n`));
+      if (err.hint) {
+        process.stderr.write(chalk.dim(`${err.hint}\n`));
       }
     }
     if (debug && err instanceof CliResolutionError && err.detail) {
       process.stderr.write(chalk.dim(`Detail: ${err.detail}\n`));
     }
-    process.exit(err instanceof CommanderError ? err.exitCode : 1);
+    process.exit(1);
   }
 
   if (err instanceof WorkspaceNotMappedError) {
-    if (!emitMachineError(format, err.code, err.summary, err.hint, [["dir", err.dir]])) {
+    if (!emitErrorRecord(err.code, err.summary, err.hint, [["dir", err.dir]], format)) {
       renderStructuredError({ error: err.code, message: err.summary, next: err.hint });
     }
     // Its own code, so an agent knows to map rather than retry (outcome.ts).
@@ -412,7 +579,7 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string, f
 
   if (isBackendUnreachable(err)) {
     const unreachable = backendUnreachableError(endpoint);
-    if (!emitMachineError(format, unreachable.error, unreachable.message, unreachable.next)) {
+    if (!emitErrorRecord(unreachable.error, unreachable.message, unreachable.next, [], format)) {
       renderStructuredError(unreachable);
     }
     if (debug) writeDebugDetail(err);
@@ -421,21 +588,21 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string, f
 
   if (e?.name === "ConfigParseError") {
     const broken = configParseError(e.path, e.detail);
-    if (!emitMachineError(format, broken.error, broken.message, broken.next)) renderStructuredError(broken);
+    if (!emitErrorRecord(broken.error, broken.message, broken.next, [], format)) renderStructuredError(broken);
     if (debug) writeDebugDetail(err);
     process.exit(1);
   }
 
   if (e?.name === "ConfigLockError") {
     const locked = configLockError(e.detail);
-    if (!emitMachineError(format, locked.error, locked.message, locked.next)) renderStructuredError(locked);
+    if (!emitErrorRecord(locked.error, locked.message, locked.next, [], format)) renderStructuredError(locked);
     if (debug) writeDebugDetail(err);
     process.exit(1);
   }
 
   if (e?.name === "LocalTokenRequiredError") {
     const refused = localTokenRequiredError(endpoint);
-    if (!emitMachineError(format, refused.error, refused.message, refused.next)) {
+    if (!emitErrorRecord(refused.error, refused.message, refused.next, [], format)) {
       renderStructuredError(refused);
     }
     if (debug) writeDebugDetail(err);
@@ -444,7 +611,7 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string, f
 
   const structured = typeof e?.message === "string" ? parseBackendError(e.message) : null;
   if (structured) {
-    if (!emitMachineError(format, structured.error, structured.message, structured.next)) {
+    if (!emitErrorRecord(structured.error, structured.message, structured.next, [], format)) {
       renderStructuredError(structured);
     }
     if (debug) writeDebugDetail(err);
@@ -456,7 +623,7 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string, f
   const msg = err === null || err === undefined ? String(err) : formatFetchError(err);
   // `cli_error` because nothing above recognised it: the code has to stay
   // stable and honest rather than guess at a class from the message text.
-  if (!emitMachineError(format, "cli_error", msg)) {
+  if (!emitErrorRecord("cli_error", msg, undefined, [], format)) {
     process.stderr.write(chalk.red(`Error: ${msg}\n`));
   }
 

@@ -60,7 +60,8 @@ async function run(args: string[], format: string, source = "flag", url = closed
 
 function expectRecord(result: Awaited<ReturnType<typeof run>>, format: string, code: string) {
   expect(result.status).toBe(1);
-  expect(result.stderr).toBe("");
+  if (format === "llm") expect(result.stderr).toBe("");
+  else expect(result.stderr).not.toBe("");
   expect(result.stdout.trim().split("\n")).toHaveLength(1);
   if (format === "json") expect(JSON.parse(result.stdout)).toMatchObject({ error: code, message: expect.any(String) });
   else expect(result.stdout).toMatch(new RegExp(`^error code=${code} message=`));

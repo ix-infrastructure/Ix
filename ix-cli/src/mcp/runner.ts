@@ -14,8 +14,8 @@ import { registerOssCommands, registerProStubs } from "../cli/register/oss.js";
 import { tryLoadProCommands } from "../cli/register/pro-loader.js";
 import { registerOssFallbacks } from "../cli/register/oss-fallbacks.js";
 import { resetResolutionNotices } from "../cli/format.js";
-import { getEndpoint } from "../cli/config.js";
-import { detectRequestedFormat, renderCliError } from "../cli/errors.js";
+import { getEndpoint, readConfiguredFormat } from "../cli/config.js";
+import { resolveErrorFormat, renderCliError } from "../cli/errors.js";
 import { resetReadScope } from "../cli/resolve.js";
 import { releaseLocksOwnedBy, setLockOwnerResolver } from "../cli/single-flight.js";
 import { IX_CALLER_ENV } from "../cli/next-step.js";
@@ -461,7 +461,8 @@ async function executeInProcess(
         if (error instanceof ProcessExitSignal || abort.signal.aborted || run.truncated) throw error;
         let endpoint: string | undefined;
         try { endpoint = getEndpoint(); } catch { /* Broken config must still be renderable. */ }
-        renderCliError(error, args.includes("--debug") || process.env.IX_DEBUG === "1", endpoint, detectRequestedFormat(args));
+        renderCliError(error, args.includes("--debug") || process.env.IX_DEBUG === "1", endpoint,
+          resolveErrorFormat(args, process.env, readConfiguredFormat));
       }
     }));
   // Settles either way and never rejects, so it can be watched without adding a

@@ -60,7 +60,8 @@ describe.each(["json", "llm"])("in-process error boundary in %s", (format) => {
         const result = await run([...args, ...(source === "flag" ? ["--format", format] : [])]);
 
         expect(result.ok).toBe(false);
-        expect(result.stderr).toBe("");
+        if (format === "llm") expect(result.stderr).toBe("");
+        else expect(result.stderr).toContain("Request failed");
         expect(result.stdout.trim().split("\n")).toHaveLength(1);
         if (format === "json") {
           expect(JSON.parse(result.stdout)).toEqual({ error: "test_failure", message: "Request failed", next: "Try later" });
@@ -76,7 +77,8 @@ describe.each(["json", "llm"])("in-process error boundary in %s", (format) => {
     const run = createInProcessRunner();
     const result = await run(["stats", "--bogus", "--format", format]);
     expect(result.ok).toBe(false);
-    expect(result.stderr).toBe("");
+    if (format === "llm") expect(result.stderr).toBe("");
+    else expect(result.stderr).toContain("unknown option");
     if (format === "json") expect(JSON.parse(result.stdout).error).toBe("usage_error");
     else expect(result.stdout).toMatch(/^error code=usage_error /);
 
