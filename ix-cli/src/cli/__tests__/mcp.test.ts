@@ -444,6 +444,27 @@ describe("ix mcp", () => {
     expect(parsed.candidates).toEqual([{ file: "ix-cli/src/a.ts", smell: "orphan" }]);
   });
 
+  it("ix_smells filters on a candidate's path when it has one: file is only a basename", async () => {
+    const candidates = [
+      { file: "util.ts", path: "app/util.ts", smell: "orphan" },
+      { file: "util.ts", path: "lib/util.ts", smell: "orphan" },
+      { file: "app.ts", path: "lib/app.ts", smell: "orphan" },
+      // No path (an older backend): the basename is all there is to match.
+      { file: "legacy.ts", smell: "orphan" },
+    ];
+    const client = await connect(async () => ({ ok: true, stdout: JSON.stringify({ count: 4, candidates }), stderr: "" }));
+    const filtered = async (path: string) => {
+      const result = await client.callTool({ name: "ix_smells", arguments: { path } });
+      const content = (result as CallToolResult).content[0];
+      return JSON.parse(content?.type === "text" ? content.text : "{}").candidates;
+    };
+
+    expect(await filtered("app")).toEqual([candidates[0], candidates[2]]);
+    expect(await filtered("app/util")).toEqual([candidates[0]]);
+    expect(await filtered("lib/util.ts")).toEqual([candidates[1]]);
+    expect(await filtered("legacy")).toEqual([candidates[3]]);
+  });
+
   it("a stale ix_smells answer goes through the same path filter and limit, stale fields kept", async () => {
     const stale = {
       count: 3,

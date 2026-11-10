@@ -1116,7 +1116,10 @@ async function runSmells(runIx: IxRunner, input: ToolInput): Promise<CallToolRes
       // rank). Prefix matching answered `{"count": 0}` — a confident "no
       // architecture smells here" — for the `src` an agent had just used
       // successfully against ix_inventory on files stored as `ix-cli/src/...`.
-      return normalizePath(candidate.file).includes(path);
+      // Against the workspace-relative `path` when the CLI could read it:
+      // `file` is a basename, which no directory matches.
+      const location = typeof candidate.path === "string" ? candidate.path : candidate.file;
+      return normalizePath(location).includes(path);
     });
   const candidates = matched.slice(0, limit);
 

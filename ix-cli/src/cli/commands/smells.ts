@@ -6,14 +6,17 @@ import { createClient } from "../../client/factory.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { llmLine, llmError, type LlmValue } from "../llm.js";
-import { printJson, sliceRanked, truncationHint, type Slice } from "../format.js";
+import { printJson, rowLocation, sliceRanked, truncationHint, type Slice } from "../format.js";
 import { MAX_WAIT_SECONDS, parseWaitSecondsOption } from "../options.js";
 import { forMcp } from "../next-step.js";
 import { canRenderProgress } from "../stderr.js";
 
 export interface SmellCandidate {
   file_id: string;
+  /** The file's name as the backend reports it: a basename, so two files can share it. */
   file: string;
+  /** The file's workspace-relative path, read from its node (see withFilePaths). */
+  path?: string;
   smell: string;
   confidence: number;
   signals: Record<string, unknown>;
@@ -91,6 +94,36 @@ export function selectSmells(report: SmellReport, limit: number, filterNonSource
     slice: sliceRanked(sorted, limit),
     filteredNonSource: report.candidates.length - kept.length,
   };
+}
+
+/** The most ids one `POST /v1/nodes` takes. */
+const NODES_PER_READ = 1000;
+
+/**
+ * The candidates with each file's workspace-relative `path`, read from its
+ * node in one batched read per 1000 files. The backend names a file by its
+ * basename, which a path filter (MCP ix_smells) cannot match against a
+ * directory. Best-effort: a backend without the batched read, or a file no
+ * longer in the graph, leaves the candidate as it was.
+ */
+export async function withFilePaths(
+  client: { nodes(ids: string[]): Promise<{ nodes: any[] }> },
+  candidates: SmellCandidate[],
+): Promise<SmellCandidate[]> {
+  const ids = [...new Set(candidates.map((c) => c.file_id).filter(Boolean))];
+  const paths = new Map<string, string>();
+  for (let i = 0; i < ids.length; i += NODES_PER_READ) {
+    try {
+      const answer = await client.nodes(ids.slice(i, i + NODES_PER_READ));
+      for (const node of answer?.nodes ?? []) {
+        const path = node?.path ?? rowLocation(node).path;
+        if (typeof node?.id === "string" && typeof path === "string" && path !== "") paths.set(node.id, path);
+      }
+    } catch {
+      // No paths for these files: their candidates keep only `file`.
+    }
+  }
+  return candidates.map((c) => (paths.has(c.file_id) ? { ...c, path: paths.get(c.file_id) } : c));
 }
 
 /**
@@ -349,6 +382,8 @@ last completed run are shown instead, marked stale.`)
       }
       stopProgress();
 
+      // Only json carries `path`: it is what MCP ix_smells filters.
+      if (opts.format === "json") report = { ...report, candidates: await withFilePaths(client, report.candidates) };
       printSmellsReport(report, opts);
     });
 }
@@ -392,6 +427,7 @@ function printSmellsReport(report: SmellReport, opts: { format: string; limit?: 
       inference_version: "smell_v1",
       candidates: slice.rows.map(c => ({
         file: c.file,
+        ...(c.path ? { path: c.path } : {}),
         smell: c.smell,
         confidence: c.confidence,
         signals: c.signals,
@@ -510,7 +546,7 @@ export function storedSmellToCandidate(row: any): SmellCandidate {
  * unreadable, it is today's error: exit 1, `backend_error`.
  */
 async function printStoredSmells(
-  client: { listSmells(opts: { workspaceId?: string; systemId?: string }): Promise<any> },
+  client: { listSmells(opts: { workspaceId?: string; systemId?: string }): Promise<any>; nodes(ids: string[]): Promise<{ nodes: any[] }> },
   scope: { workspaceId?: string; systemId?: string },
   opts: { format: string; limit?: string },
   cause: string,
@@ -548,7 +584,9 @@ async function printStoredSmells(
     rev: asOf.computed_rev ?? undefined,
     run_at: asOf.computed_at ?? undefined,
     count: rows.length,
-    candidates: rows.map(storedSmellToCandidate),
+    candidates: opts.format === "json"
+      ? await withFilePaths(client, rows.map(storedSmellToCandidate))
+      : rows.map(storedSmellToCandidate),
   } as unknown as SmellReport;
   printSmellsReport(report, opts, { reason, message: staleMessage(cause, asOf) + partial, asOf, storedTruncated });
 }
