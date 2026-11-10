@@ -41,9 +41,56 @@ cd ix-cli && npm test
 
 1. Create a branch from `main`
 2. Make your changes
-3. Run tests locally
+3. Run the checks in [Before you open a PR](#before-you-open-a-pr)
 4. Open a PR using the pull request template
 5. Ensure CI passes before merge
+
+## Before you open a PR
+
+`npm test` alone is not what CI checks. The required `CI Passed` check
+(`.github/workflows/ci.yml`) waits on every job below, so run the ones that
+cover what you changed:
+
+```bash
+# Lint & Typecheck
+python3 .github/scripts/copyright-headers.py   # from the repo root
+cd ix-cli
+npm run lint
+npm run typecheck
+npm run knip
+
+# Tests (ix-cli's npm test runs the unit suite and the parser smoke test)
+npm test
+cd ../core-ingestion && npm test && cd ../ix-cli
+
+# API and flag reference parity (flag parity reads dist/, so build first)
+node scripts/check-api-parity.mjs
+npm run build && node scripts/check-doc-parity.mjs
+
+# Links in tracked markdown, from the repo root
+cd .. && node ix-cli/scripts/check-links.mjs
+
+# Docs site build and its link crawl
+cd docs-site && npm ci && npm run build
+node ../ix-cli/scripts/check-links.mjs --dist dist --dist-only
+```
+
+CI also runs the real-backend scenarios (needs Docker). See
+[`ix-cli/test/e2e/README.md`](ix-cli/test/e2e/README.md) for how to run them
+locally:
+
+```bash
+cd ix-cli
+npm run e2e:up
+IX_E2E=1 npm run test:e2e
+npm run e2e:down
+```
+
+The `E2E (real backend)` job additionally smokes the CLI against
+`docker-compose.standalone.yml` and runs a performance gate
+(`ix-cli/scripts/perf-gate.mjs`), and the `Harness install smoke` jobs
+exercise `scripts/install-skill.sh --dry-run` on Linux and Windows. Those are
+easiest to check on the PR itself.
 
 ## Branch Naming
 
@@ -78,7 +125,8 @@ Breaking changes: use `feat!:` or `fix!:` prefix.
 | What changed | Run |
 |---|---|
 | CLI code | `cd ix-cli && npm test` |
-| Any change | Full test suite before opening PR |
+| `core-ingestion/` | `cd core-ingestion && npm test` |
+| Any change | Everything in [Before you open a PR](#before-you-open-a-pr) |
 
 ## CLI Standards
 
@@ -178,7 +226,7 @@ numbers, and generated files lose the header on their next regeneration.
 PRs and pushes to `main` run automated security checks:
 
 - **Dependency review** — flags new dependencies with known vulnerabilities (PRs only)
-- **Trivy scanning** — scans the repo filesystem and Docker image for vulnerabilities and misconfigurations
+- **Trivy scanning** — scans the repository filesystem for vulnerabilities and misconfigurations (no container image is scanned)
 - **Config security** — scans Docker Compose and deployment configs for unsafe exposure (e.g., auth disabled with public port bindings, `0.0.0.0` bindings). Local-only configs that bind to `127.0.0.1` are allowed.
 
 All checks fail on CRITICAL or HIGH severity findings. If a check fails on your PR, inspect the output and either fix the vulnerability or document why it's a false positive.
