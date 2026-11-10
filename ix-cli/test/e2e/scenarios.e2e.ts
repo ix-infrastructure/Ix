@@ -517,6 +517,7 @@ describe("an extractor upgrade over a real backend (IN-20)", () => {
     }]);
     ix(env, co, ["ingest", "--path", join(co.dir, file), "--force"]);
     expect((await client.nodes([ghost], "full")).nodes.map((n) => n.id)).toEqual([ghost]);
+    const beforeSweep = await signature(env, co);
 
     // The baseline says the previous extractor: the next map is an extractor
     // change, not a repair. Its delete for app/pricing.py must not go under
@@ -530,10 +531,21 @@ describe("an extractor upgrade over a real backend (IN-20)", () => {
     expect(res.stderr).not.toContain("[orphans kept]");
 
     expect((await client.nodes([ghost], "full")).missing).toContain(ghost);
-    // The forced ingest wrote chunk nodes a map does not; everything else
-    // matches a fresh map.
+    // The forced ingest wrote chunks and their incident edges. Map preserves
+    // that full graph, while everything outside it matches a fresh map.
     const actual = await signature(env, co);
-    const noChunks = (sig: typeof actual) => ({ nodes: sig.nodes.filter((line) => !line.startsWith("chunk|")), edges: sig.edges });
+    const isChunkEdge = (line: string) => line.split("|").slice(1, 3).some((endpoint) => endpoint.startsWith("chunk:"));
+    const chunks = (sig: typeof actual) => ({
+      nodes: sig.nodes.filter((line) => line.startsWith("chunk|")),
+      edges: sig.edges.filter(isChunkEdge),
+    });
+    expect(chunks(beforeSweep).nodes.length).toBeGreaterThan(0);
+    expect(chunks(beforeSweep).edges.length).toBeGreaterThan(0);
+    expectSameGraph("orphan sweep preserves the ingested chunks and their edges", chunks(actual), chunks(beforeSweep));
+    const noChunks = (sig: typeof actual) => ({
+      nodes: sig.nodes.filter((line) => !line.startsWith("chunk|")),
+      edges: sig.edges.filter((line) => !isChunkEdge(line)),
+    });
     expectSameGraph("a precommitted file's orphan is retired", noChunks(actual), noChunks(fresh));
   });
 });
