@@ -45,6 +45,9 @@ describe("CLI start-up module graph", () => {
     // so it is named here. Together they are the largest start-up graph.
     const { packages, modules } = startupPackages([
       join(SRC, "cli/main.ts"), join(SRC, "cli/run-cli.ts"), join(SRC, "cli/register/oss.ts"),
+      // Discovery eagerly loads this classifier by URL so static typechecking
+      // needs no generated files. Still guard its imports against parser loads.
+      resolve(SRC, "../../core-ingestion/src/languages.ts"),
     ]);
 
     // The walk really reached the command registry.

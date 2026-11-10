@@ -374,7 +374,14 @@ describe("canonical watch refresh", () => {
       expect(source.stdout.trim()).toBe(version);
       expect(source.stderr).not.toContain("Debugger listening");
 
-      const outDir = path.join(tempRoot, "dist");
+      const outDir = path.join(tempRoot, "cli", "dist");
+      // Match the shipped sibling layout for the shared language classifier.
+      const languagesDir = path.join(tempRoot, "core-ingestion", "dist");
+      fs.mkdirSync(languagesDir, { recursive: true });
+      fs.copyFileSync(
+        path.join(packageRoot, "../core-ingestion/dist/languages.js"),
+        path.join(languagesDir, "languages.js"),
+      );
       // Compile the CLI entry's own module graph, not `src`.
       //
       // This test asks whether the built child STARTS, so a file the child

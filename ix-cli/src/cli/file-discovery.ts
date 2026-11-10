@@ -5,7 +5,12 @@ import * as nodePath from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { createIgnoreMatcher, parseIgnoreFile, type IgnoreMatcher } from "./ignore-globs.js";
-import { SUPPORTED_EXTENSIONS } from "./supported-extensions.js";
+
+// core-ingestion is built for runtime, but the CLI's static typecheck runs
+// before that build. Resolve the dependency-free classifier at runtime, as the
+// ingestion loader does, without making generated declarations a prerequisite.
+const { languageFromPath }: { languageFromPath: (filePath: string) => string | null } =
+  await import(/* webpackIgnore: true */ /* @vite-ignore */ new URL("../../../core-ingestion/dist/languages.js", import.meta.url).href);
 
 /**
  * Which files are the repository: one implementation for `ix ingest`/`ix map`,
@@ -67,7 +72,7 @@ const GENERATED_FILE_PREFIXES = [
 ];
 
 // Generated dependency lockfiles, matched whole. Only the ones whose extension
-// SUPPORTED_EXTENSIONS actually discovers are listed: `yarn.lock`,
+// languageFromPath actually recognizes are listed: `yarn.lock`,
 // `composer.lock`, `Cargo.lock`, `Gemfile.lock`, `poetry.lock` and friends end
 // in `.lock`, which is not a discovered extension, so they never reach here.
 // A lockfile well under MAX_FILE_BYTES still expands into a graph patch larger
@@ -95,12 +100,7 @@ export function isGeneratedFile(basename: string): boolean {
 }
 
 export function isSupportedSourceFile(filePath: string): boolean {
-  const fileName = nodePath.basename(filePath).toLowerCase();
-  return fileName === "dockerfile"
-    || fileName.endsWith(".dockerfile")
-    || fileName === "makefile"
-    || fileName === "gnumakefile"
-    || SUPPORTED_EXTENSIONS.has(nodePath.extname(filePath).toLowerCase());
+  return languageFromPath(filePath) !== null;
 }
 
 /** A file discovery would hand to the parser. */

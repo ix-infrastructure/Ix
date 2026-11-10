@@ -2603,7 +2603,7 @@ export async function ingestFiles(
    *     has nothing to give. The dominant cause is an unavailable optional
    *     grammar -- fourteen are optionalDependencies loaded through a try/catch,
    *     and `tree-sitter-sas` has no win32 prebuild at all -- and those
-   *     extensions are still in SUPPORTED_EXTENSIONS, so the files are
+   *     extensions are still recognized by languageFromPath, so the files are
    *     discovered, read, dispatched and come back null on EVERY run. Gating on
    *     this count blocked stitching permanently for any repo containing one,
    *     `--force` included, since forcing does not change a parse result. That
