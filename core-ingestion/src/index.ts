@@ -528,11 +528,24 @@ function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
   }
 }
 
-/** Returns true if a grammar is installed for the given file's language. */
+// Formats parsed without tree-sitter. Support detection and dispatch must use
+// the same registry so a new hand parser is also eligible for verification.
+const HAND_PARSERS: Partial<Record<SupportedLanguages, (filePath: string, source: string) => FileParseResult>> = {
+  [SupportedLanguages.YAML]: parseYamlFile,
+  [SupportedLanguages.Dockerfile]: parseDockerfileFile,
+  [SupportedLanguages.SQL]: parseSqlFile,
+  [SupportedLanguages.JSON]: parseJsonFile,
+  [SupportedLanguages.TOML]: parseTomlFile,
+  [SupportedLanguages.Markdown]: parseMarkdownFile,
+  [SupportedLanguages.LaTeX]: parseLatexFile,
+  [SupportedLanguages.Proto]: parseProtoFile,
+};
+
+/** Returns true if a hand parser or installed grammar supports the file's language. */
 export function isGrammarSupported(filePath: string): boolean {
   const language = languageFromPath(filePath);
   if (!language) return false;
-  if (language === SupportedLanguages.YAML || language === SupportedLanguages.Dockerfile || language === SupportedLanguages.SQL || language === SupportedLanguages.JSON || language === SupportedLanguages.TOML || language === SupportedLanguages.Markdown || language === SupportedLanguages.LaTeX) return true;
+  if (HAND_PARSERS[language]) return true;
   if (filePath.endsWith('.tsx')) return true; // TSX uses TypeScript.tsx, always available
   return GRAMMAR_MAP[language] !== undefined;
 }
@@ -2690,14 +2703,8 @@ export interface ParseFileOptions {
 export function parseFile(filePath: string, source: string, opts: ParseFileOptions = {}): FileParseResult | null {
   const language = detectLanguageForSource(filePath, source);
   if (!language) return null;
-  if (language === SupportedLanguages.YAML) return parseYamlFile(filePath, source);
-  if (language === SupportedLanguages.Dockerfile) return parseDockerfileFile(filePath, source);
-  if (language === SupportedLanguages.SQL) return parseSqlFile(filePath, source);
-  if (language === SupportedLanguages.JSON) return parseJsonFile(filePath, source);
-  if (language === SupportedLanguages.TOML) return parseTomlFile(filePath, source);
-  if (language === SupportedLanguages.Markdown) return parseMarkdownFile(filePath, source);
-  if (language === SupportedLanguages.LaTeX) return parseLatexFile(filePath, source);
-  if (language === SupportedLanguages.Proto) return parseProtoFile(filePath, source);
+  const handParser = HAND_PARSERS[language];
+  if (handParser) return handParser(filePath, source);
 
   // TypeScript TSX uses a separate grammar
   const isTsx = filePath.endsWith('.tsx');

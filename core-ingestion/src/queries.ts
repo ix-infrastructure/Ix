@@ -2034,7 +2034,7 @@ export const LUA_QUERIES = `
   (#eq? @_req "require")) @import
 `;
 
-export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
+export const LANGUAGE_QUERIES: Partial<Record<SupportedLanguages, string>> = {
   [SupportedLanguages.TypeScript]: TYPESCRIPT_QUERIES,
   [SupportedLanguages.JavaScript]: JAVASCRIPT_QUERIES,
   [SupportedLanguages.Python]: PYTHON_QUERIES,
@@ -2049,12 +2049,6 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.Kotlin]: KOTLIN_QUERIES,
   [SupportedLanguages.Swift]: SWIFT_QUERIES,
   [SupportedLanguages.Scala]: SCALA_QUERIES,
-  [SupportedLanguages.YAML]: '',
-  [SupportedLanguages.Dockerfile]: '',
-  [SupportedLanguages.SQL]: '',
-  [SupportedLanguages.JSON]: '',
-  [SupportedLanguages.TOML]: '',
-  [SupportedLanguages.Markdown]: '',
   [SupportedLanguages.R]: R_QUERIES,
   [SupportedLanguages.SAS]: SAS_QUERIES,
   [SupportedLanguages.Elixir]: ELIXIR_QUERIES,
@@ -2068,11 +2062,5 @@ export const LANGUAGE_QUERIES: Record<SupportedLanguages, string> = {
   [SupportedLanguages.XML]: XML_QUERIES,
   [SupportedLanguages.HCL]: HCL_QUERIES,
   [SupportedLanguages.CSS]: CSS_QUERIES,
-  // LaTeX/TeX has no tree-sitter grammar in this stack; it is parsed by the
-  // hand-rolled scanner in parseLatexFile (index.ts), like Markdown/YAML/etc.
-  [SupportedLanguages.LaTeX]: '',
-  // Protocol Buffers likewise: no grammar in this stack, parsed by
-  // parseProtoFile's scanner in index.ts.
-  [SupportedLanguages.Proto]: '',
 };
  
