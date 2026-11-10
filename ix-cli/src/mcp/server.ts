@@ -25,13 +25,17 @@ import {
 export type { IxRunner } from "./runner.js";
 
 /**
- * Tools every install can run.
+ * Tools every install can run: the full OSS catalog (`--tools=all`).
  *
- * This set is the union of what the per-host Ix plugins expose, minus three
- * deliberate drops: `ix_query` is the deprecated command the CLI docs tell
- * agents not to use, and `ix_neighbors` / `ix_docs_tool` are convenience
- * composites of `ix_callers` + `ix_callees` + `ix_depends` and of
- * `ix_overview`, all of which are here individually.
+ * A default session advertises {@link IX_MCP_CORE_TOOL_NAMES} instead. This
+ * list is the union of what the per-host Ix plugins expose, minus two
+ * deliberate drops: `ix_query`, the deprecated command the CLI docs tell
+ * agents not to use, and `ix_docs_tool`, a convenience composite of
+ * `ix_overview`. `ix_neighbors` is served — one tool for callers, callees,
+ * imports, importers and overrides. The four single-relation tools
+ * (`ix_callers`, `ix_callees`, `ix_imported_by`, `ix_imports`) stay in this
+ * catalog; `--tools=core` advertises `ix_neighbors` in their place.
+ * `ix_status` is Gemini's name for `ix_health`.
  */
 export const IX_MCP_OSS_TOOL_NAMES = [
   // First, as it is registered first: tools/list leads with where to start.

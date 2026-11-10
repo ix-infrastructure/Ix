@@ -30,28 +30,32 @@ The plugins never shared one tool surface. Measured against `ix mcp`:
 | ix-codex-plugin | 23 | — |
 | ix-cursor-plugin | 23 | — |
 | ix-gemini-plugin | 23 | `ix_decide`, `ix_ingest`, `ix_query`, `ix_status` |
-| ix-openclaw-plugin | 17 | `ix_decide`, `ix_docs_tool`, `ix_ingest`, `ix_neighbors`, `ix_query` |
-| ix-opencode-plugin | 17 | `ix_decide`, `ix_docs_tool`, `ix_ingest`, `ix_neighbors`, `ix_query` |
+| ix-openclaw-plugin | 17 | `ix_decide`, `ix_docs_tool`, `ix_ingest`, `ix_query` |
+| ix-opencode-plugin | 17 | `ix_decide`, `ix_docs_tool`, `ix_ingest`, `ix_query` |
 | ix-claude-plugin | 0 (skills only) | — |
 
-`ix mcp` now closes that gap, with three deliberate exclusions:
+`ix mcp` now closes that gap, with two deliberate exclusions:
 
 - **`ix_query`** — the deprecated command the CLI docs tell agents not to use
   ("produces oversized low-signal responses"). Dropped on purpose.
-- **`ix_neighbors`** — a composite of `ix_callers` + `ix_callees` + `ix_depends`,
-  all served individually. Callers lose one round-trip, not a capability.
-- **`ix_docs_tool`** — a composite over `ix_overview`, likewise served.
+- **`ix_docs_tool`** — a composite over `ix_overview`, which is served.
+
+`ix_neighbors` is served. It is one tool for callers, callees, imports,
+importers and overrides. The four single-relation tools stay in the full
+catalog for `--tools=all`; the default session advertises `ix_neighbors` in
+their place. See [Toolsets](mcp.md#toolsets).
 
 And `ix_status` is Gemini's name for what `ix mcp` calls `ix_health`; both run
 `ix status`.
 
-`ix_decide` and `ix_ingest` were real gaps and are now served. `ix_decide` is a
-write and needs Pro, so it is advertised only when `@ix/pro` resolves — as are
-`ix_briefing` and `ix_decisions`, which this server previously offered to every
-install even though every call answered "requires Ix Pro".
+`ix_decide`, `ix_ingest` and `ix_neighbors` were real gaps and are now served.
+`ix_decide` is a write and needs Pro, so it is advertised only when `@ix/pro`
+resolves — as are `ix_briefing` and `ix_decisions`, which this server previously
+offered to every install even though every call answered "requires Ix Pro".
 
 **Net:** codex and cursor can delegate with no change in what an agent can do.
-gemini, openclaw and opencode lose only `ix_query` and the two composites.
+gemini loses `ix_query` (`ix_status` is served as `ix_health`). openclaw and
+opencode lose `ix_query` and `ix_docs_tool`.
 
 ## Structured results and tool annotations
 
@@ -79,14 +83,20 @@ gemini, openclaw and opencode lose only `ix_query` and the two composites.
   the runner, and what a tool can reach is bounded by the command it runs, not by
   what it is advertised as.
 
-- **Structured content.** `ix_map`, `ix_ingest` and `ix_smells` return their
-  parsed JSON object as `structuredContent` (with an `outputSchema`) so agents
-  receive typed values instead of a string to re-parse. The schema asserts only
-  "an object": the real field shape is backend-defined and versioned, and
+- **Structured content.** `ix_map` and `ix_ingest` return their parsed JSON
+  object as `structuredContent`, with an `outputSchema`, so agents receive
+  typed values instead of a string to re-parse. The schema asserts only "an
+  object": the real field shape is backend-defined and versioned, and
   promising specific fields would break tool calls the moment the backend
   renames one. The human-readable text result is preserved for clients that
   prefer it. Most remaining tools return their `llm`-format text, which has no
   stable object shape worth promising.
+
+  `ix_smells` and `ix_context` return `structuredContent` only when the caller
+  passes `structured: true`. Neither declares an `outputSchema`: an output
+  schema is a promise that every result carries structured content, and an
+  opt-in copy cannot make that promise. Without the flag, `ix_smells` returns
+  compact JSON text and `ix_context` returns llm records.
 
   The Pro tools are the exception worth naming: they run in JSON too, but get
   neither an `outputSchema` nor `structuredContent`, because their shape cannot

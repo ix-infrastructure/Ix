@@ -73,6 +73,43 @@ Point the client at `ix` with the argument `mcp`. For Codex:
 codex mcp add ix-memory -- ix mcp
 ```
 
+## Toolsets
+
+`ix mcp` defaults to `--tools=core` (the same set as `ix mcp --tools=core`).
+That session advertises five tools, one per question the graph answers better
+than Grep and Read:
+
+| Tool | Answers |
+|---|---|
+| `ix_context` | Where to start on a target or an issue (`target=`, or `issue=<text>`). Ranked evidence, each row `path:lines`. |
+| `ix_search` | Which definition a name means, definitions first. |
+| `ix_neighbors` | Who calls or imports a symbol, what it calls or imports, and a method's overrides (`relation=callers\|callees\|imports\|imported_by\|overrides`). |
+| `ix_impact` | What a change to a symbol or file reaches. |
+| `ix_read` | A definition's source by name, without knowing its file. |
+
+When Ix Pro is installed, `ix_briefing`, `ix_decisions` and `ix_decide` are
+advertised with either set.
+
+`--tools=all` advertises the whole OSS catalog: the five above, plus
+`ix_health`, `ix_locate`, `ix_text`, `ix_map`, `ix_overview`, `ix_diff`,
+`ix_callers`, `ix_callees`, `ix_imported_by`, `ix_imports`, `ix_overrides`,
+`ix_depends`, `ix_trace`, `ix_explain`, `ix_rank`, `ix_inventory`,
+`ix_smells`, `ix_stats`, `ix_subsystems`, `ix_history` and `ix_ingest`.
+The four `ix_callers` / `ix_callees` / `ix_imported_by` / `ix_imports` tools
+are the single-relation forms `ix_neighbors` stands in for on the core set.
+
+The server command for that catalog is `ix mcp --tools=all`. A client that
+launches `ix mcp` gets the five core tools.
+
+`ix mcp install` writes the bare command `ix mcp` (arguments `mcp` only) and
+has no toolset option, so it cannot record `--tools=all`. To advertise every
+tool, register the server by hand, or edit the client's config so the
+arguments are `mcp` and `--tools=all`:
+
+```bash
+codex mcp add ix-memory -- ix mcp --tools=all
+```
+
 ## Process isolation
 
 Tool calls run inside the server process. Set `IX_MCP_SUBPROCESS=1` to run each

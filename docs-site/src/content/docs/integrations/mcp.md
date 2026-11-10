@@ -49,7 +49,7 @@ codex mcp add ix-memory -- ix mcp
 |---|---|
 | `ix_context` | Where do I start on this target or issue (`issue=<text>`)? Ranked evidence with `path:lines` |
 | `ix_search` | Which definition does this name mean? |
-| `ix_neighbors` | Callers, callees, imports or importers, picked by `relation` |
+| `ix_neighbors` | Callers, callees, imports, importers or overrides, picked by `relation` |
 | `ix_impact` | What does a change to this reach? |
 | `ix_read` | The source of a symbol by name, or a line range |
 
@@ -59,7 +59,14 @@ reach for first. Clients that load tool schemas only on demand still show these 
 flags.
 
 `ix mcp --tools=all` advertises every tool instead, including `ix_health`, `ix_text`, `ix_locate`, `ix_overview`
-and `ix_explain`, which were in the default set before.
+and `ix_explain`, which were in the default set before, plus the rest of the OSS catalog (`ix_map`,
+`ix_diff`, `ix_callers`, `ix_callees`, `ix_imported_by`, `ix_imports`, `ix_overrides`, `ix_depends`,
+`ix_trace`, `ix_rank`, `ix_inventory`, `ix_smells`, `ix_stats`, `ix_subsystems`, `ix_history` and
+`ix_ingest`). The server command for that catalog is `ix mcp --tools=all`.
+
+`ix mcp install` writes the bare command `ix mcp` and has no toolset option, so it cannot record
+`--tools=all`. Register that command by hand, or edit the client's config so the arguments are `mcp` and
+`--tools=all`.
 
 ## Repair a moved launcher
 
