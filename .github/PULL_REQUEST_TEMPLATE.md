@@ -21,8 +21,6 @@ How did you test this?
 - [ ] No raw errors introduced
 - [ ] CLI output follows Ix format
 
-## Release checklist (if merging to main)
-- [ ] `ix-cli/package.json` version bumped
-- [ ] After merge: tag pushed (`git tag vX.Y.Z && git push origin vX.Y.Z`)
-- [ ] If backend changes: `ix-memory-layer` tagged and released first (maintainers only — see [Backend Development](https://github.com/ix-infrastructure/Ix/blob/main/CONTRIBUTING.md#backend-development))
-- [ ] If `docker-compose.standalone.yml` changed: verified `curl | sh` install works
+Releases are handled by maintainers through the release workflow, which stamps
+the CLI package version from the release tag. A PR does not need a manual
+`ix-cli/package.json` version bump.

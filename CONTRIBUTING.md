@@ -32,6 +32,8 @@ npm run build
 
 ### Verify Your Setup
 
+From the repository root, run this quick check. See [Before you open a PR](#before-you-open-a-pr) for the full CI checks.
+
 ```bash
 # CLI tests
 cd ix-cli && npm test
@@ -75,10 +77,78 @@ Breaking changes: use `feat!:` or `fix!:` prefix.
 
 ## Testing
 
-| What changed | Run |
+`cd ix-cli && npm test` builds core-ingestion, runs CLI unit tests and the parser
+smoke test. It does not rebuild the CLI's `dist/`, run core-ingestion's own tests,
+or run the real-backend scenarios.
+
+### Before you open a PR
+
+The required `CI Passed` check aggregates the jobs in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml). From the repository root,
+run these commands (parentheses keep each block's working directory local):
+
+```bash
+(
+  cd ix-cli
+  npm ci --silent
+  npm run build
+  npm run lint
+  npm run typecheck
+  npm run knip
+  npm run test:unit
+  npm run test:coverage
+  npm run smoke
+  node scripts/check-api-parity.mjs
+  node scripts/check-doc-parity.mjs
+)
+(cd core-ingestion && npm test)
+python3 .github/scripts/copyright-headers.py
+node ix-cli/scripts/check-links.mjs
+(
+  cd docs-site
+  npm ci
+  npm run build
+  node ../ix-cli/scripts/check-links.mjs --dist dist --dist-only
+)
+```
+
+CI runs unit tests with coverage on Linux/Node 22 and without coverage on the
+other matrix legs: Linux/Node 24, macOS/Node 22 and 24, and Windows/Node 22.
+The CLI build installs and builds core-ingestion, including its native parsers.
+
+For the real-backend correctness scenarios, Docker must be running. From the
+repository root, after building the CLI:
+
+```bash
+(
+  cd ix-cli
+  npm run e2e:up
+  IX_E2E=1 npx vitest run --config vitest.e2e.config.ts
+  npm run e2e:down
+)
+```
+
+Always run `npm run e2e:down` from `ix-cli/` when finished, including after a
+failed run. The [real-backend harness guide](ix-cli/test/e2e/README.md) explains
+the isolated stack, configuration and cleanup. Its [performance gate](ix-cli/test/e2e/README.md#performance-gate)
+also runs in CI: from `ix-cli/`, with that stack running and the fixture checked
+out as described in the guide, run
+`IX_E2E=1 node scripts/perf-gate.mjs <fixture-path>`. CI adds
+`--out "$RUNNER_TEMP/perf-results.json"` to save the results.
+
+The following required checks use inline scripts or isolated runner fixtures;
+their full setup and assertions live in the linked workflow steps:
+
+| Gate | Commands and CI setup |
 |---|---|
-| CLI code | `cd ix-cli && npm test` |
-| Any change | Full test suite before opening PR |
+| Raw NUL-byte guard | The `static` job's “No raw NUL bytes in tracked sources” step checks tracked JS/TS sources with `git ls-files`, `tr` and `wc`. |
+| Workflow wiring | `./actionlint -shellcheck= -pyflakes=` from the repository root, using the checksum-verified actionlint version in the `static` job. |
+| Backend write/read smoke | The `e2e` job runs `docker compose -f docker-compose.standalone.yml up -d --wait --wait-timeout 180`, then `node dist/cli/main.js` with `status`, `map`, `search` and `doctor`, checking results and the unmapped-directory error. Use the job's isolated fixture setup. |
+| Harness install smoke (Linux and Windows/Git Bash) | The `harness-install-smoke` and `harness-install-smoke-windows` jobs run `node ix-cli/scripts/skill-harnesses.mjs --probe`, `bash scripts/install-skill.sh --dry-run`, `bash scripts/install-skill.sh --help`, `bash scripts/install-skill.sh --dry-run --json`, and (from `ix-cli/`) `node dist/cli/main.js mcp install --host claude codex openclaw --dry-run --format json`. The jobs supply fake harnesses and isolated home directories; copy their setup to reproduce the assertions. |
+
+Separate PR workflows also report security and policy checks; see
+[Security Checks](#security-checks). The config policy command is
+`bash scripts/ci/check-config-security.sh` from the repository root.
 
 ## CLI Standards
 
@@ -178,7 +248,7 @@ numbers, and generated files lose the header on their next regeneration.
 PRs and pushes to `main` run automated security checks:
 
 - **Dependency review** — flags new dependencies with known vulnerabilities (PRs only)
-- **Trivy scanning** — scans the repo filesystem and Docker image for vulnerabilities and misconfigurations
+- **Trivy scanning** — scans the repository filesystem for vulnerabilities; the Config Security workflow separately scans filesystem configuration for misconfigurations. These workflows do not scan a Docker image.
 - **Config security** — scans Docker Compose and deployment configs for unsafe exposure (e.g., auth disabled with public port bindings, `0.0.0.0` bindings). Local-only configs that bind to `127.0.0.1` are allowed.
 
 All checks fail on CRITICAL or HIGH severity findings. If a check fails on your PR, inspect the output and either fix the vulnerability or document why it's a false positive.

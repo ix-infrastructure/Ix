@@ -36,7 +36,7 @@ endpoint that is not loopback or that uses a port of a stack with real data:
 | `IX_E2E_PROJECT` | `ix-e2e` | compose project name |
 | `IX_E2E_BACKEND_PORT` | `8290` | compose and harness: host port of the memory-layer |
 | `IX_E2E_ARANGO_PORT` | `8729` | compose and harness: host port of ArangoDB |
-| `IX_E2E_BACKEND_IMAGE` | the pin in `compose.e2e.yml` (1.0.32 by digest) | `stack.mjs`: run this image instead |
+| `IX_E2E_BACKEND_IMAGE` | the pin in `compose.e2e.yml` | `stack.mjs`: run this image instead |
 | `IX_E2E_ENDPOINT` | `http://127.0.0.1:$IX_E2E_BACKEND_PORT` | harness: backend URL, overrides the port |
 | `IX_E2E_ARANGO_URL` | `http://127.0.0.1:$IX_E2E_ARANGO_PORT` | harness and `graph-sig.mjs`: ArangoDB URL |
 | `IX_E2E_DIFF_DIR` | unset | harness: write every graph difference to `<dir>/<scenario>.txt` |
