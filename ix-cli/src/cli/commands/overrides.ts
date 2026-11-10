@@ -11,7 +11,7 @@ import { parseCountOption, parsePickOption, STRICT_TARGET_HELP } from "../option
 import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
 import { isQuiet, projectRow } from "../output-shape.js";
-import { printResolved, resolveFileOrReport } from "../resolve.js";
+import { displayNameOf, printResolved, resolveFileOrReport } from "../resolve.js";
 import { reportError } from "./around.js";
 import { overrideFamily, type OverrideRelation, type OverrideRow } from "../type-walk.js";
 
@@ -96,7 +96,7 @@ async function overridesOne(client: IxClient, symbol: string, opts: OverridesOpt
   if (opts.format === "json") {
     printJson({
       target: symbol,
-      resolvedTarget: { id: target.id, name: target.name, kind: target.kind, ...(target.path ? { path: target.path } : {}) },
+      resolvedTarget: { id: target.id, name: displayNameOf(target), kind: target.kind, ...(target.path ? { path: target.path } : {}) },
       ...(family.owner ? { owner: family.owner } : {}),
       ...(family.root ? { root: family.root } : {}),
       ...(family.roots ? { roots: family.roots } : {}),

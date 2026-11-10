@@ -49,7 +49,7 @@ import { collectTextReferences, gitRepoAccess, type RepoAccess, type TextSource 
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { parseBudgetOption, parsePickOption, STRICT_TARGET_HELP, parseRevisionOption } from "../options.js";
-import { activeReadScope, ensureReadScope, isRawId, resolveFileOrEntityFull, resolveFileOrReport, type ResolutionNotice, type ResolvedEntity } from "../resolve.js";
+import { activeReadScope, ensureReadScope, isRawId, resolveFileOrEntityFull, resolveFileOrReport, shownTarget, type ResolutionNotice, type ResolvedEntity } from "../resolve.js";
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
 import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure } from "../ui.js";
 import { printJson, relativePath, takeResolutionNotices } from "../format.js";
@@ -506,7 +506,7 @@ export function registerContextCommand(program: Command): void {
 
       const client = createClient({ query: true });
 
-      const resolved = await resolveFileOrReport(client, target, {
+      const found = await resolveFileOrReport(client, target, {
         kind: opts.kind,
         path: opts.path,
         pick: opts.pick,
@@ -515,7 +515,9 @@ export function registerContextCommand(program: Command): void {
         // write, so it stays the miss (exit 3) rather than a file list and 0.
         ...(opts.out || opts.save ? { textAnswer: false } : {}),
       }, opts.format);
-      if (!resolved) return;
+      if (!found) return;
+      // The bundle keeps the target as it was qualified: --diff resolves that name again.
+      const resolved = shownTarget(found);
 
       const budgets = clampBudgets(opts, fmt);
       const asOfRev = opts.asOfRev;
@@ -672,6 +674,7 @@ async function buildFreshBundle(
     strict: true,
   }, format);
   if (!resolved) return undefined;
+  resolved = shownTarget(resolved);
 
   const asOfRev = opts.asOfRev;
   const [facts, context, workspaceHealth] = await Promise.all([

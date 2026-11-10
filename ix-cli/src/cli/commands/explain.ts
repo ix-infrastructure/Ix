@@ -4,7 +4,7 @@ import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import { formatExplain, relativePath, printJson, type ExplainResult, type EntityRef, type Diagnostic } from "../format.js";
-import { resolveFileOrReport, isRawId, activeReadScope } from "../resolve.js";
+import { resolveFileOrReport, isRawId, activeReadScope, shownTarget } from "../resolve.js";
 import { isFileStale } from "../stale.js";
 import { collectFacts, unresolvedCallNames, unresolvedCallsOf } from "../explain/facts.js";
 import { inferRole } from "../explain/role-inference.js";
@@ -36,8 +36,9 @@ export function registerExplainCommand(program: Command): void {
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; strict?: boolean; suggest?: boolean; format: string; raw?: boolean }) => {
       const client = createClient({ query: true });
       const resolveOpts = { suggest: opts.suggest, suggestCommand: "explain", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict };
-      const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
-      if (!target) return;
+      const found = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
+      if (!found) return;
+      const target = shownTarget(found);
 
       if (opts.raw) {
         await rawExplain(client, target, opts.format);

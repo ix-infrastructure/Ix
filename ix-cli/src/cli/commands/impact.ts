@@ -5,7 +5,7 @@ import chalk from "chalk";
 import { renderSection, renderKeyValue, renderNote, renderResolvedHeader, renderWarning, colorizeKind } from "../ui.js";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
-import { activeReadScope, candidatesCut, resolveTargetSetOrReport, printResolved, type ResolvedEntity, type TargetSet } from "../resolve.js";
+import { activeReadScope, candidatesCut, resolveTargetSetOrReport, printResolved, shownTarget, type ResolvedEntity, type TargetSet } from "../resolve.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
 import { checkGraphHealth, graphHealthJson, graphHealthLlmFields, graphHealthProse, isUnhealthy } from "../graph-health.js";
 import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type BucketMember, type SystemPath } from "../hierarchy.js";
@@ -48,7 +48,7 @@ export function registerImpactCommand(program: Command): void {
         const resolveOpts = { suggest: opts.suggest, suggestCommand: "impact", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all };
         const set = await resolveTargetSetOrReport(client, symbol, resolveOpts, opts.format);
         if (!set) return;
-        const target = set.entities[0];
+        const target = shownTarget(set.entities[0]);
 
         if (opts.format === "text" && !set.all) printResolved(target);
 

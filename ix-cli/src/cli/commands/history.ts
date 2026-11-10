@@ -3,7 +3,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { createClient } from "../../client/factory.js";
-import { resolveFileOrReport, printResolved } from "../resolve.js";
+import { resolveFileOrReport, printResolved, shownTarget } from "../resolve.js";
 import { relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
 import { parsePickOption, STRICT_AMBIGUOUS_HELP } from "../options.js";
@@ -43,8 +43,9 @@ export function registerHistoryCommand(program: Command): void {
       // An entity's history was asked for: a list of the files that mention
       // a text-only name today is not one, so it stays the miss (exit 3).
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, textAnswer: false };
-      const resolved = await resolveFileOrReport(client, target, resolveOpts, opts.format);
-      if (!resolved) return;
+      const found = await resolveFileOrReport(client, target, resolveOpts, opts.format);
+      if (!found) return;
+      const resolved = shownTarget(found);
 
       if (opts.format === "text") printResolved(resolved);
 

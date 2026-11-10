@@ -185,6 +185,11 @@ export interface ResolvedEntity {
   id: string;
   kind: string;
   name: string;
+  /**
+   * The target as the user qualified it (`Class.method`), for headers only.
+   * `name` stays the entity's own name: members are matched by it.
+   */
+  displayName?: string;
   path?: string;
   resolutionMode: ResolutionMode;
 }
@@ -1275,13 +1280,24 @@ export function printAmbiguous(symbol: string, result: AmbiguousResult, opts?: {
  * Print the resolved target before showing results (text mode only).
  * Callers should skip this when format === "json" to keep JSON strict.
  */
+/** The name to show for a resolved target: as the user qualified it, else its own name. */
+export function displayNameOf(target: { name: string; displayName?: string }): string {
+  return target.displayName ?? target.name;
+}
+
+/** A resolved target for output: `name` is the name to show, and `displayName` is gone. */
+export function shownTarget<T extends { name: string; displayName?: string }>(target: T): Omit<T, "displayName"> {
+  const { displayName, ...rest } = target;
+  return { ...rest, name: displayName ?? target.name };
+}
+
 export function printResolved(target: ResolvedEntity): void {
   if (isQuiet()) return;
   const shortId = target.id.slice(0, 8);
   const modeStr = target.resolutionMode !== "exact"
     ? chalk.dim(` (${target.resolutionMode})`)
     : "";
-  stderr(`${chalk.dim("Resolved:")} ${chalk.cyan(target.kind)} ${chalk.dim(shortId)} ${chalk.bold(target.name)}${modeStr}\n`);
+  stderr(`${chalk.dim("Resolved:")} ${chalk.cyan(target.kind)} ${chalk.dim(shortId)} ${chalk.bold(displayNameOf(target))}${modeStr}\n`);
 }
 
 /** Check if a string looks like a raw UUID (not a human-readable name). */
@@ -1567,10 +1583,10 @@ async function resolveQualified(
   };
   const result = await rankEntity(client, scoped.methodName, ['method', 'function'], scopedOpts);
   if (result.resolved) {
-    // Rewrite the display name to show the full scoped form, as the user typed it
+    // Show the full scoped form, as the user typed it
     return {
       ...result,
-      entity: { ...result.entity, name: `${scoped.className}${scoped.sep}${scoped.methodName}` },
+      entity: { ...result.entity, displayName: `${scoped.className}${scoped.sep}${scoped.methodName}` },
     };
   }
   return result;
@@ -1668,7 +1684,7 @@ async function resolveInClasses(
     const only = ordered[0];
     return {
       resolved: true,
-      entity: { id: only.id, kind: only.kind, name: display, path: only.path, resolutionMode: "scored" },
+      entity: { id: only.id, kind: only.kind, name: only.name, displayName: display, path: only.path, resolutionMode: "scored" },
     };
   }
   const qualifiedResult: AmbiguousResult = {
@@ -1683,7 +1699,7 @@ async function resolveInClasses(
   rememberAll(qualifiedResult, qualifiedResult.candidates, ordered);
   const ambiguous: ResolveResult = { resolved: false, ambiguous: true, result: qualifiedResult };
   const picked = applyPick(ambiguous, opts);
-  if (picked?.resolved) return { ...picked, entity: { ...picked.entity, name: display } };
+  if (picked?.resolved) return { ...picked, entity: { ...picked.entity, displayName: display } };
   return picked ?? ambiguous;
 }
 

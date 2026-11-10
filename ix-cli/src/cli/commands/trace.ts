@@ -4,7 +4,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
-import { answerAmbiguous, resolveFileOrEntityFull, resolveFileOrReport, activeReadScope, ensureReadScope } from "../resolve.js";
+import { answerAmbiguous, resolveFileOrEntityFull, resolveFileOrReport, shownTarget, activeReadScope, ensureReadScope } from "../resolve.js";
 import type { ResolvedEntity } from "../resolve.js";
 import {
   renderSection,
@@ -590,8 +590,8 @@ export function registerTraceCommand(program: Command): void {
             }
             return;
           }
-          const fromTarget = fromResult.entity;
-          const toTarget = toResult.entity;
+          const fromTarget = shownTarget(fromResult.entity);
+          const toTarget = shownTarget(toResult.entity);
           for (const r of [fromResult, toResult]) {
             if (r.notices?.length) reportResolutionNotices(r.notices, opts.format, resolveOpts);
           }
@@ -692,7 +692,7 @@ export function registerTraceCommand(program: Command): void {
         // ── Directional mode ────────────────────────────────────────
         const resolvedTarget = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
         if (!resolvedTarget) return;
-        let target: ResolvedEntity = resolvedTarget;
+        let target: ResolvedEntity = shownTarget(resolvedTarget);
 
         const predicates = kindToPredicates(opts.kind);
         const relKind = opts.kind ?? "mixed";

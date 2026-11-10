@@ -992,7 +992,7 @@ export function renderEdgeResultsLlm(
 
 export function formatEdgeResults(
   slice: Slice<any>, relation: string, symbol: string, format: string,
-  resolvedTarget?: { id: string; kind: string; name: string; resolutionMode?: string },
+  resolvedTarget?: { id: string; kind: string; name: string; displayName?: string; resolutionMode?: string },
   source?: ResultSource,
   diagnostics?: Diagnostic[],
   candidates?: EdgeCandidate[],
@@ -1034,8 +1034,10 @@ export function formatEdgeResults(
       resultSource: source ?? "graph",
     };
     if (resolvedTarget) {
+      const { displayName, ...shown } = resolvedTarget;
       output.resolvedTarget = {
-        ...resolvedTarget,
+        ...shown,
+        name: displayName ?? shown.name,
         path: relativePath((resolvedTarget as any).path),
       };
       if (resolvedTarget.resolutionMode && resolvedTarget.resolutionMode !== "exact") {

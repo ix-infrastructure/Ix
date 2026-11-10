@@ -3,7 +3,7 @@
 import type { Command } from "commander";
 import { createClient } from "../../client/factory.js";
 import { expandCapped, formatEdgeResults, sliceEdgeResults } from "../format.js";
-import { resolveFileOrReport, printResolved } from "../resolve.js";
+import { displayNameOf, resolveFileOrReport, printResolved } from "../resolve.js";
 import { emptyEdgeResultsJson } from "../text-matches.js";
 import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
@@ -33,7 +33,7 @@ export function registerImportsCommand(program: Command): void {
       const slice = sliceEdgeResults(result.nodes, limit, offset, expandCapped(result));
       if (slice.nextOffset !== undefined) slice.next = nextPageCommand(cmd, [symbol], slice.nextOffset);
       const site = await edgeTargetFor(client, target, "imports");
-      formatEdgeResults({ ...slice, rows: withEdgeSites(slice.rows, "imports", site) }, "imports", target.name, opts.format, target, "graph");
+      formatEdgeResults({ ...slice, rows: withEdgeSites(slice.rows, "imports", site) }, "imports", displayNameOf(target), opts.format, target, "graph");
     });
 
   program
@@ -59,6 +59,6 @@ export function registerImportsCommand(program: Command): void {
       const slice = sliceEdgeResults(result.nodes, limit, offset, expandCapped(result));
       if (slice.nextOffset !== undefined) slice.next = nextPageCommand(cmd, [symbol], slice.nextOffset);
       const site = await edgeTargetFor(client, target, "imported-by");
-      formatEdgeResults({ ...slice, rows: withEdgeSites(slice.rows, "imported-by", site) }, "imported-by", target.name, opts.format, target, "graph");
+      formatEdgeResults({ ...slice, rows: withEdgeSites(slice.rows, "imported-by", site) }, "imported-by", displayNameOf(target), opts.format, target, "graph");
     });
 }

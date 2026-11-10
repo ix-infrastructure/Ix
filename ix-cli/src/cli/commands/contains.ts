@@ -5,7 +5,7 @@ import { createClient } from "../../client/factory.js";
 import { expandCapped, formatEdgeResults, sliceEdgeResults } from "../format.js";
 import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
-import { resolveFileOrReport, printResolved } from "../resolve.js";
+import { displayNameOf, resolveFileOrReport, printResolved } from "../resolve.js";
 import { emptyEdgeResultsJson } from "../text-matches.js";
 
 export function registerContainsCommand(program: Command): void {
@@ -31,6 +31,6 @@ export function registerContainsCommand(program: Command): void {
       const result = await client.expand(target.id, { direction: "out", predicates: ["CONTAINS"] });
       const slice = sliceEdgeResults(result.nodes, limit, offset, expandCapped(result));
       if (slice.nextOffset !== undefined) slice.next = nextPageCommand(cmd, [symbol], slice.nextOffset);
-      formatEdgeResults(slice, "contains", target.name, opts.format, target, "graph");
+      formatEdgeResults(slice, "contains", displayNameOf(target), opts.format, target, "graph");
     });
 }
