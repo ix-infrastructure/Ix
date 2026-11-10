@@ -363,6 +363,7 @@ describe("workspace-scoped staleness", () => {
 
     expect(loadIngestBaseline(root)).toEqual({
       files: new Map(),
+      fileModes: new Map(),
       deletedFiles,
       currentRev: 15,
       lastIngestAt: completedAt.toISOString(),

@@ -21,7 +21,7 @@ import {
 } from '../file-discovery.js';
 import {
   clearRebuildProgress, extractorChanged, isRev, loadIngestBaseline, loadRebuildProgress,
-  saveIngestBaseline, saveRebuildProgress, type BaselineFileNotes,
+  saveIngestBaseline, saveRebuildProgress, type BaselineFileNotes, type IngestMode,
   loadOrphanSweepPending, saveOrphanSweepPending, type OrphanSweepPending,
 } from '../ingest-baseline.js';
 import { resolveGitHubToken } from '../github/auth.js';
@@ -297,6 +297,81 @@ export function stripMapModeOps(patch: GraphPatchPayload): GraphPatchPayload {
       if (op.type === 'UpsertEdge' && (droppedNodes.has(op['src']) || droppedNodes.has(op['dst']))) return false;
       return true;
     }),
+  };
+}
+
+function ingestModePatchId(patchId: string, mode: IngestMode): string {
+  // Both modes need fresh IDs: a pre-fix ID may already hold either payload.
+  // Retain the UUID wire format used by the core patch builder.
+  const hex = crypto.createHash('sha256').update(`ingest-mode-v1:${mode}:${patchId}`).digest('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+export function applyIngestMode(patch: GraphPatchPayload, mapMode: boolean): GraphPatchPayload {
+  return {
+    ...(mapMode ? stripMapModeOps(patch) : patch),
+    patchId: ingestModePatchId(patch.patchId, mapMode ? 'map' : 'full'),
+  };
+}
+
+function modeAwarePatchLookup(
+  client: Pick<IxClient, 'getPatch' | 'entity' | 'nodes'>,
+  modeForId: (id: string) => IngestMode | undefined,
+  mergeModes: boolean,
+  beforeFallback?: () => void,
+): Pick<IxClient, 'getPatch' | 'entity' | 'nodes'> {
+  return {
+    entity: client.entity.bind(client),
+    nodes: client.nodes.bind(client),
+    getPatch: async id => {
+      const mode = modeForId(id);
+      // All modes can still own live entities, including pre-fix unsalted
+      // patches. A mode change does not retire the other mode's manifest.
+      const candidates = mode
+        ? [ingestModePatchId(id, mode), id, ingestModePatchId(id, mode === 'map' ? 'full' : 'map')]
+        : [id, ingestModePatchId(id, 'map'), ingestModePatchId(id, 'full')];
+      const manifests: unknown[] = [];
+      let notFound: unknown;
+      for (let i = 0; i < candidates.length; i++) {
+        if (i > 0) beforeFallback?.();
+        try {
+          const raw = await client.getPatch(candidates[i]!);
+          // Map reconciliation leaves chunks alone; either mode names the
+          // topology nodes for these bytes. Keep its one-read fast path and
+          // orphan sweep budget. Full reconciliation must include both modes.
+          if (!mergeModes) return raw;
+          manifests.push(raw);
+        } catch (err) {
+          if (!isNotFoundError(err)) throw err;
+          notFound = err;
+        }
+      }
+      if (manifests.length === 0) throw notFound;
+      if (manifests.length === 1) return manifests[0];
+
+      // This adapter serves only reconciliation and orphan cleanup. Return a
+      // combined node manifest, retaining the upsert/delete distinction and
+      // any kind/external metadata available from op-bearing responses.
+      const nodeIds = new Set<string>();
+      const upsertIds = new Set<string>();
+      const kinds = new Map<string, string>();
+      const external = new Set<string>();
+      for (const raw of manifests) {
+        const entities = readStoredPatchEntities(raw);
+        const upserts = storedUpserts(raw);
+        if (!entities || !upserts) throw new Error('Stored mode patch has no entity manifest');
+        for (const id of entities.nodeIds) nodeIds.add(id);
+        for (const id of upserts.ids) upsertIds.add(id);
+        for (const [id, kind] of entities.kinds) kinds.set(id, kind);
+        for (const id of entities.external) external.add(id);
+      }
+      return { data: { ops: [...nodeIds].map(id => ({
+        type: upsertIds.has(id) ? 'UpsertNode' : 'DeleteNode',
+        id,
+        kind: kinds.get(id),
+        attrs: external.has(id) ? { external: true } : undefined,
+      })) } };
+    },
   };
 }
 
@@ -2962,6 +3037,16 @@ export async function ingestFiles(
       );
     };
     const previousMtimes = previousBaseline?.files ?? new Map<string, number>();
+    const fileModes = new Map(previousBaseline?.fileModes);
+    // Bulk commits replace all source edges. Once a file has chunks, keep
+    // writing the full payload even during map so its chunk edges survive.
+    // Legacy baselines do not say whether chunks were written. Conservatively
+    // migrate their files to full; only new files default to map.
+    const modeForFile = (absolutePath: string): IngestMode => mapMode
+      ? fileModes.get(absolutePath) ?? (previousMtimes.has(absolutePath) ? 'full' : 'map')
+      : 'full';
+    const mapsFile = (relativePath: string): boolean =>
+      modeForFile(nodePath.resolve(workspaceRoot, relativePath)) === 'map';
     const {
       previousDeletedFiles,
       nextDeletedFiles,
@@ -2971,6 +3056,11 @@ export async function ingestFiles(
       filePaths,
       previousBaseline?.deletedFiles ?? new Map(),
     );
+    // Upgrades to full (including from an unrecorded mode) must bypass both
+    // mtime and source-hash skipping, even for a scoped or --lang run.
+    for (const file of filePaths) {
+      if (fileModes.get(file) !== modeForFile(file)) forceReingestPaths.add(file);
+    }
     const mtimeCache = (opts.force || workspaceMigrated)
       ? new Map<string, number>()
       : new Map(resumedRebuild ?? previousMtimes);
@@ -4202,11 +4292,11 @@ export async function ingestFiles(
           let patch = buildPatchFn!(p, hash, fileWorkspace, edgesByFile.get(p.filePath) ?? emptyEdges, previousHash, fileMultiRepo(p.filePath));
           if (previousHash) {
             patch = await reconcileRemovedEntities(
-              client,
+              modeAwarePatchLookup(client, () => fileModes.get(nodePath.resolve(workspaceRoot, p.filePath)), !mapsFile(p.filePath)),
               patch,
               sourcePatchIdCandidates(p.filePath, previousHash, fileWorkspace),
               undefined,
-              mapMode,
+              mapsFile(p.filePath),
               reconcileLookups,
               { onWindowSkipped: reason => noteOrphanSkip(p.filePath, reason), window: reconcileOrphans && orphanSweepBlocker === null ? RECONCILE_MANIFEST_WINDOW : 1 },
             );
@@ -4251,8 +4341,17 @@ export async function ingestFiles(
         const writtenBefore = new Set<number>();
         try {
           const sweepFiles = sweepable.map(b => ({ patch: b.patch, previousPatchIds: b.previousPatchIds }));
+          const modes = new Map(sweepable.flatMap(b => b.previousPatchIds.map(id =>
+            [id, fileModes.get(nodePath.resolve(workspaceRoot, b.p.filePath))] as const)));
+          const sweepStarted = performance.now();
           const orphans = await sweepOrphanNodes(
-            client,
+            modeAwarePatchLookup(client, id => modes.get(id), !mapMode, () => {
+              if (orphanSweep.budget.requests >= orphanSweep.budget.maxRequests
+                || orphanSweep.budget.usedMs + performance.now() - sweepStarted >= orphanSweep.budget.maxMs) {
+                throw new Error('orphan cleanup reached its lookup budget');
+              }
+              orphanSweep.budget.requests++;
+            }),
             sweepFiles,
             {
               mapMode,
@@ -4317,8 +4416,7 @@ export async function ingestFiles(
       return built.map(b => {
         if (b === null) return null;
         try {
-          let patch = b.patch;
-          if (mapMode) patch = stripMapModeOps(patch);
+          const patch = applyIngestMode(b.patch, mapsFile(b.p.filePath));
           noteResolution(b.p.filePath, patch);
           // source.uri (workspace-relative) and source.workspaceId are set
           // inside buildPatch; the backend stores both as opaque attributes.
@@ -4714,11 +4812,12 @@ export async function ingestFiles(
             fileMultiRepo(relFilePath),
           );
           patch = await reconcileRemovedEntities(
-            client,
+            modeAwarePatchLookup(client, () => fileModes.get(absFilePath), true),
             patch,
             sourcePatchIdCandidates(relFilePath, previousHash, fileWorkspace),
             dependentSourceUris,
-            mapMode,
+            // A deleted file owns no surviving entities in either mode.
+            false,
             reconcileLookups,
             {
               onWindowSkipped: reason => noteOrphanSkip(relFilePath, reason),
@@ -4728,7 +4827,7 @@ export async function ingestFiles(
               window: orphanSweepBlocker === null ? RECONCILE_MANIFEST_WINDOW : 1,
             },
           );
-          if (mapMode) patch = stripMapModeOps(patch);
+          patch = applyIngestMode(patch, mapsFile(relFilePath));
           deletedPatches.push(makePreparedPatch(patch, i + 1, relFilePath, true));
           const dependents = [...dependentSourceUris].sort();
           nextDeletedFiles.set(absFilePath, dependents);
@@ -4769,6 +4868,7 @@ export async function ingestFiles(
               pendingFiles: previousBaseline.pendingFiles,
               parseTimeouts: previousBaseline.parseTimeouts,
               pythonPackageEntries: previousBaseline.pythonPackageEntries,
+              fileModes: previousBaseline.fileModes,
             },
           );
         }
@@ -4862,7 +4962,7 @@ export async function ingestFiles(
           const entry = table.get(rel);
           const build = (salt?: string): GraphPatchPayload => {
             const patch = buildPatchFn!(p, hash, fileWorkspaceId(rel), edgesByFile.get(rel) ?? emptyEdges, undefined, fileMultiRepo(rel), salt);
-            return mapMode ? stripMapModeOps(patch) : patch;
+            return applyIngestMode(patch, mapsFile(rel));
           };
           const res = resolutionHash(build().ops);
           // Equal: re-resolving changes nothing this file says. A different
@@ -4968,6 +5068,12 @@ export async function ingestFiles(
     // A deletion whose patch did not land keeps its entry, so it is found
     // deleted again next run.
     const failedDeletions = deletedPaths.filter(abs => !committedRel.has(toWorkspaceRelative(abs)));
+    // Only committed files advance their mode. Failed and out-of-scope files
+    // retain theirs; saveIngestBaseline prunes entries removed from the mtimes.
+    for (const rel of committedRel) {
+      const abs = absoluteFor.get(rel);
+      if (abs !== undefined) fileModes.set(abs, modeForFile(abs));
+    }
     const baselinePersisted = (scopedRun && !previousBaseline) ? false : persistIngestBaseline(
       projectRoot,
       retryOnNextRun(
@@ -4983,7 +5089,7 @@ export async function ingestFiles(
       runClean ? baselineExtractor : (previousBaseline?.extractor ?? baselineExtractor),
       // A scoped run re-resolves only its own dependents, so it keeps the old
       // package list and the next full run still sees what changed outside.
-      { replayedFiles, pendingFiles, parseTimeouts, pythonPackageEntries: (scopedRun ? null : pythonPackageEntries) ?? previousBaseline?.pythonPackageEntries },
+      { fileModes, replayedFiles, pendingFiles, parseTimeouts, pythonPackageEntries: (scopedRun ? null : pythonPackageEntries) ?? previousBaseline?.pythonPackageEntries },
     );
     // The symbol table describes files, not the graph, so it is kept whether or
     // not every commit landed -- pruned to the files that still exist. A
