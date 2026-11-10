@@ -1403,10 +1403,44 @@ components:
         attrs: { type: object, additionalProperties: true }
         createdRev: { type: integer }
         deletedRev: { type: integer }
+    Factor:
+      type: object
+      required: [value, reason]
+      properties:
+        value: { type: number }
+        reason: { type: string }
+    ConfidenceBreakdown:
+      type: object
+      description: >-
+        The factors behind a claim's confidence. There is no combined score in
+        this object; the claim's number is ScoredClaim.finalScore.
+      required: [baseAuthority, verification, recency, corroboration, conflictPenalty, intentAlignment]
+      properties:
+        baseAuthority: { $ref: "#/components/schemas/Factor" }
+        verification: { $ref: "#/components/schemas/Factor" }
+        recency: { $ref: "#/components/schemas/Factor" }
+        corroboration: { $ref: "#/components/schemas/Factor" }
+        conflictPenalty: { $ref: "#/components/schemas/Factor" }
+        intentAlignment: { $ref: "#/components/schemas/Factor" }
+    ScoredClaim:
+      type: object
+      required: [claim, confidence, relevance, finalScore]
+      properties:
+        claim:
+          type: object
+          required: [id, entityId, statement, status]
+          properties:
+            id: { type: string }
+            entityId: { type: string }
+            statement: { type: string }
+            status: { type: string }
+        confidence: { $ref: "#/components/schemas/ConfidenceBreakdown" }
+        relevance: { type: number }
+        finalScore: { type: number }
     StructuredContext:
       type: object
       properties:
-        claims: { type: array, items: { type: object } }
+        claims: { type: array, items: { $ref: "#/components/schemas/ScoredClaim" } }
         compactClaims: { type: array, items: { type: object } }
         conflicts: { type: array, items: { type: object } }
         decisions: { type: array, items: { type: object } }

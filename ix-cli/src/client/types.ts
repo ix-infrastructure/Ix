@@ -10,6 +10,12 @@ export interface Factor {
   reason: string;
 }
 
+/**
+ * The factors behind a claim's confidence, as `POST /v1/context` sends them in
+ * `claims[].confidence`. There is no combined score in this object: the
+ * number to show is `ScoredClaim.finalScore` (or `CompactConfidence.score` in
+ * the compact form).
+ */
 export interface ConfidenceBreakdown {
   baseAuthority: Factor;
   verification: Factor;
@@ -17,7 +23,6 @@ export interface ConfidenceBreakdown {
   corroboration: Factor;
   conflictPenalty: Factor;
   intentAlignment: Factor;
-  score: number;
 }
 
 export interface Claim {

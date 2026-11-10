@@ -18,6 +18,7 @@ import type {
   DecisionReport,
   GraphNode,
   IntentReport,
+  ScoredClaim,
   StructuredContext,
 } from "../../client/types.js";
 import { resolveWorkspaceRoot } from "../config.js";
@@ -2515,6 +2516,17 @@ const TIER = { target: 0, issue: 1, structural: 2, claims: 3, relationships: 4, 
 const TIER_WIDTH = 1000;
 const tierScore = (tier: number, index = 0): number => tier * TIER_WIDTH + Math.min(index, TIER_WIDTH - 1);
 
+/**
+ * A claim's confidence for its evidence reason: the backend's `finalScore`,
+ * to two places. The factor breakdown in `confidence` has no score of its own
+ * on the wire, so reading `confidence.score` printed "n/a" for every claim
+ * (#1007). `ix query`'s claim list shows the same number as its percentage.
+ */
+function claimConfidence(scored: ScoredClaim): string {
+  const score = scored.finalScore;
+  return typeof score === "number" && Number.isFinite(score) ? String(Math.round(score * 100) / 100) : "n/a";
+}
+
 /** Deterministic evidence ranking: tier, then a stable id tiebreaker. */
 function rankEvidence(input: {
   resolved: { id: string; name: string; kind: string };
@@ -2683,7 +2695,7 @@ function rankEvidence(input: {
       source: "context.claims",
       title: scored.claim.statement,
       score: tierScore(TIER.claims, 0),
-      reason: `context claim (relevance ${scored.relevance}, confidence ${scored.confidence?.score ?? "n/a"})`,
+      reason: `context claim (relevance ${scored.relevance}, confidence ${claimConfidence(scored)})`,
       refs: [scored.claim.entityId],
     });
   }
