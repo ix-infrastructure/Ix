@@ -3,17 +3,19 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, relative, sep } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   dedupeDiscoveredFilePaths,
+  collectExcludePatterns,
   isSupportedSourceFile,
   discoverIngestFilePaths,
   isWithinDiscoveryRoot,
   tryGitLsFiles,
 } from '../commands/ingest.js';
+import { createIgnoreMatcher } from '../ignore-globs.js';
 import { discoverSourceFiles, emptyDiscoveryCounts, walkFiles } from '../file-discovery.js';
 import { SUPPORTED_FILE_NAMES } from '../supported-extensions.js';
 
@@ -321,24 +323,73 @@ describe('discovery symlink containment', () => {
       expect(counts.unreadable).toBe(0);
     },
   );
+});
 
-  it('walks and lists shell dotfiles, with or without git', () => {
-    const repo = scratchDir('ix-dotfiles-');
+describe('shell dotfile discovery', () => {
+  const scratch: string[] = [];
+
+  afterEach(() => {
+    for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  // `realpathSync.native`, the call discovery canonicalises with. On Windows
+  // the plain `realpathSync` keeps an 8.3 short name (`RUNNER~1`) that the
+  // native one expands, so a base taken the other way does not prefix the
+  // discovered paths.
+  function dotfileRepo(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ix-dotfiles-'));
+    scratch.push(dir);
+    const repo = realpathSync.native(dir);
     writeFileSync(join(repo, '.bashrc'), 'alias ll="ls -l"\n');
     mkdirSync(join(repo, 'zsh'), { recursive: true });
     writeFileSync(join(repo, 'zsh', '.zshrc'), 'export EDITOR=vim\n');
-    writeFileSync(join(repo, '.gitignore'), 'node_modules\n');
+    return repo;
+  }
 
-    const walked = [...walkFiles(repo, true)].map((p) => p.slice(repo.length + 1).replace(/\\/g, '/')).sort();
-    expect(walked).toEqual(['.bashrc', 'zsh/.zshrc']);
+  function rel(repo: string, paths: Iterable<string>): string[] {
+    return [...paths].map((p) => relative(repo, p).split(sep).join('/')).sort();
+  }
 
+  /** True when git is here and `repo` is now a work tree with everything added. */
+  function gitAdd(repo: string): boolean {
     try {
       execFileSync('git', ['init', '-q'], { cwd: repo });
       execFileSync('git', ['add', '-A'], { cwd: repo });
+      return true;
     } catch {
-      return; // no git — the walk above is the whole check
+      return false;
     }
-    const listed = discoverSourceFiles(repo).map((p) => p.slice(repo.length + 1).replace(/\\/g, '/')).sort();
-    expect(listed).toEqual(['.bashrc', 'zsh/.zshrc']);
+  }
+
+  it('walks and lists shell dotfiles, with or without git', () => {
+    const repo = dotfileRepo();
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n');
+
+    expect(rel(repo, walkFiles(repo, true))).toEqual(['.bashrc', 'zsh/.zshrc']);
+
+    if (!gitAdd(repo)) return; // no git — the walk above is the whole check
+    expect(rel(repo, discoverSourceFiles(repo))).toEqual(['.bashrc', 'zsh/.zshrc']);
+  });
+
+  it('drops a dotfile named in .gitignore, with or without git', () => {
+    const repo = dotfileRepo();
+    writeFileSync(join(repo, '.gitignore'), '.bashrc\n');
+
+    expect(rel(repo, walkFiles(repo, true))).toEqual(['zsh/.zshrc']);
+
+    if (!gitAdd(repo)) return;
+    expect(rel(repo, discoverSourceFiles(repo))).toEqual(['zsh/.zshrc']);
+  });
+
+  it('drops a dotfile named in .ixignore, with or without git', () => {
+    const repo = dotfileRepo();
+    writeFileSync(join(repo, '.ixignore'), '.bashrc\n');
+    const exclude = { matcher: createIgnoreMatcher(collectExcludePatterns(repo)), root: repo };
+
+    expect(rel(repo, walkFiles(repo, true, exclude))).toEqual(['zsh/.zshrc']);
+
+    // Tracked, so only the .ixignore stands between git's list and the file.
+    if (!gitAdd(repo)) return;
+    expect(rel(repo, discoverSourceFiles(repo, { exclude }))).toEqual(['zsh/.zshrc']);
   });
 });
