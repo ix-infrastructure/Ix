@@ -503,9 +503,9 @@ if (phpResult) {
   );
   assert(userExtendsModel !== undefined, 'EXTENDS User→Model exists');
   const modelImplementsStoable = phpResult.relationships.find(
-    r => r.predicate === 'EXTENDS' && r.srcName === 'Model' && r.dstName === 'Storable'
+    r => r.predicate === 'IMPLEMENTS' && r.srcName === 'Model' && r.dstName === 'Storable'
   );
-  assert(modelImplementsStoable !== undefined, 'EXTENDS Model→Storable (implements) exists');
+  assert(modelImplementsStoable !== undefined, 'IMPLEMENTS Model→Storable exists');
 }
 
 // ---------------------------------------------------------------------------

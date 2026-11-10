@@ -34,7 +34,7 @@ public class Service extends BaseService implements Runnable {
     expect(result!.relationships).toContainEqual({
       srcName: 'Service',
       dstName: 'Runnable',
-      predicate: 'EXTENDS',
+      predicate: 'IMPLEMENTS',
     });
     expect(result!.relationships).toContainEqual({
       srcName: 'Service.run',
@@ -69,13 +69,13 @@ public abstract class ImmutableList<E> extends ImmutableCollection<E>
     expect(result!.relationships).toContainEqual({
       srcName: 'ImmutableList',
       dstName: 'List',
-      predicate: 'EXTENDS',
+      predicate: 'IMPLEMENTS',
     });
     // implements plain interface alongside generic one
     expect(result!.relationships).toContainEqual({
       srcName: 'ImmutableList',
       dstName: 'RandomAccess',
-      predicate: 'EXTENDS',
+      predicate: 'IMPLEMENTS',
     });
   });
 
@@ -122,7 +122,7 @@ abstract class AbstractMultimap<K, V> implements Multimap<K, V> {
     expect(result!.relationships).toContainEqual({
       srcName: 'AbstractMultimap',
       dstName: 'Multimap',
-      predicate: 'EXTENDS',
+      predicate: 'IMPLEMENTS',
     });
   });
 

@@ -10,7 +10,7 @@ import { activeReadScope } from "./resolve.js";
 /**
  * The other definitions of a method: the declarations it overrides or
  * implements, the overrides below it, and the sibling implementations of the
- * same base method. Read from `EXTENDS` (which carries `implements` too) and
+ * same base method. Read from `EXTENDS`, `IMPLEMENTS` and
  * `CONTAINS` edges, the same walk Java's `dispatchCallers` does upwards, here
  * in both directions and for every language.
  *
@@ -199,7 +199,7 @@ export async function overrideFamily(
 ): Promise<OverrideFamily> {
   const caps = new Set<HierarchyCap>();
   const expand = async (id: string, direction: "in" | "out", predicate: string): Promise<any[]> => {
-    const result = await client.expand(id, { direction, predicates: [predicate] });
+    const result = await client.expand(id, { direction, predicates: predicate === "EXTENDS" ? ["EXTENDS", "IMPLEMENTS"] : [predicate] });
     if (expandCapped(result)) caps.add("edges");
     return result.nodes.filter((n: any) => n?.id);
   };
@@ -243,7 +243,7 @@ export async function overrideFamily(
   for (const { type } of up) types.set(type.id, type);
 
   // Members of the supertypes, while the owner's subtypes are walked. A
-  // supertype that is also a subtype (an EXTENDS cycle) stays a supertype.
+  // supertype that is also a subtype (a heritage cycle) stays a supertype.
   const ancestors = new Set(up.map((u) => u.type.id));
   const below = new Map<string, number>();
   await Promise.all([
@@ -252,7 +252,7 @@ export async function overrideFamily(
   ]);
 
   const declaring = up.filter((u) => (members.get(u.type.id) ?? []).length > 0);
-  // The supertypes above one, through the EXTENDS edges the up walk read.
+  // The supertypes above one, through the heritage edges the up walk read.
   const aboveOf = (id: string): Set<string> => {
     const seen = new Set<string>();
     for (let todo = [id]; todo.length > 0;) {
@@ -337,7 +337,7 @@ export async function overrideFamily(
     diagnostics.push({
       code: "heritage_not_in_graph",
       message: `${owner.name} declares ${unlinked} as a base in ${ownerLocation.path}:${ownerLocation.lineStart}, and ${unlinked} is a ` +
-        `type in the graph, but there is no EXTENDS edge from ${owner.name} to it. The map may predate heritage capture ` +
+        `type in the graph, but there is no EXTENDS or IMPLEMENTS edge from ${owner.name} to it. The map may predate heritage capture ` +
         "(re-map with: ix map), or ingestion could not resolve this base.",
     });
   }
@@ -354,7 +354,7 @@ export async function overrideFamily(
 
 /**
  * A base the owner's header names that is itself a type in the graph, when the
- * owner has no EXTENDS edge: the one case a re-map can fix. A base from a
+ * owner has no heritage edge: the one case a re-map can fix. A base from a
  * library or the language (`Exception`, `models.Model`, `React.Component`) is
  * never ingested, so its edge is dropped on every map, and saying so on every
  * run would be noise. At most `HERITAGE_LOOKUPS` name searches, and only for a
@@ -396,7 +396,7 @@ function truncationMessage(cap: HierarchyCap): string {
 type Expand = (id: string, direction: "in" | "out", predicate: string) => Promise<any[]>;
 
 /**
- * Breadth-first up `EXTENDS`, nearest first and by name within a level, to
+ * Breadth-first up `EXTENDS` and `IMPLEMENTS`, nearest first and by name within a level, to
  * `HIERARCHY_DEPTH` levels and `HIERARCHY_UP_MAX_TYPES` types. The level past
  * the last is expanded only to tell a cut walk from a finished one.
  */
@@ -430,7 +430,7 @@ async function walkUp(owner: any, expand: Expand, caps: Set<HierarchyCap>): Prom
 }
 
 /**
- * Breadth-first down `EXTENDS` from `start`, to `HIERARCHY_DEPTH` levels,
+ * Breadth-first down `EXTENDS` and `IMPLEMENTS` from `start`, to `HIERARCHY_DEPTH` levels,
  * adding each new type to `types` while it is under `HIERARCHY_MAX_TYPES`.
  * A type `skip` names is neither reported nor walked through; one already in
  * `types` (a supertype on the way down from the root) is walked through

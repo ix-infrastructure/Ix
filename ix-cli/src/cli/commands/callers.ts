@@ -42,8 +42,8 @@ export const byName = (a: any, b: any): number =>
 
 /**
  * Callers that reach a Java method through a supertype. For a target `C.m`,
- * the callers of `S.m` for each supertype `S` of `C` (EXTENDS edges, which
- * include `implements`) that declares `m`: a call typed against `S` targets
+ * the callers of `S.m` for each supertype `S` of `C` (EXTENDS or IMPLEMENTS
+ * edges) that declares `m`: a call typed against `S` targets
  * `S.m` statically and may run `C.m`. Each row carries `dispatchVia: "S.m"`
  * (printed as `via`). Nothing for another language, or for a class with no
  * supertype in the graph (two requests then).
@@ -61,7 +61,7 @@ export async function dispatchCallers(
   const members: Array<{ id: string; via: string }> = [];
   let frontier: any[] = owners;
   for (let depth = 0; depth < DISPATCH_DEPTH && frontier.length > 0 && seen.size <= DISPATCH_MAX_TYPES; depth++) {
-    const parents = await mapLimit(frontier, ALL_CONCURRENCY, (n) => client.expand(n.id, { direction: "out", predicates: ["EXTENDS"] }));
+    const parents = await mapLimit(frontier, ALL_CONCURRENCY, (n) => client.expand(n.id, { direction: "out", predicates: ["EXTENDS", "IMPLEMENTS"] }));
     const next: any[] = [];
     for (const n of parents.flatMap((r) => r.nodes).sort(byName)) {
       if (!n?.id || seen.has(n.id) || seen.size > DISPATCH_MAX_TYPES) continue;

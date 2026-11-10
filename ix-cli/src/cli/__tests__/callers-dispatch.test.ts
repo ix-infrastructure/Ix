@@ -25,7 +25,7 @@ vi.mock("../../client/factory.js", () => ({
     expand: async (id: string, opts: { direction: string; predicates: string[] }) => {
       const key = `${id} ${opts.direction} ${opts.predicates.join(",")}`;
       graph.calls.push(key);
-      return { nodes: graph.value.get(key) ?? [], edges: [] };
+      return { nodes: graph.value.get(key) ?? opts.predicates.flatMap(p => graph.value.get(`${id} ${opts.direction} ${p}`) ?? []), edges: [] };
     },
   }),
 }));
@@ -71,8 +71,9 @@ function javaGraph(): Map<string, unknown[]> {
     [`${IMPL.id} in CALLS,REFERENCES`, [FILTER]],
     [`${IMPL.id} in CONTAINS`, [OWNER]],
     // TimeoutInvoker extends AbstractInvoker implements Invoker; AbstractInvoker implements Invoker; Invoker extends Node.
-    [`${OWNER.id} out EXTENDS`, [IFACE, ABSTRACT]],
-    [`${ABSTRACT.id} out EXTENDS`, [IFACE]],
+    [`${OWNER.id} out EXTENDS`, [ABSTRACT]],
+    [`${OWNER.id} out IMPLEMENTS`, [IFACE]],
+    [`${ABSTRACT.id} out IMPLEMENTS`, [IFACE]],
     [`${IFACE.id} out EXTENDS`, [NODE]],
     [`${ABSTRACT.id} out CONTAINS`, [node("m-AbstractInvoker.getUrl", "method", "getUrl", "src/rpc/AbstractInvoker.java", 5)]],
     [`${IFACE.id} out CONTAINS`, [node("m-Invoker.getUrl", "method", "getUrl", "src/rpc/Invoker.java", 4), node("m-Invoker.invoke", "method", "invoke", "src/rpc/Invoker.java", 5)]],
@@ -151,9 +152,9 @@ describe("ix callers dispatch rows (Java)", () => {
   it("walks a bounded, cycle-safe supertype graph", async () => {
     graph.value.set(`${NODE.id} out EXTENDS`, [OWNER, IFACE]);
     await run(["--format", "json"]);
-    // One EXTENDS expand per type, each type once.
-    expect(graph.calls.filter((c) => c.endsWith("out EXTENDS")).sort()).toEqual([
-      `${ABSTRACT.id} out EXTENDS`, `${IFACE.id} out EXTENDS`, `${NODE.id} out EXTENDS`, `${OWNER.id} out EXTENDS`,
+    // One heritage expand per type, each type once.
+    expect(graph.calls.filter((c) => c.endsWith("out EXTENDS,IMPLEMENTS")).sort()).toEqual([
+      `${ABSTRACT.id} out EXTENDS,IMPLEMENTS`, `${IFACE.id} out EXTENDS,IMPLEMENTS`, `${NODE.id} out EXTENDS,IMPLEMENTS`, `${OWNER.id} out EXTENDS,IMPLEMENTS`,
     ].sort());
   });
 
@@ -168,8 +169,9 @@ describe("ix callers dispatch rows (Java)", () => {
 
   it("costs two requests for a Java class with no supertype, and none for another language", async () => {
     graph.value.delete(`${OWNER.id} out EXTENDS`);
+    graph.value.delete(`${OWNER.id} out IMPLEMENTS`);
     await run(["--format", "json"]);
-    expect(graph.calls).toEqual([`${IMPL.id} in CALLS,REFERENCES`, `${IMPL.id} in CONTAINS`, `${OWNER.id} out EXTENDS`]);
+    expect(graph.calls).toEqual([`${IMPL.id} in CALLS,REFERENCES`, `${IMPL.id} in CONTAINS`, `${OWNER.id} out EXTENDS,IMPLEMENTS`]);
     graph.calls = [];
     target.value = { ...IMPL, path: "src/rpc/timeout.ts" };
     await run(["--format", "json"]);

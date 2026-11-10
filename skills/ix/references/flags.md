@@ -702,7 +702,7 @@ Check that `ix mcp` is registered and launchable from each client.
 
 Alias: `ix implementations`. Show the other definitions of a method: what it
 overrides or implements, its overrides, and sibling implementations. Read
-from the graph's `EXTENDS` (extends and implements) and `CONTAINS` edges and
+from the graph's `EXTENDS`, `IMPLEMENTS` and `CONTAINS` edges and
 matched by name, up to 5 levels each way and 32 types; a free function
 answers with no rows and `no_owner_type`. Several symbols answer in one call,
 grouped per symbol.

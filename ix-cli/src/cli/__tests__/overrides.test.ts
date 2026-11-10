@@ -30,7 +30,7 @@ const client = {
   expand: async (id: string, opts: { direction: string; predicates: string[] }) => {
     const key = `${id} ${opts.direction} ${opts.predicates.join(",")}`;
     graph.calls.push(key);
-    return { nodes: graph.value.get(key) ?? [], edges: [] };
+    return { nodes: graph.value.get(key) ?? opts.predicates.flatMap(p => graph.value.get(`${id} ${opts.direction} ${p}`) ?? []), edges: [] };
   },
   // Name search, as the backend answers it: fuzzy, so callers match the name exactly.
   search: async (term: string) => {
@@ -70,6 +70,13 @@ class Graph {
     for (const p of parents) {
       this.add(`${child.id} out EXTENDS`, p);
       this.add(`${p.id} in EXTENDS`, child);
+    }
+    return this;
+  }
+  implements(child: Node, ...parents: Node[]): this {
+    for (const p of parents) {
+      this.add(`${child.id} out IMPLEMENTS`, p);
+      this.add(`${p.id} in IMPLEMENTS`, child);
     }
     return this;
   }
@@ -263,7 +270,7 @@ describe("interfaces", () => {
   const RUN = method(TASK, "run");
 
   it("an interface that declares the method gives an implements row", async () => {
-    graph.value = new Graph().extends(TASK, RUNNABLE).contains(RUNNABLE, method(RUNNABLE, "run", 2)).contains(TASK, RUN).map;
+    graph.value = new Graph().implements(TASK, RUNNABLE).contains(RUNNABLE, method(RUNNABLE, "run", 2)).contains(TASK, RUN).map;
     target.value = asTarget(RUN);
     const body = json((await run(["overrides", "run", "--format", "json"])).out);
     expect(brief(body.rows)).toEqual([["implements", "Runnable.run", 1, undefined]]);
@@ -283,7 +290,7 @@ describe("interfaces", () => {
   it("siblings of an interface method are the other implementations", async () => {
     const other = type("Job", "src/Job.ts");
     graph.value = new Graph()
-      .extends(TASK, RUNNABLE).extends(other, RUNNABLE)
+      .implements(TASK, RUNNABLE).implements(other, RUNNABLE)
       .contains(RUNNABLE, method(RUNNABLE, "run", 2)).contains(TASK, RUN).contains(other, method(other, "run"))
       .map;
     target.value = asTarget(RUN);

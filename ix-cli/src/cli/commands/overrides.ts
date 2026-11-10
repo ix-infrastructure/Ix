@@ -52,7 +52,7 @@ export function registerOverridesCommand(program: Command): void {
 Before changing a method's signature or behaviour: the base declarations it
 overrides or implements, the overrides below it, and the sibling
 implementations of the same base method. Matched by name, through the
-EXTENDS (extends and implements) edges in the graph; up to 5 levels each way
+EXTENDS and IMPLEMENTS edges in the graph; up to 5 levels each way
 and 32 types.
 Several symbols answer in one call, grouped per symbol (json: {targets: [...]}).
 ${EXIT_CODES_HELP}`)
