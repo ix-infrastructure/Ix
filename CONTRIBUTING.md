@@ -75,6 +75,9 @@ Breaking changes: use `feat!:` or `fix!:` prefix.
 
 ## Testing
 
+For parser work, follow the [Adding a language guide](docs-site/src/content/docs/community/adding-a-language.md).
+It covers classification, grammar loading, query captures, tests and extractor versioning.
+
 | What changed | Run |
 |---|---|
 | CLI code | `cd ix-cli && npm test` |

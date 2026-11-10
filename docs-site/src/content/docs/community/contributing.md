@@ -32,6 +32,9 @@ backend, open an issue describing what the CLI needs, and a maintainer will carr
 
 ## Conventions
 
+To extend the parser, follow [Adding a language](/community/adding-a-language/) for the files,
+query conventions and verification steps to update.
+
 - **Copyright header.** Every source file starts with `// Copyright 2026 Ix Infrastructure Inc.` in its language's
   comment syntax. CI enforces it. `python3 .github/scripts/copyright-headers.py --fix` adds any that are missing.
 - **Clean output.** No raw stack traces in normal mode. Use the structured errors in `ix-cli/src/cli/errors.ts`.
