@@ -198,7 +198,7 @@ export interface ParsedChunk {
 export interface ParsedRelationship {
   srcName: string;
   dstName: string;
-  predicate: string;  // "CONTAINS" | "CALLS" | "IMPORTS" | "EXTENDS"
+  predicate: string;  // "CONTAINS" | "CALLS" | "IMPORTS" | "EXTENDS" | "IMPLEMENTS" | "REFERENCES"
   // For path-based IMPORTS only: the unwrapped raw import specifier exactly as
   // written (e.g. "./core", "../util/x", "@nestjs/core", "alpha"), BEFORE it is
   // flattened to a bare stem. The multi-repo dependency gate needs this to tell a
@@ -3056,13 +3056,13 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         continue;
       }
 
-      // Heritage: IMPLEMENTS (separate edge type, use EXTENDS for simplicity)
+      // Heritage: explicit interface implementations (TS, Java, PHP).
       const heritageImpl = match.captures.find((c: any) =>
         c.name === 'heritage.implements'
       );
       if (heritageClass && heritageImpl) {
         recordJsTsImportUse(
-          'EXTENDS',
+          'IMPLEMENTS',
           heritageClass.node.text,
           heritageImpl.node.text,
           heritageImpl.node,
@@ -3072,7 +3072,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         relationships.push({
           srcName: heritageClass.node.text,
           dstName: heritageImpl.node.text,
-          predicate: 'EXTENDS',
+          predicate: 'IMPLEMENTS',
         });
         continue;
       }
@@ -3796,7 +3796,7 @@ export interface ResolvedEdge {
   dstFilePath: string;          // file where the destination symbol is actually defined
   dstName: string;              // plain name as it appears in the relationship
   dstQualifiedKey: string;      // qualified key used for nodeId in the defining file
-  predicate: string;            // "CALLS" | "EXTENDS"
+  predicate: string;            // "CALLS" | "EXTENDS" | "IMPLEMENTS" | "REFERENCES" | "IMPORTS"
   confidence: number;           // 0.9 import-scoped | 0.8 transitive | 0.5 global
   /** Which resolution tier produced the edge; written on the edge with `confidence`. */
   tier?: ResolutionTier;
@@ -3883,7 +3883,7 @@ export function summarizeParseResult(r: FileParseResult): FileSummary {
         ...(rel.importVia ? { importVia: rel.importVia } : {}),
         ...(rel.importAliased ? { importAliased: true } : {}),
       });
-    } else if (rel.predicate === 'CALLS' || rel.predicate === 'REFERENCES' || rel.predicate === 'EXTENDS') {
+    } else if (rel.predicate === 'CALLS' || rel.predicate === 'REFERENCES' || rel.predicate === 'EXTENDS' || rel.predicate === 'IMPLEMENTS') {
       refs.add(rel.dstName);
       if (rel.receiverType) refs.add(rel.receiverType);
       if (rel.receiverFactory) refs.add(rel.receiverFactory);
@@ -4364,7 +4364,7 @@ const COMMODITY_DEF_FILE_THRESHOLD = 5;
 const TS_DECLARATION_FILE = /\.d\.[cm]?ts$/;
 
 /**
- * Resolves CALLS and EXTENDS relationships to their cross-file targets by
+ * Resolves calls, heritage, references and imports to their cross-file targets by
  * building a symbol table and import map over the full batch of parsed files.
  *
  * Tiers (in priority order):
@@ -5815,7 +5815,7 @@ export function resolveEdges(
     };
 
     for (const rel of result.relationships) {
-      if (rel.predicate !== 'CALLS' && rel.predicate !== 'EXTENDS' && rel.predicate !== 'REFERENCES' && rel.predicate !== 'IMPORTS') continue;
+      if (rel.predicate !== 'CALLS' && rel.predicate !== 'EXTENDS' && rel.predicate !== 'IMPLEMENTS' && rel.predicate !== 'REFERENCES' && rel.predicate !== 'IMPORTS') continue;
 
       // Resolve Scala/Java dotted class imports (e.g. "ix.memory.model.ClaimId")
       // to the actual indexed entity node in the defining file.
@@ -6021,7 +6021,7 @@ export function resolveEdges(
         !binding && JS_AMBIENT_CALLEES.has(origDstName);
 
       let bindingProviderFiles: string[] | undefined;
-      if (rel.predicate === 'CALLS' || rel.predicate === 'EXTENDS' || rel.predicate === 'REFERENCES') {
+      if (rel.predicate === 'CALLS' || rel.predicate === 'EXTENDS' || rel.predicate === 'IMPLEMENTS' || rel.predicate === 'REFERENCES') {
         if (binding) {
           let providerFiles = bindingProviderFiles = [...new Set(resolveImportTargets(
             srcFilePath,
@@ -6182,7 +6182,7 @@ export function resolveEdges(
           // `implements ns.I`): a module-scope type of the module `ns` is bound
           // to. A qualifier bound to a module stops here either way, so an
           // external `React.Component` never falls through to a same-named type.
-          if (qualImportMatches.length === 0 && rel.predicate === 'EXTENDS' && srcIsJsTs) {
+          if (qualImportMatches.length === 0 && (rel.predicate === 'EXTENDS' || rel.predicate === 'IMPLEMENTS') && srcIsJsTs) {
             const moduleFiles = jsTsQualifierModuleFiles(srcFilePath, srcLanguage, qualifierPart);
             if (moduleFiles !== undefined) {
               const definesMember = (fp: string): boolean =>
@@ -6298,7 +6298,7 @@ export function resolveEdges(
       // `const { X } = require('./x')` binds: the resolver does not follow
       // CommonJS exports.
       const srcAliases = summaries.get(srcFilePath)?.importAliases;
-      const tsUnboundBase = srcLanguage === SupportedLanguages.TypeScript && rel.predicate === 'EXTENDS' && !binding &&
+      const tsUnboundBase = srcLanguage === SupportedLanguages.TypeScript && (rel.predicate === 'EXTENDS' || rel.predicate === 'IMPLEMENTS') && !binding &&
         !(srcAliases && (Object.hasOwn(srcAliases, dstName) || Object.hasOwn(srcAliases, TS_REQUIRE_BINDING_KEY(dstName))));
       const tsGlobalCandidate = (fp: string): boolean => {
         const summary = summaries.get(fp);

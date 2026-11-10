@@ -489,6 +489,13 @@ ref name=invoke kind=method path=src/rpc/Filter.java lines=10-24
 ref name=select kind=method path=src/cluster/Cluster.java lines=30-41 via=Invoker.getUrl
 ```
 
+`ix depends <type> --format json` labels incoming `EXTENDS` edges as
+`rel: "extended_by"` and `IMPLEMENTS` edges as `rel: "implemented_by"`.
+For example, `class A implements I` makes `A` an `implemented_by` entry in
+`ix depends I`. Explicit `implements` clauses in TypeScript, Java and PHP
+emit `IMPLEMENTS`; inheritance syntax that does not distinguish interfaces
+from classes continues to use `EXTENDS`. Run `ix map` to refresh an older map.
+
 `ix overrides <method>` (alias `ix implementations`) lists the other
 definitions of a method, the ones that move with it when its signature or
 behaviour changes. The header names the target as `<Type>.<method>`, the type
@@ -512,7 +519,7 @@ base as a class says `overrides`), `overridden_by` (declared on a subtype), or
 naming that root; a type under two roots is listed once, under the first).
 `depth` counts levels from the target's type for up and down rows, and from
 the root for siblings. Rows are ordered by relation, then depth, then path.
-Matching is by name through `EXTENDS` (which carries `implements`) and
+Matching is by name through `EXTENDS`, `IMPLEMENTS` and
 `CONTAINS` edges, never by signature; each type is a graph id, so a
 same-named class in another file is not in the family. Diagnostics:
 
@@ -523,7 +530,7 @@ same-named class in another file is not in the family. Diagnostics:
   carries `truncated=true`.
 - `overloads_not_distinguished`: in Java, Kotlin, C#, Scala or C++, a matched
   type declares the method more than once; check each row's parameters.
-- `heritage_not_in_graph`: the type has no `EXTENDS` edge, but its header
+- `heritage_not_in_graph`: the type has no `EXTENDS` or `IMPLEMENTS` edge, but its header
   names a base that is itself a type in the graph, so the map may predate
   heritage capture; re-map. A base the graph does not hold (a library or
   builtin class such as `Exception`) is not reported: no map links it.

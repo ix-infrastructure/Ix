@@ -5,11 +5,11 @@ import { describe, expect, it } from 'vitest';
 import { buildGlobalResolutionIndex, parseFile, resolveEdges, summarizeParseResult } from '../index.js';
 import { buildPatchWithResolution, symbolNodeId } from '../patch-builder.js';
 
-/** Where each EXTENDS edge of `srcPath` resolves: `src -> dstFile:dstKey`. */
+/** Where each heritage edge of `srcPath` resolves: `src -> dstFile:dstKey`. */
 function heritage(files: Record<string, string>, srcPath: string, opts?: Parameters<typeof resolveEdges>[3]): string[] {
   const parsed = Object.entries(files).map(([filePath, source]) => parseFile(filePath, source)!);
   return resolveEdges(parsed, undefined, undefined, opts)
-    .filter(edge => edge.predicate === 'EXTENDS' && edge.srcFilePath === srcPath)
+    .filter(edge => (edge.predicate === 'EXTENDS' || edge.predicate === 'IMPLEMENTS') && edge.srcFilePath === srcPath)
     .map(edge => `${edge.srcName} ${edge.dstName} -> ${edge.dstFilePath}:${edge.dstQualifiedKey}`)
     .sort();
 }
@@ -165,7 +165,7 @@ describe('EXTENDS resolution for JavaScript bases', () => {
   });
 });
 
-describe('EXTENDS resolution for TypeScript bases', () => {
+describe('EXTENDS and IMPLEMENTS resolution for TypeScript bases', () => {
   const base = {
     '/repo/src/base.ts': [
       'export class Base<T = unknown> {}',
@@ -421,7 +421,7 @@ describe('EXTENDS resolution for TypeScript bases', () => {
       new Map(parsed.map(r => [r.filePath, summarizeParseResult(r)])),
     );
     expect(resolveEdges([parsed[1]], undefined, index)
-      .filter(edge => edge.predicate === 'EXTENDS')
+      .filter(edge => (edge.predicate === 'EXTENDS' || edge.predicate === 'IMPLEMENTS'))
       .map(edge => `${edge.dstName} -> ${edge.dstFilePath}`)).toEqual(['Base -> /repo/src/base.ts']);
   });
 
@@ -476,7 +476,7 @@ describe('EXTENDS resolution for TypeScript bases', () => {
       }));
       const index = buildGlobalResolutionIndex(parsed.map(r => r.filePath), undefined, undefined, summaries);
       return resolveEdges(parsed.filter(r => r.filePath === srcPath), undefined, index)
-        .filter(edge => edge.predicate === 'EXTENDS')
+        .filter(edge => (edge.predicate === 'EXTENDS' || edge.predicate === 'IMPLEMENTS'))
         .map(edge => `${edge.dstName} -> ${edge.dstFilePath}`);
     };
     expect(resolveAgainstOld({
@@ -562,14 +562,14 @@ describe('EXTENDS resolution for JavaScript namespace bases', () => {
   });
 });
 
-describe('EXTENDS edges in the patch', () => {
-  /** The EXTENDS edges `srcPath`'s patch writes, as `srcId -> dstId`. */
-  function patchedExtends(files: Record<string, string>, srcPath: string): string[] {
+describe('heritage edges in the patch', () => {
+  /** The heritage edges `srcPath`'s patch writes, as `srcId -> dstId`. */
+  function patchedHeritage(files: Record<string, string>, srcPath: string): string[] {
     const parsed = Object.entries(files).map(([filePath, source]) => parseFile(filePath, source)!);
     const src = parsed.find(result => result.filePath === srcPath)!;
     const edges = resolveEdges(parsed).filter(edge => edge.srcFilePath === srcPath);
     return buildPatchWithResolution(src, 'h', 'ws', edges).ops
-      .filter((op: any) => op.type === 'UpsertEdge' && op.predicate === 'EXTENDS')
+      .filter((op: any) => op.type === 'UpsertEdge' && (op.predicate === 'EXTENDS' || op.predicate === 'IMPLEMENTS'))
       .map((op: any) => `${op.src} -> ${op.dst}`)
       .sort();
   }
@@ -577,7 +577,7 @@ describe('EXTENDS edges in the patch', () => {
 
   it('links a Python class to its module-qualified, generic and same-file bases', () => {
     const user = '/repo/app/user.py';
-    expect(patchedExtends({
+    expect(patchedHeritage({
       '/repo/app/__init__.py': '',
       '/repo/app/models.py': 'class Model:\n    pass\n',
       [user]: [
@@ -600,7 +600,7 @@ describe('EXTENDS edges in the patch', () => {
   it('links a TypeScript class to its namespace-qualified and generic bases', () => {
     const widget = '/repo/src/widget.ts';
     const base = '/repo/src/base.ts';
-    expect(patchedExtends({
+    expect(patchedHeritage({
       [base]: 'export class Base {}\nexport interface I<T> {}\n',
       [widget]: "import * as ns from './base';\nexport class Widget extends ns.Base implements ns.I<number> {}\n",
     }, widget)).toEqual([
@@ -611,7 +611,7 @@ describe('EXTENDS edges in the patch', () => {
 
   it('links a JavaScript class expression to its imported base', () => {
     const widget = '/repo/src/widget.js';
-    expect(patchedExtends({
+    expect(patchedHeritage({
       '/repo/src/base.js': 'export class Base {}\n',
       [widget]: "import { Base } from './base';\nexport const Widget = class extends Base {};\n",
     }, widget)).toEqual([`${id(widget, 'Widget')} -> ${id('/repo/src/base.js', 'Base')}`]);
