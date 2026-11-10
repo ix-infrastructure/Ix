@@ -23,9 +23,10 @@ Consolidation retires the tool layer; it does not retire the plugins.
 
 ## Tool-surface parity
 
-The plugins never shared one tool surface. Measured against `ix mcp`:
+The plugins never shared one tool surface. Before consolidation, the gaps in
+`ix mcp` were:
 
-| Plugin | Tools | Tools `ix mcp` lacked |
+| Plugin | Tools | Tools missing before consolidation |
 |---|---:|---|
 | ix-codex-plugin | 23 | — |
 | ix-cursor-plugin | 23 | — |
@@ -34,15 +35,18 @@ The plugins never shared one tool surface. Measured against `ix mcp`:
 | ix-opencode-plugin | 17 | `ix_decide`, `ix_docs_tool`, `ix_ingest`, `ix_neighbors`, `ix_query` |
 | ix-claude-plugin | 0 (skills only) | — |
 
-`ix mcp` now closes that gap, with three deliberate exclusions:
+The full `ix mcp --tools=all` catalog now closes that gap, with two deliberate
+exclusions (see [Toolsets](mcp.md#toolsets) for the default core catalog):
 
 - **`ix_query`** — the deprecated command the CLI docs tell agents not to use
   ("produces oversized low-signal responses"). Dropped on purpose.
-- **`ix_neighbors`** — a composite of `ix_callers` + `ix_callees` + `ix_depends`,
-  all served individually. Callers lose one round-trip, not a capability.
 - **`ix_docs_tool`** — a composite over `ix_overview`, likewise served.
 
-And `ix_status` is Gemini's name for what `ix mcp` calls `ix_health`; both run
+`ix_neighbors` is served in both toolsets. It selects callers, callees, imports,
+importers or overrides through its `relation` argument; the individual relation
+tools are also available in `all`.
+
+`ix_status` is Gemini's name for what `ix mcp` calls `ix_health`; both run
 `ix status`.
 
 `ix_decide` and `ix_ingest` were real gaps and are now served. `ix_decide` is a
@@ -50,8 +54,9 @@ write and needs Pro, so it is advertised only when `@ix/pro` resolves — as are
 `ix_briefing` and `ix_decisions`, which this server previously offered to every
 install even though every call answered "requires Ix Pro".
 
-**Net:** codex and cursor can delegate with no change in what an agent can do.
-gemini, openclaw and opencode lose only `ix_query` and the two composites.
+**Net:** with `--tools=all`, codex and cursor can delegate with no change in what
+an agent can do. gemini, openclaw and opencode lose only `ix_query` and
+`ix_docs_tool`.
 
 ## Structured results and tool annotations
 
@@ -79,7 +84,7 @@ gemini, openclaw and opencode lose only `ix_query` and the two composites.
   the runner, and what a tool can reach is bounded by the command it runs, not by
   what it is advertised as.
 
-- **Structured content.** `ix_map`, `ix_ingest` and `ix_smells` return their
+- **Structured content.** `ix_map` and `ix_ingest` return their
   parsed JSON object as `structuredContent` (with an `outputSchema`) so agents
   receive typed values instead of a string to re-parse. The schema asserts only
   "an object": the real field shape is backend-defined and versioned, and
@@ -87,6 +92,10 @@ gemini, openclaw and opencode lose only `ix_query` and the two composites.
   renames one. The human-readable text result is preserved for clients that
   prefer it. Most remaining tools return their `llm`-format text, which has no
   stable object shape worth promising.
+
+  `ix_smells` returns JSON text by default and adds `structuredContent` only
+  when called with `structured: true`. It has no `outputSchema`: structured
+  content is opt-in, so the server cannot promise it on every result.
 
   The Pro tools are the exception worth naming: they run in JSON too, but get
   neither an `outputSchema` nor `structuredContent`, because their shape cannot

@@ -10,6 +10,39 @@ ix mcp
 The client launches the server in the active workspace, so every Ix tool uses
 that repository's graph and configuration.
 
+## Toolsets
+
+`ix mcp` defaults to `--tools=core`, advertising five graph tools:
+
+| Tool | Purpose |
+|---|---|
+| `ix_context` | Ranked evidence for where to start on a target or issue |
+| `ix_search` | Find a definition by name |
+| `ix_neighbors` | Callers, callees, imports, importers or method overrides |
+| `ix_impact` | What a change to a target reaches |
+| `ix_read` | Read a definition's source by name |
+
+`ix mcp --tools=all` advertises the full OSS catalog, adding health and stats,
+mapping and ingestion, text search, overview and other lookups, individual
+relation tools, dependency trees and traces, ranking, inventory, architecture
+smells, subsystems, diffs and history. OSS tools outside core are available only
+in `all`. When Ix Pro loads, `ix_briefing`, `ix_decisions` and `ix_decide` are
+also advertised in either toolset.
+
+To get the full catalog in a client session, its registered server command must
+be `ix mcp --tools=all` (command `ix`, arguments `["mcp", "--tools=all"]`).
+For example, when registering Codex by hand:
+
+```bash
+codex mcp add ix-memory -- ix mcp --tools=all
+```
+
+`ix mcp install` currently registers `ix mcp` with the default core toolset and
+cannot write a `--tools=all` registration. Use the client's own registration
+command or edit its server configuration to include the flag, then restart
+the client session. Starting `ix mcp --tools=all` separately in a shell does
+not change the command the client launches.
+
 ## Registering clients
 
 ```bash

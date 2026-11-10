@@ -27,11 +27,10 @@ export type { IxRunner } from "./runner.js";
 /**
  * Tools every install can run.
  *
- * This set is the union of what the per-host Ix plugins expose, minus three
- * deliberate drops: `ix_query` is the deprecated command the CLI docs tell
- * agents not to use, and `ix_neighbors` / `ix_docs_tool` are convenience
- * composites of `ix_callers` + `ix_callees` + `ix_depends` and of
- * `ix_overview`, all of which are here individually.
+ * The full OSS catalog includes `ix_neighbors`, also in the default core set.
+ * Two per-host plugin tools are deliberately omitted: `ix_query` is deprecated,
+ * and `ix_docs_tool` is a convenience composite over the served `ix_overview`.
+ * `--tools=all` advertises this full catalog; the default advertises core only.
  */
 export const IX_MCP_OSS_TOOL_NAMES = [
   // First, as it is registered first: tools/list leads with where to start.
