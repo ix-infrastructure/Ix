@@ -95,35 +95,57 @@ import PHP from 'tree-sitter-php';
 // @ts-ignore
 import Scala from 'tree-sitter-scala';
 const _require = createRequire(import.meta.url);
-function tryLoadGrammar(pkg: string): any {
-  try { return _require(pkg); } catch { return null; }
+/**
+ * Every grammar loaded through the quiet helpers below, by language: the
+ * package it came from and, when it did not load, why. `grammarStatus()` reads
+ * it. Keeping the reason here is what lets `ix map` and `ix doctor` name a
+ * missing grammar instead of only counting its files as unparsed (#967).
+ * Recording costs nothing per parse worker; printing is left to the caller.
+ */
+const QUIET_GRAMMARS = new Map<SupportedLanguages, { pkg: string; reason?: string }>();
+/** One line of a load error: the message, never a stack. */
+function grammarLoadReason(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.split('\n')[0].trim() || 'unknown error';
+}
+function tryLoadGrammar(language: SupportedLanguages, pkg: string): any {
+  QUIET_GRAMMARS.set(language, { pkg });
+  try {
+    return _require(pkg);
+  } catch (err) {
+    QUIET_GRAMMARS.set(language, { pkg, reason: grammarLoadReason(err) });
+    return null;
+  }
 }
 // Async sibling of tryLoadGrammar for grammars that publish ESM bindings with
 // top-level await (they can't go through CJS require). Returns null silently
 // when the optional grammar can't load on this platform — same contract as
 // tryLoadGrammar. An unavailable optional grammar (e.g. no native prebuild for
-// this OS/arch) is expected and must not be logged per parse worker.
-async function tryImportGrammar(pkg: string): Promise<any> {
+// this OS/arch) is expected and must not be logged per parse worker; the
+// reason is kept for grammarStatus() instead.
+async function tryImportGrammar(language: SupportedLanguages, pkg: string): Promise<any> {
+  QUIET_GRAMMARS.set(language, { pkg });
   try {
     const mod: any = await import(pkg);
     return mod?.default ?? mod;
-  } catch {
+  } catch (err) {
+    QUIET_GRAMMARS.set(language, { pkg, reason: grammarLoadReason(err) });
     return null;
   }
 }
-const Kotlin = tryLoadGrammar('tree-sitter-kotlin');
-const Swift  = tryLoadGrammar('tree-sitter-swift');
-const R = tryLoadGrammar('@davisvaughan/tree-sitter-r');
-const Elixir = tryLoadGrammar('tree-sitter-elixir');
-const Make = tryLoadGrammar('tree-sitter-make');
-const Bash = tryLoadGrammar('tree-sitter-bash');
-const Haskell = tryLoadGrammar('tree-sitter-haskell');
-const Zig = tryLoadGrammar('@tree-sitter-grammars/tree-sitter-zig');
-const Html = tryLoadGrammar('tree-sitter-html');
+const Kotlin = tryLoadGrammar(SupportedLanguages.Kotlin, 'tree-sitter-kotlin');
+const Swift  = tryLoadGrammar(SupportedLanguages.Swift, 'tree-sitter-swift');
+const R = tryLoadGrammar(SupportedLanguages.R, '@davisvaughan/tree-sitter-r');
+const Elixir = tryLoadGrammar(SupportedLanguages.Elixir, 'tree-sitter-elixir');
+const Make = tryLoadGrammar(SupportedLanguages.Makefile, 'tree-sitter-make');
+const Bash = tryLoadGrammar(SupportedLanguages.Bash, 'tree-sitter-bash');
+const Haskell = tryLoadGrammar(SupportedLanguages.Haskell, 'tree-sitter-haskell');
+const Zig = tryLoadGrammar(SupportedLanguages.Zig, '@tree-sitter-grammars/tree-sitter-zig');
+const Html = tryLoadGrammar(SupportedLanguages.HTML, 'tree-sitter-html');
 // tree-sitter-xml exports { xml, dtd }; we use the xml sub-grammar.
-const XmlPkg = tryLoadGrammar('@tree-sitter-grammars/tree-sitter-xml');
+const XmlPkg = tryLoadGrammar(SupportedLanguages.XML, '@tree-sitter-grammars/tree-sitter-xml');
 const Xml = XmlPkg?.xml ?? null;
-const HclPkg = tryLoadGrammar('@tree-sitter-grammars/tree-sitter-hcl');
+const HclPkg = tryLoadGrammar(SupportedLanguages.HCL, '@tree-sitter-grammars/tree-sitter-hcl');
 const Hcl = HclPkg?.default ?? HclPkg;
 // SAS / Lua / CSS publish ESM bindings with top-level await, so they load via
 // import() through the quiet helper above. A grammar that can't load on this
@@ -137,17 +159,17 @@ const Hcl = HclPkg?.default ?? HclPkg;
 // tree-sitter-sas stays bare: its `main` is already a full filename and it
 // declares `"exports"`, so it never warns and a subpath import of it throws
 // ERR_PACKAGE_PATH_NOT_EXPORTED.
-const SAS = await tryImportGrammar('tree-sitter-sas');
+const SAS = await tryImportGrammar(SupportedLanguages.SAS, 'tree-sitter-sas');
 // Lua and CSS are both `"type": "module"` with a directory `"main"` and no
 // `"exports"`, so the bare specifier makes Node fall back to directory-index
 // lookup and warn — once per parse worker, onto the same stderr the `ix map`
 // progress bar draws on. Pointing straight at the file skips that resolution.
-const Lua = await tryImportGrammar('@tree-sitter-grammars/tree-sitter-lua/bindings/node/index.js');
-const Css = await tryImportGrammar('tree-sitter-css/bindings/node/index.js');
+const Lua = await tryImportGrammar(SupportedLanguages.Lua, '@tree-sitter-grammars/tree-sitter-lua/bindings/node/index.js');
+const Css = await tryImportGrammar(SupportedLanguages.CSS, 'tree-sitter-css/bindings/node/index.js');
 // tree-sitter-powershell is the same shape: ESM bindings with top-level await,
 // a directory `main` and no `"exports"`, so it needs the async helper and the
 // explicit file path for the same two reasons Lua and CSS do.
-const PowerShell = await tryImportGrammar('tree-sitter-powershell/bindings/node/index.js');
+const PowerShell = await tryImportGrammar(SupportedLanguages.PowerShell, 'tree-sitter-powershell/bindings/node/index.js');
 
 import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
@@ -557,6 +579,52 @@ export function isGrammarSupported(filePath: string): boolean {
   if (HAND_PARSERS[language]) return true;
   if (filePath.endsWith('.tsx')) return true; // TSX uses TypeScript.tsx, always available
   return GRAMMAR_MAP[language] !== undefined;
+}
+
+/** One tree-sitter grammar and whether it loaded on this machine. */
+export interface GrammarStatus {
+  /** A `SupportedLanguages` value, e.g. `kotlin`. */
+  language: string;
+  loaded: boolean;
+  /**
+   * The npm package that provides it. Present for grammars loaded through the
+   * quiet optional path; absent for the statically imported ones, which load
+   * or take this whole module down with them.
+   */
+  package?: string;
+  /** First line of the load error, when `loaded` is false. */
+  reason?: string;
+}
+
+/** `@scope/name/sub/path.js` -> `@scope/name`; `name/sub` -> `name`. */
+function packageName(specifier: string): string {
+  const parts = specifier.split('/');
+  return specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
+}
+
+/**
+ * Every tree-sitter grammar this module knows, loaded or not, sorted by
+ * language. Hand-parsed formats (YAML, SQL, ...) have no grammar and are not
+ * listed. A grammar that did not load keeps the reason its import failed, so a
+ * caller can say why a language's files went unparsed (#967).
+ */
+export function grammarStatus(): GrammarStatus[] {
+  const out: GrammarStatus[] = [];
+  const languages = new Set<SupportedLanguages>([
+    ...(Object.keys(GRAMMAR_MAP) as SupportedLanguages[]),
+    ...QUIET_GRAMMARS.keys(),
+  ]);
+  for (const language of languages) {
+    const quiet = QUIET_GRAMMARS.get(language);
+    const loaded = GRAMMAR_MAP[language] !== undefined;
+    const entry: GrammarStatus = { language, loaded };
+    if (quiet) entry.package = packageName(quiet.pkg);
+    // A package that loaded but exposes no grammar (tree-sitter-xml without
+    // its `xml` export) is still unavailable, and still owed a reason.
+    if (!loaded) entry.reason = quiet?.reason ?? 'the package loaded but exports no grammar';
+    out.push(entry);
+  }
+  return out.sort((a, b) => a.language.localeCompare(b.language));
 }
 
 // ---------------------------------------------------------------------------

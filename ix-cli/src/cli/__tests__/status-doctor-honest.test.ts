@@ -512,6 +512,50 @@ describe("doctor checks", () => {
     process.exitCode = undefined;
   });
 
+  it("ix doctor: lists every grammar, and names an unavailable one with its reason without failing (#967)", async () => {
+    registerRepo();
+    vi.doMock("../commands/ingestion-loader.js", async (orig) => ({
+      ...(await orig<typeof import("../commands/ingestion-loader.js")>()),
+      loadGrammarStatus: async () => [
+        { language: "kotlin", loaded: false, package: "tree-sitter-kotlin", reason: "Cannot find module 'tree-sitter-kotlin'" },
+        { language: "typescript", loaded: true },
+      ],
+    }));
+    mockNoDocker();
+    const { registerDoctorCommand } = await import("../commands/doctor.js");
+    const json = JSON.parse(await run(registerDoctorCommand, ["doctor", "--format", "json"]));
+    expect(json.grammars).toEqual([
+      { language: "kotlin", loaded: false, package: "tree-sitter-kotlin", reason: "Cannot find module 'tree-sitter-kotlin'" },
+      { language: "typescript", loaded: true },
+    ]);
+    const check = json.checks.find((c: { name: string }) => c.name === "Language grammars loaded");
+    expect(check).toEqual({
+      name: "Language grammars loaded",
+      ok: true,
+      detail: "1 of 2 loaded; unavailable: kotlin (Cannot find module 'tree-sitter-kotlin') — files in that language are not parsed",
+    });
+    process.exitCode = undefined;
+  });
+
+  it("ix doctor: text output lists the unavailable grammar under its check (#967)", async () => {
+    registerRepo();
+    vi.doMock("../commands/ingestion-loader.js", async (orig) => ({
+      ...(await orig<typeof import("../commands/ingestion-loader.js")>()),
+      loadGrammarStatus: async () => [
+        { language: "sas", loaded: false, package: "tree-sitter-sas", reason: "No native build was found" },
+        { language: "typescript", loaded: true },
+      ],
+    }));
+    mockNoDocker();
+    const { registerDoctorCommand } = await import("../commands/doctor.js");
+    // eslint-disable-next-line no-control-regex
+    const text = (await run(registerDoctorCommand, ["doctor"])).replace(/\x1b\[[0-9;]*m/g, "");
+    expect(text).toContain("Language grammars loaded — 1 of 2 loaded; unavailable: sas (No native build was found)");
+    expect(text).toContain("loaded: typescript");
+    expect(text).toContain("unavailable: sas (tree-sitter-sas) — No native build was found");
+    process.exitCode = undefined;
+  });
+
   it("ix doctor: the re-parse check against a backend that 404s /v1/list is 'not checked'", async () => {
     registerRepo();
     stats = HOLLOW;
