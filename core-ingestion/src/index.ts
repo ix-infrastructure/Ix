@@ -530,11 +530,31 @@ function builtinsForLanguage(lang: SupportedLanguages): Set<string> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Formats parsed without a tree-sitter grammar
+// ---------------------------------------------------------------------------
+
+/**
+ * The one list of hand-parsed formats. parseFile dispatches on it and
+ * isGrammarSupported reads it, so a format added here is both parsed and
+ * picked by `ix verify` (#959: .proto was parsed but never verified).
+ */
+const HAND_PARSERS: Partial<Record<SupportedLanguages, (filePath: string, source: string) => FileParseResult>> = {
+  [SupportedLanguages.YAML]: parseYamlFile,
+  [SupportedLanguages.Dockerfile]: parseDockerfileFile,
+  [SupportedLanguages.SQL]: parseSqlFile,
+  [SupportedLanguages.JSON]: parseJsonFile,
+  [SupportedLanguages.TOML]: parseTomlFile,
+  [SupportedLanguages.Markdown]: parseMarkdownFile,
+  [SupportedLanguages.LaTeX]: parseLatexFile,
+  [SupportedLanguages.Proto]: parseProtoFile,
+};
+
 /** Returns true if a grammar is installed for the given file's language. */
 export function isGrammarSupported(filePath: string): boolean {
   const language = languageFromPath(filePath);
   if (!language) return false;
-  if (language === SupportedLanguages.YAML || language === SupportedLanguages.Dockerfile || language === SupportedLanguages.SQL || language === SupportedLanguages.JSON || language === SupportedLanguages.TOML || language === SupportedLanguages.Markdown || language === SupportedLanguages.LaTeX) return true;
+  if (HAND_PARSERS[language]) return true;
   if (filePath.endsWith('.tsx')) return true; // TSX uses TypeScript.tsx, always available
   return GRAMMAR_MAP[language] !== undefined;
 }
@@ -2695,14 +2715,8 @@ export interface ParseFileOptions {
 export function parseFile(filePath: string, source: string, opts: ParseFileOptions = {}): FileParseResult | null {
   const language = detectLanguageForSource(filePath, source);
   if (!language) return null;
-  if (language === SupportedLanguages.YAML) return parseYamlFile(filePath, source);
-  if (language === SupportedLanguages.Dockerfile) return parseDockerfileFile(filePath, source);
-  if (language === SupportedLanguages.SQL) return parseSqlFile(filePath, source);
-  if (language === SupportedLanguages.JSON) return parseJsonFile(filePath, source);
-  if (language === SupportedLanguages.TOML) return parseTomlFile(filePath, source);
-  if (language === SupportedLanguages.Markdown) return parseMarkdownFile(filePath, source);
-  if (language === SupportedLanguages.LaTeX) return parseLatexFile(filePath, source);
-  if (language === SupportedLanguages.Proto) return parseProtoFile(filePath, source);
+  const handParser = HAND_PARSERS[language];
+  if (handParser) return handParser(filePath, source);
 
   // TypeScript TSX uses a separate grammar
   const isTsx = filePath.endsWith('.tsx');
@@ -6145,6 +6159,11 @@ export function resolveEdges(
           : elixirAliasedModule ? (symbolToFiles.get(elixirAliasedModule) ?? []).filter(fp => fp !== srcFilePath)
           : pythonAliasedFiles.length === 1 ? pythonAliasedFiles
           : [];
+          // The caller's own file defines `qualifier.member` (a `this.m()` /
+          // `self.m()` call, which the parser rewrites to `Class.m`): the call
+          // stays in this file, whatever same-named class defines it elsewhere.
+          // A qualifier that is an import alias names another module instead.
+          if (aliasedImportMatches.length === 0 && fileDefinesQualifiedMember(srcFilePath, qualifierPart, memberPart)) continue;
           // Try import-scoped qualifier first
           const qualifierSearchPool = aliasedImportMatches.length > 0
             ? aliasedImportMatches

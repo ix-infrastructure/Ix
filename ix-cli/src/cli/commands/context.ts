@@ -14,10 +14,12 @@ import {
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import type {
+  ConfidenceBreakdown,
   ConflictReport,
   DecisionReport,
   GraphNode,
   IntentReport,
+  ScoredClaim,
   StructuredContext,
 } from "../../client/types.js";
 import { resolveWorkspaceRoot } from "../config.js";
@@ -2515,6 +2517,36 @@ const TIER = { target: 0, issue: 1, structural: 2, claims: 3, relationships: 4, 
 const TIER_WIDTH = 1000;
 const tierScore = (tier: number, index = 0): number => tier * TIER_WIDTH + Math.min(index, TIER_WIDTH - 1);
 
+/** The six factors the backend multiplies into a claim's confidence. */
+const CONFIDENCE_FACTORS = [
+  "baseAuthority",
+  "verification",
+  "recency",
+  "corroboration",
+  "conflictPenalty",
+  "intentAlignment",
+] as const;
+
+/**
+ * A claim's confidence for its evidence reason, to two places: the product of
+ * the six factor values in `confidence`, clamped to [0, 1]. That is the
+ * backend's `ConfidenceBreakdown.score` (and `compactClaims[].confidence.score`),
+ * which is not serialized in `claims[].confidence`, so reading
+ * `confidence.score` printed "n/a" for every claim (#1007). `finalScore` is
+ * not used here: it is relevance × confidence, and the reason already names
+ * relevance on its own. "n/a" when any factor value is missing.
+ */
+function claimConfidence(scored: ScoredClaim): string {
+  const breakdown = scored.confidence as Partial<ConfidenceBreakdown> | undefined;
+  let product = 1;
+  for (const name of CONFIDENCE_FACTORS) {
+    const value = breakdown?.[name]?.value;
+    if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
+    product *= value;
+  }
+  return String(Math.round(Math.min(1, Math.max(0, product)) * 100) / 100);
+}
+
 /** Deterministic evidence ranking: tier, then a stable id tiebreaker. */
 function rankEvidence(input: {
   resolved: { id: string; name: string; kind: string };
@@ -2683,7 +2715,7 @@ function rankEvidence(input: {
       source: "context.claims",
       title: scored.claim.statement,
       score: tierScore(TIER.claims, 0),
-      reason: `context claim (relevance ${scored.relevance}, confidence ${scored.confidence?.score ?? "n/a"})`,
+      reason: `context claim (relevance ${scored.relevance}, confidence ${claimConfidence(scored)})`,
       refs: [scored.claim.entityId],
     });
   }
