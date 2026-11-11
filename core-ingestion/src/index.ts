@@ -714,6 +714,56 @@ function extractJsImportBindings(stmtNode: any, rawSpec: string): ImportBinding[
 }
 
 /**
+ * Rust: the in-crate paths a file's top-level items bind to a name, as
+ * `[name, path]` -- `mod stats;` → [stats, self::stats], `use crate::stats;` →
+ * [stats, crate::stats], `use super::{stats as totals}` → [totals, super::stats].
+ * Only paths that start at `crate`, `self` or `super`: any other first segment
+ * is another crate, or a name this list already explains.
+ */
+function rustModuleAliases(rootNode: any): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  const use = (node: any, prefix: string): void => {
+    const join = (text: string): string => prefix ? `${prefix}::${text}` : text;
+    if (node.type === 'identifier' || node.type === 'scoped_identifier') {
+      const path = join(node.text);
+      if (/^(crate|self|super)(::\w+)+$/.test(path)) out.push([path.slice(path.lastIndexOf('::') + 2), path]);
+    } else if (node.type === 'use_as_clause') {
+      const path = node.childForFieldName('path');
+      const alias = node.childForFieldName('alias');
+      if (path && alias && /^(crate|self|super)(::\w+)+$/.test(join(path.text))) out.push([alias.text, join(path.text)]);
+    } else if (node.type === 'scoped_use_list') {
+      const path = node.childForFieldName('path');
+      const list = node.childForFieldName('list');
+      if (list) use(list, path ? join(path.text) : prefix);
+    } else if (node.type === 'use_list') {
+      for (let i = 0; i < node.namedChildCount; i++) use(node.namedChild(i), prefix);
+    }
+  };
+  for (let i = 0; i < rootNode.namedChildCount; i++) {
+    const item = rootNode.namedChild(i);
+    if (item.type === 'mod_item' && !item.childForFieldName('body')) {
+      const name = item.childForFieldName('name')?.text;
+      if (name) out.push([name, `self::${name}`]);
+    } else if (item.type === 'use_declaration') {
+      const argument = item.childForFieldName('argument');
+      if (argument) use(argument, '');
+    }
+  }
+  return out;
+}
+
+/** Rust: the type of the `impl` block around a node, for `impl Trait for Type` too. */
+function rustImplType(node: any): string | null {
+  for (let scope = node.parent; scope; scope = scope.parent) {
+    if (scope.type !== 'impl_item') continue;
+    const type = scope.childForFieldName('type');
+    const name = type?.type === 'generic_type' ? type.childForFieldName('type') : type;
+    return name?.type === 'type_identifier' ? name.text : null;
+  }
+  return null;
+}
+
+/**
  * JS/TS: the `importAliases` key of a re-exported namespace -- `export * as ns
  * from 'x'` binds no local `ns`, so it is kept apart from the file's own
  * namespace imports, but an importer's `import { ns }` still names it.
@@ -3548,6 +3598,19 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
             // Substitute so e.g. `this.save()` → `Document.save` instead of `this.save`.
             const enclosingClass = findEnclosing(classRanges, callLine, '');
             if (enclosingClass) qualifier = enclosingClass;
+          } else if (language === SupportedLanguages.Rust) {
+            if (qualifier === 'Self') {
+              // `Self` is the type of the enclosing impl: `Self::fresh()` → `Counter.fresh`.
+              const enclosingType = findEnclosing(classRanges, callLine, '') ?? rustImplType(qualifierCapture.node);
+              if (enclosingType) qualifier = enclosingType;
+            } else if (qualifier.includes('::')) {
+              // A longer path keeps every segment (`crate::stats::report()` →
+              // `crate.stats.report`), so the resolver can find the module. Not
+              // with `::`, which the patch builder reads as an external package.
+              qualifier = /^\w+(::\w+)+$/.test(qualifier)
+                ? qualifier.replaceAll('::', '.')
+                : qualifierCapture.node.childForFieldName?.('name')?.text ?? qualifier.slice(qualifier.lastIndexOf('::') + 2);
+            }
           } else if (language === SupportedLanguages.Python) {
             // Typed-parameter substitution: if the qualifier is a param with a declared type,
             // use the type name so e.g. `query.filter(...)` → `Query.filter`.
@@ -3772,6 +3835,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     const isTsSource = language === SupportedLanguages.TypeScript && !TS_DECLARATION_FILE.test(filePath);
     if (language === SupportedLanguages.TypeScript) {
       for (const [name, spec] of tsRequireAliases(tree.rootNode)) importAliases[name] ??= spec;
+    }
+    if (language === SupportedLanguages.Rust) {
+      for (const [name, modulePath] of rustModuleAliases(tree.rootNode)) importAliases[name] ??= modulePath;
     }
     const tsGlobalTypes = isTsSource ? tsGlobalTypeNames(tree.rootNode) : [];
     const tsModule = isTsSource && isTsModule(tree.rootNode);
@@ -5647,6 +5713,55 @@ export function resolveEdges(
   }
 
   /**
+   * Rust: the files of the module an in-crate path names, seen from
+   * `srcFilePath` -- `crate::stats`, `self::stats` (a `mod stats;` of the
+   * file), `super::stats`. A module `x` is `x.rs` or `x/mod.rs` in the
+   * directory that holds its parent's children: the parent's own directory for
+   * `main.rs`, `lib.rs` and `mod.rs`, else the directory named after the parent.
+   */
+  function rustModuleFiles(srcFilePath: string, modulePath: string): string[] {
+    const segments = modulePath.split('::');
+    const src = srcFilePath.replace(/\\/g, '/');
+    const srcDir = nodePath.posix.dirname(src);
+    const indexed = (filePath: string): string[] => normalizedPathToFiles.get(normalizedPathKey(filePath)) ?? [];
+    const ownsItsDirectory = /^(main|lib|mod)\.rs$/.test(nodePath.posix.basename(src));
+    let dir: string | undefined;
+    let i = 1;
+    if (segments[0] === 'self') {
+      dir = ownsItsDirectory ? srcDir : src.replace(/\.rs$/, '');
+    } else if (segments[0] === 'super') {
+      dir = ownsItsDirectory ? nodePath.posix.dirname(srcDir) : srcDir;
+      for (; segments[i] === 'super'; i++) dir = nodePath.posix.dirname(dir);
+    } else if (segments[0] === 'crate') {
+      // The crate root is the nearest directory above with a `lib.rs` or `main.rs`.
+      for (let up = srcDir, depth = 0; depth < 32; up = nodePath.posix.dirname(up), depth++) {
+        if (indexed(`${up}/lib.rs`).length > 0 || indexed(`${up}/main.rs`).length > 0) { dir = up; break; }
+        if (up === nodePath.posix.dirname(up)) break;
+      }
+    }
+    if (dir === undefined || i >= segments.length) return [];
+    const module = `${dir}/${segments.slice(i).join('/')}`;
+    return [...indexed(`${module}.rs`), ...indexed(`${module}/mod.rs`)];
+  }
+
+  /**
+   * Rust: what `path::member()` calls, given the in-crate path its qualifier
+   * stands for -- the function `member` of the module file the path names, or
+   * the associated function of a type (the path's last segment) in the module
+   * before it. Undefined when the path names neither in exactly one file.
+   */
+  function rustPathCallTarget(srcFilePath: string, modulePath: string, memberPart: string): { fp: string; key: string } | undefined {
+    const functions = rustModuleFiles(srcFilePath, modulePath)
+      .filter(fp => (fileQKeys.get(fp)?.get(memberPart) ?? []).includes(memberPart));
+    if (functions.length > 0) return functions.length === 1 ? { fp: functions[0], key: memberPart } : undefined;
+    const typeAt = modulePath.lastIndexOf('::');
+    const typeName = modulePath.slice(typeAt + 2);
+    const members = rustModuleFiles(srcFilePath, modulePath.slice(0, typeAt))
+      .filter(fp => fileDefinesQualifiedMember(fp, typeName, memberPart));
+    return members.length === 1 ? { fp: members[0], key: `${typeName}.${memberPart}` } : undefined;
+  }
+
+  /**
    * Python: the files of the module a dotted qualifier names through this
    * file's own imports -- `base` after `from pkg import base` (or
    * `from . import base`), `pkg.base` after `import pkg.base`. An absolute
@@ -6172,6 +6287,24 @@ export function resolveEdges(
         const qualifierPart = dstName.slice(0, qualDot);
         const memberPart = dstName.slice(qualDot + 1);
         if (memberPart && qualifierPart) {
+          // Rust `stats::report()`: `stats` is a module, bound by `mod stats;` or
+          // `use crate::stats;`, or the call spells the path itself
+          // (`crate::stats::report()`). A path into another crate, or one that
+          // names no module file here, falls through to the tiers below.
+          if (srcLanguage === SupportedLanguages.Rust && rel.predicate === 'CALLS') {
+            const [head, ...rest] = qualifierPart.split('.');
+            const aliases = result.importAliases;
+            const headPath = aliases && Object.hasOwn(aliases, head) ? aliases[head]
+              : rest.length > 0 && (head === 'crate' || head === 'self' || head === 'super') ? head
+              : undefined;
+            const target = headPath !== undefined
+              ? rustPathCallTarget(srcFilePath, [headPath, ...rest].join('::'), memberPart)
+              : undefined;
+            if (target) {
+              resolved.push({ srcFilePath, srcName, dstFilePath: target.fp, dstName: origDstName, dstQualifiedKey: target.key, predicate: rel.predicate, confidence: 0.9, tier: 'qualifier' });
+              continue;
+            }
+          }
           const elixirAliasedModule = srcLanguage === SupportedLanguages.Elixir ? result.importAliases?.[qualifierPart]: undefined;
           // Python `import a.b as m`: `m.f` is `f` in the one file a.b names.
           // An ambiguous module stays unresolved here, as without the alias.
