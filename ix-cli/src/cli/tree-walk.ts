@@ -157,18 +157,27 @@ export async function walkTree<T extends { children: T[] }>(opts: TreeWalkOption
 
 /**
  * One `/v1/expand` answer for several predicates, as the lists one expand per
- * predicate would have returned: each predicate's neighbours in the order of
- * its edges, a neighbour listed once per predicate that reached it.
+ * predicate would have returned, a neighbour listed once per predicate that
+ * reached it. The API does not promise an order, and a one-predicate request
+ * was read in its `nodes` order, so each list keeps the order that request
+ * would have had under either way a server can order an answer:
+ * - `nodes` in the order their first edge comes (one traversal yields both):
+ *   each predicate's neighbours in the order of its own edges;
+ * - `nodes` in an order of their own (a sort): that order, for the predicate's
+ *   neighbours. A single `nodes` array cannot carry the edge order of every
+ *   predicate when they share neighbours, so it is not used then.
  *
  * Null when the answer cannot be split exactly, and the caller asks one
  * predicate at a time instead:
  * - the server's edge cap may have cut it (`expandCapped`). The cap is per
  *   request, so the predicates together can reach it where none alone would;
  * - it has no edges array, or a listed node that no requested edge reaches,
- *   so which predicate it belongs to is unknown;
- * - an edge does not touch the node, which a one-hop answer never holds.
- * An edge whose other end is not among the nodes (a self-loop: the server
- * leaves the node itself out) lists nothing, as it would have alone.
+ *   so which predicate it belongs to is unknown.
+ * An edge that does not touch the node (one a one-hop answer should not hold)
+ * is skipped: it reaches no neighbour of the node, and a node only it would
+ * explain still fails the check above. An edge whose other end is not among
+ * the nodes (a self-loop: the server leaves the node itself out) lists
+ * nothing, as it would have alone.
  */
 export function splitByPredicate(
   nodeId: string, predicates: string[], answer: { nodes?: any[]; edges?: any[]; truncated?: unknown },
@@ -177,22 +186,31 @@ export function splitByPredicate(
   if (!Array.isArray(nodes) || !Array.isArray(edges) || expandCapped(answer)) return null;
   const byId = new Map<string, any>();
   for (const n of nodes) if (!byId.has(n?.id)) byId.set(n?.id, n);
-  const lists: any[][] = predicates.map(() => []);
+  // Each predicate's neighbours in edge order, and every neighbour in the
+  // order its first edge comes.
+  const byEdges: any[][] = predicates.map(() => []);
   const listed = predicates.map(() => new Set<string>());
+  const firstEdgeOrder: string[] = [];
   const reached = new Set<string>();
   for (const e of edges) {
     const i = predicates.indexOf(e?.predicate);
     if (i < 0) continue;
     const other = e.src === nodeId ? e.dst : e.dst === nodeId ? e.src : undefined;
-    if (other === undefined) return null;
-    const n = byId.get(other);
+    const n = other === undefined ? undefined : byId.get(other);
     if (n === undefined || listed[i].has(other)) continue;
     listed[i].add(other);
-    lists[i].push(n);
+    byEdges[i].push(n);
+    if (!reached.has(other)) firstEdgeOrder.push(other);
     reached.add(other);
   }
-  for (const id of byId.keys()) if (!reached.has(id)) return null;
-  return lists;
+  if (reached.size !== byId.size) return null;
+  // `nodes` in first-edge order: each predicate's edges are the order its own
+  // request would have listed its nodes in. `nodes` in some other order (one
+  // that does not follow the edges, such as a sort): that order, kept for
+  // each predicate's subset, is.
+  const ids = [...byId.keys()];
+  if (ids.every((id, k) => firstEdgeOrder[k] === id)) return byEdges;
+  return predicates.map((_, i) => ids.filter((id) => listed[i].has(id)).map((id) => byId.get(id)));
 }
 
 function newState(rootId: string): WalkState {

@@ -53,9 +53,14 @@ function randomGraph(seed: number, size: number, maxFanout: number): Adjacency {
  * several predicates without edges, as an answer the walk cannot split, so it
  * must fetch one predicate at a time: the walk as it was.
  */
-function clientFor(adjacency: Adjacency, opts: { splittable?: boolean; edgeCap?: number } = {}) {
+function clientFor(adjacency: Adjacency, opts: { splittable?: boolean; edgeCap?: number; sortNodes?: boolean } = {}) {
   const expand = vi.fn(async (id: string, o: { direction: string; predicates: string[]; hops?: number }) => {
     const answer = expandAnswer(id, o.direction, adjacency[id], o.predicates);
+    if (opts.sortNodes) {
+      // A server that sorts nodes and hands back edges in an order of their own.
+      answer.nodes.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      answer.edges.reverse();
+    }
     if (opts.splittable === false && o.predicates.length > 1) return { nodes: answer.nodes, edges: [] };
     if (opts.edgeCap !== undefined && answer.edges.length > opts.edgeCap) {
       const edges = answer.edges.slice(0, opts.edgeCap);
@@ -93,6 +98,59 @@ describe("ix depends: one expand per visited node", () => {
       const rootSingles = before.expand.mock.calls.filter(([id, o]) => id === "n0" && (o as any).predicates.length === 1);
       expect(rootSingles.map(([, o]) => (o as any).predicates[0])).toEqual(PREDICATES);
     }
+  });
+
+  it.each([1, 2, 3, 4, 5, 6])("builds the same tree when the server sorts nodes apart from edges (graph %i)", async (seed) => {
+    // The one-predicate requests were read in `nodes` order: a sorted one.
+    const adjacency = randomGraph(seed, 40, 3);
+    const bounds = { maxDepth: 4, maxNodes: 17 };
+    const now = clientFor(adjacency, { sortNodes: true });
+    const before = clientFor(adjacency, { splittable: false, sortNodes: true });
+    expect(await buildDependencyTree(now.client, "n0", bounds)).toEqual(await buildDependencyTree(before.client, "n0", bounds));
+    for (const [id, count] of perNode(now.expand)) expect(count, `requests for ${id}`).toBe(1);
+  });
+
+  it("follows nodes order within a predicate when nodes do not follow the edges", async () => {
+    const answer = {
+      nodes: [fn("x"), fn("y"), fn("z")],
+      edges: [
+        { src: "z", dst: "root", predicate: "CALLS" },
+        { src: "y", dst: "root", predicate: "IMPORTS" },
+        { src: "x", dst: "root", predicate: "CALLS" },
+      ],
+    };
+    const expand = vi.fn(async (id: string) => (id === "root" ? answer : { nodes: [], edges: [] }));
+    const walk = await buildDependencyTree({ expand } as never, "root", { maxDepth: 1 });
+    expect(walk.tree.map((n) => n.name)).toEqual(["x", "z", "y"]);
+    expect(expand).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips an edge that does not touch the node instead of asking again", async () => {
+    const answer = {
+      nodes: [fn("a"), fn("b")],
+      edges: [
+        { src: "a", dst: "root", predicate: "CALLS" },
+        { src: "a", dst: "b", predicate: "CALLS" },
+        { src: "b", dst: "root", predicate: "IMPORTS" },
+      ],
+    };
+    const expand = vi.fn(async (id: string) => (id === "root" ? answer : { nodes: [], edges: [] }));
+    const walk = await buildDependencyTree({ expand } as never, "root", { maxDepth: 1 });
+    expect(walk.tree.map((n) => `${n.name}:${n.relation}`)).toEqual(["a:called_by", "b:imported_by"]);
+    expect(expand).toHaveBeenCalledTimes(1);
+  });
+
+  it("still asks per predicate when only a stray edge reaches a listed node", async () => {
+    const answer = {
+      nodes: [fn("a"), fn("b")],
+      edges: [
+        { src: "a", dst: "root", predicate: "CALLS" },
+        { src: "a", dst: "b", predicate: "CALLS" },
+      ],
+    };
+    const expand = vi.fn(async (id: string) => (id === "root" ? answer : { nodes: [], edges: [] }));
+    await buildDependencyTree({ expand } as never, "root", { maxDepth: 1 });
+    expect(expand).toHaveBeenCalledTimes(1 + PREDICATES.length);
   });
 
   it("lists a node reached through two predicates once, under the first", async () => {
