@@ -2367,7 +2367,7 @@ export async function ingestFiles(
     if (spec.startsWith('@')) { const parts = spec.split('/'); return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null; }
     return spec.split('/')[0] || null;
   };
-  const collectStitch = (parsedFiles: Array<{ filePath: string; entities?: Array<{ name: string; kind: string; container?: string }>; relationships?: Array<{ predicate: string; srcName?: string; dstName?: string; importRaw?: string }>; importBindings?: Array<{ pkg: string; local: string; imported: string }>; exportPublicNames?: Array<{ local: string; public: string }> }>): void => {
+  const collectStitch = (parsedFiles: Array<{ filePath: string; entities?: Array<{ name: string; kind: string; container?: string }>; relationships?: Array<{ predicate: string; srcName?: string; dstName?: string; importRaw?: string }>; importBindings?: Array<{ pkg: string; local: string; imported: string }>; exportPublicNames?: Array<{ local: string; public: string; source?: string }> }>): void => {
     for (const p of parsedFiles) {
       stitchFiles.push(p.filePath);
       for (const e of (p.entities ?? [])) {
@@ -2389,6 +2389,9 @@ export async function ingestFiles(
         if (!m.has(b.local)) m.set(b.local, { pkg: b.pkg, imported: b.imported });
       }
       for (const x of (p.exportPublicNames ?? [])) {
+        // A renaming re-export's `local` is another module's export, and the
+        // alias below is looked up by name alone: registration stays as it was.
+        if (x.source !== undefined) continue;
         stitchExportAliases.push({ filePath: p.filePath, local: x.local, pub: x.public });
       }
       for (const rel of (p.relationships ?? [])) {

@@ -276,10 +276,13 @@ export interface ImportBinding {
  * name: `export default function debug` → { local: "debug", public: "default" };
  * `export { impl as format }` → { local: "impl", public: "format" }. Lets the
  * provider advertise the symbol by the name consumers actually import.
+ * A renaming re-export, `export { impl as format } from './impl'`, also carries
+ * the module it names: `local` is then that module's export, not an entity here.
  */
 export interface ExportPublicName {
   local: string;   // local entity name in the provider file
   public: string;  // name consumers import it by ("default" for default export)
+  source?: string; // module specifier of a re-export (`... from './impl'`)
 }
 
 export interface FileParseResult {
@@ -1009,19 +1012,21 @@ function isJsTsImportShadowed(
  * Walk a JS/TS tree for provider-side public export names that differ from the
  * local entity name: `export { impl as format }` (no source) → {impl, format};
  * `export default function debug` → {debug, "default"}. Lets a provider advertise
- * a symbol by the name a consumer imports it as. Purely additive.
+ * a symbol by the name a consumer imports it as. A renaming re-export,
+ * `export { impl as format } from './impl'`, is recorded with its source.
+ * Purely additive.
  */
 function extractJsExportPublicNames(rootNode: any): ExportPublicName[] {
   const out: ExportPublicName[] = [];
   const seen = new Set<string>();
   const visit = (node: any): void => {
     if (node.type === 'export_statement') {
-      let hasSource = false;
+      let source: string | undefined;
       let isDefault = false;
       for (let i = 0; i < node.childCount; i++) {
         const c = node.child(i);
         if (c.type === 'default') isDefault = true;
-        if (c.type === 'string') hasSource = true;
+        if (c.type === 'string') source = c.text.slice(1, -1);
       }
       let clause: any = null;
       let decl: any = null;
@@ -1033,8 +1038,9 @@ function extractJsExportPublicNames(rootNode: any): ExportPublicName[] {
           || c.type === 'lexical_declaration' || c.type === 'generator_function_declaration') decl = c;
         else if (c.type === 'identifier') defaultIdentifier = c;
       }
-      // Local re-export `export { a as b }` (NOT `... from './x'`): a is public as b.
-      if (clause && !hasSource) {
+      // `export { a as b }`: a is public as b. With `... from './x'`, a is an
+      // export of './x' rather than a local entity, so the source goes along.
+      if (clause) {
         for (let j = 0; j < clause.namedChildCount; j++) {
           const spec = clause.namedChild(j);
           if (spec.type !== 'export_specifier') continue;
@@ -1045,7 +1051,7 @@ function extractJsExportPublicNames(rootNode: any): ExportPublicName[] {
           const pub = pubN && pubN.text ? pubN.text : local;
           if (pub !== local) {
             const k = `${local}\x00${pub}`;
-            if (!seen.has(k)) { seen.add(k); out.push({ local, public: pub }); }
+            if (!seen.has(k)) { seen.add(k); out.push({ local, public: pub, ...(source !== undefined ? { source } : {}) }); }
           }
         }
       }
@@ -3857,6 +3863,15 @@ function ambiguousPhpTypeNames(entities: ParsedEntity[]): Set<string> {
 }
 
 /**
+ * `public -> local` for the export names that rename an entity of the file
+ * itself. A renaming re-export names another module's export, so it is left
+ * out: a same-named local entity is not what it exports.
+ */
+function localPublicNames(names: NonNullable<FileSummary['exportPublicNames']>): Map<string, string> {
+  return new Map(names.filter(name => name[2] === undefined).map(([pub, local]) => [pub, local]));
+}
+
+/**
  * What resolution needs from a file it resolves TO (see `FileSummary`). The
  * same rules `resolveEdges` applies to a batch file, so a file looks the same
  * to resolution whether it is in the batch or only in the index.
@@ -3867,7 +3882,8 @@ export function summarizeParseResult(r: FileParseResult): FileSummary {
     if (e.kind === 'file' || e.kind === 'module') continue;
     qkeys.push([e.name, qualifiedKey(e)]);
   }
-  const exportPublicNames = r.exportPublicNames?.map((n): [string, string] => [n.public, n.local]);
+  const exportPublicNames = r.exportPublicNames?.map((n): [string, string, string?] =>
+    n.source === undefined ? [n.public, n.local] : [n.public, n.local, n.source]);
   let phpTypes: Array<[string, string]> | undefined;
   if (r.language === SupportedLanguages.PHP) {
     const ambiguous = ambiguousPhpTypeNames(r.entities);
@@ -4145,7 +4161,7 @@ export function buildGlobalResolutionIndex(
         fileHasSymbol.set(fp, new Set(qkMap.keys()));
       }
       if (parsed.exportPublicNames) {
-        filePublicNames.set(fp, new Map(parsed.exportPublicNames.map(name => [name.public, name.local])));
+        filePublicNames.set(fp, new Map(parsed.exportPublicNames.filter(name => name.source === undefined).map(name => [name.public, name.local])));
       }
     }
 
@@ -4229,7 +4245,7 @@ export function buildGlobalResolutionIndex(
       const qkMap = qkeyMapOf(summary);
       fileQKeys.set(fp, qkMap);
       fileHasSymbol.set(fp, new Set(qkMap.keys()));
-      if (summary.exportPublicNames) filePublicNames.set(fp, new Map(summary.exportPublicNames));
+      if (summary.exportPublicNames) filePublicNames.set(fp, localPublicNames(summary.exportPublicNames));
       else filePublicNames.delete(fp);
     }
     // PHP types for summarized files come from their summaries alone.
@@ -4627,7 +4643,7 @@ export function resolveEdges(
     ? new Map<string, Map<string, string>>(globalIndex.filePublicNames ?? [])
     : new Map<string, Map<string, string>>();
   for (const s of batchSummaries) {
-    if (s.exportPublicNames) filePublicNames.set(s.filePath, new Map(s.exportPublicNames));
+    if (s.exportPublicNames) filePublicNames.set(s.filePath, localPublicNames(s.exportPublicNames));
     else filePublicNames.delete(s.filePath);
   }
 
@@ -6065,6 +6081,26 @@ export function resolveEdges(
                 confidence: 0.9,
                 tier: 'binding',
               });
+              continue;
+            }
+          }
+          // `export { inner as outer } from './impl'`: the barrel names the
+          // symbol without defining it, and the transitive tier below would
+          // look for `outer` in impl. Follow the re-export to its source, one
+          // hop, under the name it has there.
+          const reexport = srcIsJsTs && providerFiles.length === 1
+            ? summaries.get(providerFiles[0])?.exportPublicNames?.find(name => name[0] === binding.imported && name[2] !== undefined)
+            : undefined;
+          if (reexport) {
+            const barrel = providerFiles[0];
+            const reexportMatches: Array<{ fp: string; local: string }> = [];
+            for (const fp of jsTsModuleSpecFiles(barrel, fileLanguage.get(barrel) ?? srcLanguage, reexport[2]!)) {
+              const local = reexport[1] === 'default' ? filePublicNames.get(fp)?.get('default') : reexport[1];
+              if (local && (fileQKeys.get(fp)?.get(local) ?? []).includes(local)) reexportMatches.push({ fp, local });
+            }
+            if (reexportMatches.length === 1) {
+              const { fp, local } = reexportMatches[0];
+              resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey: local, predicate: rel.predicate, confidence: 0.8, tier: 'transitive' });
               continue;
             }
           }
