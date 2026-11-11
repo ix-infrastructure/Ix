@@ -343,7 +343,9 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       kind: SYMBOL_TOOL_INPUT.kind,
       path: SYMBOL_TOOL_INPUT.path,
       pick: SYMBOL_TOOL_INPUT.pick,
-      as_of_rev: z.number().int().nonnegative().optional(),
+      // At least 1, as `ix context --as-of-rev` requires: a 0 the schema let
+      // through came back as a usage error naming a CLI flag.
+      as_of_rev: z.number().int().min(1).optional(),
       max_entities: z.number().int().min(1).max(500).optional(),
       max_relationships: z.number().int().min(1).max(1000).optional(),
       max_evidence: z.number().int().min(1).max(200).optional(),
