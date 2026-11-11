@@ -8,8 +8,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createIxMcpServer } from "../src/mcp/server.ts";
-import { cliArgv, loadHosts, renderAll, renderSkill } from "./render-skills.mjs";
+import { createIxMcpServer, IX_MCP_CORE_TOOL_NAMES, IX_MCP_PRO_TOOL_NAMES } from "../src/mcp/server.ts";
+import { CORE_TOOLS, PRO_TOOLS, cliArgv, loadHosts, renderAll, renderSkill } from "./render-skills.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
@@ -97,6 +97,29 @@ describe("template syntax", () => {
   });
 });
 
+describe("mcp exposure", () => {
+  const CORE = { ...MCP, exposure: "core" };
+
+  it("refuses a call to a tool a core host does not register", () => {
+    expect(render("{{ix impact target=X}} and {{ix neighbors}}", CORE)).toBe('`ix_impact` with `{ "target": "X" }` and `ix_neighbors`');
+    expect(() => render("{{ix explain symbol=X}}", CORE, "cursor")).toThrow(/cursor.*tools=core.*ix_explain/);
+    expect(() => render("the {{ix explain}} result", CORE)).toThrow(/ix_explain/);
+    expect(() => render("{{calls}}\nix callers symbol=X\n{{/calls}}\n", CORE)).toThrow(/ix_callers/);
+    // A cli host runs shell commands, so the MCP tool set does not apply.
+    expect(render("{{ix explain symbol=X}}", { ...CLI, exposure: "core" })).toBe("`ix explain X --format llm`");
+  });
+
+  it("knows the same core set `ix mcp --tools=core` advertises", () => {
+    expect([...CORE_TOOLS].sort()).toEqual([...IX_MCP_CORE_TOOL_NAMES].sort());
+    expect([...PRO_TOOLS].sort()).toEqual([...IX_MCP_PRO_TOOL_NAMES].sort());
+  });
+
+  it("would refuse to render ix-impact for a host on the core set", () => {
+    const source = readFileSync(join(workflowsDir, "ix-impact.md"), "utf8");
+    expect(() => renderSkill(source, { id: "cursor", ...CORE })).toThrow(/tools=core/);
+  });
+});
+
 describe("hosts.json", () => {
   it("rejects an unknown host key, dialect, exposure or skill", () => {
     const dir = mkdtempSync(join(tmpdir(), "ix-render-hosts-"));
@@ -155,6 +178,17 @@ describe("rendered workflow skills", () => {
         expect(text, `${host}: ${invented}`).not.toContain(invented);
       }
     }
+  });
+
+  // Changes the Claude plugin made after the copy this template started from
+  // (ix-claude-plugin #42, #53, and Ix-pro#108 folding `ix bugs` into `ix bug list`).
+  it("keep the Claude plugin's current text where it moved on", () => {
+    const text = readFileSync(join(expectedDir, "claude", "skills", "ix-impact", "SKILL.md.expected"), "utf8");
+    expect(text).toMatch(/^---\n[\s\S]*\ndisable-model-invocation: true\n---\n/);
+    expect(text).toContain("Do not run `ix briefing`");
+    expect(text).toContain("ix bug list --format text");
+    expect(text).not.toContain("ix briefing --format json");
+    expect(text).not.toContain("ix bugs ");
   });
 
   // The two dialects must be the same call. For every call an mcp host's

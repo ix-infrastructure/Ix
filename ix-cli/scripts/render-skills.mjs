@@ -62,6 +62,13 @@ const repoRoot = join(here, "..", "..");
 const DIALECTS = new Set(["cli", "mcp"]);
 /** `ix mcp serve --tools` sets (ToolsetName in src/mcp/server.ts). */
 const EXPOSURES = new Set(["core", "all"]);
+/**
+ * What `--tools=core` advertises: IX_MCP_CORE_TOOL_NAMES, plus the Pro tools,
+ * which the core gate exempts (both in src/mcp/server.ts; render-skills.test.mjs
+ * fails if these drift from it). A skill for a core host may call nothing else.
+ */
+export const CORE_TOOLS = new Set(["ix_context", "ix_search", "ix_neighbors", "ix_impact", "ix_read"]);
+export const PRO_TOOLS = new Set(["ix_briefing", "ix_decisions", "ix_decide"]);
 const HOST_KEYS = new Set(["dialect", "exposure", "skills", "frontmatter", "preamble"]);
 
 class TemplateError extends Error {}
@@ -196,6 +203,12 @@ export function renderSkill(source, host, { onCall } = {}) {
   if (!DIALECTS.has(host.dialect)) throw new TemplateError(`host ${host.id}: unknown dialect "${host.dialect}" (cli or mcp)`);
   const dialect = host.dialect;
   const seen = (call) => {
+    if (dialect === "mcp" && host.exposure === "core") {
+      const tool = toolName(call.command);
+      if (!CORE_TOOLS.has(tool) && !PRO_TOOLS.has(tool)) {
+        throw new TemplateError(`host ${host.id} registers \`ix mcp --tools=core\`, which has no ${tool}`);
+      }
+    }
     onCall?.(call);
     return call;
   };

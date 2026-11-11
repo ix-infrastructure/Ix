@@ -2,6 +2,7 @@
 name: ix-impact
 description: Change risk analysis — blast radius, affected systems, and what to test. Depth scales with risk level; low-risk targets stop early.
 argument-hint: <symbol or file path to assess change risk for> [--save [path]]
+disable-model-invocation: true
 ---
 
 > [ix-claude-plugin shared model](../shared.md)
@@ -17,11 +18,11 @@ Strip `--save` and any following path token from `$ARGUMENTS` before resolving t
 
 ## Pro check (optional)
 
-Run once at the start:
-```bash
-ix briefing --format json 2>&1
-```
-If it returns JSON with a `revision` field, Pro is available. Extract `openBugs` for use in Pro steps below. If it errors, skip all **[Pro]** labeled steps.
+Do not run `ix briefing` — you have already been told. The plugin's
+UserPromptSubmit hook injects an `[ix] Session briefing` once per TTL whenever
+Pro is reachable. Seen one this session? Pro is available; read `openBugs` from it.
+Not seen one? Skip every **[Pro]** step. Asking costs a whole turn to learn
+something already in your context.
 
 ## Goal
 
@@ -101,7 +102,7 @@ Cross-reference callers + dependents + importers to identify:
 
 If Pro is available and `openBugs` from the briefing is non-empty, check for bugs affecting this target:
 ```bash
-ix bugs --format json
+ix bug list --format text
 ```
 Cross-reference open bugs against the direct callers and dependents identified in Phase 2. Any open bug touching the blast radius escalates the risk verdict — flag it explicitly in the output.
 
