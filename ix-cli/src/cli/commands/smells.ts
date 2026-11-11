@@ -7,7 +7,7 @@ import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { llmLine, llmError, type LlmValue } from "../llm.js";
 import { printJson, sliceRanked, truncationHint, type Slice } from "../format.js";
-import { MAX_WAIT_SECONDS, parseWaitSecondsOption } from "../options.js";
+import { formatOption, MAX_WAIT_SECONDS, parseWaitSecondsOption } from "../options.js";
 import { forMcp } from "../next-step.js";
 import { canRenderProgress } from "../stderr.js";
 
@@ -228,7 +228,7 @@ export function registerSmellsCommand(program: Command): void {
   program
     .command("smells")
     .description("Detect architecture smells in the codebase")
-    .option("--format <fmt>",              "Output format (text|json|llm)",    "text")
+    .addOption(formatOption())
     .option("--orphan-max-connections <n>","Max connections for orphan files",  "0")
     .option("--god-module-chunks <n>",     "Min chunks for god module",         "20")
     .option("--god-module-fan <n>",        "Min fan-in/out for god module",     "15")

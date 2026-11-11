@@ -3,6 +3,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { isLoopbackEndpoint } from "./endpoint.js";
+import { routeMissing } from "../client/features.js";
 import { acquireLockAt, namedLockPath, type LockHandle } from "./single-flight.js";
 
 // ---------------------------------------------------------------------------
@@ -268,8 +269,9 @@ export interface StitchOutcome {
  *   - the backend answered 4xx, which is it refusing the request rather than
  *     executing it. 408 is excluded: a proxy reporting that IT gave up waiting
  *     says nothing about whether the backend did, and that is this whole bug.
- *   - the backend answered 501. `isStitchUnsupported` already treats 404 AND
- *     501 as "this backend has no /v1/stitch", and the run swallows it
+ *   - the backend answered a status that `routeMissing("stitch", ...)` in
+ *     client/features.ts reads as "this backend has no /v1/stitch" (404 and
+ *     501; 404 is a 4xx anyway), and the run swallows it
  *     silently for exactly that reason -- so leaving a marker behind would
  *     refuse every map for 15 minutes, claiming a join may still be running,
  *     against a backend that has never had one.
@@ -304,7 +306,7 @@ export function outcomeProvesNothingRunning(outcome: StitchOutcome): boolean {
   // Deliberately no 2xx arm -- see the note above. `ok` covers a stitch that
   // actually returned; a 2xx reaching the catch means the body was unreadable,
   // which is what a proxy error page looks like.
-  if (status === 501) return true;
+  if (routeMissing("stitch", status)) return true;
   return status >= 400 && status < 500 && status !== 408;
 }
 

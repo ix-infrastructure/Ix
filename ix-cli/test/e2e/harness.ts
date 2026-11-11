@@ -81,7 +81,7 @@ export function e2eEnv(): E2eEnv {
   };
 }
 
-function headers(env: E2eEnv): Record<string, string> {
+export function headers(env: E2eEnv): Record<string, string> {
   const h: Record<string, string> = { "content-type": "application/json" };
   if (env.token) h.authorization = `Bearer ${env.token}`;
   return h;

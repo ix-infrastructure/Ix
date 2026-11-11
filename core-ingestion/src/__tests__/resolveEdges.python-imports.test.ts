@@ -55,7 +55,7 @@ describe('Python absolute imports resolve by full module path', () => {
     const caller = py('/repo/app/main.py', 'from pkg.sub.mod import load\n\ndef main():\n    return load()\n');
     const all = [caller, mod(), otherMod()];
     // What the CLI does: index every file by its summary, resolve one batch.
-    const index = buildGlobalResolutionIndex(all.map(r => r.filePath), undefined, undefined, new Map(all.map(r => [r.filePath, summarizeParseResult(r)])));
+    const index = buildGlobalResolutionIndex(all.map(r => r.filePath), new Map(all.map(r => [r.filePath, summarizeParseResult(r)])));
     const edges = resolveEdges([caller], undefined, index);
 
     expect(callsTo(edges, MOD)).toHaveLength(1);
@@ -113,7 +113,7 @@ describe('Python absolute imports resolve by full module path', () => {
     const local = py('/repo/src/myapp/json.py', 'def dumps(x):\n    return x\n');
     const caller = py('/repo/src/myapp/views.py', 'import json as j\n\ndef v(a):\n    return j.dumps(a)\n');
     const all = [caller, init, local];
-    const index = buildGlobalResolutionIndex(all.map(r => r.filePath), undefined, undefined, new Map(all.map(r => [r.filePath, summarizeParseResult(r)])));
+    const index = buildGlobalResolutionIndex(all.map(r => r.filePath), new Map(all.map(r => [r.filePath, summarizeParseResult(r)])));
 
     for (const edges of [resolveEdges(all), resolveEdges([caller], undefined, index)]) {
       expect(importsOf(edges, caller.filePath, local.filePath)).toEqual([]);
@@ -145,7 +145,7 @@ describe('Python absolute imports resolve by full module path', () => {
     const local = py(NN, 'def relu(x):\n    return x\n');
     const caller = py('/repo/app/main.py', 'import torch.nn as nn\n\ndef main(a):\n    return nn.relu(a)\n');
     const all = [caller, local];
-    const index = buildGlobalResolutionIndex(all.map(r => r.filePath), undefined, undefined, new Map(all.map(r => [r.filePath, summarizeParseResult(r)])));
+    const index = buildGlobalResolutionIndex(all.map(r => r.filePath), new Map(all.map(r => [r.filePath, summarizeParseResult(r)])));
     const edges = resolveEdges([caller], undefined, index);
 
     expect(importsOf(edges, '/repo/app/main.py', NN)).toEqual([]);

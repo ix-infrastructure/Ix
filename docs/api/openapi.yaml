@@ -96,30 +96,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/StructuredContext"
 
-  /v1/ingest:
-    post:
-      tags: [ingestion]
-      summary: Ingest a path into the graph (long-running, up to 30 min)
-      operationId: ingest
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [path]
-              properties:
-                path: { type: string, description: Absolute path to ingest }
-                recursive: { type: boolean }
-                force: { type: boolean, description: Re-ingest unchanged files }
-      responses:
-        "200":
-          description: Ingestion result
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/IngestResult"
-
   /v1/map:
     post:
       tags: [ingestion]
@@ -1474,22 +1450,6 @@ components:
             hopsExpanded: { type: integer }
             asOfRev: { type: integer }
             depth: { type: string }
-    IngestResult:
-      type: object
-      properties:
-        filesProcessed: { type: integer }
-        patchesApplied: { type: integer }
-        filesSkipped: { type: integer }
-        entitiesCreated: { type: integer }
-        latestRev: { type: integer }
-        skipReasons:
-          type: object
-          properties:
-            unchanged: { type: integer }
-            emptyFile: { type: integer }
-            parseError: { type: integer }
-            tooLarge: { type: integer }
-            minifiedLikely: { type: integer }
     NodeCreationResult:
       type: object
       properties:

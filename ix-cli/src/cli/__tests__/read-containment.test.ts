@@ -135,6 +135,7 @@ describe("ix read enforces the boundary", () => {
     const err: string[] = [];
     const log = vi.spyOn(console, "log").mockImplementation((...a) => { out.push(a.join(" ")); });
     const write = vi.spyOn(process.stderr, "write").mockImplementation(((s: string) => { err.push(String(s)); return true; }) as never);
+    const error = vi.spyOn(console, "error").mockImplementation((...a) => { err.push(a.join(" ") + "\n"); });
     try {
       const program = new Command();
       program.exitOverride();
@@ -144,6 +145,7 @@ describe("ix read enforces the boundary", () => {
     } finally {
       log.mockRestore();
       write.mockRestore();
+      error.mockRestore();
     }
   }
 
@@ -156,8 +158,11 @@ describe("ix read enforces the boundary", () => {
     const { out, err } = await runRead(join(outside, "secret.txt"), workspace);
     expect(JSON.parse(out)).toMatchObject({ error: "path_outside_workspace" });
     expect(process.exitCode).toBe(1);
-    expect(err).toBe("");
+    // The record is on stdout; stderr keeps only the prose, as for every json failure.
+    expect(err).toContain("Refusing to read file outside the workspace");
+    expect(err).not.toContain('"error"');
     expect(out).not.toContain("SENTINEL");
+    expect(err).not.toContain("SENTINEL");
   });
 
   it("refuses a symlink inside the workspace that points outside it", async () => {

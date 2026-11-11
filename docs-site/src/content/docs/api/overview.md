@@ -7,8 +7,9 @@ The Ix backend serves a JSON-over-HTTP API on **`http://localhost:8090`**. The `
 are all clients of it. You only need it to build your own tooling on top of the graph.
 
 The **Endpoints** pages in the sidebar are generated from the
-[OpenAPI spec](https://github.com/ix-infrastructure/Ix/blob/main/docs/api/openapi.yaml). A CI check keeps that spec
-in step with what the CLI actually calls.
+[OpenAPI spec](https://github.com/ix-infrastructure/Ix/blob/main/docs/api/openapi.yaml), which is written by hand.
+One CI check keeps that spec in step with what the CLI actually calls; another sends one request per documented
+endpoint to a pinned backend release and fails on any it does not serve.
 
 ## Quick start
 
@@ -16,10 +17,8 @@ in step with what the CLI actually calls.
 # Liveness and graph schema version
 curl -s http://localhost:8090/v1/health
 
-# Ingest a repository
-curl -s -X POST http://localhost:8090/v1/ingest \
-  -H "Content-Type: application/json" \
-  -d '{"path": "/absolute/path/to/repo", "recursive": true}'
+# Map a repository first, with the CLI (it commits through /v1/patches/bulk)
+ix map /absolute/path/to/repo
 
 # Search for a symbol
 curl -s -X POST http://localhost:8090/v1/search \

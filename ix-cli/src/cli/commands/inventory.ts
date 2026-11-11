@@ -9,7 +9,8 @@ import { relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
 import { projectRow } from "../output-shape.js";
 import { normalizeForPathMatch, normalizePathSeparators } from "../path-match.js";
-import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
+import { nextPageCommand, parseOffset } from "../paging.js";
+import { formatOption, pageOffsetOption } from "../options.js";
 
 /**
  * The most rows one /v1/list call returns. The backend clamps the request's
@@ -119,8 +120,8 @@ export function registerInventoryCommand(program: Command): void {
     .requiredOption("--kind <kind>", "Entity kind to list (class, method, function, file, module, etc.)")
     .option("--path <path>", "Filter by source file path substring")
     .option("--limit <n>", "Max results", "50")
-    .option("--offset <n>", OFFSET_FLAG, "0")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(pageOffsetOption())
+    .addOption(formatOption())
     .addHelpText("after", `
 Examples:
   ix inventory --kind class

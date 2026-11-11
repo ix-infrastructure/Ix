@@ -7,12 +7,12 @@ import type { IxClient } from "../../client/api.js";
 import { disambiguatingIds, lineSpan, locationLabel, printJson, sliceRanked, truncationHint } from "../format.js";
 import { llmLine } from "../llm.js";
 import { runPerTarget } from "../multi-target.js";
-import { parseCountOption, parsePickOption, STRICT_TARGET_HELP } from "../options.js";
-import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
+import { formatOption, kindOption, pageLimitOption, pageOffsetOption, parseCountOption, pathOption, pickOption, strictOption } from "../options.js";
+import { nextPageCommand, parseOffset } from "../paging.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
 import { isQuiet, projectRow } from "../output-shape.js";
 import { printResolved, resolveFileOrReport } from "../resolve.js";
-import { reportError } from "./around.js";
+import { reportFailure } from "../ui.js";
 import { overrideFamily, type OverrideRelation, type OverrideRow } from "../type-walk.js";
 
 interface OverridesOpts {
@@ -36,13 +36,13 @@ export function registerOverridesCommand(program: Command): void {
     .command("overrides <symbols...>")
     .alias("implementations")
     .description("Show the other definitions of a method: what it overrides or implements, its overrides, and sibling implementations")
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
-    .option("--limit <n>", "Max results to show", "50")
-    .option("--offset <n>", OFFSET_FLAG, "0")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
+    .addOption(pageLimitOption())
+    .addOption(pageOffsetOption())
+    .addOption(formatOption())
     .addHelpText("after", `\nExamples:
   ix overrides handle --path src/handlers/Base.java
   ix overrides render --format llm
@@ -60,7 +60,7 @@ ${EXIT_CODES_HELP}`)
       // The root hook refuses a malformed <n> already; this holds where it is
       // not installed, so `abc` never becomes NaN and silently zero rows.
       if (parseOverridesLimit(opts.limit) === undefined) {
-        reportError("invalid_limit", `--limit must be a non-negative integer (for example, 50), not "${opts.limit}".`, opts.format);
+        reportFailure("invalid_limit", `--limit must be a non-negative integer (for example, 50), not "${opts.limit}".`, opts.format);
         return;
       }
       const client = createClient();

@@ -22,6 +22,17 @@ function entity(
   };
 }
 
+/**
+ * The global index the CLI builds: every file's symbols come from
+ * `summarizeParseResult(parseFile(...))`, the only way the index learns them.
+ */
+function summaryIndex(filePaths: string[], sources: Map<string, string>) {
+  return buildGlobalResolutionIndex(
+    filePaths,
+    new Map([...sources].map(([fp, src]) => [fp, summarizeParseResult(parseFile(fp, src)!)])),
+  );
+}
+
 const defaultFileRole = { role: 'production' as const, role_confidence: 0.5, role_signals: [] };
 
 function fileResult(
@@ -194,7 +205,7 @@ describe('resolveEdges', () => {
       ['/repo/pkg/controlplane/apiserver/apiserver.go', 'package apiserver\ntype Config struct{}\n'],
       ['/repo/pkg/controlplane/apiserver/aggregator.go', 'package apiserver\nfunc CreateAggregatorServer() {}\n'],
     ]);
-    const globalIndex = buildGlobalResolutionIndex(
+    const globalIndex = summaryIndex(
       ['/repo/pkg/controlplane/apiserver/apiserver.go', '/repo/pkg/controlplane/apiserver/aggregator.go'],
       sources,
     );
@@ -238,7 +249,7 @@ describe('resolveEdges', () => {
       ],
     );
     const targetPath = '/repo/DomainService.php';
-    const globalIndex = buildGlobalResolutionIndex(
+    const globalIndex = summaryIndex(
       ['/repo/UseCase.php', targetPath],
       new Map([
         [
@@ -999,7 +1010,7 @@ final class UseCase
     ];
 
     const targetPath = '/repo/target.ts';
-    const globalIndex = buildGlobalResolutionIndex(
+    const globalIndex = summaryIndex(
       ['/repo/consumer.ts', targetPath],
       new Map([[targetPath, 'export function crossBatchTarget() {}\n']]),
     );
@@ -1145,8 +1156,6 @@ final class UseCase
     // The barrel and its source only in the index: the summary carries the mapping.
     const index = buildGlobalResolutionIndex(
       ['/repo/re/index.ts', '/repo/re/impl.ts'],
-      undefined,
-      undefined,
       new Map([barrel, impl].map(r => [r.filePath, summarizeParseResult(r)])),
     );
     expect(resolveEdges([user], undefined, index)).toContainEqual(expect.objectContaining(call));
@@ -1305,7 +1314,7 @@ final class UseCase
       'import localName from "./provider";\nexport function caller() { return localName(); }\n',
     )!;
     const providerPath = '/repo/provider.ts';
-    const globalIndex = buildGlobalResolutionIndex(
+    const globalIndex = summaryIndex(
       ['/repo/consumer.ts', providerPath],
       new Map([[providerPath, 'function actualName() { return 1; }\nexport default actualName;\n']]),
     );
@@ -1569,11 +1578,10 @@ final class UseCase
     ).toEqual([]);
   });
 
-  it('uses caller-supplied parse results instead of re-parsing', () => {
-    // The CLI parses prescan sources on its worker pool and hands the results
-    // in, so the index costs no main-thread parsing. Proven by supplying a
-    // parse result whose entity does not appear in the source text: if the
-    // index re-parsed, `fromPool` could not be resolved.
+  it('takes a file\'s symbols from its summary alone', () => {
+    // The CLI parses on its worker pool and hands summaries in, so the index
+    // costs no main-thread parsing. `fromPool` exists only in the summary: no
+    // source text names it, so only the summary can have put it there.
     const targetPath = '/repo/target.ts';
     const caller = fileResult(
       '/repo/consumer.ts',
@@ -1595,8 +1603,7 @@ final class UseCase
 
     const globalIndex = buildGlobalResolutionIndex(
       ['/repo/consumer.ts', targetPath],
-      new Map([[targetPath, '// the pool result is authoritative, not this text\n']]),
-      new Map([[targetPath, poolResult]]),
+      new Map([[targetPath, summarizeParseResult(poolResult)]]),
     );
 
     expect(resolveEdges([caller], undefined, globalIndex)).toContainEqual({
@@ -1608,6 +1615,19 @@ final class UseCase
       predicate: 'CALLS',
       confidence: 0.9,
     });
+  });
+
+  it('learns a file\'s symbols only from summaries, never from source text', () => {
+    // The old `sources` / `preParsed` arguments are gone: a caller still
+    // passing them fails loudly instead of getting an index with no symbols.
+    const legacyCall = buildGlobalResolutionIndex as (...args: unknown[]) => unknown;
+    expect(() => legacyCall(['/repo/a.go'], undefined, undefined, new Map())).toThrow(TypeError);
+    expect(buildGlobalResolutionIndex.length).toBe(2);
+
+    // What the summary says is what the index holds: an unexported Go function,
+    // which the removed column-0 regex scan for exported names never indexed.
+    const index = summaryIndex(['/repo/pkg/a.go'], new Map([['/repo/pkg/a.go', 'package pkg\n\nfunc helper() {}\n']]));
+    expect(index.symbolToFiles.get('helper')).toEqual(['/repo/pkg/a.go']);
   });
 
   it('resolves Elixir alias-qualified calls through the implicit short alias', () => {
@@ -2156,7 +2176,7 @@ final class UseCase
     )!;
     const localPath = '/repo/a/utils.ts';
     const unrelatedPath = '/repo/b/utils.ts';
-    const globalIndex = buildGlobalResolutionIndex(
+    const globalIndex = summaryIndex(
       [localPath, unrelatedPath],
       new Map([
         [localPath, 'export function target() { return 1; }\n'],
@@ -2525,7 +2545,7 @@ final class UseCase
     expect(resolved.filter(e => e.predicate === 'IMPORTS' && e.dstName === 'HttpClient')).toEqual([]);
   });
 
-  // The R cross-batch index is parser-derived (not regex), so it captures every
+  // The R cross-batch index comes from the file's summary, so it captures every
   // definition form the parser does — including `= function` and string-keyed S3
   // method names that the old `<- function(` regex missed.
   it('R: cross-batch index captures <-, = and string-keyed S3 function defs', () => {
@@ -2535,7 +2555,7 @@ final class UseCase
       '"print.myClass" <- function(z) z',
     ].join('\n');
     const sources = new Map([['/repo/funcs.r', src]]);
-    const index = buildGlobalResolutionIndex(['/repo/funcs.r'], sources);
+    const index = summaryIndex(['/repo/funcs.r'], sources);
 
     expect(index.symbolToFiles.get('clean_data')).toContain('/repo/funcs.r');     // <- form
     expect(index.symbolToFiles.get('fit_model')).toContain('/repo/funcs.r');      // = form (regex missed)

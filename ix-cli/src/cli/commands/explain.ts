@@ -12,7 +12,7 @@ import { inferImportance } from "../explain/importance.js";
 import { renderExplanation } from "../explain/render.js";
 import { renderExplainLlm, renderExplainRawLlm } from "../explain/llm.js";
 import { printLlmLines } from "../llm.js";
-import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
+import { formatOption, kindOption, noSuggestOption, pathOption, pickOption, strictOption } from "../options.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
 import { renderSection, renderWarning, renderNote } from "../ui.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm } from "../map-freshness.js";
@@ -25,12 +25,12 @@ export function registerExplainCommand(program: Command): void {
   program
     .command("explain <symbol>")
     .description("Explain an entity — infers role, importance, and structural context")
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--no-suggest", "Disable did-you-mean candidates on unresolved targets")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(noSuggestOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
+    .addOption(formatOption())
     .option("--raw", "Show raw metadata dump (legacy format)")
     .addHelpText("after", "\nExamples:\n  ix explain IngestionService\n  ix explain expand --path memory-layer\n  ix explain verify_token --kind function --format json\n  ix explain IxClient --raw\n" + EXIT_CODES_HELP)
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; strict?: boolean; suggest?: boolean; format: string; raw?: boolean }) => {
