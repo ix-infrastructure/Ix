@@ -17,45 +17,12 @@ import { llmError, llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { formatOption, pathOption, pickOption } from "../options.js";
 import { disambiguationHint } from "../next-step.js";
 import { reportResolutionNotices, reportUnresolvedTarget } from "../ui.js";
+import type { ReadAmbiguityJson, ReadFailureJson, ReadJson } from "../contracts/read.js";
 
-export interface ReadResult {
-  targetType: "file" | "file-range" | "filename-match" | "symbol";
-  path: string;
-  lineStart: number;
-  lineEnd: number;
-  content: string;
-  symbol?: string;
-  kind?: string;
-  stale?: boolean;
-  warning?: string;
-  /** Set when the default line cap stopped the read short of the file. */
-  truncated?: boolean;
-  /**
-   * How many lines the read's whole target has, when the read was capped: the
-   * file's line count for a file, and the span's line count (`spanEnd` minus
-   * its first line, plus one) for a symbol or a paged range. It is a count,
-   * never a line number; `spanEnd` is where a symbol or paged range ends.
-   */
-  totalLines?: number;
-  /**
-   * The last line of the symbol or paged range being paged, when the read was
-   * capped. Absent on plain file reads, where `totalLines` is already the last
-   * line.
-   */
-  spanEnd?: number;
-  /**
-   * The next page, ready to run. `path:401-800` for a file. For a symbol or a
-   * paged range it is `path:<first>-<last>@<from>`: the same span, read from
-   * `<from>` and capped again, so following it repeatedly reaches `spanEnd`.
-   */
-  next?: string;
-}
-
-interface AmbiguityResult {
-  targetType: "ambiguous-file" | "ambiguous-symbol";
-  candidates: Array<{ name: string; kind?: string; path?: string; id?: string; rank?: number; container?: string }>;
-  diagnostics?: Array<{ code: string; message: string }>;
-}
+/** The answer before its path is made workspace-relative; see contracts/read.ts. */
+export type ReadResult = ReadJson;
+/** json prints it as is: an exception to the miss envelope (contracts/read.ts). */
+type AmbiguityResult = ReadAmbiguityJson;
 
 function checkStale(filePath: string): boolean {
   try { return isFileStale(filePath); } catch { return false; }
@@ -78,7 +45,7 @@ function guardReadable(absPath: string, explicitRoot: string | undefined, what: 
   if (isReadablePath(absPath, explicitRoot)) return true;
   const message = `Refusing to read ${what} outside the workspace: ${absPath}`;
   if (format === "json") {
-    printJson({ error: "path_outside_workspace", message });
+    printJson(readFailureJson("path_outside_workspace", message));
   } else if (format === "llm") {
     console.log(llmError("path_outside_workspace", message));
   } else {
@@ -95,7 +62,7 @@ function reportInvalidLineRange(target: string, format: string, paged = false): 
     ? `Invalid line range in "${target}". Line numbers must start at 1, the end must not precede the start, and a page start (@n) must fall inside the range.`
     : `Invalid line range in "${target}". Line numbers must start at 1 and the end must not precede the start.`;
   if (format === "json") {
-    printJson({ error: "invalid_line_range", message });
+    printJson(readFailureJson("invalid_line_range", message));
   } else if (format === "llm") {
     console.log(llmError("invalid_line_range", message));
   } else {
@@ -353,8 +320,7 @@ export function outputResult(result: ReadResult, format: string): void {
   if (format === "llm") {
     printLlmLines(renderReadLlm(result));
   } else if (format === "json") {
-    const out = { ...result, path: relativePath(result.path) ?? result.path };
-    printJson(out);
+    printJson(readJson(result));
   } else {
     if (result.stale) stderr(chalk.yellow("⚠ File has changed since last ingest. Run ix map to update.\n"));
     if (result.targetType === "symbol" || result.targetType === "filename-match") {
@@ -377,6 +343,15 @@ export function outputResult(result: ReadResult, format: string): void {
       ));
     }
   }
+}
+
+/** The `--format json` answer: the read, with its path workspace-relative. */
+function readJson(result: ReadResult): ReadJson {
+  return { ...result, path: relativePath(result.path) ?? result.path };
+}
+
+function readFailureJson(error: ReadFailureJson["error"], message: string): ReadFailureJson {
+  return { error, message };
 }
 
 function outputAmbiguity(result: AmbiguityResult, target: string, format: string): void {

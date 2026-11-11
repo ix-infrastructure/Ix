@@ -7,6 +7,7 @@ import { printJson, relativePath } from "./format.js";
 import { llmLine } from "./llm.js";
 import type { Suggestion } from "./resolve.js";
 import { didYouMeanRows, type TargetCandidate } from "./target-suggestions.js";
+import type { TextMatchesJson } from "./contracts/miss.js";
 
 /**
  * A name a graph command could not resolve, answered with the source files
@@ -102,7 +103,7 @@ export interface TextMatchSource {
 const SUGGESTIONS_HINT = "A code symbol with a similar name: re-run with one of these names.";
 
 /** The `--format json` record: the answer, without an `error`. */
-export function textMatchesRecord(target: string, miss: TextMatchSource, rows: TextMatch[]): Record<string, unknown> {
+export function textMatchesRecord(target: string, miss: TextMatchSource, rows: TextMatch[]): TextMatchesJson {
   const total = (miss.matches ?? []).filter((m) => issueSourcePath(m.path)).length;
   return {
     note: TEXT_MATCHES_CODE,
@@ -182,10 +183,10 @@ function suggestionText(miss: TextMatchSource): string[] {
  * as `locate` prints them, then the text matches. A script that reads the
  * command's keys on exit 0 finds them, holding no entity.
  */
-export function textMatchesJson(
-  target: string, miss: TextMatchSource, rows: TextMatch[], shape?: Record<string, unknown>,
-): Record<string, unknown> {
-  return { resolvedTarget: null, resolutionMode: "text", ...shape, ...textMatchesRecord(target, miss, rows) };
+export function textMatchesJson<S extends object = Record<never, never>>(
+  target: string, miss: TextMatchSource, rows: TextMatch[], shape?: S,
+): { resolvedTarget: null; resolutionMode: "text" } & S & TextMatchesJson {
+  return { resolvedTarget: null, resolutionMode: "text" as const, ...(shape as S), ...textMatchesRecord(target, miss, rows) };
 }
 
 /** The empty json body of an edge list (`callers`, `callees`, `contains`, `imports`, `imported-by`). */

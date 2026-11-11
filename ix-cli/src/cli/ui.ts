@@ -17,6 +17,7 @@ import { forMcp } from "./next-step.js";
 import { graphHealthJson, graphHealthLlmFields, graphHealthProse, type GraphHealth } from "./graph-health.js";
 import { setOutcome } from "./outcome.js";
 import { didYouMeanRows, type TargetCandidate } from "./target-suggestions.js";
+import { ambiguousTargetJson, ambiguousTargetMessage, unresolvedTargetJson } from "./contracts/miss.js";
 
 // ── Brand palette ─────────────────────────────────────────────────────────────
 //
@@ -168,11 +169,7 @@ export function unresolvedTargetMessage(target: string | string[]): string {
 
 /** The `--format json` record for a target that does not exist. */
 export function unresolvedTargetRecord(target: string | string[]): { error: string; message: string; targets?: string[] } {
-  return {
-    error: "unresolved_target",
-    message: unresolvedTargetMessage(target),
-    ...(Array.isArray(target) ? { targets: target } : {}),
-  };
+  return unresolvedTargetJson(unresolvedTargetMessage(target), Array.isArray(target) ? { targets: target } : {});
 }
 
 export function reportUnresolvedTarget(
@@ -189,15 +186,14 @@ export function reportUnresolvedTarget(
   // the suggestion rows, whose ids resolve an entity directly.
   const display = didYouMeanRows(near, detail?.didYouMean);
   if (format === "json") {
-    printJson({
-      ...unresolvedTargetRecord(target),
-      message,
-      ...(detail?.reason ? { reason: detail.reason } : {}),
-      ...(detail?.files?.length ? { files: detail.files } : {}),
-      ...(near.length ? { suggestions: near } : {}),
-      ...(detail?.didYouMean ? { didYouMean: detail.didYouMean } : {}),
-      ...(detail?.graph ? { graph: graphHealthJson(detail.graph) } : {}),
-    });
+    printJson(unresolvedTargetJson(message, {
+      targets: Array.isArray(target) ? target : undefined,
+      reason: detail?.reason,
+      files: detail?.files,
+      suggestions: near,
+      didYouMean: detail?.didYouMean,
+      graph: detail?.graph ? graphHealthJson(detail.graph) : undefined,
+    }));
   } else if (format === "llm") {
     const lines = [
       llmError("unresolved_target", message, [
@@ -259,16 +255,9 @@ export function reportAmbiguousTarget(
   format?: string,
   opts?: { kind?: string; path?: string; offerAll?: boolean },
 ): void {
-  const message = `Ambiguous symbol "${target}".`;
+  const message = ambiguousTargetMessage(target);
   if (format === "json") {
-    printJson({
-      error: "ambiguous_target",
-      message,
-      candidates: result.candidates,
-      ...(result.total != null ? { total: result.total } : {}),
-      ...(result.truncated ? { truncated: true } : {}),
-      diagnostics: result.diagnostics ?? [],
-    });
+    printJson(ambiguousTargetJson(target, result));
     return;
   }
   if (format === "llm") {

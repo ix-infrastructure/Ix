@@ -63,6 +63,48 @@ command substitution, an agent's tool result — and indents only when you are
 reading it on screen. Indentation is whitespace a parser throws away, and it is
 about a fifth of the payload. `--pretty` forces the indented shape anywhere.
 
+### JSON compatibility
+
+`--format json` is a public interface: plugins and scripts parse it. The rule:
+
+- Fields are only added. A new field may appear in any answer, so ignore keys
+  you do not know.
+- A rename or a removal keeps the old field next to the new one for one
+  deprecation period before the old field goes.
+
+The shapes are TypeScript types in `ix-cli/src/cli/contracts/`, and a test pins
+the keys each one prints. Covered so far: the shared miss records, `ix locate`
+and `ix read`. The other commands' json is not typed yet; the rule applies to
+it all the same.
+
+**Misses share one envelope.** A target that resolves to nothing, or to several
+entities when nothing is answered, prints a string `error` slug and a
+`message`, with the exit code to match:
+
+| `error` | Exit | Also carries |
+|---|---|---|
+| `unresolved_target` | 3 | `reason`, `files`, `suggestions`, `didYouMean`, `graph` when known |
+| `ambiguous_target` | 2 | `candidates` (pick with `--pick <n>`), `total`, `truncated`, `diagnostics` |
+
+`candidates` belongs to an ambiguity only; a miss lists near names in
+`suggestions` and `didYouMean`. An ambiguity that was answered for its top
+candidate (exit 0) is not an error: it is a `resolutionNotices` entry beside
+the answer.
+
+Two records predate the envelope and keep their shape for now:
+
+- `ix locate --strict` on an ambiguous name puts the slug in `code`, not
+  `error` (exit 2), beside locate's own `resolvedTarget: null`,
+  `resolutionMode: "ambiguous"`, `systemPath` and `diagnostics`.
+- `ix read` on an ambiguous file or symbol name exits 0 with `targetType:
+  "ambiguous-file"` or `"ambiguous-symbol"` and its `candidates`, and no
+  `error`.
+
+Both stay as they are because some readers treat any string `error` as a
+failure and would drop the candidates. Moving them is a deliberate change:
+each gains `error: "ambiguous_target"` and `message`, and keeps `code` or
+`targetType` for one deprecation period under the rule above.
+
 ### `ix impact` JSON
 
 One object per target (under `--all`, one per candidate in `results`). Top-level
