@@ -683,6 +683,31 @@ describe('super calls', () => {
     ]);
   });
 
+  it('does not resolve a super call on an outside base to a same-named class in the repo', () => {
+    expect(resolvedCalls({
+      '/repo/src/vendor/component.ts': 'export class Component {\n  setState() { return 1; }\n}\n',
+      '/repo/src/widget.ts': [
+        "import { Component } from 'react';",
+        'export class Widget extends Component {',
+        '  setState() { return super.setState(); }',
+        '}',
+        '',
+      ].join('\n'),
+    })).toEqual([]);
+    expect(resolvedCalls({
+      '/repo/app/__init__.py': '',
+      '/repo/app/legacy/model.py': 'class Model:\n    def save(self):\n        pass\n',
+      '/repo/app/user.py': [
+        'from django.db.models import Model',
+        '',
+        'class User(Model):',
+        '    def save(self):',
+        '        return super().save()',
+        '',
+      ].join('\n'),
+    })).toEqual([]);
+  });
+
   it('names a base in the same file', () => {
     expect(parsedCalls('/repo/app/user.py', [
       'class Base:',

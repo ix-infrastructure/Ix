@@ -255,6 +255,13 @@ export interface ParsedRelationship {
    */
   bareCall?: true;
   /**
+   * CALLS only: the callee was rewritten from `super.m()` / `super().m()` to
+   * `<Base>.m`. The base may come from an outside package, so the call resolves
+   * only through the caller's own file or the files it imports, never through
+   * the global qualifier fallback, where a same-named in-repo class would match.
+   */
+  superCall?: true;
+  /**
    * JS/TS IMPORTS only: `'helper'` marks a module path that was not written in
    * an import statement but passed as a string literal to an import helper
    * (`importModule(resolveModule("../../pkg/dist/x.js"))`). It is inferred, so
@@ -3601,6 +3608,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         if (!seenCalls.has(scope)) seenCalls.set(scope, new Set());
         const seen = seenCalls.get(scope)!;
 
+        let superCall = false;
         const effectiveCallee = (() => {
           // R package-qualified call (pkg::func / pkg:::func): keep the :: so the
           // patch builder can externalize it under external://<pkg> and split it
@@ -3673,7 +3681,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           // this one extends. Without a known base the call keeps its bare name.
           if (qualifier === 'super' && (isJsTs || language === SupportedLanguages.Python)) {
             const base = soleBaseAt(callLine);
-            return base ? `${base}.${callee}` : callee;
+            if (!base) return callee;
+            superCall = true;
+            return `${base}.${callee}`;
           }
           // Python: 'self'/'cls' always refers to the enclosing class — substitute it
           // so the edge reads 'Query.filter' instead of 'self.filter', enabling
@@ -3788,6 +3798,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
             dstName: effectiveCallee,
             predicate: 'CALLS',
             ...(phpCallKind ? { phpCallKind } : {}),
+            ...(superCall ? { superCall: true as const } : {}),
           };
           relationships.push(rel);
           callRelationships.set(bareKey, rel);
@@ -3796,6 +3807,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           // The call also names what an earlier typed relationship named: it is
           // a call in its own right, so it keeps its name-based fallback.
           delete callRelationships.get(bareKey)?.receiverOnly;
+          if (!superCall) delete callRelationships.get(bareKey)?.superCall;
         }
         if (typedReceiver) {
           // `Type.member`, `receiver.member` for a factory-typed receiver, or
@@ -6473,7 +6485,7 @@ export function resolveEdges(
           // across module/repo boundaries; for builtin/stdlib member names that is a
           // false positive, so skip the global fallback (the import-scoped qualifier
           // tier above already had its chance). Favor under-connection.
-          if (COMMODITY_CALLEE_NAMES.has(memberPart)) {
+          if (COMMODITY_CALLEE_NAMES.has(memberPart) || rel.superCall) {
             stats.skippedAmbiguous++;
             continue;
           }
