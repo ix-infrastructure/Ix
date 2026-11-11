@@ -8,7 +8,7 @@ import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { roundFloat, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
-import { parsePickOption } from "../options.js";
+import { formatOption, parsePickOption } from "../options.js";
 import { setOutcome } from "../outcome.js";
 import { renderMapText, renderMapLlm, type MapRegion, type MapResult } from "./map.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm } from "../map-freshness.js";
@@ -62,7 +62,7 @@ export function registerSubsystemsCommand(program: Command): void {
   program
     .command("subsystems [target]")
     .description("Show the persisted architectural map saved by 'ix map'")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .option("--list",         "List stored subsystem health scores instead of the persisted architecture map")
     .option("--detailed",     "Include member files and enriched call/import edges (requires --list)")
     .option("--limit <n>",    "Max regions per page in detailed mode (default: 200 when auto-paging)")

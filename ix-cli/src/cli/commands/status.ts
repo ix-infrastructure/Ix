@@ -22,6 +22,7 @@ import {
 } from "../graph-health.js";
 import { detectSystem } from "../system.js";
 import { loadVerifyRecord, verifyRecordOutdated, type VerifyRecord } from "../verify.js";
+import { formatOption } from "../options.js";
 
 interface StatusStaleInfo {
   graphCompleted: boolean;
@@ -134,7 +135,7 @@ export function registerStatusCommand(program: Command): void {
   program
     .command("status")
     .description("Show Ix backend health and status")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .option("--root <dir>", "Workspace root directory")
     .action(async (opts: { format: string; root?: string }) => {
       const client = createClient();
