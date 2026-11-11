@@ -21,6 +21,16 @@
       "why": "asserts runIx is never called with `smells --path`"
     },
     {
+      "where": "ix-codex-plugin/tests/test_lookup_exit_codes.py",
+      "match": "command, \"x\"",
+      "why": "parameterized exit-code test: the command is a variable and \"x\" a placeholder symbol"
+    },
+    {
+      "where": "ix-codex-plugin/tests/test_plugin_guidance.py",
+      "match": "ix invented",
+      "why": "asserts that unknown commands and flags survive extraction"
+    },
+    {
       "where": "ix-cursor-plugin/mcp/lib/parser.ts",
       "match": "ix output is not valid JSON",
       "why": "error message prose"
