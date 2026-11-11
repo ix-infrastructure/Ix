@@ -14,7 +14,7 @@ import { anchorSpan, bareName } from "../edge-sites.js";
 import { WALK_ENTRY_BUDGET, WALK_IGNORE_DIRS, basenameMatcher } from "../symbol-read-check.js";
 import { relativePath, printJson } from "../format.js";
 import { llmError, llmLine, llmShortId, printLlmLines } from "../llm.js";
-import { parsePickOption } from "../options.js";
+import { formatOption, pathOption, pickOption } from "../options.js";
 import { disambiguationHint } from "../next-step.js";
 import { reportResolutionNotices, reportUnresolvedTarget } from "../ui.js";
 
@@ -407,10 +407,10 @@ export function registerReadCommand(program: Command): void {
   program
     .command("read <target>")
     .description("Read raw file content, line ranges, or symbol source code")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .option("--kind <kind>", "Filter symbol by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .addOption(pathOption())
+    .addOption(pickOption())
     .option("--root <dir>", "Workspace root directory")
     .option("--all", `Read the whole file or symbol, past the ${READ_LINE_CAP}-line default cap`)
     .addHelpText("after", `\nResolution order:

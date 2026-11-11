@@ -6,6 +6,7 @@ import * as crypto from 'node:crypto';
 import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import type { Command } from 'commander';
+import { formatOption } from '../options.js';
 import { ParsePool } from './parse-pool.js';
 // import { ResolveWorker } from './resolve-pool.js';
 import chalk from 'chalk';
@@ -1594,7 +1595,7 @@ export function registerIngestCommand(program: Command): void {
     .option('--since <date>', 'Only fetch items updated after this date (ISO 8601)')
     .option('--limit <n>', 'Max items per category (default 50)', '50')
     .option('--force', 'Force re-ingest even if files are unchanged (useful after parser upgrades)')
-    .option('--format <fmt>', 'Output format (text|json|llm)', 'text')
+    .addOption(formatOption())
     .option('--root <dir>', 'Workspace root directory')
     .option('--debug', 'Show phase timing breakdown', false)
     .option('--prune-stale-workspace', "Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest. Loopback endpoints only -- and loopback is the URL, not ownership: never use it through a tunnel or proxy to a shared backend")

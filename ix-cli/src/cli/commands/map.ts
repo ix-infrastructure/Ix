@@ -22,6 +22,8 @@ import { readBackendHealth } from "./upgrade.js";
 import { renderWarning } from "../ui.js";
 import { describeUnavailableGrammars } from "../grammar-status.js";
 import type { IxClient } from "../../client/api.js";
+import { formatOption } from "../options.js";
+import { DEFAULT_FORMAT_CHOICES } from "../default-format.js";
 
 // Hard wall-clock budget for a single `ix map`. Past this, the shared deadline
 // signal aborts every in-flight request and the command exits, so a single
@@ -452,7 +454,7 @@ export function registerMapCommand(program: Command): void {
   program
     .command("map [path]")
     .description("Map the architectural hierarchy of a codebase")
-    .option("--format <fmt>", "Output format (text|json|llm|silent)", "text")
+    .addOption(formatOption([...DEFAULT_FORMAT_CHOICES, "silent"]))
     .option("--level <n>", "Show only regions at this level (1=finest, higher=coarser)")
     .option("--min-confidence <n>", "Only show regions above this confidence threshold (0-1)", "0")
     .option("--max-items <n>", "Max items to show per section in text output (default: 10)", "10")

@@ -8,7 +8,7 @@ import { createClient } from "../../client/factory.js";
 import { resolveWorkspaceRoot } from "../config.js";
 import { printJson } from "../format.js";
 import { llmError, printLlmLines } from "../llm.js";
-import { parseBudgetOption } from "../options.js";
+import { formatOption, parseBudgetOption } from "../options.js";
 import { setOutcome } from "../outcome.js";
 import { isQuiet } from "../output-shape.js";
 import { stderr } from "../stderr.js";
@@ -98,7 +98,7 @@ export function registerAroundCommand(program: Command): void {
     .description("Show who depends on the code at a file location: callers, importers, tests")
     .option("--limit <n>", "Max rows per list; 0 for all (text/llm default: 8 callers, 5 others; json: all)")
     .option("--budget <tokens>", `Token budget for text/llm output (~4 chars a token)`, (v: string) => parseBudgetOption(v, String(DEFAULT_TOKEN_BUDGET)), DEFAULT_TOKEN_BUDGET)
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .addHelpText("after", `
 <target> is path[:line[-end]], relative to the workspace root or absolute.
 With a line, reports the definitions whose span covers it (innermost first);

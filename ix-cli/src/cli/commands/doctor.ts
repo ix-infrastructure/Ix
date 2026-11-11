@@ -48,6 +48,7 @@ import { healthFromError } from "../database-probe.js";
 import type { GrammarStatus } from "../grammar-status.js";
 import { loadGrammarStatus } from "./ingestion-loader.js";
 import type { CapabilitiesResponse, HealthResponse } from "../../client/types.js";
+import { formatOption } from "../options.js";
 
 interface CheckResult {
   ok: boolean;
@@ -524,7 +525,7 @@ export function registerDoctorCommand(program: Command): void {
   program
     .command("doctor")
     .description("Check Ix system health — server, database, graph integrity")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .action(async (opts: { format: string }) => {
       const { endpoint, client } = doctorClient();
       // Asked of the file directly: with IX_ENDPOINT and IX_TOKEN set,

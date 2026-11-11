@@ -50,7 +50,7 @@ import { companionHistory, expandIssueCompanions } from "../explain/issue-compan
 import { collectTextReferences, gitRepoAccess, type RepoAccess, type TextSource } from "../explain/text-references.js";
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
-import { parseBudgetOption, parsePickOption, STRICT_TARGET_HELP, parseRevisionOption } from "../options.js";
+import { formatOption, kindOption, parseBudgetOption, parseRevisionOption, pathOption, pickOption, strictOption } from "../options.js";
 import { activeReadScope, ensureReadScope, isRawId, resolveFileOrEntityFull, resolveFileOrReport, type ResolutionNotice, type ResolvedEntity } from "../resolve.js";
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
 import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure } from "../ui.js";
@@ -382,10 +382,10 @@ export function registerContextCommand(program: Command): void {
       "--lean",
       "With --from-issue: only the starting points Ix trusts and the next few files, or one line saying it trusts none",
     )
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
     .option(
       "--depth <depth>",
       `Context-graph expansion depth (${CONTEXT_DEPTHS.join("|")})`,
@@ -411,7 +411,7 @@ export function registerContextCommand(program: Command): void {
       `${budgetField("maxChars").help} (overrides --max-tokens; clamped to ${budgetField("maxChars").min}-${budgetField("maxChars").max})`,
       budgetParser("maxChars"),
     )
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .option("--out <path>", "Write the JSON bundle to this file instead of stdout")
     .option("--save <id>", "Persist the bundle as a resumable investigation state")
     .option("--resume <id>", "Render a saved investigation state without a backend")
