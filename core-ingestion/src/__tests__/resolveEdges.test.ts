@@ -764,6 +764,23 @@ class Child extends Base
       ]);
     });
 
+    it('matches an inherited method name without regard to case, as PHP does', () => {
+      const shouting = parseFile(
+        '/repo/app/Child.php',
+        `<?php
+namespace App;
+class Child extends Base
+{
+    public function go(): bool { return $this->INHERITED(); }
+}
+      `,
+      )!;
+
+      expect(calls(resolveEdges([shouting, base()]))).toEqual([
+        'Child.go -> /repo/app/Base.php Base.inherited 0.9',
+      ]);
+    });
+
     it('resolves a typed receiver, imported or in the same namespace, through the class it names', () => {
       const sameNamespace = parseFile(
         '/repo/app/Svc.php',

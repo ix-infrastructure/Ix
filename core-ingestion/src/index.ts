@@ -5731,11 +5731,14 @@ export function resolveEdges(
           .filter(q => q === key).map(() => ({ fp: candidate, key })));
       return targets.length === 1 ? targets : [];
     }
-    const exact = (fileQKeys.get(fp)?.get(member) ?? []).filter(q => q === key);
+    const php = summaries.get(fp)?.language === SupportedLanguages.PHP;
+    const exact = php
+      ? phpQualifiedKeys(fp, name, member)
+      : (fileQKeys.get(fp)?.get(member) ?? []).filter(q => q === key);
     const java = summaries.get(fp)?.language === SupportedLanguages.Java;
     // Multiple definitions include overloads. Do not guess a signature. Java
     // overloads in one class are one node (one key), so they are one target.
-    if (exact.length) return exact.length === 1 || java ? [{ fp, key }] : [];
+    if (exact.length) return exact.length === 1 || java ? [{ fp, key: exact[0] }] : [];
     const parents = (summaries.get(fp)?.receiverHeritage ?? []).filter(([child]) => child === name);
     if (java || summaries.get(fp)?.language === SupportedLanguages.PHP) {
       // The nearest declaration: the superclass chain (listed first), then
@@ -5760,7 +5763,7 @@ export function resolveEdges(
    */
   function phpInheritedMember(context: string, type: string, member: string): { fp: string; key: string } | undefined {
     const owners = receiverProviders(context, type);
-    if (owners.length !== 1 || fileDefinesQualifiedMember(owners[0].fp, owners[0].type, member)) return;
+    if (owners.length !== 1 || phpQualifiedKeys(owners[0].fp, owners[0].type, member).length) return;
     const targets = receiverMembers(context, type, member);
     return targets.length === 1 ? targets[0] : undefined;
   }
@@ -5834,6 +5837,21 @@ export function resolveEdges(
     if (!definers) return [];
     if (definers.length >= pool.size) return [...pool].filter(fp => fileHasSymbol.get(fp)?.has(name));
     return definers.filter(fp => pool.has(fp)).sort((a, b) => order.get(a)! - order.get(b)!);
+  }
+
+  /**
+   * PHP method names are case-insensitive: `$this->Save()` calls `save()`.
+   * The keys in `filePath` for `typeName.member`, in their declared case.
+   */
+  function phpQualifiedKeys(filePath: string, typeName: string, member: string): string[] {
+    const wanted = `${typeName}.${member}`.toLowerCase();
+    const memberLower = member.toLowerCase();
+    const keys: string[] = [];
+    for (const [name, qks] of fileQKeys.get(filePath) ?? []) {
+      if (name.toLowerCase() !== memberLower) continue;
+      for (const qk of qks) if (qk.toLowerCase() === wanted) keys.push(qk);
+    }
+    return keys;
   }
 
   function fileDefinesQualifiedMember(filePath: string, qualifierPart: string, memberPart: string): boolean {
