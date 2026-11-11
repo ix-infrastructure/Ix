@@ -123,64 +123,10 @@ export function mapModeForIngest(raw = process.env.IX_MAP_FULL_INGEST): boolean 
   return raw !== "1";
 }
 
-export interface MapRegion {
-  id: string;
-  label: string;
-  label_kind: string;
-  level: number;
-  file_count: number;
-  child_region_count: number;
-  parent_id: string | null;
-  cohesion: number;
-  external_coupling: number;
-  boundary_ratio: number;
-  confidence: number;
-  crosscut_score: number;
-  dominant_signals: string[];
-  interface_node_count: number;
-  children?: MapRegion[];
-}
-
-interface MapPreflight {
-  cost: {
-    file_count: number;
-    directory_count: number;
-    directory_quadratic: number;
-    symbol_estimate: number;
-    edge_estimate: number;
-  };
-  capacity: {
-    cpu_cores: number;
-    heap_max_bytes: number;
-    heap_free_bytes: number;
-    container_memory: number | null;
-    disk_free_bytes: number | null;
-  };
-  risk: string;
-  mode: string;
-  warnings: string[];
-  duration_ms: number;
-}
-
-interface MapPersistence {
-  region_nodes: number;
-  file_edges: number;
-  region_edges: number;
-  delete_ops: number;
-  total_ops: number;
-}
-
-export interface MapResult {
-  file_count: number;
-  region_count: number;
-  levels: number;
-  map_rev: number;
-  regions: MapRegion[];
-  hierarchy: MapRegion[];
-  outcome?: string;
-  preflight?: MapPreflight;
-  persistence?: MapPersistence;
-}
+// The `/v1/map` response types live with the client; exported from here as well,
+// where they were first defined.
+import type { MapRegion, MapResult } from "../../client/types.js";
+export type { MapRegion, MapResult };
 
 /**
  * The fields of a `/v1/map` response that `ix map` reads -- all a reused

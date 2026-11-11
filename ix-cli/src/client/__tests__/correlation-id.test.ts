@@ -27,7 +27,8 @@ beforeAll(async () => {
     req.resume();
     req.on("end", () => {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", results: [], nodes: [], edges: [], rev: 1 }));
+      // `/v1/search` answers an array, which the client checks; the rest share one body.
+      res.end(req.url?.startsWith("/v1/search") ? "[]" : JSON.stringify({ status: "ok", results: [], nodes: [], edges: [], rev: 1 }));
     });
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));

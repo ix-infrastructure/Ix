@@ -4,9 +4,19 @@ import { DEFAULT_ENDPOINT, isLoopbackEndpoint } from "../cli/endpoint.js";
 import { isPreConnectionFailure, RESET_RECONCILIATION_ERROR } from "./transport.js";
 import { Limiter, RequestMemo } from "./request-memo.js";
 import { CORRELATION_ID_HEADER, debugRequest, nextCorrelationId } from "./correlation.js";
+import { contextResponse, entityResponse, expandResponse, searchResponse } from "./contract.js";
 import type {
   StructuredContext,
   GraphNode,
+  ExpandResponse,
+  EntityResponse,
+  MapResult,
+  SmellReport,
+  StoredSmellsResponse,
+  SubsystemScoresResponse,
+  ScopedSubsystemResult,
+  StatsResponse,
+  SavingsResponse,
   HealthResponse,
   PatchSummary,
   GraphPatchPayload,
@@ -180,7 +190,7 @@ export class IxClient {
     question: string,
     opts?: { asOfRev?: number; depth?: string }
   ): Promise<StructuredContext> {
-    return this.post("/v1/context", { query: question, ...opts });
+    return contextResponse(await this.post<unknown>("/v1/context", { query: question, ...opts }));
   }
 
   /**
@@ -203,10 +213,10 @@ export class IxClient {
     opts?: { asOfRev?: number; depth?: string; hops?: number }
   ): Promise<StructuredContext> {
     const { hops = 1, ...rest } = opts ?? {};
-    return this.post("/v1/context", {
+    return contextResponse(await this.post<unknown>("/v1/context", {
       slices: [{ type: "nodes", nodeIds: [nodeId], expand: true, hops }],
       ...rest,
-    });
+    }));
   }
 
   /**
@@ -219,10 +229,10 @@ export class IxClient {
     nodeIds: string[],
     opts: { depth?: string; signal?: AbortSignal } = {},
   ): Promise<StructuredContext> {
-    return this.post("/v1/context", {
+    return contextResponse(await this.post<unknown>("/v1/context", {
       slices: [{ type: "nodes", nodeIds, expand: true, hops: 1 }],
       ...(opts.depth !== undefined ? { depth: opts.depth } : {}),
-    }, { signal: opts.signal });
+    }, { signal: opts.signal }));
   }
 
   async decide(
@@ -237,7 +247,7 @@ export class IxClient {
     term: string,
     opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean; workspaceId?: string; systemId?: string; scope?: string; signal?: AbortSignal }
   ): Promise<GraphNode[]> {
-    return this.post("/v1/search", {
+    return searchResponse(await this.post<unknown>("/v1/search", {
       term,
       limit: opts?.limit,
       kind: opts?.kind,
@@ -251,7 +261,7 @@ export class IxClient {
       // request with a derived circe decoder and drop the unknown field, so
       // sending it is always safe; callers keep their own filter as well.
       scope: opts?.scope,
-    }, { signal: opts?.signal });
+    }, { signal: opts?.signal }));
   }
 
   // Vector-similarity search. The backend (POST /v1/search/semantic) embeds the
@@ -303,38 +313,34 @@ export class IxClient {
     throw new Error(`No entity found for prefix: ${prefix}`);
   }
 
-  async entity(id: string): Promise<{
-    node: GraphNode;
-    claims: unknown[];
-    edges: unknown[];
-  }> {
-    return this.get(`/v1/entity/${encodeURIComponent(id)}`);
+  async entity(id: string): Promise<EntityResponse> {
+    return entityResponse(await this.get<unknown>(`/v1/entity/${encodeURIComponent(id)}`));
   }
 
   async expandByName(
     name: string,
     opts?: { direction?: string; predicates?: string[]; kinds?: string[]; timeoutMs?: number }
-  ): Promise<{ nodes: any[]; edges: any[] }> {
-    return this.post("/v1/expand-by-name", {
+  ): Promise<ExpandResponse> {
+    return expandResponse(await this.post<unknown>("/v1/expand-by-name", {
       name,
       direction: opts?.direction ?? "both",
       predicates: opts?.predicates,
       kinds: opts?.kinds,
-    }, { timeoutMs: opts?.timeoutMs });
+    }, { timeoutMs: opts?.timeoutMs }), "POST /v1/expand-by-name");
   }
 
   async expand(
     id: string,
     opts?: { direction?: string; predicates?: string[]; hops?: number; limit?: number }
-  ): Promise<{ nodes: any[]; edges: any[] }> {
-    return this.post("/v1/expand", {
+  ): Promise<ExpandResponse> {
+    return expandResponse(await this.post<unknown>("/v1/expand", {
       nodeId: id,
       direction: opts?.direction ?? "both",
       predicates: opts?.predicates,
       hops: opts?.hops ?? 1,
       // Only when asked for, so every existing caller sends the body it did.
       ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
-    });
+    }));
   }
 
   /**
@@ -575,7 +581,7 @@ export class IxClient {
     }
   }
 
-  async map(opts?: { full?: boolean; workspaceId?: string; systemId?: string }): Promise<any> {
+  async map(opts?: { full?: boolean; workspaceId?: string; systemId?: string }): Promise<MapResult> {
     // /v1/map reads snake_case keys (full, branch_id, workspace_id, system_id) off the raw JSON body.
     const body: Record<string, unknown> = { full: opts?.full ?? false };
     if (opts?.workspaceId) body.workspace_id = opts.workspaceId;
@@ -590,7 +596,7 @@ export class IxClient {
       const text = await resp.text();
       throw httpError(resp.status, text);
     }
-    return resp.json();
+    return resp.json() as Promise<MapResult>;
   }
 
   async commitPatchBulk(patches: GraphPatchPayload[]): Promise<PatchCommitResult> {
@@ -619,7 +625,7 @@ export class IxClient {
      * 2 minutes). `ix smells` sets its `--wait` budget here. Never retried.
      */
     timeoutMs?: number;
-  }): Promise<any> {
+  }): Promise<SmellReport> {
     const params = new URLSearchParams();
     if (opts?.orphanMaxConnections !== undefined) params.set("orphan-max-connections", String(opts.orphanMaxConnections));
     if (opts?.godModuleChunks      !== undefined) params.set("god-module-chunks",      String(opts.godModuleChunks));
@@ -631,7 +637,7 @@ export class IxClient {
     return this.post(qs ? `/v1/smells?${qs}` : "/v1/smells", {}, { timeoutMs: opts?.timeoutMs });
   }
 
-  async listSmells(opts?: { workspaceId?: string; systemId?: string }): Promise<any> {
+  async listSmells(opts?: { workspaceId?: string; systemId?: string }): Promise<StoredSmellsResponse> {
     const params = new URLSearchParams();
     if (opts?.workspaceId) params.set("workspace_id", opts.workspaceId);
     if (opts?.systemId)    params.set("system_id",    opts.systemId);
@@ -639,7 +645,7 @@ export class IxClient {
     return this.get(`/v1/smells${qs ? `?${qs}` : ""}`);
   }
 
-  async scoreSubsystems(opts?: { workspaceId?: string; systemId?: string }): Promise<any> {
+  async scoreSubsystems(opts?: { workspaceId?: string; systemId?: string }): Promise<SubsystemScoresResponse> {
     const params = new URLSearchParams();
     if (opts?.workspaceId) params.set("workspace_id", opts.workspaceId);
     if (opts?.systemId)    params.set("system_id",    opts.systemId);
@@ -647,7 +653,7 @@ export class IxClient {
     return this.post(`/v1/subsystems/score${qs ? `?${qs}` : ""}`, {});
   }
 
-  async listSubsystems(opts?: ListSubsystemsOptions & { workspaceId?: string; systemId?: string }): Promise<any> {
+  async listSubsystems(opts?: ListSubsystemsOptions & { workspaceId?: string; systemId?: string }): Promise<SubsystemScoresResponse> {
     const params = new URLSearchParams();
     if (opts?.detailed) params.set("detailed", "true");
     if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
@@ -661,7 +667,8 @@ export class IxClient {
     return this.get(`/v1/subsystems${qs ? `?${qs}` : ""}`);
   }
 
-  async getSubsystemMap(opts?: { target?: string; pick?: number; workspaceId?: string; systemId?: string }): Promise<any> {
+  /** The persisted map, or with `target` that one region (`ScopedSubsystemResult`). */
+  async getSubsystemMap(opts?: { target?: string; pick?: number; workspaceId?: string; systemId?: string }): Promise<MapResult | ScopedSubsystemResult> {
     const params = new URLSearchParams();
     if (opts?.target) params.set("target", opts.target);
     if (opts?.pick !== undefined) params.set("pick", String(opts.pick));
@@ -891,12 +898,13 @@ export class IxClient {
     return resp.json() as Promise<{ ok: boolean; message: string }>;
   }
 
-  async savings(detail?: boolean): Promise<any> {
+  async savings(detail?: boolean): Promise<SavingsResponse> {
     const qs = detail ? "?detail=true" : "";
     return this.get(`/v1/savings${qs}`);
   }
 
-  async savingsReset(): Promise<any> {
+  /** The body is a confirmation nothing reads; its shape is not documented. */
+  async savingsReset(): Promise<unknown> {
     const resp = await fetch(`${this.endpoint}/v1/savings`, {
       method: "DELETE",
       headers: this.headers(false, "DELETE", "/v1/savings"),
@@ -908,7 +916,7 @@ export class IxClient {
     return resp.json();
   }
 
-  async stats(opts?: { workspaceId?: string; systemId?: string; timeoutMs?: number }): Promise<any> {
+  async stats(opts?: { workspaceId?: string; systemId?: string; timeoutMs?: number }): Promise<StatsResponse> {
     const params = new URLSearchParams();
     if (opts?.workspaceId) params.set("workspace_id", opts.workspaceId);
     if (opts?.systemId)    params.set("system_id",    opts.systemId);

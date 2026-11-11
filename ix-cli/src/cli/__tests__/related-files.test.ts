@@ -67,7 +67,8 @@ class Graph {
           frontier = next;
         }
         seen.delete(id);
-        return { nodes: [...seen].map((n) => this.nodes.get(n)!).filter(Boolean), edges };
+        // Partial nodes, as the code under test reads them: not full GraphNodes.
+        return { nodes: [...seen].map((n) => this.nodes.get(n)!).filter(Boolean), edges } as never;
       },
     };
   }
