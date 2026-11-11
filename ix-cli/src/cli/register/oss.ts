@@ -44,6 +44,7 @@ import { registerContextCommand } from "../commands/context.js";
 import { registerAroundCommand } from "../commands/around.js";
 import { registerHookCommand } from "../commands/hook.js";
 import { registerVerifyCommand } from "../commands/verify.js";
+import { registerCapabilitiesCommand } from "../commands/capabilities.js";
 import { applyOssSetup } from "./oss-setup.js";
 
 export { registerProStubs } from "./pro-stubs.js";
@@ -101,6 +102,7 @@ export function registerOssCommands(program: Command): void {
   registerAroundCommand(program);
   registerHookCommand(program);
   registerVerifyCommand(program);
+  registerCapabilitiesCommand(program);
 
   applyOssSetup(program);
 }

@@ -2,6 +2,9 @@
 
 import type { Command } from "commander";
 
+/** Resolve from this module, so every probe here agrees with the loader. */
+const defaultResolve = (specifier: string): string => import.meta.resolve(specifier);
+
 /**
  * True only when `@ix/pro` is not installed at all.
  *
@@ -10,9 +13,9 @@ import type { Command } from "commander";
  * proves it is installed — so that counts as present, and the caller fails
  * closed.
  */
-function proPackageIsAbsent(): boolean {
+function proPackageIsAbsent(resolve: (specifier: string) => string = defaultResolve): boolean {
   try {
-    import.meta.resolve("@ix/pro");
+    resolve("@ix/pro");
     return false;
   } catch (error) {
     return (error as { code?: string }).code === "ERR_MODULE_NOT_FOUND";
@@ -26,11 +29,31 @@ function proPackageIsAbsent(): boolean {
  * loader on this answer still leaves the broken case to the loader's error.
  */
 export function proIsAbsent(): boolean {
+  return proInstallState() === "absent";
+}
+
+/** What `proInstallState` found. */
+export type ProInstallState = "absent" | "installed" | "broken";
+
+/**
+ * Where `@ix/pro` stands, from module resolution alone: nothing is imported or
+ * initialized, so this costs two resolutions and has no side effects.
+ *
+ * - `absent`: the package is not installed (`proIsAbsent`).
+ * - `installed`: `@ix/pro/register` resolves, so the loader will try it. Pro
+ *   can still fail to initialize; the first command that loads it says so.
+ * - `broken`: the package is there but `@ix/pro/register` does not resolve,
+ *   which `tryLoadProCommands` refuses to run past.
+ *
+ * `resolve` is for tests; the default resolves from this module, as the loader
+ * does.
+ */
+export function proInstallState(resolve: (specifier: string) => string = defaultResolve): ProInstallState {
   try {
-    import.meta.resolve("@ix/pro/register");
-    return false;
+    resolve("@ix/pro/register");
+    return "installed";
   } catch {
-    return proPackageIsAbsent();
+    return proPackageIsAbsent(resolve) ? "absent" : "broken";
   }
 }
 

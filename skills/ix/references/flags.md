@@ -270,6 +270,17 @@ through a superclass or interface follow the direct ones, tagged
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
+### `ix capabilities`
+
+What this installed CLI supports, for a plugin or script to read before it calls anything else. Needs no backend and reads no config; Ix Pro is resolved, never loaded or initialized, so it is not a Pro command run as a probe. `ix capabilities --format json` (with or without `--pretty`) is answered before the command tree loads. It prints `{"schema":"ix-capabilities/1","version":"<semver>","pro":{"available":<bool>,"state":"absent|installed|broken"},"hooks":["claude-post-edit"]}`. `version` is what `ix --version` prints and `hooks` lists the `ix hook` subcommands. `pro.available` is true only when `state` is `installed`; `broken` means the package is there but its entry point does not resolve (`ix upgrade` reinstalls it). The answer changes only when the CLI or Ix Pro is reinstalled, so cache it per resolved `ix` path and modification time. New fields may appear; a breaking change changes `schema`. Exits 0 whenever it answers.
+
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
+| `--quiet` | — | off | Accepted for consistency; there are no headers or hints to drop |
+| `--fields` | `<list>` | — | Accepted for consistency; the answer is one object, not rows |
+
 ### `ix config`
 
 Show or update Ix configuration.

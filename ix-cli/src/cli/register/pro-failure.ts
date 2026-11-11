@@ -29,6 +29,10 @@ const REPAIR_INVOCATIONS = new Set([
   // does not weaken anything: `detectPro` then declines to advertise the Pro
   // tools, and `buildProgram` still rejects for any call that would need them.
   "mcp",
+  // Reports Pro's state rather than using it, so it must answer when that
+  // state is "broken". `main.ts` answers it before Pro is looked at when given
+  // `--format`; this covers the rest.
+  "capabilities",
   "help",
   "--help",
   "-h",

@@ -25,17 +25,9 @@ import {
   writeCommanderError,
 } from "./errors.js";
 import { getEndpoint, readConfiguredFormat } from "./config.js";
+import { readCliVersion } from "./cli-version.js";
 
-import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
-
-let cliVersion = "0.0.0";
-try {
-  const __dirname = dirname(fileURLToPath(import.meta.url));
-  const pkg = JSON.parse(readFileSync(join(__dirname, "../../package.json"), "utf-8"));
-  cliVersion = pkg.version || "0.0.0";
-} catch {}
+const cliVersion = readCliVersion();
 
 // Set IX_DEBUG=1 to append stack traces to any rendered error.
 const debug = process.env.IX_DEBUG === "1";
