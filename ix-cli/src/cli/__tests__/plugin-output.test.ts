@@ -3,6 +3,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { FakeBackend, SMALL_READ_GRAPH } from "./helpers/fake-backend.js";
 import { runCommand, type RunCommandResult } from "./helpers/run-command.js";
+import { llmQuote } from "../llm.js";
 
 /**
  * Characterisation snapshots of what a plugin sees from `ix locate`,
@@ -27,7 +28,8 @@ import { runCommand, type RunCommandResult } from "./helpers/run-command.js";
  *   - the run's temp directory (scratch IX_HOME, workspace and unmapped
  *     directory all live under it), in any of the forms it is printed in
  *     (native, JSON-escaped, forward-slashed), becomes `<TMP>`, and the
- *     separators in the path after it become `/`;
+ *     separators in the path after it become `/`; an llm value that is only
+ *     such a path loses the quotes Windows' backslashes gave it;
  *   - the FakeBackend's port (in the endpoint, should one be printed) becomes
  *     `<PORT>`.
  * No duration is printed by any of these outputs today; if one appears, the
@@ -67,6 +69,10 @@ function normalise(text: string, run: RunCommandResult): string {
     const pattern = new RegExp(`${escapeRegExp(form)}((?:(?:\\\\\\\\|[\\\\/])[\\w.-]+)*)`, "g");
     out = out.replace(pattern, (_m, rest: string) => `<TMP>${rest.replace(/\\\\|\\/g, "/")}`);
   }
+  // `--format llm` quotes a value holding a `\` (llm.ts), so on Windows a bare
+  // path prints as dir="C:\\...". Once it is `<TMP>/...` it needs no quoting:
+  // print it as it prints on POSIX.
+  out = out.replace(/="(<TMP>(?:\/[\w.-]+)*)"/g, "=$1");
   return out.replace(/127\.0\.0\.1:\d+/g, "127.0.0.1:<PORT>");
 }
 
@@ -119,5 +125,26 @@ describe.each(COMMANDS)("ix %s: plugin-facing output", (command) => {
       expect(exitCode).toBe(4);
       expect(text).toMatchSnapshot();
     });
+  });
+});
+
+describe("normalise", () => {
+  // The snapshots are recorded on POSIX; this pins that a Windows run normalises to the same text.
+  const posix = { stdout: "", stderr: "", exitCode: 4, tempRoot: "/tmp/ix-run-command-abc" };
+  const windows = { ...posix, tempRoot: "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\ix-run-command-abc" };
+  const llmLine = (root: string, sep: string) => {
+    const dir = `${root}${sep}elsewhere`;
+    return `error code=workspace_not_mapped message=${llmQuote(`${dir} is not mapped.`)} dir=${llmQuote(dir)} hint=${llmQuote(`Run \`ix map ${dir}\``)}`;
+  };
+
+  it("prints an llm path value the same on Windows as on POSIX", () => {
+    const expected = 'error code=workspace_not_mapped message="<TMP>/elsewhere is not mapped." dir=<TMP>/elsewhere hint="Run `ix map <TMP>/elsewhere`"';
+    expect(normalise(llmLine(posix.tempRoot, "/"), posix)).toBe(expected);
+    expect(normalise(llmLine(windows.tempRoot, "\\"), windows)).toBe(expected);
+  });
+
+  it("keeps the quotes on a value that is more than the path", () => {
+    const text = `note=${llmQuote(`${windows.tempRoot}\\a b`)}`;
+    expect(normalise(text, windows)).toBe('note="<TMP>/a b"');
   });
 });
