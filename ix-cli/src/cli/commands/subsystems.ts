@@ -20,6 +20,7 @@ import {
   type ScopedSubsystemResult,
   type SubsystemScore,
 } from "../explain/subsystem.js";
+import { isIxHttpError } from "../../client/http-error.js";
 
 interface AmbiguousSubsystemResult {
   error: "ambiguous_target";
@@ -402,11 +403,10 @@ function healthBar(score: number): string {
   return color(bar);
 }
 
-function parseErrorBody(err: { message?: string }): unknown | null {
-  const match = /^\d+: (.+)$/.exec(err.message ?? "");
-  if (!match) return null;
+function parseErrorBody(err: unknown): unknown | null {
+  if (!isIxHttpError(err)) return null;
   try {
-    return JSON.parse(match[1]);
+    return JSON.parse(err.body);
   } catch {
     return null;
   }

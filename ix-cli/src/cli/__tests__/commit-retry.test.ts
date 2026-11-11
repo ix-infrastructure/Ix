@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GATEWAY_TIMEOUT_MAX_RETRIES, isTransientCommitStatus, retryAfterMs, retryCommit, TRANSIENT_RETRY_BUDGET_MS } from "../commit-retry.js";
 import { httpError } from "../../client/api.js";
+import { IxHttpError } from "../../client/http-error.js";
 
 /** An error shaped the way `httpError` builds one for a commit route. */
 function statusError(status: number, retryAfter?: string): Error {
@@ -24,10 +25,17 @@ function failing(...failures: unknown[]): { fn: () => Promise<string>; calls: ()
 }
 
 describe("isTransientCommitStatus", () => {
-  it("is true for 502, 503, 504 and 429, from the status or the message", () => {
+  it("is true for 502, 503, 504 and 429, from the error's status", () => {
     for (const status of [502, 503, 504, 429]) {
       expect(isTransientCommitStatus(statusError(status)), String(status)).toBe(true);
-      expect(isTransientCommitStatus(new Error(`${status}: body`)), `${status} message`).toBe(true);
+      expect(isTransientCommitStatus(new IxHttpError(status, "body")), `${status} without headers`).toBe(true);
+    }
+  });
+
+  it("never reads a status out of a message (#940)", () => {
+    for (const status of [502, 503, 504, 429]) {
+      expect(isTransientCommitStatus(new Error(`${status}: body`)), `${status} message`).toBe(false);
+      expect(isTransientCommitStatus(new Error(`Error: ${status}: body`)), `${status} prefixed`).toBe(false);
     }
   });
 
@@ -40,7 +48,7 @@ describe("isTransientCommitStatus", () => {
   });
 
   it("is never true for an abort", () => {
-    const abort = new Error("503: upstream aborted");
+    const abort = new IxHttpError(503, "upstream aborted");
     expect(isTransientCommitStatus(abort)).toBe(false);
     expect(isTransientCommitStatus(new DOMException("timed out", "TimeoutError"))).toBe(false);
   });
@@ -166,7 +174,7 @@ describe("retryCommit", () => {
   });
 
   it("maxRetries 0 stops conflict retries only; a 503 is still retried on the transient budget", async () => {
-    const conflict = failing(new Error("500: write-write conflict"));
+    const conflict = failing(new IxHttpError(500, "write-write conflict"));
     await expect(retryCommit(conflict.fn, { maxRetries: 0, transient: true })).rejects.toThrow(/write-write/);
     expect(conflict.calls()).toBe(1);
 
@@ -176,7 +184,7 @@ describe("retryCommit", () => {
   });
 
   it("still retries a lock conflict on its old short backoff", async () => {
-    const { fn, calls } = failing(new Error("500: write-write conflict"));
+    const { fn, calls } = failing(new IxHttpError(500, "write-write conflict"));
     const result = retryCommit(fn, { maxRetries: 6, transient: false, random: () => 0 });
     await vi.advanceTimersByTimeAsync(10);
     await expect(result).resolves.toBe("ok");

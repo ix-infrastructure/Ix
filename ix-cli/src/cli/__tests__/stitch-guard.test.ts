@@ -18,6 +18,8 @@ import * as net from "node:net";
 import { createServer } from "node:http";
 import { IxClient } from "../../client/api.js";
 import { namedLockPath } from "../single-flight.js";
+import { httpStatusOf } from "../../client/http-error.js";
+import { describeStitchFailure } from "../commands/ingest.js";
 
 const ENDPOINT = "http://localhost:8090";
 const OTHER = "http://localhost:9999";
@@ -509,8 +511,10 @@ describe("a 2xx that still failed", () => {
       } catch (err) {
         caught = err;
       }
-      // The status is in the message, which is what makes this decidable at all.
+      // The error carries the status, which is what makes this decidable at all.
       expect(String(caught)).toContain("200: response body is not JSON");
+      expect(httpStatusOf(caught)).toBe(200);
+      expect(describeStitchFailure(caught)).toContain("HTTP 200 with an unreadable body");
       expect(outcomeProvesNothingRunning({ ok: false, elapsedMs: 5, status: 200 })).toBe(false);
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()));

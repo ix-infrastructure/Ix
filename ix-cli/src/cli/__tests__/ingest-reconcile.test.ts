@@ -17,6 +17,7 @@ import {
   sweepOrphanNodes,
 } from "../commands/ingest.js";
 import { createLimiter } from "../tree-walk.js";
+import { IxHttpError } from "../../client/http-error.js";
 
 function patchWith(ops: GraphPatchPayload["ops"]): GraphPatchPayload {
   return {
@@ -181,7 +182,7 @@ describe("reconcileRemovedEntities", () => {
   it("deletes removed nodes and their incident edges while preserving current entities", async () => {
     const getPatch = vi
       .fn()
-      .mockRejectedValueOnce(new Error("404: not found"))
+      .mockRejectedValueOnce(new IxHttpError(404, "not found"))
       .mockResolvedValueOnce({
         data: {
           entityIds: ["kept-node", "removed-node", "kept-edge", "removed-edge"],
@@ -331,7 +332,7 @@ describe("reconcileRemovedEntities", () => {
   });
 
   describe("across the first two stored patches", () => {
-    const notFound = () => Object.assign(new Error("404: patch not found"), { status: 404 });
+    const notFound = () => new IxHttpError(404, "patch not found");
     const ops = (...ids: string[]) => ({ data: { ops: ids.map(id => ({ type: "UpsertNode", id, kind: id.startsWith("h") ? "heading" : "function" })) } });
     const liveEntity = () => vi.fn().mockResolvedValue({ node: { kind: "function" }, claims: [], edges: [] });
     const deleted = (p: GraphPatchPayload) => p.ops.filter(o => o.type === "DeleteNode").map(o => o["id"]);
@@ -467,7 +468,7 @@ describe("reconcileRemovedEntities", () => {
 });
 
 describe("sweepOrphanNodes (IN-20 same-hash sweep)", () => {
-  const notFound = () => Object.assign(new Error("404: patch not found"), { status: 404 });
+  const notFound = () => new IxHttpError(404, "patch not found");
   const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
   const A = id(1), B = id(2), C = id(3), D = id(4), E = id(5), F = id(6), G = id(7);
   const node = (nid: string, over: Record<string, unknown> = {}): GraphNode => ({
@@ -559,11 +560,11 @@ describe("sweepOrphanNodes (IN-20 same-hash sweep)", () => {
 
   it("reports a failed patch or node read for the files it covers and deletes nothing for them", async () => {
     const getPatch = vi.fn(async (pid: string) => {
-      if (pid === "old@src/bad.ts") throw new Error("500: transaction begin timeout");
+      if (pid === "old@src/bad.ts") throw new IxHttpError(500, "transaction begin timeout");
       return { data: { nodeIds: [A] } };
     });
     const onSkip = vi.fn();
-    const failingNodes = vi.fn().mockRejectedValue(new Error("500: busy"));
+    const failingNodes = vi.fn().mockRejectedValue(new IxHttpError(500, "busy"));
     const orphans = await sweepOrphanNodes(
       { getPatch, nodes: failingNodes }, [fileWith([]), fileWith([], "src/bad.ts")],
       { mapMode: false, budget: orphanSweepBudget({}), onSkip },
@@ -574,7 +575,7 @@ describe("sweepOrphanNodes (IN-20 same-hash sweep)", () => {
 
   it("throws BatchNodeReadsUnsupported when the backend has no batched node read", async () => {
     const getPatch = vi.fn(async () => ({ data: { nodeIds: [A] } }));
-    const nodes = vi.fn().mockRejectedValue(new Error("404: no such endpoint /v1/nodes"));
+    const nodes = vi.fn().mockRejectedValue(new IxHttpError(404, "no such endpoint /v1/nodes"));
     await expect(sweepOrphanNodes({ getPatch, nodes }, [fileWith([])], { mapMode: false, budget: orphanSweepBudget({}) }))
       .rejects.toBeInstanceOf(BatchNodeReadsUnsupported);
   });
@@ -596,7 +597,7 @@ describe("sweepOrphanNodes (IN-20 same-hash sweep)", () => {
   it("reads every stored patch a file names, merging their candidates, and reports the files it did not finish", async () => {
     const getPatch = vi.fn(async (pid: string) => {
       if (pid === "older@src/example.ts") return { data: { nodeIds: [B, C] } };
-      if (pid === "old@src/bad.ts") throw new Error("500: busy");
+      if (pid === "old@src/bad.ts") throw new IxHttpError(500, "busy");
       if (pid === "older@src/gone.ts") throw notFound();
       return { data: { nodeIds: [A, B] } };
     });

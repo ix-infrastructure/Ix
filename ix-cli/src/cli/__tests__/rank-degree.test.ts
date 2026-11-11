@@ -5,6 +5,7 @@ import { Command } from "commander";
 import {
   DEGREE_CHECK_MIN, DEGREE_MAX_IDS, DEGREE_TIMEOUT_MS, DEGREE_UNUSABLE_TTL_MS, registerRankCommand, scoreViaDegree,
 } from "../commands/rank.js";
+import { IxHttpError } from "../../client/http-error.js";
 
 const { listByKind, expand, degree } = vi.hoisted(() => ({ listByKind: vi.fn(), expand: vi.fn(), degree: vi.fn() }));
 vi.mock("../../client/api.js", () => ({
@@ -283,9 +284,9 @@ describe("ix rank /v1/degree fallback", () => {
   const args = ["--by", "importers", "--kind", "class", "--top", TOP, "--format", "llm"];
 
   it.each([
-    ["404", new Error('404: {"error":"not found"}'), true],
-    ["405", new Error("405: Method Not Allowed"), true],
-    ["413", new Error("413: Payload Too Large"), false],
+    ["404", new IxHttpError(404, '{"error":"not found"}'), true],
+    ["405", new IxHttpError(405, "Method Not Allowed"), true],
+    ["413", new IxHttpError(413, "Payload Too Large"), false],
     ["transport error", new TypeError("fetch failed"), false],
   ] as const)("%s: the expand path, same output; route missing remembered: %s", async (_label, err, remembered) => {
     const before = await oldPathOutput(args);
@@ -303,7 +304,7 @@ describe("ix rank /v1/degree fallback", () => {
   });
 
   it("remembers a missing route per backend, not for every backend", async () => {
-    degree.mockReset().mockRejectedValue(new Error("404: not found"));
+    degree.mockReset().mockRejectedValue(new IxHttpError(404, "not found"));
     await run(args);
     expect(degree).toHaveBeenCalledTimes(1);
 
@@ -318,7 +319,7 @@ describe("ix rank /v1/degree fallback", () => {
     try {
       const before = await oldPathOutput(args);
       process.env.IX_ENDPOINT = freshEndpoint();
-      degree.mockReset().mockRejectedValue(new Error("404: not found"));
+      degree.mockReset().mockRejectedValue(new IxHttpError(404, "not found"));
       await run(args);
       vi.advanceTimersByTime(DEGREE_UNUSABLE_TTL_MS - 1);
       await run(args);

@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
+import { IxHttpError } from "../../client/http-error.js";
 
 /**
  * CL-17: `ix status` said "Graph is up to date" on the evidence of file mtimes
@@ -349,7 +350,7 @@ describe("doctor checks", () => {
     expect(await assessDatabase(new Error("fetch failed"), never)).toMatchObject({ ok: true, detail: expect.stringMatching(/skipped/) });
     // An older backend: health says nothing about the database.
     expect(await assessDatabase({ status: "ok" }, async () => ({ rev: 3 }))).toMatchObject({ ok: true });
-    expect(await assessDatabase({ status: "ok" }, async () => { throw new Error("500: arango connection refused"); }))
+    expect(await assessDatabase({ status: "ok" }, async () => { throw new IxHttpError(500, "arango connection refused"); }))
       .toMatchObject({ ok: false, detail: expect.stringMatching(/could not read its database: 500/) });
     // A 1.0.32 backend enforcing the token: health is exempt, the probe is not.
     // A refused token is not a dead database.
@@ -361,10 +362,10 @@ describe("doctor checks", () => {
 
   it("a 503 health body is an answer, anything else is not", async () => {
     const { healthFromError } = await import("../commands/doctor.js");
-    expect(healthFromError(new Error('503: {"status":"degraded","database":"unreachable"}')))
+    expect(healthFromError(new IxHttpError(503, '{"status":"degraded","database":"unreachable"}')))
       .toEqual({ status: "degraded", database: "unreachable" });
-    expect(healthFromError(new Error("503: <html>bad gateway</html>"))).toBeNull();
-    expect(healthFromError(new Error('500: {"status":"x"}'))).toBeNull();
+    expect(healthFromError(new IxHttpError(503, "<html>bad gateway</html>"))).toBeNull();
+    expect(healthFromError(new IxHttpError(500, '{"status":"x"}'))).toBeNull();
   });
 
   it("Config file parses", async () => {
@@ -471,7 +472,7 @@ describe("doctor checks", () => {
     });
     expect(await assessGraphVerify(report("unverified", { unverified: 20 }, { reason: "not_mapped" })))
       .toEqual({ ok: true, detail: "not checked: not mapped" });
-    expect(await assessGraphVerify(async () => { throw new Error("404: not found"); }))
+    expect(await assessGraphVerify(async () => { throw new IxHttpError(404, "not found"); }))
       .toMatchObject({ ok: true, detail: expect.stringMatching(/^not checked/) });
   });
 

@@ -3,6 +3,7 @@
 import chalk from "chalk";
 import { CommanderError, type Command } from "commander";
 import { PRE_CONNECTION_CODES, RESET_RECONCILIATION_ERROR } from "../client/transport.js";
+import { isIxHttpError } from "../client/http-error.js";
 
 import { DEFAULT_ENDPOINT, isLoopbackEndpoint, isManagedLocalBackend } from "./endpoint.js";
 import { llmError } from "./llm.js";
@@ -243,16 +244,29 @@ export interface StructuredError {
 }
 
 /**
- * Attempt to parse a structured error from a backend HTTP error message.
- * Backend errors arrive as "${status}: ${jsonBody}" from the API client.
+ * The structured error (`{error, message, next?}`) a backend answered with.
+ *
+ * Given an `IxHttpError`, it reads the error's `body`. Given anything else, it
+ * reads the `<status>: <json body>` shape out of the message (or of the string
+ * itself): the form this function has always taken, kept for errors built
+ * outside `httpError` and for callers outside this package. Rendering only:
+ * nothing may classify a failure by its status this way (#940).
  */
-export function parseBackendError(errMessage: string): StructuredError | null {
-  // Match "NNN: {json}" pattern from api.ts error throwing
-  const match = errMessage.match(/^(\d{3}):\s*(.+)$/s);
-  if (!match) return null;
+export function parseBackendError(err: unknown): StructuredError | null {
+  let text: string;
+  if (isIxHttpError(err)) {
+    text = err.body;
+  } else {
+    const raw = typeof err === "string" ? err : (err as { message?: unknown } | null | undefined)?.message;
+    if (typeof raw !== "string") return null;
+    // ix-940-allow: legacy message form, see above.
+    const match = raw.match(/^(\d{3}):\s*(.+)$/s);
+    if (!match) return null;
+    text = match[2]!;
+  }
 
   try {
-    const body = JSON.parse(match[2]);
+    const body = JSON.parse(text);
     if (body.error && body.message) {
       return {
         error: body.error,
@@ -461,6 +475,8 @@ export function isBackendUnreachable(err: unknown): boolean {
   // otherwise render "start the backend, then check status" on top of a
   // "do not repeat this reset" warning — advising the retry it exists to stop.
   if (e?.name === RESET_RECONCILIATION_ERROR) return false;
+  // The server answered: its body's `code` is not a socket code.
+  if (isIxHttpError(err)) return false;
   if (isUnreachableCode(e)) return true;
   return isUnreachableCode(e?.cause as { code?: unknown } | null | undefined);
 }
@@ -607,7 +623,7 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string): 
     process.exit(1);
   }
 
-  const structured = typeof e?.message === "string" ? parseBackendError(e.message) : null;
+  const structured = parseBackendError(err);
   if (structured) {
     if (!emitErrorRecord(structured.error, structured.message, structured.next)) {
       renderStructuredError(structured);

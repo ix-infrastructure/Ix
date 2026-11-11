@@ -11,6 +11,7 @@ import { ParsePool } from './parse-pool.js';
 // import { ResolveWorker } from './resolve-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
+import { httpStatusOf } from '../../client/http-error.js';
 import { combineSignals, currentRunSignal } from '../../client/run-signal.js';
 import type { GraphNode, GraphPatchPayload } from '../../client/types.js';
 import { canonicalWorkspacePath, getEndpoint, isPathInside, loadWorkspaces, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
@@ -700,7 +701,8 @@ function writtenBy(node: GraphNode | undefined, patch: GraphPatchPayload): boole
 }
 
 function isUnsupportedRouteError(error: unknown): boolean {
-  return /^(?:Error:\s*)?(?:404|405|501):/.test(String(error));
+  const status = httpStatusOf(error);
+  return status === 404 || status === 405 || status === 501;
 }
 
 /**
@@ -980,8 +982,8 @@ export function planDeletedFileRecovery(
  * way through is to commit only what is missing, which the backend tells us by
  * naming the ids that landed (`committed_patch_ids`).
  *
- * Matched on the message because the client throws `${status}: ${body}`, so the
- * JSON body is the tail of the error string.
+ * Matched on the text, which holds the JSON body (`IxHttpError`'s message is
+ * `${status}: ${body}`).
  */
 export function isBulkPartiallyCommittedError(err: unknown): boolean {
   return String(err).toLowerCase().includes('partially committed') || isBulkPlanMismatchError(err);
@@ -996,7 +998,7 @@ export function isBulkPartiallyCommittedError(err: unknown): boolean {
  * are handled the same way: counted as committed, never re-bulked.
  */
 export function isBulkPlanMismatchError(err: unknown): boolean {
-  return /(^|\s)409: \{/.test(String(err)) && parseBulkCommittedPatchIds(err) !== undefined;
+  return httpStatusOf(err) === 409 && parseBulkCommittedPatchIds(err) !== undefined;
 }
 
 /**
@@ -1140,7 +1142,6 @@ export function isPayloadTooLargeError(err: unknown): boolean {
   if (responseError?.status === 413 || responseError?.statusCode === 413) return true;
 
   const message = String(err).toLowerCase();
-  if (/^(?:error:\s*)?413(?:\b|:)/.test(message)) return true;
   return PAYLOAD_TOO_LARGE_PATTERNS.some(pattern => message.includes(pattern));
 }
 
@@ -1786,13 +1787,12 @@ export interface IngestFilesSummary {
 }
 
 /**
- * The HTTP status `IxClient` put at the front of its `${status}: ${body}`
- * error, when there is one. Anchored, so a three-digit run anywhere else in the
- * message — a port, a byte count, a timestamp — cannot be read as a status.
+ * The HTTP status the backend (or a proxy) answered a failed request with
+ * (`IxHttpError.status`), or null when it did not answer: never read out of
+ * the message, where a port, a byte count or a timestamp could pass for one.
  */
 function stitchFailureStatus(error: unknown): number | null {
-  const match = /^(?:Error:\s*)?(\d{3}):/.exec(String(error));
-  return match ? Number(match[1]) : null;
+  return httpStatusOf(error) ?? null;
 }
 
 /**
@@ -1811,17 +1811,15 @@ export function isStitchUnsupported(error: unknown): boolean {
 /**
  * Is this "the backend does not have it", as opposed to any other failure?
  *
- * Anchored, the way `stitchFailureStatus` is. A bare
- * `String(err).includes('404:')` was safe only while an unparseable body
- * surfaced as V8's `SyntaxError`, which quotes about ten characters of input.
- * `IxClient` now reports it as `"${status}: response body is not JSON: ..."`
- * with a 200-character preview -- so a gateway answering 200 with an HTML error
- * page whose title is `404: Not Found` matched, the error was swallowed as
- * "absent", and `reconcileRemovedEntities` emitted a DeleteNode for a node that
- * exists. That is the #528 proxy shape this file already cites twice.
+ * The response's status, never text in the error. A bare
+ * `String(err).includes('404:')` once matched a gateway answering 200 with an
+ * HTML error page titled `404: Not Found` (`IxClient` quotes a preview of a
+ * body that is not JSON), the error was swallowed as "absent", and
+ * `reconcileRemovedEntities` emitted a DeleteNode for a node that exists. That
+ * is the #528 proxy shape this file already cites twice.
  */
 function isNotFoundError(error: unknown): boolean {
-  return /^(?:Error:\s*)?404:/.test(String(error));
+  return httpStatusOf(error) === 404;
 }
 
 /**

@@ -2,6 +2,7 @@
 
 import { DEFAULT_ENDPOINT, isLoopbackEndpoint } from "../cli/endpoint.js";
 import { isPreConnectionFailure, RESET_RECONCILIATION_ERROR } from "./transport.js";
+import { httpStatusOf, isIxHttpError, IxHttpError, jsonCode } from "./http-error.js";
 import { Limiter, RequestMemo } from "./request-memo.js";
 import { CORRELATION_ID_HEADER, debugRequest, nextCorrelationId } from "./correlation.js";
 import type {
@@ -68,7 +69,7 @@ export interface IxClientOptions {
 }
 
 /** Statuses a proxy or a restarting backend answers with, for which one retry is worth it. */
-const RETRYABLE_READ_STATUS = /^(502|503|504):/;
+const RETRYABLE_READ_STATUSES: ReadonlySet<number> = new Set([502, 503, 504]);
 
 /**
  * A connection dropped mid-request. Not safe to repeat for a write, which may
@@ -78,6 +79,8 @@ const DROPPED_CONNECTION_CODES = new Set(["ECONNRESET", "EPIPE", "UND_ERR_SOCKET
 
 function hasCode(err: unknown, codes: ReadonlySet<string>): boolean {
   for (let e: unknown = err, hops = 0; e && hops < 5; hops++) {
+    // The server answered: its body's `code` is not a socket code.
+    if (isIxHttpError(e)) return false;
     const code = (e as { code?: unknown }).code;
     if (typeof code === "string" && codes.has(code)) return true;
     e = (e as { cause?: unknown }).cause;
@@ -570,7 +573,7 @@ export class IxClient {
   async workspaceSystem(workspaceId: string): Promise<{ systemId: string | null }> {
     try { return await this.get(`/v1/stitch/system/${encodeURIComponent(workspaceId)}`); }
     catch (err) {
-      if (err instanceof Error && err.message.startsWith("404:")) return { systemId: null };
+      if (httpStatusOf(err) === 404) return { systemId: null };
       throw err;
     }
   }
@@ -1003,7 +1006,8 @@ export class IxClient {
     if (this.deadlineSignal?.aborted) return false;
     if (this.readDeadlineAt !== undefined && Date.now() >= this.readDeadlineAt) return false;
     if (isPreConnectionFailure(err) || hasCode(err, DROPPED_CONNECTION_CODES)) return true;
-    return err instanceof Error && RETRYABLE_READ_STATUS.test(err.message);
+    const status = httpStatusOf(err);
+    return status !== undefined && RETRYABLE_READ_STATUSES.has(status);
   }
 
   /**
@@ -1050,15 +1054,14 @@ export class IxClient {
 
 /**
  * The backend refused a request for want of its local bearer token (a 401
- * with code `local_token_required`, from the loopback guard). The message keeps
- * the `401: <body>` shape every other HTTP failure has, so code that reads an
- * error code back out of a message still sees it; `renderCliError` recognises
+ * with code `local_token_required`, from the loopback guard). Its message is
+ * the `401: <body>` every other HTTP failure has; `renderCliError` recognises
  * the class and says how to fix it.
  */
-export class LocalTokenRequiredError extends Error {
-  readonly code = "local_token_required";
+export class LocalTokenRequiredError extends IxHttpError {
+  override readonly code = "local_token_required";
   constructor(body: string) {
-    super(`401: ${errorBodyForMessage(body)}`);
+    super(401, errorBodyForMessage(body));
     this.name = "LocalTokenRequiredError";
   }
 }
@@ -1072,33 +1075,22 @@ export interface HttpErrorDetail {
 }
 
 /**
- * The error for a non-2xx response: `<status>: <body>`, or a typed one we can explain.
+ * The error for a non-2xx response: an `IxHttpError` whose message is
+ * `<status>: <body>`, or a typed subclass we can explain.
  *
- * With `headers`, the Error also carries `status` and, when the response had
- * one, `retryAfter` (see `HttpErrorDetail`), both non-enumerable. The message
- * is the same either way: many callers read the status and the error code back
- * out of it, so it must not change shape. Only the commit routes pass headers,
- * for the ingest's transient-status retry (`cli/commit-retry.ts`).
+ * With `headers`, the error also carries `retryAfter` when the response had
+ * one. Only the commit routes pass headers, for the ingest's transient-status
+ * retry (`cli/commit-retry.ts`).
  */
-export function httpError(status: number, body: string, headers?: Pick<Headers, "get">): Error {
-  if (status === 401) {
-    try {
-      const parsed = JSON.parse(body) as { code?: unknown } | null;
-      if (parsed?.code === "local_token_required") return new LocalTokenRequiredError(body);
-    } catch { /* not the guard's JSON: a plain 401 */ }
-  }
-  const err = new Error(`${status}: ${errorBodyForMessage(body)}`);
-  if (headers !== undefined) {
-    Object.defineProperty(err, "status", { value: status, enumerable: false });
-    const retryAfter = headers.get("retry-after");
-    if (retryAfter !== null) Object.defineProperty(err, "retryAfter", { value: retryAfter, enumerable: false });
-  }
-  return err;
+export function httpError(status: number, body: string, headers?: Pick<Headers, "get">): IxHttpError {
+  if (status === 401 && jsonCode(body) === "local_token_required") return new LocalTokenRequiredError(body);
+  return new IxHttpError(status, errorBodyForMessage(body), { retryAfter: headers?.get("retry-after") });
 }
 
 /**
- * An error response body as it goes into an Error message. A JSON body is kept
- * whole: callers read its error code back out of the message. Anything else,
+ * An error response body as it goes into an Error message (and
+ * `IxHttpError.body`). A JSON body is kept whole: `parseBackendError` and the
+ * ingest read fields out of it. Anything else,
  * such as a proxy's HTML page, is cut to 300 characters, so a multi-megabyte
  * page never becomes a message, a log line or an MCP tool result.
  */
@@ -1129,14 +1121,15 @@ interface SuccessBody {
  * has no business making, since the whole premise of Ix#528 and Ix#568 is that
  * whatever proxy sits in front spells things the way it likes, up to and
  * including a 200 with an HTML error page. Stating the status turns that
- * inference into a fact the error carries, and it matches the `${status}: ...`
- * shape every other failure here already uses.
+ * inference into a fact the error carries: an `IxHttpError` with that 2xx
+ * status, whose message has the `${status}: ...` shape every other failure here
+ * already uses.
  */
 function parseOrThrowWithStatus<T>({ status, text }: SuccessBody): T {
   try {
     return JSON.parse(text) as T;
   } catch {
     const preview = text.length > 200 ? `${text.slice(0, 200)}…` : text;
-    throw new Error(`${status}: response body is not JSON: ${preview}`);
+    throw new IxHttpError(status, preview, { message: `${status}: response body is not JSON: ${preview}` });
   }
 }

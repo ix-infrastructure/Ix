@@ -142,8 +142,7 @@ function targetFailure(err: unknown): TargetFailure {
     const unreachable = backendUnreachableError();
     return { code: unreachable.error, message: unreachable.message, next: unreachable.next, exitCode: EXIT_ERROR };
   }
-  const raw = (err as { message?: unknown } | null | undefined)?.message;
-  const structured = typeof raw === "string" ? parseBackendError(raw) : null;
+  const structured = parseBackendError(err);
   if (structured) {
     return { code: structured.error, message: structured.message, next: structured.next, exitCode: EXIT_ERROR };
   }

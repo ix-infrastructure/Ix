@@ -10,6 +10,7 @@ import { printJson, sliceRanked, truncationHint, type Slice } from "../format.js
 import { formatOption, MAX_WAIT_SECONDS, parseWaitSecondsOption } from "../options.js";
 import { forMcp } from "../next-step.js";
 import { canRenderProgress } from "../stderr.js";
+import { httpStatusOf, isIxHttpError } from "../../client/http-error.js";
 
 export interface SmellCandidate {
   file_id: string;
@@ -146,6 +147,8 @@ type StaleReason = "timeout" | "not_permitted";
  */
 function isHeadersTimeout(err: unknown): boolean {
   for (let e: unknown = err, hops = 0; e && hops < 5; hops++) {
+    // The server answered: its body's `code` is not undici's.
+    if (isIxHttpError(e)) return false;
     if ((e as { code?: unknown }).code === "UND_ERR_HEADERS_TIMEOUT") return true;
     e = (e as { cause?: unknown }).cause;
   }
@@ -162,7 +165,7 @@ function staleReasonOf(err: unknown): StaleReason | undefined {
   const e = err as { name?: unknown; message?: unknown } | null;
   const message = typeof e?.message === "string" ? e.message : "";
   if (e?.name === "TimeoutError" || /aborted due to timeout/i.test(message) || isHeadersTimeout(err)) return "timeout";
-  if (/^403:/.test(message)) return "not_permitted";
+  if (httpStatusOf(err) === 403) return "not_permitted";
   return undefined;
 }
 

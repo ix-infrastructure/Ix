@@ -10,6 +10,7 @@ import { normalizeForPathMatch, normalizePathSeparators } from "../path-match.js
 import { printJson } from "../format.js";
 import { mapLimit } from "../../client/request-memo.js";
 import { formatOption } from "../options.js";
+import { httpStatusOf } from "../../client/http-error.js";
 
 type Metric = "dependents" | "callers" | "importers" | "members";
 
@@ -196,12 +197,6 @@ function isDegreeUnusable(endpoint: string): boolean {
   return false;
 }
 
-/** The HTTP status an `IxClient` error carries at the front of its message, if any. */
-function errorStatus(err: unknown): number | undefined {
-  const m = err instanceof Error ? /^(\d{3}):/.exec(err.message) : null;
-  return m ? Number(m[1]) : undefined;
-}
-
 /** The `n`th largest of `values` (1-based); `Infinity` when `n` is 0. */
 function nthLargest(values: number[], n: number): number {
   if (n <= 0) return Infinity;
@@ -266,7 +261,7 @@ export async function scoreViaDegree(
         timeoutMs: DEGREE_TIMEOUT_MS,
       });
     } catch (err) {
-      const status = errorStatus(err);
+      const status = httpStatusOf(err);
       if (status === 404 || status === 405) markDegreeUnusable(endpoint);
       return null;
     }

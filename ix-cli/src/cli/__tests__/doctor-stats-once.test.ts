@@ -5,6 +5,7 @@ import { Command } from "commander";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { IxHttpError } from "../../client/http-error.js";
 
 type FakeWorkspace = { workspace_id: string; workspace_name: string; root_path: string; default: boolean };
 
@@ -102,7 +103,7 @@ vi.mock("../commands/upgrade.js", async (orig) => ({
   // A current backend reports its database; a 503 with a health body is that
   // backend saying ArangoDB is down.
   readBackendHealth: async () => {
-    if (scope.databaseDown) throw new Error('503: {"status":"degraded","database":"unreachable","schema_version":3}');
+    if (scope.databaseDown) throw new IxHttpError(503, '{"status":"degraded","database":"unreachable","schema_version":3}');
     return { status: "ok", schema_version: 3, database: "reachable" };
   },
 }));

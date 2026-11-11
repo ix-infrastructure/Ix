@@ -24,6 +24,7 @@
 // ---------------------------------------------------------------------------
 
 import type { HealthResponse } from "../client/types.js";
+import { isIxHttpError } from "../client/http-error.js";
 
 /**
  * The two reads a probe makes. `readHealth` is the caller's way to fetch
@@ -42,10 +43,11 @@ export interface DatabaseProbeReads {
  * Thrown for anything else.
  */
 export function healthFromError(err: unknown): HealthResponse | null {
-  const m = /^503:\s*(\{.*\})\s*$/s.exec((err as Error)?.message ?? "");
-  if (!m) return null;
+  if (!isIxHttpError(err) || err.status !== 503) return null;
+  const text = err.body.trim();
+  if (!text.startsWith("{")) return null;
   try {
-    const body = JSON.parse(m[1]!) as HealthResponse;
+    const body = JSON.parse(text) as HealthResponse;
     return typeof body?.status === "string" ? body : null;
   } catch {
     return null;

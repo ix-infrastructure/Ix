@@ -1,5 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { isIxHttpError } from "./http-error.js";
+
 /**
  * Failure codes that mean the request never reached the server.
  *
@@ -43,6 +45,8 @@ export const RESET_RECONCILIATION_ERROR = "ResetReconciliationError";
 
 export function isPreConnectionFailure(err: unknown): boolean {
   for (let e: unknown = err, hops = 0; e && hops < 5; hops++) {
+    // The server answered: its body's `code` is not a socket code.
+    if (isIxHttpError(e)) return false;
     const code = (e as { code?: unknown }).code;
     if (typeof code === "string" && PRE_CONNECTION_CODES.has(code)) return true;
     e = (e as { cause?: unknown }).cause;
