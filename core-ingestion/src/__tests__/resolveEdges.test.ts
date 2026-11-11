@@ -721,6 +721,98 @@ namespace Second {
     expect(resolveEdges([consumer, first, second])).toEqual([]);
   });
 
+  it('resolves a PHP static call to the class it names, not to a same-named method', () => {
+    const consumer = parseFile(
+      '/repo/app/Svc.php',
+      `<?php
+namespace App;
+use App\\OrderId;
+use App\\UserId;
+class Svc
+{
+    public function orderIdOwner(): void { UserId::from('a'); }
+    public function both(): void { OrderId::from('a'); UserId::from('b'); }
+}
+      `,
+    )!;
+    const orderId = parseFile(
+      '/repo/app/OrderId.php',
+      '<?php namespace App; class OrderId { public static function from(string $v): self { return new self(); } }',
+    )!;
+    const userId = parseFile(
+      '/repo/app/UserId.php',
+      '<?php namespace App; class UserId { public static function from(string $v): self { return new self(); } }',
+    )!;
+
+    const calls = resolveEdges([consumer, orderId, userId])
+      .filter(edge => edge.predicate === 'CALLS')
+      .map(edge => `${edge.srcName} -> ${edge.dstFilePath} ${edge.dstQualifiedKey}`);
+    expect(calls.sort()).toEqual([
+      'Svc.both -> /repo/app/OrderId.php OrderId.from',
+      'Svc.both -> /repo/app/UserId.php UserId.from',
+      'Svc.orderIdOwner -> /repo/app/UserId.php UserId.from',
+    ]);
+  });
+
+  it('does not resolve a PHP static call on a class outside the repo', () => {
+    const consumer = parseFile(
+      '/repo/app/OrderService.php',
+      `<?php
+namespace App;
+use Illuminate\\Support\\Facades\\DB;
+class OrderService
+{
+    public function place(): void { DB::rollBack(); }
+}
+      `,
+    )!;
+    const unrelated = parseFile(
+      '/repo/app/ReportController.php',
+      '<?php namespace App; class ReportController { public function rollBack(int $id): void {} }',
+    )!;
+
+    expect(consumer.relationships).toContainEqual({
+      srcName: 'OrderService.place',
+      dstName: 'DB.rollBack',
+      predicate: 'CALLS',
+      phpCallKind: 'static',
+    });
+    expect(resolveEdges([consumer, unrelated]).filter(edge => edge.predicate === 'CALLS')).toEqual([]);
+  });
+
+  it('resolves PHP self and parent static calls to the enclosing and extended class', () => {
+    const child = parseFile(
+      '/repo/app/Child.php',
+      `<?php
+namespace App;
+class Child extends Base
+{
+    public function save(): bool { return parent::save(); }
+    public static function boot(): void { parent::boot(); }
+}
+      `,
+    )!;
+    const base = parseFile(
+      '/repo/app/Base.php',
+      `<?php
+namespace App;
+class Base
+{
+    public function save(): bool { return true; }
+    public static function boot(): void {}
+}
+      `,
+    )!;
+
+    const calls = resolveEdges([child, base])
+      .filter(edge => edge.predicate === 'CALLS')
+      .map(edge => `${edge.srcName} -> ${edge.dstFilePath} ${edge.dstQualifiedKey}`);
+    expect(calls.sort()).toEqual([
+      'Child.boot -> /repo/app/Base.php Base.boot',
+      'Child.save -> /repo/app/Base.php Base.save',
+    ]);
+  });
+
   it('resolves imports from a grouped PHP use statement', () => {
     const consumer = parseFile(
       '/repo/UseCase.php',

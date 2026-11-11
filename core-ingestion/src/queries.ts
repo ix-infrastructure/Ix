@@ -1222,6 +1222,7 @@ export const PHP_QUERIES = `
 
 ; Static call: Foo::bar() (php_only uses scoped_call_expression)
 (scoped_call_expression
+  scope: (_) @_qualifier
   name: (name) @call.name) @call
 
 ; Constructor call: new User()

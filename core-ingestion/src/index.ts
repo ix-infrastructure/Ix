@@ -2819,6 +2819,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
 
     // Track class ranges for containment: [name, startLine, endLine]
     const classRanges: Array<{ name: string; start: number; end: number }> = [];
+    // PHP class name → the class it `extends`, for `parent::method()`.
+    const phpParentClass = new Map<string, string>();
     // Python: key the typed-receiver maps the way the lookup does
     // (findEnclosingDefinition): `Container.name` for a function inside a
     // class, the bare name otherwise. The container is found exactly as for
@@ -3072,6 +3074,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           dstName: heritageExtends.node.text,
           predicate: 'EXTENDS',
         });
+        if (language === SupportedLanguages.PHP && heritageExtends.name === 'heritage.extends' && heritageExtends.node.type === 'name') {
+          phpParentClass.set(heritageClass.node.text, heritageExtends.node.text);
+        }
         continue;
       }
 
@@ -3501,6 +3506,23 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           let phpReceiverIsSupported = true;
           if (language === SupportedLanguages.PHP) {
             const receiverNode = qualifierCapture.node;
+            if (phpCallKind === 'static') {
+              // `Foo::bar()` names its class, so the call is `Foo.bar` and never
+              // a bare `bar` that matches any method of that name. `self` and
+              // `static` are the enclosing class and `parent` is the class it
+              // extends. A namespaced name (`\App\Foo::bar()`) or a dynamic
+              // scope (`$class::bar()`) keeps the bare name, as an untyped
+              // receiver does.
+              const enclosingClass = findEnclosing(classRanges, callLine, '');
+              const staticClass = receiverNode.type === 'name'
+                ? receiverNode.text
+                : receiverNode.type !== 'relative_scope' || !enclosingClass
+                  ? undefined
+                  : receiverNode.text.toLowerCase() === 'parent'
+                    ? phpParentClass.get(enclosingClass)
+                    : enclosingClass;
+              return staticClass ? `${staticClass}.${callee}` : callee;
+            }
             if (receiverNode.type === 'variable_name') {
               qualifier = receiverNode.firstNamedChild?.text ?? receiverNode.text.replace(/^\$/, '');
             } else if (receiverNode.type === 'member_access_expression') {
