@@ -1,5 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { expandCapped } from "./format.js";
 import { isRawId } from "./resolve.js";
 
 /**
@@ -73,9 +74,18 @@ export interface TreeWalkOptions<T extends { children: T[] }> {
   rootId: string;
   maxDepth: number;
   maxNodes: number;
-  /** One expand per predicate; a node's children are merged in this order. */
+  /** A node's children are merged in this order. */
   predicates: string[];
+  /** One predicate's neighbours of a node. */
   expand: (nodeId: string, predicate: string) => Promise<{ nodes: any[] }>;
+  /**
+   * Every predicate's neighbours of a node in one request: the `/v1/expand`
+   * answer, whose edges say which predicate reached each neighbour. When it
+   * is given, a node costs this one request instead of one `expand` per
+   * predicate, unless its answer cannot be split exactly (see
+   * `splitByPredicate`); the node is then fetched through `expand` as before.
+   */
+  expandAll?: (nodeId: string, predicates: string[]) => Promise<{ nodes: any[]; edges?: any[]; truncated?: unknown }>;
   /** Reorders one predicate's neighbours before the cap sees them. */
   order?: (nodes: any[]) => any[];
   makeNode: (raw: any, predicate: string, seen: { name: string; resolved: boolean; cycle: boolean }) => T;
@@ -108,14 +118,26 @@ export async function walkTree<T extends { children: T[] }>(opts: TreeWalkOption
   // then skipped instead of sent.
   let done = false;
 
+  const onePerPredicate = (nodeId: string): Promise<any[][]> =>
+    Promise.all(
+      opts.predicates.map((p) =>
+        limit(async () => (done ? [] : (await opts.expand(nodeId, p)).nodes)),
+      ),
+    );
+
+  const fetchLists = async (nodeId: string): Promise<any[][]> => {
+    const expandAll = opts.expandAll;
+    // One predicate is one request either way: send the one it always was.
+    if (!expandAll || opts.predicates.length < 2) return onePerPredicate(nodeId);
+    const answer = await limit(async () => (done ? null : await expandAll(nodeId, opts.predicates)));
+    if (answer === null) return opts.predicates.map(() => []);
+    return splitByPredicate(nodeId, opts.predicates, answer) ?? onePerPredicate(nodeId);
+  };
+
   const neighbours: Neighbours = (nodeId) => {
     let lists = fetched.get(nodeId);
     if (!lists) {
-      lists = Promise.all(
-        opts.predicates.map((p) =>
-          limit(async () => (done ? [] : (await opts.expand(nodeId, p)).nodes)),
-        ),
-      ).then((raw) => (opts.order ? raw.map(opts.order) : raw));
+      lists = fetchLists(nodeId).then((raw) => (opts.order ? raw.map(opts.order) : raw));
       // A prefetch the walk never reads must not surface as an unhandled
       // rejection; one it does read still throws where it is awaited.
       lists.catch(() => {});
@@ -131,6 +153,46 @@ export async function walkTree<T extends { children: T[] }>(opts: TreeWalkOption
   } finally {
     done = true;
   }
+}
+
+/**
+ * One `/v1/expand` answer for several predicates, as the lists one expand per
+ * predicate would have returned: each predicate's neighbours in the order of
+ * its edges, a neighbour listed once per predicate that reached it.
+ *
+ * Null when the answer cannot be split exactly, and the caller asks one
+ * predicate at a time instead:
+ * - the server's edge cap may have cut it (`expandCapped`). The cap is per
+ *   request, so the predicates together can reach it where none alone would;
+ * - it has no edges array, or a listed node that no requested edge reaches,
+ *   so which predicate it belongs to is unknown;
+ * - an edge does not touch the node, which a one-hop answer never holds.
+ * An edge whose other end is not among the nodes (a self-loop: the server
+ * leaves the node itself out) lists nothing, as it would have alone.
+ */
+export function splitByPredicate(
+  nodeId: string, predicates: string[], answer: { nodes?: any[]; edges?: any[]; truncated?: unknown },
+): any[][] | null {
+  const { nodes, edges } = answer;
+  if (!Array.isArray(nodes) || !Array.isArray(edges) || expandCapped(answer)) return null;
+  const byId = new Map<string, any>();
+  for (const n of nodes) if (!byId.has(n?.id)) byId.set(n?.id, n);
+  const lists: any[][] = predicates.map(() => []);
+  const listed = predicates.map(() => new Set<string>());
+  const reached = new Set<string>();
+  for (const e of edges) {
+    const i = predicates.indexOf(e?.predicate);
+    if (i < 0) continue;
+    const other = e.src === nodeId ? e.dst : e.dst === nodeId ? e.src : undefined;
+    if (other === undefined) return null;
+    const n = byId.get(other);
+    if (n === undefined || listed[i].has(other)) continue;
+    listed[i].add(other);
+    lists[i].push(n);
+    reached.add(other);
+  }
+  for (const id of byId.keys()) if (!reached.has(id)) return null;
+  return lists;
 }
 
 function newState(rootId: string): WalkState {
