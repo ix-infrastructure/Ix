@@ -12,6 +12,7 @@ import { z } from "zod";
 import { isReadablePath, resolveWorkspaceRoot } from "../cli/config.js";
 import { resolveIngestRootWithSource } from "../cli/map-root.js";
 import { BUNDLE_SCHEMA } from "../cli/context-bundle-schema.js";
+import { PRO_MCP_TOOL_NAMES } from "../cli/register/pro-surface.js";
 
 import {
   createProtocolStdout,
@@ -75,8 +76,11 @@ export const IX_MCP_OSS_TOOL_NAMES = [
  * unconditionally — as this server did for `ix_briefing` and `ix_decisions` —
  * hands an OSS agent tools whose every call returns "requires Ix Pro", which it
  * cannot tell apart from a real failure.
+ *
+ * The names are the MCP column of the Pro surface table
+ * (cli/register/pro-surface.ts); the handlers are registered below.
  */
-export const IX_MCP_PRO_TOOL_NAMES = ["ix_briefing", "ix_decisions", "ix_decide"] as const;
+export const IX_MCP_PRO_TOOL_NAMES = PRO_MCP_TOOL_NAMES;
 
 /** Every tool this server can serve, across both tiers. */
 export const IX_MCP_TOOL_NAMES = [...IX_MCP_OSS_TOOL_NAMES, ...IX_MCP_PRO_TOOL_NAMES] as const;
