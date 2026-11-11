@@ -3,6 +3,7 @@
 import { DEFAULT_ENDPOINT, isLoopbackEndpoint } from "../cli/endpoint.js";
 import { isPreConnectionFailure, RESET_RECONCILIATION_ERROR } from "./transport.js";
 import { Limiter, RequestMemo } from "./request-memo.js";
+import { routeMissing } from "./features.js";
 import { CORRELATION_ID_HEADER, debugRequest, nextCorrelationId } from "./correlation.js";
 import type {
   StructuredContext,
@@ -250,6 +251,9 @@ export class IxClient {
       // (Ix-memory ≥ 1.0.31, case-insensitive). Older backends decode the
       // request with a derived circe decoder and drop the unknown field, so
       // sending it is always safe; callers keep their own filter as well.
+      // What callers do for an older backend (a wider candidate window) is
+      // removable once MIN_BACKEND_VERSION reaches 1.0.31 (`searchScope` in
+      // features.ts).
       scope: opts?.scope,
     }, { signal: opts?.signal });
   }
@@ -562,7 +566,8 @@ export class IxClient {
   // Path-2 grouping (Ix#225 Half B): the system_id a workspace currently belongs
   // to (null if a singleton). Lets `ix map <repo>` scope to its stitched system.
   //
-  // Only a 404 (an older backend without the endpoint) means "no system". Any
+  // Only the route being missing (an older backend; see `workspaceSystem` in
+  // features.ts, which names when this fallback can go) means "no system". Any
   // other failure -- backend down, timeout, 5xx, a non-JSON body -- is not an
   // answer and is thrown: `ensureReadScope` persists what this returns with no
   // TTL, so turning an outage into `null` pinned every later read in a stitched
@@ -570,7 +575,7 @@ export class IxClient {
   async workspaceSystem(workspaceId: string): Promise<{ systemId: string | null }> {
     try { return await this.get(`/v1/stitch/system/${encodeURIComponent(workspaceId)}`); }
     catch (err) {
-      if (err instanceof Error && err.message.startsWith("404:")) return { systemId: null };
+      if (routeMissing("workspaceSystem", err)) return { systemId: null };
       throw err;
     }
   }
@@ -735,8 +740,9 @@ export class IxClient {
   // so we keep the original sync request unchanged — identical behavior for
   // OSS and Pro users running against a local memory-layer.
   //
-  // If a remote backend predates the async endpoints (404 on begin), fall
-  // back to the sync request so old deployments still work.
+  // If a remote backend predates the async endpoints (`asyncReset` in
+  // features.ts decides, and names when this fallback can go), fall back to the
+  // sync request so old deployments still work.
   private async runReset(
     asyncPath: string,
     syncPath: string,
@@ -771,7 +777,7 @@ export class IxClient {
       await beginResp.body?.cancel().catch(() => {});
       throw this.resetRedirectError("start route", beginResp);
     }
-    if (beginResp.status === 404) {
+    if (routeMissing("asyncReset", beginResp.status)) {
       return this.runResetSync(syncPath);
     }
     if (!beginResp.ok) {
