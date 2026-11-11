@@ -23,7 +23,7 @@ describe("stripMapModeOps", () => {
       ],
     } as unknown as GraphPatchPayload;
 
-    const kept = stripMapModeOps(patch).ops.map((op) => String(op.id ?? op.type));
+    const kept = stripMapModeOps(patch).ops.map((op) => String("id" in op ? op.id : op.type));
 
     expect(kept).toEqual(["file", "fn", "e4"]);
   });
