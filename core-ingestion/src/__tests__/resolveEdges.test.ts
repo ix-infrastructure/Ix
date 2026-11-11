@@ -1349,6 +1349,50 @@ final class UseCase
     expect(resolveEdges([caller, duplicateQualifierA, duplicateQualifierB])).toEqual([]);
   });
 
+  describe('a call through the caller\'s own class', () => {
+    const calls = (files: Record<string, string>): string[] =>
+      resolveEdges(Object.entries(files).map(([filePath, source]) => parseFile(filePath, source)!))
+        .filter(edge => edge.predicate === 'CALLS')
+        .map(edge => `${edge.srcName} -> ${edge.dstFilePath}:${edge.dstQualifiedKey} ${edge.confidence}`);
+
+    it('keeps a TypeScript this call out of a same-named class in another file', () => {
+      expect(calls({
+        '/repo/a/config.ts': 'export class Config {\n  load() { return this.parse(); }\n  parse() { return 1; }\n}\n',
+        '/repo/b/config.ts': 'export class Config {\n  parse() { return 2; }\n}\n',
+      })).toEqual([]);
+    });
+
+    it('keeps a Python self call out of a same-named class in another file', () => {
+      expect(calls({
+        '/repo/a/models.py': 'class Base:\n    def save(self):\n        self.validate()\n\n    def validate(self):\n        pass\n',
+        '/repo/b/other.py': 'class Base:\n    def validate(self):\n        pass\n',
+      })).toEqual([]);
+    });
+
+    it('keeps a PHP $this call out of a same-named class in another file', () => {
+      expect(calls({
+        '/repo/a/Conf.php': '<?php\nnamespace A;\nclass Conf {\n    public function load() { return $this->parse(); }\n    public function parse() { return 1; }\n}\n',
+        '/repo/b/Conf.php': '<?php\nnamespace B;\nclass Conf {\n    public function parse() { return 2; }\n}\n',
+      })).toEqual([]);
+    });
+
+    it('keeps it out of a same-named class in a file the caller imports', () => {
+      expect(calls({
+        '/repo/a/__init__.py': '',
+        '/repo/b/__init__.py': '',
+        '/repo/a/models.py': 'from b import other\n\nclass Base:\n    def save(self):\n        self.validate()\n        other.helper()\n\n    def validate(self):\n        pass\n',
+        '/repo/b/other.py': 'class Base:\n    def validate(self):\n        pass\n\ndef helper():\n    pass\n',
+      })).toEqual(['Base.save -> /repo/b/other.py:helper 0.9']);
+    });
+
+    it('still resolves a qualified member the caller\'s file does not define', () => {
+      expect(calls({
+        '/repo/a/service.py': 'def run(query: Query):\n    query.narrow()\n',
+        '/repo/b/query.py': 'class Query:\n    def narrow(self):\n        pass\n',
+      })).toContain('run -> /repo/b/query.py:Query.narrow 0.7');
+    });
+  });
+
   it('resolves tier-2 import-scoped edges and rejects ambiguous imports', () => {
     const caller = fileResult(
       '/repo/consumer.ts',

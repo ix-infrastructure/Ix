@@ -6123,6 +6123,11 @@ export function resolveEdges(
           : elixirAliasedModule ? (symbolToFiles.get(elixirAliasedModule) ?? []).filter(fp => fp !== srcFilePath)
           : pythonAliasedFiles.length === 1 ? pythonAliasedFiles
           : [];
+          // The caller's own file defines `qualifier.member` (a `this.m()` /
+          // `self.m()` call, which the parser rewrites to `Class.m`): the call
+          // stays in this file, whatever same-named class defines it elsewhere.
+          // A qualifier that is an import alias names another module instead.
+          if (aliasedImportMatches.length === 0 && fileDefinesQualifiedMember(srcFilePath, qualifierPart, memberPart)) continue;
           // Try import-scoped qualifier first
           const qualifierSearchPool = aliasedImportMatches.length > 0
             ? aliasedImportMatches
