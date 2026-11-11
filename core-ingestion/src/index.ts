@@ -5,6 +5,7 @@ import * as crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 // @ts-ignore — tree-sitter has no bundled types
 import Parser from 'tree-sitter';
+import type { EdgePredicate, NodeKind } from './schema.js';
 // A grammar is imported by the explicit path to its binding ONLY when Node
 // would otherwise emit DEP0151 for it. That is a narrower set than it looks.
 //
@@ -185,7 +186,8 @@ export type { FileSummary } from './symbol-index.js';
 
 export interface ParsedEntity {
   name: string;
-  kind: string;       // NodeKind string: "class", "function", "method", etc.
+  /** One of `NODE_KINDS` (schema.ts): "class", "function", "method", etc. */
+  kind: NodeKind;
   lineStart: number;
   lineEnd: number;
   language: string;
@@ -219,7 +221,7 @@ export interface ParsedChunk {
 export interface ParsedRelationship {
   srcName: string;
   dstName: string;
-  predicate: string;  // "CONTAINS" | "CALLS" | "IMPORTS" | "EXTENDS"
+  predicate: EdgePredicate;  // "CONTAINS" | "CALLS" | "IMPORTS" | "EXTENDS" | "REFERENCES"
   // For path-based IMPORTS only: the unwrapped raw import specifier exactly as
   // written (e.g. "./core", "../util/x", "@nestjs/core", "alpha"), BEFORE it is
   // flattened to a bare stem. The multi-repo dependency gate needs this to tell a
@@ -396,7 +398,7 @@ const GRAMMAR_MAP: Partial<Record<SupportedLanguages, any>> = {
 };
 
 // Capture key prefix → NodeKind string
-const DEFINITION_KIND_MAP: Record<string, string> = {
+const DEFINITION_KIND_MAP: Record<string, NodeKind> = {
   'definition.class':     'class',
   'definition.interface': 'interface',
   'definition.function':  'function',
@@ -1816,7 +1818,7 @@ function parseLatexFile(filePath: string, source: string): FileParseResult {
     entities.push({ name: dst, kind: 'module', lineStart: line, lineEnd: line, language });
     relationships.push({ srcName: fileName, dstName: dst, predicate: 'IMPORTS', importRaw: rawSpec });
   };
-  const addDef = (name: string, kind: string, line: number): void => {
+  const addDef = (name: string, kind: NodeKind, line: number): void => {
     if (!name) return;
     const cont = container();
     entities.push({ name, kind, lineStart: line, lineEnd: line, language, container: cont === fileName ? undefined : cont });
@@ -3983,7 +3985,7 @@ export interface ResolvedEdge {
   dstFilePath: string;          // file where the destination symbol is actually defined
   dstName: string;              // plain name as it appears in the relationship
   dstQualifiedKey: string;      // qualified key used for nodeId in the defining file
-  predicate: string;            // "CALLS" | "EXTENDS"
+  predicate: EdgePredicate;     // "CALLS" | "EXTENDS"
   confidence: number;           // 0.9 import-scoped | 0.8 transitive | 0.5 global
   /** Which resolution tier produced the edge; written on the edge with `confidence`. */
   tier?: ResolutionTier;
