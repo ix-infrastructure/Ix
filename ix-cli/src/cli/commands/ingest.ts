@@ -308,6 +308,48 @@ export function stripMapModeOps(patch: GraphPatchPayload): GraphPatchPayload {
   };
 }
 
+/**
+ * The id a full (not map mode) run sends a patch under. `buildPatch` names a
+ * patch by path, source hash and extractor, and `ix map` sends that id with
+ * the chunks, their edges and claims stripped. The backend skips an id it
+ * already holds, so with one id for both a file kept whichever mode wrote it
+ * first: a forced `ix ingest` after `ix map` never added the chunks (Ix#965).
+ *
+ * The full patch takes the derived id, not the map one: a CLI before this sent
+ * both under the built id, and most of those patches are `ix map`'s. Derived
+ * from the built id alone, so a reader holding `sourcePatchIdCandidates` can
+ * name both (`withModeVariants`). Same UUID shape as the built id.
+ */
+export function fullModePatchId(patchId: string): string {
+  const hash = crypto.createHash('sha256').update(`${patchId}:full`).digest('hex');
+  return [hash.slice(0, 8), hash.slice(8, 12), hash.slice(12, 16), hash.slice(16, 20), hash.slice(20, 32)].join('-');
+}
+
+/** The patch a run of this mode sends for a built one: its ops and its id. */
+export function patchForMode(patch: GraphPatchPayload, mapMode: boolean): GraphPatchPayload {
+  return mapMode ? stripMapModeOps(patch) : { ...patch, patchId: fullModePatchId(patch.patchId) };
+}
+
+/**
+ * Stored-patch candidates (`sourcePatchIdCandidates` order) with each one's
+ * other-mode id beside it, the mode `preferFull` names first. A file's stored
+ * patch is under whichever mode last wrote it, which the baseline records
+ * for the workspace as a whole, not per file.
+ */
+export function withModeVariants(candidates: readonly string[], preferFull: boolean): string[] {
+  return candidates.flatMap(id => preferFull ? [fullModePatchId(id), id] : [id, fullModePatchId(id)]);
+}
+
+/**
+ * A manifest window (`loadStoredPatchEntities`) over `withModeVariants`
+ * candidates: a merged window covers both modes of each extractor it merges.
+ * A window of one stays one read, the preferred mode; the walk after it reads
+ * the other.
+ */
+function modeVariantWindow(window: number): number {
+  return window > 1 ? window * 2 : window;
+}
+
 interface StoredPatchEntities {
   nodeIds: string[];
   /** Node kinds the stored patch wrote, when it kept its ops; empty otherwise. */
@@ -2863,6 +2905,9 @@ export async function ingestFiles(
     // skip the mtime pre-filter and re-ingest everything, exactly like --force.
     const previousBaseline = loadIngestBaseline(projectRoot);
     const currentExtractor = extractorName();
+    // Where a stored patch is looked up, the mode the baseline says last
+    // committed is read first (see `withModeVariants`).
+    const preferFullIds = previousBaseline?.ingestMode === 'full';
     // A --lang run, or one scoped to a file or directory below the root,
     // re-extracts only its own files, so it must not record the new extractor
     // for the rest; keep the old one and the next full run still re-ingests
@@ -4217,11 +4262,14 @@ export async function ingestFiles(
             patch = await reconcileRemovedEntities(
               client,
               patch,
-              sourcePatchIdCandidates(p.filePath, previousHash, fileWorkspace),
+              withModeVariants(sourcePatchIdCandidates(p.filePath, previousHash, fileWorkspace), preferFullIds),
               undefined,
               mapMode,
               reconcileLookups,
-              { onWindowSkipped: reason => noteOrphanSkip(p.filePath, reason), window: reconcileOrphans && orphanSweepBlocker === null ? RECONCILE_MANIFEST_WINDOW : 1 },
+              {
+                onWindowSkipped: reason => noteOrphanSkip(p.filePath, reason),
+                window: modeVariantWindow(reconcileOrphans && orphanSweepBlocker === null ? RECONCILE_MANIFEST_WINDOW : 1),
+              },
             );
           }
           // Same content, new extractor (or an opted-in --force): the
@@ -4236,7 +4284,11 @@ export async function ingestFiles(
             else {
               orphanSources = orphanSourcesFor(p.filePath);
               const candidates = sourcePatchIdCandidates(p.filePath, knownHash, fileWorkspace);
-              previousPatchIds = orphanSources.map(extractor => candidates[orphanCandidateIndex(extractor)!]!);
+              // One read per extractor, under the id of the mode the baseline
+              // says last committed. The sweep is best effort: a file the
+              // other mode wrote last keeps its orphans, as one whose read fails.
+              previousPatchIds = orphanSources.map(extractor =>
+                withModeVariants([candidates[orphanCandidateIndex(extractor)!]!], preferFullIds)[0]!);
               if (previousPatchIds.length === 0) previousPatchIds = undefined;
             }
           }
@@ -4330,8 +4382,7 @@ export async function ingestFiles(
       return built.map(b => {
         if (b === null) return null;
         try {
-          let patch = b.patch;
-          if (mapMode) patch = stripMapModeOps(patch);
+          const patch = patchForMode(b.patch, mapMode);
           noteResolution(b.p.filePath, patch);
           // source.uri (workspace-relative) and source.workspaceId are set
           // inside buildPatch; the backend stores both as opaque attributes.
@@ -4729,7 +4780,7 @@ export async function ingestFiles(
           patch = await reconcileRemovedEntities(
             client,
             patch,
-            sourcePatchIdCandidates(relFilePath, previousHash, fileWorkspace),
+            withModeVariants(sourcePatchIdCandidates(relFilePath, previousHash, fileWorkspace), preferFullIds),
             dependentSourceUris,
             mapMode,
             reconcileLookups,
@@ -4738,10 +4789,10 @@ export async function ingestFiles(
               // The second stored patch (a graph a pre-fix rebuild left
               // polluted) is merged only where its extra deletes can go in
               // bulk; elsewhere the first-hit walk, as before IN-20.
-              window: orphanSweepBlocker === null ? RECONCILE_MANIFEST_WINDOW : 1,
+              window: modeVariantWindow(orphanSweepBlocker === null ? RECONCILE_MANIFEST_WINDOW : 1),
             },
           );
-          if (mapMode) patch = stripMapModeOps(patch);
+          patch = patchForMode(patch, mapMode);
           deletedPatches.push(makePreparedPatch(patch, i + 1, relFilePath, true));
           const dependents = [...dependentSourceUris].sort();
           nextDeletedFiles.set(absFilePath, dependents);
@@ -4782,6 +4833,7 @@ export async function ingestFiles(
               pendingFiles: previousBaseline.pendingFiles,
               parseTimeouts: previousBaseline.parseTimeouts,
               pythonPackageEntries: previousBaseline.pythonPackageEntries,
+              ingestMode: previousBaseline.ingestMode,
             },
           );
         }
@@ -4876,7 +4928,7 @@ export async function ingestFiles(
           const entry = table.get(rel);
           const build = (salt?: string): GraphPatchPayload => {
             const patch = buildPatchFn!(p, hash, fileWorkspaceId(rel), edgesByFile.get(rel) ?? emptyEdges, undefined, fileMultiRepo(rel), salt);
-            return mapMode ? stripMapModeOps(patch) : patch;
+            return patchForMode(patch, mapMode);
           };
           const res = resolutionHash(build().ops);
           // Equal: re-resolving changes nothing this file says. A different
@@ -4997,7 +5049,12 @@ export async function ingestFiles(
       runClean ? baselineExtractor : (previousBaseline?.extractor ?? baselineExtractor),
       // A scoped run re-resolves only its own dependents, so it keeps the old
       // package list and the next full run still sees what changed outside.
-      { replayedFiles, pendingFiles, parseTimeouts, pythonPackageEntries: (scopedRun ? null : pythonPackageEntries) ?? previousBaseline?.pythonPackageEntries },
+      {
+        replayedFiles, pendingFiles, parseTimeouts, pythonPackageEntries: (scopedRun ? null : pythonPackageEntries) ?? previousBaseline?.pythonPackageEntries,
+        // The mode whose patch ids the stored patches carry: this run's once
+        // it committed one, else the one recorded before.
+        ingestMode: committedRel.size > 0 ? (mapMode ? 'map' : 'full') : previousBaseline?.ingestMode,
+      },
     );
     // The symbol table describes files, not the graph, so it is kept whether or
     // not every commit landed -- pruned to the files that still exist. A
