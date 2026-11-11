@@ -36,7 +36,7 @@ endpoint that is not loopback or that uses a port of a stack with real data:
 | `IX_E2E_PROJECT` | `ix-e2e` | compose project name |
 | `IX_E2E_BACKEND_PORT` | `8290` | compose and harness: host port of the memory-layer |
 | `IX_E2E_ARANGO_PORT` | `8729` | compose and harness: host port of ArangoDB |
-| `IX_E2E_BACKEND_IMAGE` | the pin in `compose.e2e.yml` (1.0.32 by digest) | `stack.mjs`: run this image instead |
+| `IX_E2E_BACKEND_IMAGE` | the pin in `compose.e2e.yml` (tag and digest) | `stack.mjs`: run this image instead |
 | `IX_E2E_ENDPOINT` | `http://127.0.0.1:$IX_E2E_BACKEND_PORT` | harness: backend URL, overrides the port |
 | `IX_E2E_ARANGO_URL` | `http://127.0.0.1:$IX_E2E_ARANGO_PORT` | harness and `graph-sig.mjs`: ArangoDB URL |
 | `IX_E2E_DIFF_DIR` | unset | harness: write every graph difference to `<dir>/<scenario>.txt` |
@@ -112,6 +112,18 @@ removes its own id from the title and the list. Any other error, such as a
 crashed `ix map` or an unreachable database, fails the run either way.
 
 To see what a marked scenario still gets wrong, set `IX_E2E_DIFF_DIR`.
+
+### API reference
+
+`api-reference.e2e.ts` sends one request per method and path in
+`docs/api/openapi.yaml`, with `{}` as the body and a made-up id in every
+`{id}` slot, and fails on any the backend does not route: a 405, or a 404
+whose body matches the answer to a path no backend serves. A handler's own
+404 (no such entity, session or op) has a different body and passes. Only
+existence is checked, not request or response shapes. The request and
+classification logic is in `api-probe.ts`, unit-tested by `api-probe.test.ts`
+in `npm test`. Some documented routes write (reset, patch, savings), so the
+file waits for any async reset it starts and resets the database when done.
 
 ## In CI
 

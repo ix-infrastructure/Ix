@@ -172,6 +172,11 @@ export interface SkipReasons {
   minifiedLikely?: number;
 }
 
+/**
+ * @deprecated The backend serves no `/v1/ingest`, and the client no longer
+ * calls it. Kept only so code that imports the type through
+ * `@ix/cli/client/*` still compiles.
+ */
 export interface IngestResult {
   filesProcessed: number;
   patchesApplied: number;

@@ -5,7 +5,6 @@ import { isPreConnectionFailure, RESET_RECONCILIATION_ERROR } from "./transport.
 import { Limiter, RequestMemo } from "./request-memo.js";
 import { CORRELATION_ID_HEADER, debugRequest, nextCorrelationId } from "./correlation.js";
 import type {
-  IngestResult,
   StructuredContext,
   GraphNode,
   HealthResponse,
@@ -224,20 +223,6 @@ export class IxClient {
       slices: [{ type: "nodes", nodeIds, expand: true, hops: 1 }],
       ...(opts.depth !== undefined ? { depth: opts.depth } : {}),
     }, { signal: opts.signal });
-  }
-
-  async ingest(path: string, recursive?: boolean, force?: boolean): Promise<IngestResult> {
-    const resp = await fetch(`${this.endpoint}/v1/ingest`, {
-      method: "POST",
-      headers: this.headers(true, "POST", "/v1/ingest"),
-      body: JSON.stringify({ path, recursive, force: force || undefined }),
-      signal: this.signalFor(30 * 60 * 1000), // 30 minute timeout for large repos
-    });
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw httpError(resp.status, text);
-    }
-    return resp.json() as Promise<IngestResult>;
   }
 
   async decide(
