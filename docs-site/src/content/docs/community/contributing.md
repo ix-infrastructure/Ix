@@ -25,7 +25,9 @@ backend, open an issue describing what the CLI needs, and a maintainer will carr
 ## Workflow
 
 1. Branch from `main` with a prefix: `feat/`, `fix/`, `docs/`, `refactor/`, `test/`, `ci/` or `chore/`.
-2. Make your change and run the tests (`cd ix-cli && npm test`).
+2. Make your change. Before you open the PR, run every check CI gates on, listed under
+   [Before you open a PR](https://github.com/ix-infrastructure/Ix/blob/main/CONTRIBUTING.md#before-you-open-a-pr).
+   `cd ix-cli && npm test` alone covers only the unit tests and the parser smoke test.
 3. Commit with [Conventional Commits](https://www.conventionalcommits.org/) prefixes (`feat:`, `fix:`, `docs:` and so
    on). Use `feat!:` or `fix!:` for breaking changes.
 4. Open a pull request using the template, and make sure CI passes.

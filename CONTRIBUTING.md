@@ -33,17 +33,82 @@ npm run build
 ### Verify Your Setup
 
 ```bash
-# CLI tests
+# CLI unit tests and the parser smoke test
 cd ix-cli && npm test
 ```
+
+This is a quick check that the build works. It is not everything CI runs: see
+[Before you open a PR](#before-you-open-a-pr).
 
 ## Development Workflow
 
 1. Create a branch from `main`
 2. Make your changes
-3. Run tests locally
+3. Run the checks in [Before you open a PR](#before-you-open-a-pr)
 4. Open a PR using the pull request template
 5. Ensure CI passes before merge
+
+## Before you open a PR
+
+The one required check on `main` is `CI Passed`, and it waits for every job in
+`.github/workflows/ci.yml`. These are the commands those jobs run, in the
+directory each one runs in. `cd ix-cli && npm test` covers only the unit tests
+and the parser smoke test.
+
+```bash
+# From the repo root
+python3 .github/scripts/copyright-headers.py   # copyright header on every source file (--fix adds them)
+node ix-cli/scripts/check-links.mjs            # dead links in markdown (--offline skips the URL probes)
+
+cd ix-cli
+npm run lint
+npm run typecheck
+npm run knip                                   # unused files and exports, in ix-cli and core-ingestion
+npm run build                                  # also builds core-ingestion; doc-parity reads dist/
+npm run test:unit
+npm run smoke                                  # parser smoke test
+node scripts/check-api-parity.mjs              # docs/api matches the HTTP client
+node scripts/check-doc-parity.mjs              # registered flags match the flag reference
+cd ..
+
+cd core-ingestion                              # installed and built by the ix-cli build above
+npm test
+cd ..
+
+cd docs-site                                   # needs Node 22.22+
+npm ci
+npm run build
+node ../ix-cli/scripts/check-links.mjs --dist dist --dist-only
+cd ..
+```
+
+CI also runs the real-backend scenarios, which need Docker. They start their
+own throwaway stack on ports 8290 and 8729, so they do not touch a backend you
+already run. [ix-cli/test/e2e/README.md](ix-cli/test/e2e/README.md) explains
+what they check, how to configure them and how they run in CI.
+
+```bash
+cd ix-cli
+npm run e2e:up                  # start the pinned backend and ArangoDB
+IX_E2E=1 npm run test:e2e       # build dist/, then run the scenarios
+npm run e2e:down                # remove the containers and the volume
+```
+
+Some CI steps need the CI machine and have no local command. You can read them
+in `ci.yml`:
+
+- `Lint & Typecheck` also rejects raw NUL bytes in tracked JS/TS sources and
+  runs `actionlint` over `.github/workflows/`.
+- `E2E (real backend)` also smokes the write→read path against
+  `docker-compose.standalone.yml` and runs a performance gate
+  (`ix-cli/scripts/perf-gate.mjs`) on a pinned fixture checkout.
+- `Harness install smoke` (Linux and Windows) installs the agent skill and runs
+  `ix mcp install --dry-run` against a fixture.
+
+Other workflows report on the PR as well. The PR title must be a conventional
+commit (`pr-title.yml`). The [security checks](#security-checks) also run.
+A change under `ix-cli/src/cli/` runs the advisory plugin contract check
+(`plugin-contract.yml`).
 
 ## Branch Naming
 
@@ -77,8 +142,8 @@ Breaking changes: use `feat!:` or `fix!:` prefix.
 
 | What changed | Run |
 |---|---|
-| CLI code | `cd ix-cli && npm test` |
-| Any change | Full test suite before opening PR |
+| CLI code | `cd ix-cli && npm test` while you work |
+| Any change | Everything in [Before you open a PR](#before-you-open-a-pr) |
 
 ## CLI Standards
 
@@ -178,7 +243,7 @@ numbers, and generated files lose the header on their next regeneration.
 PRs and pushes to `main` run automated security checks:
 
 - **Dependency review** — flags new dependencies with known vulnerabilities (PRs only)
-- **Trivy scanning** — scans the repo filesystem and Docker image for vulnerabilities and misconfigurations
+- **Trivy scanning** — scans the repository's files for vulnerable dependencies (`security.yml`) and for misconfigurations (`config-security.yml`). No workflow in this repository scans a container image. The backend image is scanned where it is built.
 - **Config security** — scans Docker Compose and deployment configs for unsafe exposure (e.g., auth disabled with public port bindings, `0.0.0.0` bindings). Local-only configs that bind to `127.0.0.1` are allowed.
 
 All checks fail on CRITICAL or HIGH severity findings. If a check fails on your PR, inspect the output and either fix the vulnerability or document why it's a false positive.

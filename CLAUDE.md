@@ -13,7 +13,7 @@ backend is NOT in this repo — it is the released Docker image running at
 | `core-ingestion/` | Tree-sitter parser/classifier (27 languages) |
 | `skills/ix/` | The agent skill this project ships: `SKILL.md`, `references/` (commands, flags, output-formats, troubleshooting), `scripts/` (bootstrap.sh/ps1) |
 | `docs/` | `api/` (HTTP API reference + OpenAPI spec), `llm-format.md`, `prerequisites.md` |
-| `scripts/` | `bootstrap.sh` (first-run), `install-skill.sh` (deploy skill to `~/.claude/skills` + `~/.agents/skills`) |
+| `scripts/` | `backend.sh` (local backend via Docker), `install-skill.sh` (deploy skill to `~/.claude/skills` + `~/.agents/skills`), `install/` (the `curl \| sh` installer) |
 
 ## Commands
 
@@ -26,7 +26,7 @@ npm test              # core-ingestion build + vitest + parser smoke; does NOT r
 npm run dev           # tsx src/cli/main.ts
 
 # Skill + tooling (from repo root)
-bash scripts/bootstrap.sh [repo-root]   # install CLI, start backend, map repo
+bash skills/ix/scripts/bootstrap.sh [repo-root]   # install CLI, start backend, map repo
 bash scripts/install-skill.sh           # deploy skills/ix to ~/.claude + ~/.agents
 # Repackage the skill zip into ./dist (gitignored). Needs the skill-creator
 # skill installed; on Windows set PYTHONIOENCODING=utf-8 or its emoji print crashes.
