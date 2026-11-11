@@ -3944,18 +3944,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
 // Cross-file CALLS resolution
 // ---------------------------------------------------------------------------
 
-export interface ResolvedCallEdge {
-  callerFilePath: string;
-  callerName: string;           // the caller entity (function/method/file)
-  calleeFilePath: string;       // the file where the callee is actually defined
-  calleeName: string;           // plain name as it appears in the CALLS relationship
-  calleeQualifiedKey: string;   // qualified key used for nodeId in the callee file
-                                // e.g. 'PaymentService.charge' for a class method,
-                                // or plain 'processPayment' for a module-level function
-  confidence: number;           // 0.9 import-scoped | 0.5 global
-}
-
-/** Generalised form of ResolvedCallEdge that covers any cross-file edge predicate. */
+/** A cross-file edge, any predicate, resolved to the file that defines its target. */
 export interface ResolvedEdge {
   srcFilePath: string;
   srcName: string;
@@ -3979,7 +3968,7 @@ export interface ResolvedEdge {
 export type ResolutionTier = 'type' | 'binding' | 'import' | 'transitive' | 'qualifier' | 'global';
 
 // ---------------------------------------------------------------------------
-// resolveCallEdges helpers
+// resolveEdges helpers
 // ---------------------------------------------------------------------------
 
 /** Build the qualified key for an entity (mirrors buildPatch's entityQKey logic). */
@@ -4155,26 +4144,24 @@ function qkeyMapOf(summary: FileSummary): Map<string, string[]> {
 }
 
 /**
- * Build a GlobalResolutionIndex from a list of file paths (and optional source
- * texts for entity extraction). Covers the entire repository so that each
- * streaming batch can resolve edges pointing to files outside the batch.
+ * Build a GlobalResolutionIndex from a list of file paths and per-file
+ * summaries. Covers the entire repository so that each streaming batch can
+ * resolve edges pointing to files outside the batch.
+ *
+ * A file's symbols come from its summary (`summarizeParseResult`) and nowhere
+ * else, so the index answers exactly as `resolveEdges` would with the file in
+ * the batch. A path with no summary contributes to the path maps only.
  */
 export function buildGlobalResolutionIndex(
   filePaths: string[],
-  sources?: Map<string, string>,
-  // Parse results the caller already has. The parser-derived language blocks
-  // below (PHP, JS/TS, R, SAS) call parseFile synchronously on the main thread,
-  // which is fine for a handful of files and not fine for a whole repository's
-  // worth of TypeScript. The CLI owns a worker pool; letting it parse in
-  // parallel and hand the results in keeps the work off this thread entirely.
-  // Absent an entry, each block falls back to parsing here, so callers that do
-  // not have a pool (tests, library use) behave exactly as before.
-  preParsed?: Map<string, FileParseResult>,
-  // Summaries of any files, any language (see FileSummary). A summarized file's
-  // symbols come from its summary, not from the per-language blocks below,
-  // which then only serve callers that have no summaries.
   summaries?: Map<string, FileSummary>,
 ): GlobalResolutionIndex {
+  // The sources and preParsed parameters that used to sit between these two
+  // are gone (#968). A caller still passing four arguments would otherwise get
+  // `summaries` silently ignored and an index with no symbols in it.
+  if (arguments.length > 2) {
+    throw new TypeError('buildGlobalResolutionIndex(filePaths, summaries): pass summaries as the second argument; sources and preParsed were removed');
+  }
   const stemToFiles = new Map<string, string[]>();
   const dirToIndexFiles = new Map<string, string[]>();
   const packageToFiles = new Map<string, string[]>();
@@ -4244,157 +4231,11 @@ export function buildGlobalResolutionIndex(
     }
   }
 
-  // Entity maps (built from sources if provided, via fast regex scan)
+  // Entity maps, from the summaries alone.
   const fileQKeys = new Map<string, Map<string, string[]>>();
   const filePublicNames = new Map<string, Map<string, string>>();
   const fileHasSymbol = new Map<string, Set<string>>();
   const symbolToFiles = new Map<string, string[]>();
-
-  if (sources) {
-    const pkgRe = /^package\s+(\w+)/m;
-    const typeRe = /^type\s+([A-Z]\w*)\s+/gm;
-    const funcRe = /^func\s+([A-Z]\w*)\s*[(\[]/gm;
-    const methodRe = /^func\s+\([^)]+\)\s+([A-Z]\w*)\s*[(\[]/gm;
-
-    for (const [fp, src] of sources) {
-      if (nodePath.extname(fp) !== '.go') continue;
-
-      const qkMap = new Map<string, string[]>();
-
-      // Package name — critical for qualifier-assisted REFERENCES resolution
-      const pkgMatch = pkgRe.exec(src);
-      if (pkgMatch) {
-        const name = pkgMatch[1];
-        qkMap.set(name, [name]);
-      }
-
-      // Exported types (struct/interface/aliases/type defs)
-      typeRe.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = typeRe.exec(src)) !== null) {
-        const name = m[1];
-        if (!qkMap.has(name)) qkMap.set(name, [name]);
-      }
-
-      // Exported top-level functions
-      funcRe.lastIndex = 0;
-      while ((m = funcRe.exec(src)) !== null) {
-        const name = m[1];
-        if (!qkMap.has(name)) qkMap.set(name, [name]);
-      }
-
-      // Exported methods (receiver form)
-      methodRe.lastIndex = 0;
-      while ((m = methodRe.exec(src)) !== null) {
-        const name = m[1];
-        if (!qkMap.has(name)) qkMap.set(name, [name]);
-      }
-
-      if (qkMap.size > 0) {
-        fileQKeys.set(fp, qkMap);
-        fileHasSymbol.set(fp, new Set(qkMap.keys()));
-      }
-    }
-
-    // JavaScript/TypeScript: index definitions for cross-batch resolution from
-    // the same parser output used by the normal ingest path. A path-only index
-    // can find an imported file outside the current streaming batch, but without
-    // its symbols resolveEdges cannot verify the destination and drops the edge.
-    const jsTsExtensions = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx']);
-    for (const [fp, src] of sources) {
-      if (!jsTsExtensions.has(nodePath.extname(fp).toLowerCase())) continue;
-      const parsed = preParsed?.get(fp) ?? parseFile(fp, src);
-      if (!parsed) continue;
-      const qkMap = new Map<string, string[]>();
-      for (const e of parsed.entities) {
-        if (e.kind === 'file' || e.kind === 'module') continue;
-        const list = qkMap.get(e.name) ?? [];
-        list.push(qualifiedKey(e));
-        qkMap.set(e.name, list);
-      }
-      if (qkMap.size > 0) {
-        fileQKeys.set(fp, qkMap);
-        fileHasSymbol.set(fp, new Set(qkMap.keys()));
-      }
-      if (parsed.exportPublicNames) {
-        filePublicNames.set(fp, new Map(parsed.exportPublicNames.filter(name => name.source === undefined).map(name => [name.public, name.local])));
-      }
-    }
-
-    // R: index function definitions for cross-batch Tier-3 resolution. Derive
-    // them from the parser's definition.function entities (not a regex) so this
-    // never drifts from what the in-batch path extracts in resolveEdges — the
-    // parser also captures forms a regex misses (`= function`, string-keyed S3
-    // method names like "print.myClass"). Mirrors the qkMap construction at
-    // resolveEdges (key by name, value qkey). Same pattern as the SAS index.
-    for (const [fp, src] of sources) {
-      if (nodePath.extname(fp).toLowerCase() !== '.r') continue;
-      const parsed = preParsed?.get(fp) ?? parseFile(fp, src);
-      if (!parsed) continue;
-      const qkMap = new Map<string, string[]>();
-      for (const e of parsed.entities) {
-        if (e.kind !== 'function') continue;
-        const list = qkMap.get(e.name) ?? [];
-        list.push(qualifiedKey(e));
-        qkMap.set(e.name, list);
-      }
-      if (qkMap.size > 0) {
-        fileQKeys.set(fp, qkMap);
-        fileHasSymbol.set(fp, new Set(qkMap.keys()));
-      }
-    }
-
-    // PHP: index definitions so an incremental batch can resolve typed receiver
-    // calls to classes and interfaces in unchanged files.
-    for (const [fp, src] of sources) {
-      if (nodePath.extname(fp).toLowerCase() !== '.php') continue;
-      const parsed = preParsed?.get(fp) ?? parseFile(fp, src);
-      if (!parsed) continue;
-      const qkMap = new Map<string, string[]>();
-      const ambiguousTypes = ambiguousPhpTypeNames(parsed.entities);
-      for (const e of parsed.entities) {
-        if (e.kind === 'file' || e.kind === 'module') continue;
-        const list = qkMap.get(e.name) ?? [];
-        list.push(qualifiedKey(e));
-        qkMap.set(e.name, list);
-        const fqcn = phpTypeFqcn(e);
-        if (fqcn && !ambiguousTypes.has(e.name.toLowerCase())) {
-          const entries = phpFqcnToTypes.get(fqcn) ?? [];
-          if (!entries.some(entry => entry.filePath === fp && entry.typeName === e.name)) {
-            entries.push({ filePath: fp, typeName: e.name });
-          }
-          phpFqcnToTypes.set(fqcn, entries);
-        }
-      }
-      if (qkMap.size > 0) {
-        fileQKeys.set(fp, qkMap);
-        fileHasSymbol.set(fp, new Set(qkMap.keys()));
-      }
-    }
-
-    // SAS: index macro definitions for cross-batch Tier-3 resolution. Derive
-    // them from the parser's definition.macro entities (not a regex) so this
-    // never drifts from what the in-batch path extracts in resolveEdges — the
-    // parser also captures forms a regex misses (e.g. %macro /*comment*/ name).
-    // Mirrors the qkMap construction at resolveEdges (key by name, value qkey).
-    for (const [fp, src] of sources) {
-      if (nodePath.extname(fp).toLowerCase() !== '.sas') continue;
-      const parsed = preParsed?.get(fp) ?? parseFile(fp, src);
-      if (!parsed) continue;
-      const qkMap = new Map<string, string[]>();
-      for (const e of parsed.entities) {
-        if (e.kind !== 'macro') continue;
-        const list = qkMap.get(e.name) ?? [];
-        list.push(qualifiedKey(e));
-        qkMap.set(e.name, list);
-      }
-      if (qkMap.size > 0) {
-        fileQKeys.set(fp, qkMap);
-        fileHasSymbol.set(fp, new Set(qkMap.keys()));
-      }
-    }
-
-  }
 
   if (summaries) {
     for (const [fp, summary] of summaries) {
@@ -4402,13 +4243,6 @@ export function buildGlobalResolutionIndex(
       fileQKeys.set(fp, qkMap);
       fileHasSymbol.set(fp, new Set(qkMap.keys()));
       if (summary.exportPublicNames) filePublicNames.set(fp, localPublicNames(summary.exportPublicNames));
-      else filePublicNames.delete(fp);
-    }
-    // PHP types for summarized files come from their summaries alone.
-    for (const [fqcn, entries] of phpFqcnToTypes) {
-      phpFqcnToTypes.set(fqcn, entries.filter(entry => !summaries.has(entry.filePath)));
-    }
-    for (const [fp, summary] of summaries) {
       for (const [fqcn, typeName] of summary.phpTypes ?? []) {
         const entries = phpFqcnToTypes.get(fqcn) ?? [];
         if (!entries.some(entry => entry.filePath === fp && entry.typeName === typeName)) {
@@ -6594,18 +6428,6 @@ export function resolveEdges(
     });
   }
   return resolved;
-}
-
-/** @deprecated Use resolveEdges instead. */
-export function resolveCallEdges(results: FileParseResult[]): ResolvedCallEdge[] {
-  return resolveEdges(results).map(e => ({
-    callerFilePath: e.srcFilePath,
-    callerName: e.srcName,
-    calleeFilePath: e.dstFilePath,
-    calleeName: e.dstName,
-    calleeQualifiedKey: e.dstQualifiedKey,
-    confidence: e.confidence,
-  }));
 }
 
 // ---------------------------------------------------------------------------
