@@ -38,8 +38,16 @@ describe("proInstallState", () => {
     expect(proInstallState(resolver([]))).toBe("absent");
   });
 
-  it("is installed when the register entry resolves", () => {
-    expect(proInstallState(resolver(["@ix/pro", "@ix/pro/register"]))).toBe("installed");
+  it("is installed when the register entry resolves to a file that exists", () => {
+    expect(proInstallState(resolver(["@ix/pro", "@ix/pro/register"]), () => true)).toBe("installed");
+  });
+
+  it("is broken when the register entry resolves but its file is gone", () => {
+    // `exports` still maps ./register, so resolution succeeds; the file does not exist.
+    const seen: string[] = [];
+    const exists = (url: string) => { seen.push(url); return false; };
+    expect(proInstallState(resolver(["@ix/pro", "@ix/pro/register"]), exists)).toBe("broken");
+    expect(seen).toEqual(["file:///x/node_modules/@ix/pro/register.js"]);
   });
 
   it("is broken when the package resolves but its register entry does not", () => {
