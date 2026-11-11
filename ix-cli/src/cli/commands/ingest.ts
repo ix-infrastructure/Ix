@@ -3303,7 +3303,7 @@ export async function ingestFiles(
           if (entry && entry.hash === hash) summaries.set(rel, entry.summary);
         }
       }
-      return ingestion.buildGlobalResolutionIndex(resolutionPaths.map(toWorkspaceRelative), undefined, undefined, summaries);
+      return ingestion.buildGlobalResolutionIndex(resolutionPaths.map(toWorkspaceRelative), summaries);
     };
     let globalIndex: any = undefined;
 

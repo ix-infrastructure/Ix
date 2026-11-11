@@ -11,12 +11,7 @@ type IngestionModule = {
   isGrammarSupported: (filePath: string) => boolean;
   /** Absent from a core-ingestion build older than #967; read it through `readGrammarStatus`. */
   grammarStatus?: () => GrammarStatus[];
-  buildGlobalResolutionIndex: (
-    filePaths: string[],
-    sources?: Map<string, string>,
-    preParsed?: Map<string, any>,
-    summaries?: Map<string, any>,
-  ) => any;
+  buildGlobalResolutionIndex: (filePaths: string[], summaries?: Map<string, any>) => any;
   summarizeParseResult: (parsed: any) => { filePath: string; [key: string]: unknown };
 };
 
@@ -132,16 +127,6 @@ export async function loadIngestionModules(): Promise<[
     importModule(resolveIngestionModule("../../../../core-ingestion/dist/index.js")),
     importModule(resolveIngestionModule("../../../../core-ingestion/dist/patch-builder.js")),
     importModule(resolveIngestionModule("../../../../core-ingestion/dist/languages.js")),
-  ]);
-}
-
-export async function loadWatchIngestionModules(): Promise<[
-  IngestionModule,
-  PatchBuilderModule,
-]> {
-  return Promise.all([
-    importModule(resolveIngestionModule("../../../../core-ingestion/dist/index.js")),
-    importModule(resolveIngestionModule("../../../../core-ingestion/dist/patch-builder.js")),
   ]);
 }
 
