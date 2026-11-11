@@ -255,6 +255,13 @@ export interface ParsedRelationship {
    */
   bareCall?: true;
   /**
+   * CALLS only: the callee was rewritten from `super.m()` / `super().m()` to
+   * `<Base>.m`. The base may come from an outside package, so the call resolves
+   * only through the caller's own file or the files it imports, never through
+   * the global qualifier fallback, where a same-named in-repo class would match.
+   */
+  superCall?: true;
+  /**
    * JS/TS IMPORTS only: `'helper'` marks a module path that was not written in
    * an import statement but passed as a string literal to an import helper
    * (`importModule(resolveModule("../../pkg/dist/x.js"))`). It is inferred, so
@@ -2939,6 +2946,15 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     const classRanges: Array<{ name: string; start: number; end: number }> = [];
     // PHP class name → the class it `extends`, for `parent::method()`.
     const phpParentClass = new Map<string, string>();
+    // class name → the bases it extends. A `super` call is rewritten to the
+    // base only when there is exactly one and it is a plain name: with several
+    // bases, or a dotted one, the target is not known here.
+    const classBases = new Map<string, string[]>();
+    const soleBaseAt = (line: number): string | undefined => {
+      const enclosingClass = findEnclosing(classRanges, line, '');
+      const bases = enclosingClass ? classBases.get(enclosingClass) : undefined;
+      return bases?.length === 1 && /^[\w$]+$/.test(bases[0]) ? bases[0] : undefined;
+    };
     // Python: key the typed-receiver maps the way the lookup does
     // (findEnclosingDefinition): `Container.name` for a function inside a
     // class, the bare name otherwise. The container is found exactly as for
@@ -3194,6 +3210,11 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         });
         if (language === SupportedLanguages.PHP && heritageExtends.name === 'heritage.extends' && heritageExtends.node.type === 'name') {
           phpParentClass.set(heritageClass.node.text, heritageExtends.node.text);
+        }
+        if (heritageExtends.name === 'heritage.extends') {
+          const bases = classBases.get(heritageClass.node.text) ?? [];
+          bases.push(heritageExtends.node.text);
+          classBases.set(heritageClass.node.text, bases);
         }
         continue;
       }
@@ -3587,6 +3608,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         if (!seenCalls.has(scope)) seenCalls.set(scope, new Set());
         const seen = seenCalls.get(scope)!;
 
+        let superCall = false;
         const effectiveCallee = (() => {
           // R package-qualified call (pkg::func / pkg:::func): keep the :: so the
           // patch builder can externalize it under external://<pkg> and split it
@@ -3655,6 +3677,14 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
             }
           }
           if (!phpReceiverIsSupported) return callee;
+          // `super.m()` (JS/TS) and `super().m()` (Python) are `m` of the class
+          // this one extends. Without a known base the call keeps its bare name.
+          if (qualifier === 'super' && (isJsTs || language === SupportedLanguages.Python)) {
+            const base = soleBaseAt(callLine);
+            if (!base) return callee;
+            superCall = true;
+            return `${base}.${callee}`;
+          }
           // Python: 'self'/'cls' always refers to the enclosing class — substitute it
           // so the edge reads 'Query.filter' instead of 'self.filter', enabling
           // same-file resolution without type inference.
@@ -3768,6 +3798,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
             dstName: effectiveCallee,
             predicate: 'CALLS',
             ...(phpCallKind ? { phpCallKind } : {}),
+            ...(superCall ? { superCall: true as const } : {}),
           };
           relationships.push(rel);
           callRelationships.set(bareKey, rel);
@@ -3776,6 +3807,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           // The call also names what an earlier typed relationship named: it is
           // a call in its own right, so it keeps its name-based fallback.
           delete callRelationships.get(bareKey)?.receiverOnly;
+          if (!superCall) delete callRelationships.get(bareKey)?.superCall;
         }
         if (typedReceiver) {
           // `Type.member`, `receiver.member` for a factory-typed receiver, or
@@ -6287,7 +6319,7 @@ export function resolveEdges(
           // across module/repo boundaries; for builtin/stdlib member names that is a
           // false positive, so skip the global fallback (the import-scoped qualifier
           // tier above already had its chance). Favor under-connection.
-          if (COMMODITY_CALLEE_NAMES.has(memberPart)) {
+          if (COMMODITY_CALLEE_NAMES.has(memberPart) || rel.superCall) {
             stats.skippedAmbiguous++;
             continue;
           }
