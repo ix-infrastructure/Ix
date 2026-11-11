@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { truncationAdvice } from "../commands/context.js";
+import { truncationAdvice } from "../context/truncation.js";
 
 function bundle(
   target: { name: string; kind: string },

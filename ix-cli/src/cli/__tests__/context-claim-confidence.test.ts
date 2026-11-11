@@ -3,7 +3,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { StructuredContext } from "../../client/types.js";
-import { buildBundle, clampBudgets } from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { clampBudgets } from "../context/options.js";
 import type { ContextFacts } from "../explain/facts.js";
 
 /**

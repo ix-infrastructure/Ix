@@ -3,7 +3,9 @@
 import { describe, expect, it } from "vitest";
 
 import type { GraphNode } from "../../client/types.js";
-import { buildBundle, clampBudgets, renderBundle } from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { clampBudgets } from "../context/options.js";
+import { renderBundle } from "../context/render.js";
 import type { ContextFacts } from "../explain/facts.js";
 
 /**

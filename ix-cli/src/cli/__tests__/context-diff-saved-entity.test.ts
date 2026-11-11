@@ -53,7 +53,8 @@ beforeEach(async () => {
   entity.mockReset().mockImplementation(async (id: string) => (id === SAVED_ID
     ? { node: { id, kind: "function", name: "Duplicate", attrs: {}, provenance: { sourceUri: "src/first.ts" } } }
     : { node: null }));
-  const { buildBundle, saveInvestigation } = await import("../commands/context.js");
+  const { buildBundle } = await import("../context/bundle.js");
+  const { saveInvestigation } = await import("../context/investigations.js");
   saveInvestigation("dup", buildBundle({
     resolved: { id: SAVED_ID, name: "Duplicate", kind: "function", resolutionMode: "exact" },
     facts: {

@@ -61,15 +61,18 @@ describe("contextForNode", () => {
   });
 });
 
-describe("context.ts call sites", () => {
+describe("ix context call sites", () => {
   it("has no by-name context call left in the command", async () => {
-    const { readFileSync } = await import("node:fs");
+    const { readdirSync, readFileSync } = await import("node:fs");
     const { fileURLToPath } = await import("node:url");
     const { dirname, join } = await import("node:path");
-    const src = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), "..", "commands", "context.ts"),
-      "utf8",
-    );
+    // The command and the modules it delegates to (src/cli/context/).
+    const cli = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const files = [
+      join(cli, "commands", "context.ts"),
+      ...readdirSync(join(cli, "context")).filter((f) => f.endsWith(".ts")).map((f) => join(cli, "context", f)),
+    ];
+    const src = files.map((f) => readFileSync(f, "utf8")).join("\n");
     // Three call sites, and all must be by id. Leaving one behind makes `--diff`
     // compare a by-id bundle against a by-name one and report the entire graph
     // as changed on the first run after upgrade. The third is `--from-issue`,

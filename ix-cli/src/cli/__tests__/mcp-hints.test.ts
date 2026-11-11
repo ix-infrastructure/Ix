@@ -15,7 +15,8 @@ import {
   IX_MCP_TOOL_NAMES,
   type IxRunner,
 } from "../../mcp/server.js";
-import { NEXT_READ_MAX_LINES, nextReads, nextToolCalls, truncationAdvice } from "../commands/context.js";
+import { NEXT_READ_MAX_LINES, nextReads, nextToolCalls } from "../context/next.js";
+import { truncationAdvice } from "../context/truncation.js";
 import { inferRiskSemantics, type ImpactFacts } from "../impact/risk-semantics.js";
 import { disambiguationHint, forMcp, IX_CALLER_ENV, toolCall } from "../next-step.js";
 import { roleHint } from "../role-filter.js";

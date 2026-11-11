@@ -30,7 +30,7 @@ import {
   loadFileFromDisk,
   type DiffModeOptions,
 } from "../commands/diff.js";
-import { mergeDiffOptions } from "../commands/context.js";
+import { mergeDiffOptions } from "../context/investigations.js";
 
 // ══════════════════════════════════════════════════════════════════════
 // detectDiffModeConflict — pure function, no side effects
