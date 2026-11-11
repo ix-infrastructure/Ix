@@ -9,6 +9,7 @@
     ".": "./dist/index.js",
     "./languages": "./dist/languages.js",
     "./patch-builder": "./dist/patch-builder.js",
+    "./symbol-index": "./dist/symbol-index.js",
     "./types": "./dist/types.js"
   },
   "scripts": {

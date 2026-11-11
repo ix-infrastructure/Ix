@@ -27,11 +27,11 @@ import {
 } from '../ingest-baseline.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
-import { loadIngestionModules } from './ingestion-loader.js';
+import { loadIngestionModules, loadSymbolIndex } from './ingestion-loader.js';
 import { declaredPackageDirs } from '../package-dirs.js';
 import { assertStaleWorkspacePruneAllowed, clearPendingPrune, ensureWorkspaceIdState, staleWorkspaceCleanup, workspaceStateFor, type StaleWorkspaceKeepReason } from '../bootstrap.js';
 import {
-  changedNames, findDependents, importsChanged, loadIngestSymbols, resolutionHash, saveIngestSymbols,
+  loadIngestSymbols, resolutionHash, saveIngestSymbols,
   type StoredSummary, type SymbolEntry,
 } from '../ingest-symbols.js';
 import { detectSystem, fileIdentity, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
@@ -4816,6 +4816,7 @@ export async function ingestFiles(
     const packagesChanged = pathsAddedOrDeleted.some(rel => nodePath.posix.basename(rel) === '__init__.py');
     if (incrementalRun && (summaryBeforeRun.size > 0 || deletedRel.length > 0 || pendingRel.length > 0 || packagesChanged)) {
       const table = symbolTable();
+      const { changedNames, findDependents, importsChanged } = await loadSymbolIndex();
       const names = new Set<string>();
       // Paths whose importers may resolve differently: files that appeared,
       // and files that changed what they import (a re-export moved).
