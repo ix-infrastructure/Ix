@@ -2,7 +2,7 @@
 
 // The API reference against the pinned backend: every method + path in
 // docs/api/openapi.yaml must be routed. One request each, with `{}` as the
-// body and `ix-route-probe` in every `{id}` slot, so most answer 400 or their
+// body and the nil UUID in every `{id}` slot, so most answer 400 or their
 // own not-found; only "no such route" (405, or a 404 that looks like the
 // answer to an unknown path) fails. See api-probe.ts.
 //
@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type E2eEnv, e2eEnv, headers, resetBackend } from "./harness.js";
-import { type Probe, type ProbeAnswer, UNKNOWN_ROUTE, buildProbes, missingRoute } from "./api-probe.js";
+import { type Probe, type ProbeAnswer, UNKNOWN_ROUTE, buildProbes, missingRoute, startedOpId } from "./api-probe.js";
 
 const OPENAPI = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "docs", "api", "openapi.yaml");
 
@@ -43,10 +43,8 @@ async function send(method: string, url: string, body?: string): Promise<ProbeAn
 
 /** An async reset the probe started: wait for it, so it cannot race the next file's reset. */
 async function settle(answer: ProbeAnswer): Promise<void> {
-  if (answer.status !== 202) return;
-  let opId: unknown;
-  try { opId = (JSON.parse(answer.body) as { opId?: unknown }).opId; } catch { return; }
-  if (typeof opId !== "string") return;
+  const opId = startedOpId(answer);
+  if (opId === null) return;
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
     const status = await send("get", `/v1/reset/status/${encodeURIComponent(opId)}`);

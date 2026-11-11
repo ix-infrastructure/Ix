@@ -14,8 +14,14 @@
 export const HTTP_METHODS = ["get", "post", "put", "patch", "delete"] as const;
 export type HttpMethod = (typeof HTTP_METHODS)[number];
 
-/** Fills every `{name}` path slot. No such id exists, so lookups answer their own not-found. */
-export const PROBE_ID = "ix-route-probe";
+/**
+ * Fills every `{name}` path slot. No such id exists, so lookups answer their
+ * own not-found. The nil UUID, because a route that matches its id as a UUID
+ * (`/v1/reset/status/{opId}`, for one) would reject any other string before
+ * the handler and answer like an unknown path; a plain string segment matches
+ * it too.
+ */
+export const PROBE_ID = "00000000-0000-0000-0000-000000000000";
 
 /** A path no backend serves: its answer is what "no such route" looks like on this backend. */
 export const UNKNOWN_ROUTE = "/v1/__ix_route_probe_missing__";
@@ -24,7 +30,7 @@ export interface Probe {
   method: HttpMethod;
   /** As documented, e.g. `/v1/entity/{id}`. */
   path: string;
-  /** Path and query actually requested, e.g. `/v1/entity/ix-route-probe`. */
+  /** Path and query actually requested, e.g. `/v1/entity/00000000-0000-0000-0000-000000000000`. */
   url: string;
   /** JSON body for methods that carry one. */
   body?: string;
@@ -100,4 +106,19 @@ export function missingRoute(probe: Probe, answer: ProbeAnswer, unknownRoute: Pr
     unknownRoute.status === 404 &&
     normalizeBody(answer.body, probe.url) === normalizeBody(unknownRoute.body, UNKNOWN_ROUTE);
   return same ? `${label}: not routed, answers like an unknown path (${detail()})` : null;
+}
+
+/**
+ * The op id of an async operation this answer started, or null. Both 200 and
+ * 202 count: the client sees 202 from `POST /v1/reset/code/async`, the
+ * reference documents 200, and either way the work may still be running.
+ */
+export function startedOpId(answer: ProbeAnswer): string | null {
+  if (answer.status !== 200 && answer.status !== 202) return null;
+  try {
+    const opId = (JSON.parse(answer.body) as { opId?: unknown } | null)?.opId;
+    return typeof opId === "string" && opId.length > 0 ? opId : null;
+  } catch {
+    return null;
+  }
 }

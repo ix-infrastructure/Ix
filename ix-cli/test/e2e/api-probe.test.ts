@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
-import { PROBE_ID, UNKNOWN_ROUTE, buildProbes, missingRoute, type Probe } from "./api-probe.js";
+import { PROBE_ID, UNKNOWN_ROUTE, buildProbes, missingRoute, startedOpId, type Probe } from "./api-probe.js";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const read = (...p: string[]) => readFileSync(join(REPO, ...p), "utf8");
@@ -49,6 +49,31 @@ describe("buildProbes", () => {
       { method: "post", path: "/v1/note/{id}/retract", url: `/v1/note/${PROBE_ID}/retract`, body: "{}" },
       { method: "get", path: "/v1/conflicts", url: "/v1/conflicts?rev=1" },
     ]);
+  });
+});
+
+describe("PROBE_ID", () => {
+  // The client only polls lowercase-UUID op ids (api.ts), and a backend that
+  // matches an id segment as a UUID would 404 any other string before the
+  // handler, which missingRoute would read as "not routed".
+  it("is a lowercase UUID, so UUID-matched routes reach their handler", () => {
+    expect(PROBE_ID).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    const [p] = buildProbes({ paths: { "/v1/reset/status/{opId}": { get: {} } } });
+    expect(p.url).toBe(`/v1/reset/status/${PROBE_ID}`);
+  });
+});
+
+describe("startedOpId", () => {
+  const opId = "3f2b8c1e-0000-4000-8000-000000000001";
+  it("reads the op id from a 202 and from a 200 (the reference documents 200 for reset/code/async)", () => {
+    expect(startedOpId({ status: 202, body: JSON.stringify({ opId }) })).toBe(opId);
+    expect(startedOpId({ status: 200, body: JSON.stringify({ opId, state: "running" }) })).toBe(opId);
+  });
+  it("is null for other statuses, bodies without an op id, and non-JSON", () => {
+    expect(startedOpId({ status: 400, body: JSON.stringify({ opId }) })).toBeNull();
+    expect(startedOpId({ status: 200, body: '{"ok":true}' })).toBeNull();
+    expect(startedOpId({ status: 200, body: "null" })).toBeNull();
+    expect(startedOpId({ status: 202, body: "accepted" })).toBeNull();
   });
 });
 
@@ -100,6 +125,22 @@ describe("the docs readers start from", () => {
       expect(calls).not.toContain("POST /v1/ingest");
     });
   }
+
+  // A Dependabot bump changes only compose.e2e.yml, so a pinned version
+  // written in prose goes stale silently. Where these docs talk about the pin
+  // (the paragraph or table row naming it), any version they give must be it.
+  // Other versions (example payloads, "1.0.33+" minimums) are not the pin.
+  it("names no backend version for the pin other than compose.e2e.yml's", () => {
+    const pin = /ix-memory-layer:(\d+\.\d+\.\d+)/.exec(read("ix-cli", "test", "e2e", "compose.e2e.yml"))?.[1];
+    expect(pin).toBeDefined();
+    for (const file of [["docs", "api", "README.md"], ["ix-cli", "test", "e2e", "README.md"]]) {
+      const blocks = read(...file).split(/\n\s*\n|\n(?=\|)/).filter((b) => /\bpin(?:ned)?\b/i.test(b));
+      expect(blocks.length, file.join("/")).toBeGreaterThan(0);
+      for (const block of blocks) {
+        for (const m of block.matchAll(/\b\d+\.\d+\.\d+\b/g)) expect(m[0], `${file.join("/")}: ${block}`).toBe(pin);
+      }
+    }
+  });
 
   it("docs/api/README.md does not claim the reference is generated", () => {
     expect(read("docs", "api", "README.md")).not.toMatch(/generated from the client/i);

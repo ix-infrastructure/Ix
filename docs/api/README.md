@@ -19,9 +19,9 @@ Two CI checks keep it honest:
   route (`ix-cli/test/e2e/api-reference.e2e.ts`). It does not check request
   or response shapes; those are described from the client's side.
 
-The backend release it is checked against is the e2e pin, currently
-**1.0.34**. The pin moves with Dependabot bumps, and the check runs on every
-one.
+The backend release it is checked against is the `ix-memory-layer` image
+pinned in `ix-cli/test/e2e/compose.e2e.yml`. The pin moves with Dependabot
+bumps, and the check runs on every one.
 
 ## Table of Contents
 
