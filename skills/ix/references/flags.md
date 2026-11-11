@@ -270,6 +270,17 @@ through a superclass or interface follow the direct ones, tagged
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
+### `ix capabilities`
+
+What this installed CLI supports, for a plugin or script to read before it calls anything else. Needs no backend, and a missing or corrupt config cannot make it fail; Ix Pro is resolved, never loaded or initialized (in any form of the command, including its help), so it is not a Pro command run as a probe. `ix capabilities --format json` (with or without `--pretty`) is answered before the command tree loads and reads no config. Without an explicit `--format`, the output format defaults from `IX_FORMAT` or the config file like any other command, so pass `--format json` when a script parses it. It prints `{"schema":"ix-capabilities/1","version":"<semver>","pro":{"available":<bool>,"state":"absent|installed|broken"},"hooks":["claude-post-edit"]}`. `version` is what `ix --version` prints and `hooks` lists the `ix hook` subcommands. `pro.available` is true only when `state` is `installed`; `broken` means the package is there but its entry point does not resolve, or resolves to a file that is missing (`ix upgrade` reinstalls it). `installed` comes from module resolution alone, so a Pro that resolves but then fails to initialize still reports `installed`: the next Pro command exits 1 with "could not initialize", and a plugin should treat that as Pro unavailable until `ix upgrade` reinstalls it. The answer changes only when the CLI or Ix Pro is reinstalled, so cache it per resolved `ix` path and modification time. New fields may appear; a breaking change changes `schema`. Exits 0 whenever it answers.
+
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
+| `--quiet` | — | off | Accepted for consistency; there are no headers or hints to drop |
+| `--fields` | `<list>` | — | Accepted for consistency; the answer is one object, not rows |
+
 ### `ix config`
 
 Show or update Ix configuration.

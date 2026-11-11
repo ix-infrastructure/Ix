@@ -242,6 +242,7 @@ describe("the CLI loads only the command it runs", () => {
     [["impact", "x"], ["impact"]],
     [["around", "a.txt"], ["around"]],
     [["hook", "--help"], ["hook"]],
+    [["capabilities"], ["capabilities"]],
   ];
 
   it.concurrent.each(cases)("ix %j loads %j", async (args, expected) => {
@@ -250,6 +251,10 @@ describe("the CLI loads only the command it runs", () => {
 
   it.concurrent("ix hook claude-post-edit loads no command module", async () => {
     expect(await commandModulesLoaded(["hook", "claude-post-edit"], {}, "{}")).toEqual([]);
+  }, 60_000);
+
+  it.concurrent("ix capabilities --format json loads no command module", async () => {
+    expect(await commandModulesLoaded(["capabilities", "--format", "json"])).toEqual([]);
   }, 60_000);
 
   it.concurrent("the full path still loads every command module", async () => {
@@ -282,6 +287,13 @@ describe("the fast and full paths answer identically", () => {
     ["text --format json", ["text", "needle", "--format", "json"]],
     ["graph command outside a workspace", ["locate", "x", "--format", "json"]],
     ["hook --help", ["hook", "--help"]],
+    ["capabilities --format json", ["capabilities", "--format", "json"]],
+    ["capabilities --format=json --pretty", ["capabilities", "--format=json", "--pretty"]],
+    ["capabilities --format llm", ["capabilities", "--format", "llm"]],
+    ["capabilities --format text", ["capabilities", "--format", "text"]],
+    ["capabilities, configured default format", ["capabilities"], { IX_FORMAT: "json" }],
+    ["capabilities --help", ["capabilities", "--help"]],
+    ["capabilities, invalid --format choice", ["capabilities", "--format", "yaml"]],
   ];
 
   it.concurrent.each(cases)("%s", async (_label, args, extra = {}) => {
@@ -295,6 +307,31 @@ describe("the fast and full paths answer identically", () => {
 
   it.concurrent("--version prints the version and nothing else", async () => {
     expect(await runCli(["--version"])).toEqual({ stdout: `${VERSION}\n`, stderr: "", status: 0 });
+  }, 60_000);
+
+  it.concurrent("capabilities --format json is the documented shape, with --version's version", async () => {
+    const run = await runCli(["capabilities", "--format", "json"]);
+    expect(run.stderr).toBe("");
+    expect(run.status).toBe(0);
+    // The stable contract plugins parse. Pro is absent from this checkout.
+    expect(JSON.parse(run.stdout)).toEqual({
+      schema: "ix-capabilities/1",
+      version: VERSION,
+      pro: { available: false, state: "absent" },
+      hooks: ["claude-post-edit"],
+    });
+  }, 60_000);
+
+  it.concurrent("capabilities --format json reads no config and needs no backend", async () => {
+    const broken = tempDir("ix-fast-broken-home-");
+    writeFileSync(join(broken, "config.yaml"), "endpoint: [unclosed\nformat: : :\n");
+    // A port nothing listens on: the answer must not depend on reaching it.
+    const run = await runCli(["capabilities", "--format", "json"], {
+      env: baseEnv({ IX_HOME: broken, IX_ENDPOINT: "http://127.0.0.1:1" }),
+    });
+    expect(run.status).toBe(0);
+    expect(run.stderr).toBe("");
+    expect(JSON.parse(run.stdout).version).toBe(VERSION);
   }, 60_000);
 });
 

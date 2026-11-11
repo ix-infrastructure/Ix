@@ -63,6 +63,10 @@ if (args[0] === "__map-refresh" && args[1] !== undefined) {
 } else if (args[0] === "hook" && args[1] === "claude-post-edit" && !args.some((a) => a === "-h" || a === "--help")) {
   const { parseHookArgs, runHookProcess } = await import("./hook/entry.js");
   await runHookProcess(parseHookArgs(args.slice(2)));
-} else {
+} else if (!(args[0] === "capabilities" && (await import("./capabilities.js")).runFastCapabilities(args.slice(1)))) {
+  // `ix capabilities --format <fmt>` is the probe plugins run before anything
+  // else, so it is answered above without the command tree, the config file or
+  // Ix Pro (which it only resolves). Any other shape of it -- no `--format`,
+  // `--help`, an unknown flag -- printed nothing there and comes here.
   await import("./run-cli.js");
 }

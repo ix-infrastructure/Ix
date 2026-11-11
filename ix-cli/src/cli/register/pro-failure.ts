@@ -29,6 +29,10 @@ const REPAIR_INVOCATIONS = new Set([
   // does not weaken anything: `detectPro` then declines to advertise the Pro
   // tools, and `buildProgram` still rejects for any call that would need them.
   "mcp",
+  // Reports Pro's state rather than using it, so it must answer when that
+  // state is "broken". It never loads Pro (`skipsProLoading`), so this entry
+  // is belt and braces should that ever change.
+  "capabilities",
   "help",
   "--help",
   "-h",
@@ -42,4 +46,21 @@ const REPAIR_INVOCATIONS = new Set([
  */
 export function isRepairInvocation(argv: readonly string[]): boolean {
   return REPAIR_INVOCATIONS.has(argv[2] ?? "");
+}
+
+/**
+ * Invocations that never load Ix Pro, even when it is installed: run-cli skips
+ * `tryLoadProCommands` for them and registers the OSS-only command set.
+ *
+ * - `hook` runs inside an agent harness after every edit and must exit 0 with
+ *   nothing on stdout whenever it cannot help; it needs nothing Pro registers.
+ * - `capabilities` reports Pro's install state from module resolution alone
+ *   and promises no side effects, so it must not import or initialize Pro on
+ *   any path (`--help`, no `--format`, `--quiet`), not only main.ts's fast one.
+ */
+const SKIPS_PRO = new Set(["hook", "capabilities"]);
+
+/** True when `argv` (process.argv, whole) must not load Ix Pro at all. */
+export function skipsProLoading(argv: readonly string[]): boolean {
+  return SKIPS_PRO.has(argv[2] ?? "");
 }

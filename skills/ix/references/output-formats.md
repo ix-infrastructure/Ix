@@ -117,6 +117,14 @@ If any Pro command prints `The '<name>' command requires Ix Pro.`, this install
 does not have them — skip that step, do not retry it, and do not mention it
 again for the rest of the session. Nothing outside those marks is Pro-gated.
 
+To know in advance, without running a Pro command, read
+`ix capabilities --format json`: `pro.available` is true when Ix Pro is
+installed and its entry point resolves to a file that exists. It is not started to check, so a Pro
+that then fails to initialize still reads `available`; the Pro command you
+call next exits 1 with "could not initialize", which is the signal to stop
+calling Pro commands (`ix doctor` / `ix upgrade` repair it). See
+[flags.md](flags.md#ix-capabilities) for the full shape.
+
 Pro-only surface: `plan`, `plans`, `task`, `tasks`, `workflow`, `decide`,
 `decisions`, `goal`, `truth`, `bug`, `briefing`.
 

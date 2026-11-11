@@ -1,6 +1,26 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import type { Command } from "commander";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+/** Resolve from this module, so every probe here agrees with the loader. */
+const defaultResolve = (specifier: string): string => import.meta.resolve(specifier);
+
+/**
+ * Whether a resolved entry is really there. `import.meta.resolve` maps a
+ * specifier through the package's `exports` without touching the target, so a
+ * deleted `register.js` still resolves. Only `file:` URLs are checked; any
+ * other scheme is taken on trust.
+ */
+function resolvedFileExists(url: string): boolean {
+  if (!url.startsWith("file:")) return true;
+  try {
+    return existsSync(fileURLToPath(url));
+  } catch {
+    return false;
+  }
+}
 
 /**
  * True only when `@ix/pro` is not installed at all.
@@ -10,9 +30,9 @@ import type { Command } from "commander";
  * proves it is installed — so that counts as present, and the caller fails
  * closed.
  */
-function proPackageIsAbsent(): boolean {
+function proPackageIsAbsent(resolve: (specifier: string) => string = defaultResolve): boolean {
   try {
-    import.meta.resolve("@ix/pro");
+    resolve("@ix/pro");
     return false;
   } catch (error) {
     return (error as { code?: string }).code === "ERR_MODULE_NOT_FOUND";
@@ -26,11 +46,35 @@ function proPackageIsAbsent(): boolean {
  * loader on this answer still leaves the broken case to the loader's error.
  */
 export function proIsAbsent(): boolean {
+  return proInstallState() === "absent";
+}
+
+/** What `proInstallState` found. */
+export type ProInstallState = "absent" | "installed" | "broken";
+
+/**
+ * Where `@ix/pro` stands, from module resolution alone: nothing is imported or
+ * initialized, so this costs two resolutions and has no side effects.
+ *
+ * - `absent`: the package is not installed (`proIsAbsent`).
+ * - `installed`: `@ix/pro/register` resolves to a file that exists, so the
+ *   loader will try it. Pro can still fail to initialize; the first command
+ *   that loads it says so.
+ * - `broken`: the package is there but `@ix/pro/register` does not resolve,
+ *   or resolves to a file that is missing (a partly deleted install), which
+ *   `tryLoadProCommands` refuses to run past.
+ *
+ * `resolve` and `exists` are for tests; the defaults resolve from this module,
+ * as the loader does, and check the resolved file on disk.
+ */
+export function proInstallState(
+  resolve: (specifier: string) => string = defaultResolve,
+  exists: (url: string) => boolean = resolvedFileExists,
+): ProInstallState {
   try {
-    import.meta.resolve("@ix/pro/register");
-    return false;
+    return exists(resolve("@ix/pro/register")) ? "installed" : "broken";
   } catch {
-    return proPackageIsAbsent();
+    return proPackageIsAbsent(resolve) ? "absent" : "broken";
   }
 }
 
