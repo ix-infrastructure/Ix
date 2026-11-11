@@ -39,7 +39,7 @@ describe("the response guards", () => {
     ["an expand-by-name body that is an array", () => expandResponse([], "POST /v1/expand-by-name"), "POST /v1/expand-by-name", "body"],
     ["an entity body that is an array", () => entityResponse([]), "GET /v1/entity/{id}", "body"],
     ["an entity node that is a string", () => entityResponse({ node: "a", edges: [] }), "GET /v1/entity/{id}", "node"],
-    ["an entity with a node but no edges", () => entityResponse({ node: node("a") }), "GET /v1/entity/{id}", "edges"],
+    ["entity edges that are an object", () => entityResponse({ node: node("a"), edges: {} }), "GET /v1/entity/{id}", "edges"],
     ["an entity node without a kind", () => entityResponse({ node: { id: "a" }, edges: [] }), "GET /v1/entity/{id}", "node.kind"],
     ["entity claims that are not an array", () => entityResponse({ node: node("a"), claims: "none", edges: [] }), "GET /v1/entity/{id}", "claims"],
     ["a context whose nodes is not an array", () => contextResponse({ nodes: "x", edges: [] }), "POST /v1/context", "nodes"],
@@ -91,6 +91,12 @@ describe("the response guards", () => {
     // Entity claims, and every context field but nodes and edges.
     expect(() => entityResponse({ node: node("a"), edges: [] })).not.toThrow();
     expect(() => contextResponse({ nodes: [], edges: [] })).not.toThrow();
+    // Entity edges and claims, which every consumer reads with `?? []`.
+    expect(() => entityResponse({ node: node("a") })).not.toThrow();
+    expect(() => entityResponse({ node: node("a"), edges: null, claims: null })).not.toThrow();
+    // An explicit null for an optional context field reads as absent, as the consumers' `?? []` did.
+    const nulls = { nodes: [], edges: [], nodeSummaries: null, edgeSummaries: null, claims: null, compactClaims: null, metadata: null };
+    expect(contextResponse(nulls)).toBe(nulls);
     // An entity answer that names nothing is the resolver's miss (exit 3), not a contract break.
     for (const nothing of [null, {}, { node: null }]) expect(entityResponse(nothing)).toBe(nothing);
     // A node needs only an id and a kind; its name can live in attrs.

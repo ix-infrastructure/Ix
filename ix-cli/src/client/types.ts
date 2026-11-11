@@ -180,7 +180,8 @@ export interface EntityResponse {
   node: GraphNode;
   /** Absent from some responses: read it as possibly missing. */
   claims?: unknown[];
-  edges: unknown[];
+  /** Absent from some responses too: read it with `?? []`. */
+  edges?: unknown[];
 }
 
 export interface PatchSummary {

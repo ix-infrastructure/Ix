@@ -100,15 +100,19 @@ class Check {
     this.array(value, field).forEach((e, i) => this.edge(e, `${field}[${i}]`));
   }
 
-  /** An array field the backend may leave out: checked only when present. */
+  /**
+   * An array field the backend may leave out: checked only when present. An
+   * explicit `null` counts as absent, since the backend may encode an empty
+   * `Option` that way and the consumers default these fields (`?? []`).
+   */
   optionalArray(body: Record<string, unknown>, key: string, each?: (item: unknown, field: string) => void): void {
-    if (body[key] === undefined) return;
+    if (body[key] === undefined || body[key] === null) return;
     const items = this.array(body[key], key);
     if (each) items.forEach((item, i) => each(item, `${key}[${i}]`));
   }
 }
 
-/** `POST /v1/search` (and `/v1/search/semantic`): an array of nodes. */
+/** `POST /v1/search`: an array of nodes. `/v1/search/semantic` is not checked. */
 export function searchResponse(body: unknown, route = "POST /v1/search"): GraphNode[] {
   const check = new Check(route);
   check.array(body, "body").forEach((n, i) => check.node(n, `[${i}]`));
@@ -125,9 +129,10 @@ export function expandResponse(body: unknown, route = "POST /v1/expand"): Expand
 }
 
 /**
- * `GET /v1/entity/{id}`: a `node` and its `edges`, and `claims` when the
- * backend sends them. The claims and edges are not looked inside: the CLI
- * reads them as `unknown`. A body with no node at all is passed through.
+ * `GET /v1/entity/{id}`: a `node`, and its `edges` and `claims` when the
+ * backend sends them (consumers default both with `?? []`). The claims and
+ * edges are not looked inside: the CLI reads them as `unknown`. A body with no
+ * node at all is passed through.
  */
 export function entityResponse(body: unknown, route = "GET /v1/entity/{id}"): EntityResponse {
   // A 200 that names no entity -- `null`, `{}` or `{ node: null }` -- is not a
@@ -140,7 +145,7 @@ export function entityResponse(body: unknown, route = "GET /v1/entity/{id}"): En
   const obj = check.object(body, "body");
   check.node(obj.node, "node");
   check.optionalArray(obj, "claims");
-  check.array(obj.edges, "edges");
+  check.optionalArray(obj, "edges");
   return body as EntityResponse;
 }
 
@@ -162,6 +167,6 @@ export function contextResponse(body: unknown, route = "POST /v1/context"): Stru
   for (const key of ["claims", "compactClaims", "conflicts", "decisions", "intents"]) {
     check.optionalArray(obj, key);
   }
-  if (obj.metadata !== undefined) check.object(obj.metadata, "metadata");
+  if (obj.metadata !== undefined && obj.metadata !== null) check.object(obj.metadata, "metadata");
   return body as StructuredContext;
 }
