@@ -59,6 +59,7 @@ import { forMcp, suggest, toolCall } from "../next-step.js";
 import {
   assessTargetStructure, checkGraphHealth, graphHealthJson, isUnhealthy, worseHealth, type GraphHealth,
 } from "../graph-health.js";
+import { CONTAINER_KINDS } from "../graph-model.js";
 
 /** The `--max-*` knobs that bound a bundle. */
 interface BudgetSnapshot {
@@ -3132,7 +3133,7 @@ function summariseCut(dropped: EvidenceItem[]): Array<{ what: string; count: num
 function cutLever(bundle: ContextBundle, top: { what: string }): string {
   if (forMcp()) return mcpCutLever(bundle, top);
   const name = bundle.target.name;
-  const container = CONTAINER_TARGET_KINDS.includes(bundle.target.kind.toLowerCase());
+  const container = CONTAINER_KINDS.has(bundle.target.kind.toLowerCase());
   switch (top.what) {
     case "member":
       return container
@@ -3156,8 +3157,6 @@ function cutLever(bundle: ContextBundle, top: { what: string }): string {
   }
 }
 
-const CONTAINER_TARGET_KINDS: readonly string[] = ["file", "module", "class", "object", "trait", "interface"];
-
 /**
  * {@link cutLever} for an MCP caller: only core tools, and `max_tokens` for
  * the budget, since `ix_context` takes no flags. `ix contains`, `ix depends`
@@ -3166,7 +3165,7 @@ const CONTAINER_TARGET_KINDS: readonly string[] = ["file", "module", "class", "o
  */
 function mcpCutLever(bundle: ContextBundle, top: { what: string }): string {
   const { name, path } = bundle.target;
-  const container = CONTAINER_TARGET_KINDS.includes(bundle.target.kind.toLowerCase());
+  const container = CONTAINER_KINDS.has(bundle.target.kind.toLowerCase());
   const pin = container ? {} : { path };
   const budget = "raise max_tokens (default 3000)";
   switch (top.what) {

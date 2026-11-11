@@ -1,6 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { forMcp, suggest } from "../next-step.js";
+import { CALLABLE_KINDS, CONTAINER_KINDS, CONTRACT_TYPE_KINDS } from "../graph-model.js";
 
 /**
  * Risk-semantics inference for ix impact.
@@ -160,21 +161,6 @@ export function humanizeLabel(raw: string): string {
   return `${parts[0]} layer`;
 }
 
-// ── Kind sets ────────────────────────────────────────────────────────────────
-
-const TYPE_KINDS = new Set([
-  "interface", "type", "type_alias", "enum", "sealed_trait",
-  "trait", "abstract_class",
-]);
-
-const CONTAINER_KINDS = new Set([
-  "class", "module", "file", "object", "trait", "interface",
-]);
-
-const CALLABLE_KINDS = new Set([
-  "function", "method", "def", "fun", "constructor",
-]);
-
 // ── Flow detection (reuses token patterns from flow-semantics.ts) ────────────
 
 interface FlowMatch {
@@ -274,7 +260,7 @@ function detectCategory(facts: ImpactFacts): { category: RiskCategory; reasons: 
   const tokens = allTokens(facts);
 
   // Foundation: type definitions, enums, interfaces, shared model files
-  if (TYPE_KINDS.has(kind)) {
+  if (CONTRACT_TYPE_KINDS.has(kind)) {
     return { category: "foundation", reasons: [`kind "${kind}" is a type-level construct`] };
   }
   if (kind === "file" && hasModelSignal(tokens) && facts.members > 0) {

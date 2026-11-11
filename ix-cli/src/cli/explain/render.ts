@@ -12,6 +12,7 @@ import {
 import { inferSystemMeaning } from "./system-meaning.js";
 import { type FlowSemantics, inferFlowSemantics } from "./flow-semantics.js";
 import { forMcp, suggest } from "../next-step.js";
+import { CALLABLE_KINDS } from "../graph-model.js";
 
 export interface ExplanationOutput {
   explanation: string;
@@ -100,8 +101,6 @@ function fileBaseName(path?: string): string {
 }
 
 // ── Callable detection ──────────────────────────────────────────────────────
-
-const CALLABLE_KINDS = new Set(["function", "method", "def", "fun", "constructor"]);
 
 function isCallable(kind: string, role: RoleLabel): boolean {
   if (CALLABLE_KINDS.has(kind.toLowerCase())) return true;

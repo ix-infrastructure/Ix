@@ -24,6 +24,7 @@ import {
   candidateOrigin, isFileStemMatch, looksLikeCodeIdentifier, requestsNonCode,
 } from "./candidate-origin.js";
 import { normalizeForPathMatch } from "./path-match.js";
+import { CONTAINER_KINDS, STRUCTURAL_KINDS } from "./graph-model.js";
 
 /**
  * The read scope for the current working directory: a co-ingested multi-repo system
@@ -308,16 +309,6 @@ export type ResolveResult =
       /** Set by the reporter's caller when the graph itself is empty or degraded. */
       graph?: GraphHealth;
     };
-
-// ── Structural kind sets ──────────────────────────────────────────────────
-
-/** High-value container kinds — typically what callers want when resolving a bare name. */
-const CONTAINER_KINDS = new Set(["file", "class", "object", "trait", "interface", "module"]);
-
-/** All kinds that represent real code structure (vs. config/doc/decision). */
-const STRUCTURAL_KINDS = new Set([
-  ...CONTAINER_KINDS, "function", "method", "constant",
-]);
 
 /**
  * Report a miss to a person, once.
