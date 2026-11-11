@@ -113,6 +113,18 @@ crashed `ix map` or an unreachable database, fails the run either way.
 
 To see what a marked scenario still gets wrong, set `IX_E2E_DIFF_DIR`.
 
+### API reference
+
+`api-reference.e2e.ts` sends one request per method and path in
+`docs/api/openapi.yaml`, with `{}` as the body and a made-up id in every
+`{id}` slot, and fails on any the backend does not route: a 405, or a 404
+whose body matches the answer to a path no backend serves. A handler's own
+404 (no such entity, session or op) has a different body and passes. Only
+existence is checked, not request or response shapes. The request and
+classification logic is in `api-probe.ts`, unit-tested by `api-probe.test.ts`
+in `npm test`. Some documented routes write (reset, patch, savings), so the
+file waits for any async reset it starts and resets the database when done.
+
 ## In CI
 
 Job `e2e` in `.github/workflows/ci.yml` runs the scenarios on every PR after
