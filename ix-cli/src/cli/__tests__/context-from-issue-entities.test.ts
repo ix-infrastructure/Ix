@@ -2,7 +2,9 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { buildBundle, clampBudgets, issueBundleSection } from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { issueBundleSection } from "../context/issue.js";
+import { clampBudgets } from "../context/options.js";
 import { contextBundleSchema } from "../context-bundle-schema.js";
 import type { GraphNode } from "../../client/types.js";
 import type { ContextFacts, EntityLocation } from "../explain/facts.js";

@@ -14,19 +14,18 @@ import type {
   ScoredClaim,
 } from "../../client/types.js";
 import type { EntityFacts } from "../explain/facts.js";
+import { buildBundle } from "../context/bundle.js";
+import { diffInvestigations, renderInvestigationDiff } from "../context/investigation-diff.js";
 import {
-  buildBundle,
-  diffInvestigations,
   listInvestigations,
   renderInvestigationList,
   loadInvestigation,
   mergeDiffOptions,
-  parseRequestedBudgets,
-  renderBundle,
-  renderInvestigationDiff,
   renderSavedInvestigation,
   saveInvestigation,
-} from "../commands/context.js";
+} from "../context/investigations.js";
+import { parseRequestedBudgets } from "../context/options.js";
+import { renderBundle } from "../context/render.js";
 
 let home: string;
 let priorExitCode: number | string | undefined;

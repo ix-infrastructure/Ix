@@ -2,11 +2,8 @@
 
 import { describe, expect, it } from "vitest";
 
-import {
-  detectContextModeConflict,
-  renderLeanIssueLlm,
-  renderLeanIssueText,
-} from "../commands/context.js";
+import { renderLeanIssueLlm, renderLeanIssueText } from "../context/issue.js";
+import { detectContextModeConflict } from "../context/options.js";
 import {
   isGenericIdentifier,
   issueConfidence,

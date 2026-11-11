@@ -13,10 +13,10 @@ import type {
   ScoredClaim,
 } from "../../client/types.js";
 import type { EntityFacts } from "../explain/facts.js";
-import {
-  buildBundle, bundleFormat, bundleLlmLines, clampBudgets, llmNextByCut, llmNextLines, renderBundle, sanitizeId,
-  textEvidenceLines,
-} from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { sanitizeId } from "../context/investigations.js";
+import { bundleFormat, clampBudgets } from "../context/options.js";
+import { bundleLlmLines, llmNextByCut, llmNextLines, renderBundle, textEvidenceLines } from "../context/render.js";
 
 function makeFacts(overrides: Partial<EntityFacts> = {}): EntityFacts {
   return {

@@ -6,13 +6,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Command } from "commander";
 
-import {
-  detectContextModeConflict,
-  displayId,
-  registerContextCommand,
-  sanitizeId,
-  mergeDiffOptions,
-} from "../commands/context.js";
+import { registerContextCommand } from "../commands/context.js";
+import { displayId, sanitizeId, mergeDiffOptions } from "../context/investigations.js";
+import { detectContextModeConflict } from "../context/options.js";
 import {
   detectDiffModeConflict,
   registerDiffCommand,

@@ -3,7 +3,9 @@
 import { describe, expect, it } from "vitest";
 
 import type { IxClient } from "../../client/api.js";
-import { buildBundle, clampBudgets, diffInvestigations } from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { diffInvestigations } from "../context/investigation-diff.js";
+import { clampBudgets } from "../context/options.js";
 import { collectFacts, type ContextFacts, type EntityLocation } from "../explain/facts.js";
 import { collectRelatedFiles } from "../explain/related-files.js";
 
