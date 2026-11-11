@@ -167,11 +167,6 @@ export function unresolvedTargetMessage(target: string | string[]): string {
   return `No entity found matching "${target}".`;
 }
 
-/** The `--format json` record for a target that does not exist. */
-export function unresolvedTargetRecord(target: string | string[]): { error: string; message: string; targets?: string[] } {
-  return unresolvedTargetJson(unresolvedTargetMessage(target), Array.isArray(target) ? { targets: target } : {});
-}
-
 export function reportUnresolvedTarget(
   target: string | string[],
   format?: string,

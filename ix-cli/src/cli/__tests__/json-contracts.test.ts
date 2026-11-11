@@ -109,7 +109,7 @@ afterAll(() => {
 });
 beforeEach(() => {
   savedExitCode = process.exitCode;
-  search.mockReset().mockImplementation(async (term: string) => ({ Duplicate: DUPLICATES, Unique: UNIQUE } as Record<string, unknown[]>)[term] ?? []);
+  search.mockReset().mockImplementation(async (term: string) => ({ Duplicate: DUPLICATES, Unique: UNIQUE, Uniq: UNIQUE } as Record<string, unknown[]>)[term] ?? []);
 });
 afterEach(() => {
   process.exitCode = savedExitCode;
@@ -137,6 +137,24 @@ describe("ix locate (contracts/locate.ts)", () => {
     expect(exitCode).toBe(0);
     expectKeys<LocateJson>(body, ["resolvedTarget", "lineRange", "systemPath", "hasMapData", "diagnostics"]);
     expect(Object.keys(body.resolvedTarget as object).sort()).toEqual(["id", "kind", "name", "path"]);
+  });
+
+  it("an ambiguous name answers its top candidate with resolutionNotices (the default)", async () => {
+    const { body, exitCode } = await json(["locate", "Duplicate"]);
+    expect(exitCode).toBe(0);
+    expect(body.error).toBeUndefined();
+    expectKeys<LocateJson>(body, ["resolvedTarget", "resolutionMode", "lineRange", "systemPath", "hasMapData", "diagnostics", "resolutionNotices"]);
+    const [notice] = body.resolutionNotices as Array<Record<string, unknown>>;
+    expect(Object.keys(notice).sort()).toEqual(["candidates", "chosen", "code", "message", "target", "total"]);
+    expect(notice.code).toBe("ambiguous_target");
+  });
+
+  it("a fuzzy match answers with resolutionMode fuzzy and resolutionNotices", async () => {
+    const { body, exitCode } = await json(["locate", "Uniq"]);
+    expect(exitCode).toBe(0);
+    expect(body.resolutionMode).toBe("fuzzy");
+    expectKeys<LocateJson>(body, ["resolvedTarget", "resolutionMode", "lineRange", "systemPath", "hasMapData", "diagnostics", "resolutionNotices"]);
+    expect((body.resolutionNotices as Array<{ code: string }>).map((n) => n.code)).toEqual(["fuzzy_match"]);
   });
 
   it("a miss: locate's body plus the shared envelope", async () => {
@@ -187,6 +205,24 @@ describe("ix read (contracts/read.ts)", () => {
     expect(exitCode).toBe(0);
     expect(body.targetType).toBe("ambiguous-symbol");
     expectKeys<ReadAmbiguityJson>(body, ["targetType", "candidates", "diagnostics"]);
+  });
+
+  it("a fuzzy symbol answers with resolutionMode fuzzy and resolutionNotices", async () => {
+    // The mocked entity lives at src/only.ts; it exists only for this case so
+    // `read only.ts` above stays a unique file name.
+    fs.mkdirSync(path.join(workspace, "src"));
+    fs.writeFileSync(path.join(workspace, "src", "only.ts"), Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join("\n"));
+    let result: Awaited<ReturnType<typeof json>>;
+    try {
+      result = await json(["read", "Uniq", "--root", workspace]);
+    } finally {
+      fs.rmSync(path.join(workspace, "src"), { recursive: true, force: true });
+    }
+    const { body, exitCode } = result;
+    expect(exitCode).toBe(0);
+    expect(body.resolutionMode).toBe("fuzzy");
+    expect((body.resolutionNotices as Array<{ code: string }>).map((n) => n.code)).toEqual(["fuzzy_match"]);
+    expectKeys<ReadJson>(body, ["targetType", "path", "lineStart", "lineEnd", "content", "symbol", "kind", "resolutionMode", "resolutionNotices"]);
   });
 
   it("a miss is the shared unresolved_target record", async () => {

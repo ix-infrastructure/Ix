@@ -8,12 +8,17 @@
  * `{targets: [{target, exitCode, ...answer}], summary}` (multi-target.ts).
  */
 
+import type { ResolutionNotice } from "../resolve.js";
 import type { AmbiguousCandidate, JsonDiagnostic, TextMatchesJson, UnresolvedTargetJson } from "./miss.js";
 
-/** The entity a name resolved to (exit 0). */
+/**
+ * The entity a name resolved to (exit 0). A name that matched several entities
+ * (without `--strict`) or only fuzzily is answered for its top candidate, and
+ * the answer carries `resolutionNotices` saying so.
+ */
 export interface LocateJson {
   resolvedTarget: { id: string; kind: string; name: string; path?: string };
-  /** How it was chosen; absent for an exact match. */
+  /** How it was chosen (`"fuzzy"` for a fuzzy match); absent for an exact match. */
   resolutionMode?: string;
   lineRange?: { start: number; end: number };
   /** The type or module holding it, for a member. */
@@ -25,6 +30,12 @@ export interface LocateJson {
   map_stale?: true;
   regions_as_of?: { map_rev: number; file_count: number };
   diagnostics: string[];
+  /**
+   * Present when the target was a guess: an `ambiguous_target` notice lists the
+   * candidates passed over, a `fuzzy_match` notice says no name matched exactly.
+   * Never an `error`; the answer still exits 0.
+   */
+  resolutionNotices?: ResolutionNotice[];
 }
 
 /**

@@ -7,6 +7,7 @@
  * miss is the shared `unresolved_target` record (miss.ts), exit 3.
  */
 
+import type { ResolutionNotice } from "../resolve.js";
 import type { JsonDiagnostic } from "./miss.js";
 
 /**
@@ -44,6 +45,13 @@ export interface ReadJson {
    * `<from>` and capped again, so following it repeatedly reaches `spanEnd`.
    */
   next?: string;
+  /** `"fuzzy"` when a symbol matched no name exactly; absent otherwise. */
+  resolutionMode?: "fuzzy";
+  /**
+   * Present when a symbol read was a guess (a `fuzzy_match` notice, or an
+   * `ambiguous_target` tie); same records as `ix locate`'s. The read still exits 0.
+   */
+  resolutionNotices?: ResolutionNotice[];
 }
 /**
  * A file or symbol name that matches several (exit 0, as it always has).

@@ -83,13 +83,21 @@ entities when nothing is answered, prints a string `error` slug and a
 
 | `error` | Exit | Also carries |
 |---|---|---|
-| `unresolved_target` | 3 | `reason`, `files`, `suggestions`, `didYouMean`, `graph` when known |
+| `unresolved_target` | 3 | `reason`, `files`, `suggestions`, `didYouMean`, `graph` when known; `targets` when the target was a list of alternatives |
 | `ambiguous_target` | 2 | `candidates` (pick with `--pick <n>`), `total`, `truncated`, `diagnostics` |
 
 `candidates` belongs to an ambiguity only; a miss lists near names in
 `suggestions` and `didYouMean`. An ambiguity that was answered for its top
 candidate (exit 0) is not an error: it is a `resolutionNotices` entry beside
 the answer.
+
+**Guessed answers carry notices.** When `ix locate` or `ix read` answers a name
+that matched several entities (without `--strict`) or matched only fuzzily, the
+answer (exit 0) adds `resolutionNotices`: one record per guess, with `code`
+(`ambiguous_target` or `fuzzy_match`), `target`, `message`, `chosen`,
+`candidates`, `total`, and `truncated` or `diagnostics` when they apply. A fuzzy
+match also sets `resolutionMode: "fuzzy"`. These keys are part of the typed
+answers and are pinned by the same test.
 
 Two records predate the envelope and keep their shape for now:
 
