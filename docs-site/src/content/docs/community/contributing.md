@@ -40,6 +40,11 @@ backend, open an issue describing what the CLI needs, and a maintainer will carr
 - **OSS and Pro.** Some features belong to Ix Pro. Don't move Pro features into this repository. If you're unsure
   where something belongs, ask in your pull request.
 
+## Adding a language
+
+[Adding a language](/community/adding-a-language/) lists the files to change and the tests to write when Ix learns a
+new language or file format.
+
 ## Improving these docs
 
 Every page has an **Edit page** link at the bottom. The site's source is in `docs-site/` in the Ix repository. To
