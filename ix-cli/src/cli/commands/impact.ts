@@ -15,8 +15,8 @@ import { forMcp, suggest, type Relation } from "../next-step.js";
 import { llmLine, llmShortId } from "../llm.js";
 import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
+import { CONTAINER_KINDS } from "../graph-model.js";
 
-const CONTAINER_KINDS = new Set(["class", "module", "file", "object", "trait", "interface"]);
 
 export function registerImpactCommand(program: Command): void {
   program

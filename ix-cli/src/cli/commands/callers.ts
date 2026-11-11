@@ -22,6 +22,7 @@ import { renderWarning } from "../ui.js";
 import { currentRunSignal } from "../../client/run-signal.js";
 import { mapLimit } from "../../client/request-memo.js";
 import { clipSnippet } from "./text.js";
+import { TYPE_KINDS } from "../graph-model.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -36,7 +37,6 @@ export const DISPATCH_DEPTH = 5;
 /** Supertypes looked at, at most, for one target: each costs one small expand. */
 export const DISPATCH_MAX_TYPES = 16;
 
-export const TYPE_KINDS = new Set(["class", "interface", "enum", "record", "trait", "object", "annotation"]);
 export const byName = (a: any, b: any): number =>
   String(a.name ?? "").localeCompare(String(b.name ?? "")) || String(a.id ?? "").localeCompare(String(b.id ?? ""));
 

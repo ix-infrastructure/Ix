@@ -66,6 +66,16 @@ which value it ignored, on stderr, when a person is there to read it.
 - **Errors:** a uniform `error code=<slug> message="..."` line in the same
   format as data lines; the process still exits non-zero. A graph target that
   does not exist is always `unresolved_target`.
+  A failure no command handles itself (backend unreachable, a bad flag or
+  value as `usage_error`, a config that will not parse), and `ix status` /
+  `ix verify` failing to reach the backend, comes as one record on stdout in
+  the run's format, whether that was typed or set by `IX_FORMAT` or
+  `config.format`. In json it is `{"error": <slug>, "message": "...", "next": "..."}`,
+  and `next` appears only when there is a next step; the prose text would print
+  still goes to stderr alongside it. In llm the record replaces the prose. A bad
+  flag on a command that has no `--format` (`ix hook`, `ix mcp`) stays prose
+  whatever `IX_FORMAT` says. The exit code is the same as with text, where the
+  failure stays as prose on stderr.
   The graph commands (`locate`, `callers`, `callees`, `impact`, `explain` and
   the rest that resolve a target, `subsystems <region>` and `around` included)
   exit with a code per outcome, and json's `error` / llm's `error code=` carry

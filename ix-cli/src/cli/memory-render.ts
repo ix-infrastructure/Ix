@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import chalk from "chalk";
 import { currentRunSignal } from "../client/run-signal.js";
-import { isLocalEndpoint } from "./backend-version.js";
+import { isLoopbackEndpoint } from "./endpoint.js";
 import { ixHome } from "./ix-home.js";
 
 /**
@@ -136,7 +136,7 @@ export function reportWriteTarget(endpoint: string): void {
       "Run the ix that has Pro installed for cloud notes.\n",
     );
   }
-  const where = isLocalEndpoint(endpoint) ? "local backend" : "backend";
+  const where = isLoopbackEndpoint(endpoint) ? "local backend" : "backend";
   process.stderr.write(chalk.dim(`→ ${where} ${displayEndpoint(endpoint)}`) + "\n");
 }
 

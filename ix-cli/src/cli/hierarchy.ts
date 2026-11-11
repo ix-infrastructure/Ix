@@ -2,11 +2,9 @@
 
 import type { IxClient } from "../client/api.js";
 import { rowLocation, stripNulls } from "./format.js";
+import { FILE_KINDS, REGION_KINDS } from "./graph-model.js";
 
 export type SystemPath = Array<{ name: string; kind: string; id?: string }>;
-
-const REGION_KINDS = new Set(["system", "subsystem", "module", "region"]);
-const FILE_KINDS = new Set(["file"]);
 
 /** Traverse IN_REGION edges upward to build the system-hierarchy path for a node. */
 export async function getSystemPath(client: IxClient, nodeId: string): Promise<SystemPath> {

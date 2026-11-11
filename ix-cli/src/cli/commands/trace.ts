@@ -186,9 +186,11 @@ async function buildTraceTree(
     rootId,
     maxDepth,
     maxNodes,
-    // One call per predicate (matches depends.ts behaviour — order and dedup are stable)
+    // One call per node for all predicates, split by edge predicate (as in
+    // depends.ts — order and dedup are stable)
     predicates,
     expand: (nodeId, p) => client.expand(nodeId, { direction, predicates: [p], hops: 1 }),
+    expandAll: (nodeId, ps) => client.expand(nodeId, { direction, predicates: ps, hops: 1 }),
     makeNode: (n, _p, { name, resolved, cycle }) => ({
       id: n.id,
       name: resolved ? name : n.id.slice(0, 8),

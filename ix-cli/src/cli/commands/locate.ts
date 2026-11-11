@@ -24,12 +24,7 @@ import { humanizeLabel } from "../impact/risk-semantics.js";
 import { renderSection, renderKeyValue, renderNote, renderWarning, renderBreadcrumb, reportAmbiguousTarget, reportResolutionNotices } from "../ui.js";
 import { forMcp } from "../next-step.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
-
-const CONTAINER_KINDS = new Set(["class", "module", "file", "trait", "object", "interface"]);
-const FILE_KINDS = new Set(["file"]);
-
-// Region kinds whose names should be humanized in system path
-const REGION_KINDS = new Set(["system", "subsystem", "module", "region"]);
+import { CONTAINER_KINDS, FILE_KINDS, REGION_KINDS } from "../graph-model.js";
 
 interface LocateOutput {
   resolvedTarget: { id: string; kind: string; name: string; path?: string } | null;

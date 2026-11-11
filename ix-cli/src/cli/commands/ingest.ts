@@ -68,6 +68,7 @@ import { describeReplayedChanges } from '../graph-health.js';
 import { createClient } from "../../client/factory.js";
 import { mapLimit } from "../../client/request-memo.js";
 import { createLimiter, type Limiter } from "../tree-walk.js";
+import { describeUnavailableGrammars, readGrammarStatus, unavailableGrammarFiles, type UnavailableGrammarFiles } from "../grammar-status.js";
 // ---------------------------------------------------------------------------
 // File discovery
 // ---------------------------------------------------------------------------
@@ -1773,6 +1774,14 @@ export interface IngestFilesSummary {
    * unparsed skips, named because a file that times out does so on every run.
    */
   parseTimeouts: string[];
+  /**
+   * Discovered files whose language's grammar did not load on this machine,
+   * per language with the load error (#967). Those files cannot be parsed on
+   * this machine, on this run or any other, so `ix map` and `ix ingest` name
+   * them. Empty when every grammar the run needed loaded; optional only for
+   * summaries built by hand.
+   */
+  grammarUnavailable?: UnavailableGrammarFiles[];
 }
 
 /**
@@ -2206,7 +2215,7 @@ export async function ingestFiles(
   const trueStart = performance.now();
 
   const [
-    { parseFile, resolveEdges },
+    ingestionModule,
     {
       buildPatchWithResolution,
       buildDeletionPatch,
@@ -2218,6 +2227,7 @@ export async function ingestFiles(
     },
     { languageFromPath },
   ] = await loadIngestionModules();
+  const { parseFile, resolveEdges } = ingestionModule;
   const moduleLoadMs = Math.round(performance.now() - trueStart);
 
 
@@ -2367,7 +2377,7 @@ export async function ingestFiles(
     if (spec.startsWith('@')) { const parts = spec.split('/'); return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null; }
     return spec.split('/')[0] || null;
   };
-  const collectStitch = (parsedFiles: Array<{ filePath: string; entities?: Array<{ name: string; kind: string; container?: string }>; relationships?: Array<{ predicate: string; srcName?: string; dstName?: string; importRaw?: string }>; importBindings?: Array<{ pkg: string; local: string; imported: string }>; exportPublicNames?: Array<{ local: string; public: string }> }>): void => {
+  const collectStitch = (parsedFiles: Array<{ filePath: string; entities?: Array<{ name: string; kind: string; container?: string }>; relationships?: Array<{ predicate: string; srcName?: string; dstName?: string; importRaw?: string }>; importBindings?: Array<{ pkg: string; local: string; imported: string }>; exportPublicNames?: Array<{ local: string; public: string; source?: string }> }>): void => {
     for (const p of parsedFiles) {
       stitchFiles.push(p.filePath);
       for (const e of (p.entities ?? [])) {
@@ -2389,6 +2399,9 @@ export async function ingestFiles(
         if (!m.has(b.local)) m.set(b.local, { pkg: b.pkg, imported: b.imported });
       }
       for (const x of (p.exportPublicNames ?? [])) {
+        // A renaming re-export's `local` is another module's export, and the
+        // alias below is looked up by name alone: registration stays as it was.
+        if (x.source !== undefined) continue;
         stitchExportAliases.push({ filePath: p.filePath, local: x.local, pub: x.public });
       }
       for (const rel of (p.relationships ?? [])) {
@@ -2521,6 +2534,8 @@ export async function ingestFiles(
   }, 80) : null;
 
   let filesDiscovered = 0;
+  /** Discovered files per language whose grammar did not load (#967). */
+  let grammarUnavailable: UnavailableGrammarFiles[] = [];
   /**
    * Paths `--exclude` or `.ixignore` kept out of discovery.
    *
@@ -2832,6 +2847,7 @@ export async function ingestFiles(
       : resolutionPaths.map(toWorkspaceRelative).filter(rel => nodePath.posix.basename(rel) === '__init__.py');
 
     filesDiscovered = filePaths.length;
+    grammarUnavailable = unavailableGrammarFiles(filePaths, readGrammarStatus(ingestionModule), languageFromPath);
     const discovered = performance.now();
     timings.discoverMs = Math.round(discovered - start);
 
@@ -5309,6 +5325,7 @@ export async function ingestFiles(
     stitchSkippedRule,
     filesWithParseErrors,
     parseTimeouts: timedOutParses(),
+    grammarUnavailable,
     graphUnchanged:
       opts.force !== true &&
       !workspaceMigrated &&
@@ -5459,6 +5476,12 @@ export async function ingestFiles(
     if (tooLarge > 0) console.log(`  ${chalk.dim('skipped too large:')} ${tooLarge}`);
     if (minifiedLikely > 0) console.log(`  ${chalk.dim('skipped minified:')} ${minifiedLikely}`);
     if (filesWithParseErrors > 0) console.log(`  ${chalk.yellow("parsed with errors:")} ${filesWithParseErrors} ${chalk.dim("(tree-sitter recovered; parts may be missing)")}`);
+    // #967: name the languages behind part of `skipped`, one line each with
+    // why the grammar did not load. A count alone left "why are my Kotlin
+    // files not in the graph" with no answer anywhere in the output.
+    for (const line of describeUnavailableGrammars(grammarUnavailable)) {
+      console.log(`  ${chalk.yellow('grammar unavailable:')} ${line}`);
+    }
     if (summary.parseTimeouts.length > 0) console.log(`  ${chalk.yellow("skipped parse timeout:")} ${summary.parseTimeouts.length} ${chalk.dim(`(${summary.parseTimeouts.join(", ")})`)}`);
     // Not dimmed like the others: these were dropped because the repo pointed
     // at files outside itself, which is worth a look rather than a shrug.

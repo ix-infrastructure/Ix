@@ -17,7 +17,8 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import type { IxClient } from "../client/api.js";
-import { fetchBackendHealth, isLocalEndpoint } from "./backend-version.js";
+import { fetchBackendHealth } from "./backend-version.js";
+import { isLoopbackEndpoint } from "./endpoint.js";
 import { getEndpoint } from "./config.js";
 import { ixHome } from "./ix-home.js";
 
@@ -101,7 +102,7 @@ function isReleasedBackendRef(imageRef: string): boolean {
  * another port, a fixed 8090 inspected some other stack on the same host.
  */
 export function backendPortFor(endpoint: string): string | null {
-  if (!isLocalEndpoint(endpoint)) return null;
+  if (!isLoopbackEndpoint(endpoint)) return null;
   try {
     const url = new URL(endpoint);
     return url.port || (url.protocol === "https:" ? "443" : "80");
