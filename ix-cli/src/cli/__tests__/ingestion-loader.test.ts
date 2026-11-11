@@ -1,8 +1,11 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
+import type * as CoreIngestion from "@ix/core-ingestion";
+import type * as CorePatchBuilder from "@ix/core-ingestion/patch-builder";
+import type * as CoreLanguages from "@ix/core-ingestion/languages";
 
-import { isVmDynamicImportUnavailable } from "../commands/ingestion-loader.js";
+import { isVmDynamicImportUnavailable, loadIngestionModules } from "../commands/ingestion-loader.js";
 
 /**
  * The loader reaches `ingestFiles` through `new Function("return import(...)")`
@@ -134,5 +137,57 @@ describe("isVmDynamicImportUnavailable", () => {
 
     expect(err, "expected the import to fail").not.toBeNull();
     expect(isVmDynamicImportUnavailable(err)).toBe(false);
+  });
+});
+
+/**
+ * The boundary between this package and core-ingestion is typed by the
+ * library's own declarations (#953). The CLI used to describe the three modules
+ * with hand-written, all-`any` signatures that had drifted from the library --
+ * `resolveEdges` with three parameters to the library's four,
+ * `buildPatchWithResolution` without `multiRepo` and `resolutionSalt` -- so a
+ * change on either side compiled and broke at run time.
+ *
+ * The `expectTypeOf` and `@ts-expect-error` lines are checked by
+ * `npm run typecheck`, not by vitest: if the loader's types go back to `any`
+ * (or to a hand copy), those are what fail.
+ */
+describe("loadIngestionModules", () => {
+  type Loaded = Awaited<ReturnType<typeof loadIngestionModules>>;
+
+  it("is typed by core-ingestion's own declarations", () => {
+    expectTypeOf<Loaded[0]>().toEqualTypeOf<typeof CoreIngestion>();
+    expectTypeOf<Loaded[1]>().toEqualTypeOf<typeof CorePatchBuilder>();
+    expectTypeOf<Loaded[2]>().toEqualTypeOf<typeof CoreLanguages>();
+    expectTypeOf<Loaded[0]["resolveEdges"]>().not.toBeAny();
+    expectTypeOf<Loaded[1]["buildPatchWithResolution"]>().not.toBeAny();
+  });
+
+  it("rejects a call the library does not accept", () => {
+    // Never called: these exist only for the type checker.
+    const check = (ingestion: Loaded[0], patchBuilder: Loaded[1], parsed: CoreIngestion.FileParseResult) => {
+      // @ts-expect-error -- resolveEdges takes parse results, not paths
+      ingestion.resolveEdges(["src/a.ts"]);
+      // @ts-expect-error -- the resolved edges are required
+      patchBuilder.buildPatchWithResolution(parsed, "hash", "ws");
+    };
+    expect(typeof check).toBe("function");
+  });
+
+  it("loads the built modules the types describe", async () => {
+    const [ingestion, patchBuilder, languages] = await loadIngestionModules();
+    // The functions ingest calls through the typed handles. A declaration with
+    // no export behind it would type-check and fail here.
+    for (const fn of [
+      ingestion.parseFile, ingestion.resolveEdges, ingestion.summarizeParseResult,
+      ingestion.buildGlobalResolutionIndex, ingestion.isGrammarSupported,
+      patchBuilder.buildPatchWithResolution, patchBuilder.buildDeletionPatch,
+      patchBuilder.sourcePatchIdCandidates, patchBuilder.fileNodeId,
+      patchBuilder.symbolNodeId, patchBuilder.extractorName,
+      languages.languageFromPath,
+    ]) {
+      expect(typeof fn).toBe("function");
+    }
+    expect(Array.isArray(patchBuilder.PREVIOUS_EXTRACTORS)).toBe(true);
   });
 });

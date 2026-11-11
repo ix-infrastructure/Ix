@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ingestSymbolsJournalPath, ingestSymbolsPath } from "./config.js";
+import type { FileSummary } from "@ix/core-ingestion";
 
 /**
  * The symbol table an incremental `ix map` resolves against.
@@ -30,11 +31,13 @@ import { ingestSymbolsJournalPath, ingestSymbolsPath } from "./config.js";
  */
 const TABLE_VERSION = 2;
 
-/** What core-ingestion's `FileSummary` looks like from here: opaque except for the path. */
-export interface StoredSummary {
-  filePath: string;
-  [key: string]: unknown;
-}
+/**
+ * One file's summary as the table holds it. This CLI writes only what
+ * core-ingestion's `summarizeParseResult` returned (`FileSummary`), but an
+ * entry read back from disk is checked for `filePath` alone (`isValidEntry`),
+ * which is why the readers below go through the all-optional `SummaryFields`.
+ */
+export type StoredSummary = FileSummary | { filePath: string; [key: string]: unknown };
 
 export interface SymbolEntry {
   /** sha256 of the file the summary describes. */

@@ -25,7 +25,7 @@
     "e2e:up": "node test/e2e/stack.mjs up",
     "e2e:down": "node test/e2e/stack.mjs down",
     "smoke": "node test/parser.smoke.mjs",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "node scripts/build-core-ingestion.mjs && tsc --noEmit",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
     "knip": "knip && knip --directory ../core-ingestion",

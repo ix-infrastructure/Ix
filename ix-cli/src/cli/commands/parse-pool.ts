@@ -10,6 +10,7 @@
  * - Results collected via Promise.all preserve input ordering.
  */
 import { Worker } from 'node:worker_threads';
+import type { FileParseResult } from '@ix/core-ingestion';
 
 /**
  * The 'error' listener left on a worker the pool has let go of.
@@ -23,7 +24,7 @@ const SWALLOW_ERROR = (): void => {};
 type Task = {
   filePath: string;
   source: string;
-  resolve: (result: unknown) => void;
+  resolve: (result: FileParseResult | null) => void;
   /** Does losing this one mean the RUN lost a file? See `parse`. */
   counts: boolean;
   /** The backstop for a parse that never answers; see `onTaskTimeout`. */
@@ -108,7 +109,7 @@ export class ParsePool {
    * because most extensions are prescanned AND parsed, a dead pool could count
    * the same file twice and report more losses than the run discovered files.
    */
-  parse(filePath: string, source: string, countLoss = true): Promise<unknown> {
+  parse(filePath: string, source: string, countLoss = true): Promise<FileParseResult | null> {
     // A pool with no workers left cannot ever run this, so resolve it here
     // rather than enqueue it. Draining only the queue that existed at the
     // moment the last worker died left every LATER `parse()` waiting on a
@@ -448,7 +449,7 @@ export class ParsePool {
 
   private spawnWorker(): Worker {
     const w = new Worker(this.workerPath);
-    w.on('message', (msg: { ok: boolean; result: unknown }) => this.onResult(w, msg));
+    w.on('message', (msg: { ok: boolean; result: FileParseResult | null }) => this.onResult(w, msg));
     w.on('error', (err) => this.onError(w, err));
     // 'exit' as well as 'error'. A worker can go without ever emitting 'error'
     // -- `process.exit()` inside it, or the thread killed out from under the
@@ -621,7 +622,7 @@ export class ParsePool {
     return this.deaths;
   }
 
-  private onResult(w: Worker, msg: { ok: boolean; result: unknown; reason?: string }): void {
+  private onResult(w: Worker, msg: { ok: boolean; result: FileParseResult | null; reason?: string }): void {
     const task = this.active.get(w);
     if (!task) return;
     this.active.delete(w);

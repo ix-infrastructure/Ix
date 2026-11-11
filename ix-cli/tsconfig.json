@@ -8,7 +8,17 @@
     "strict": true,
     "esModuleInterop": true,
     "declaration": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    // Types only. ix-cli loads core-ingestion at run time by a relative path
+    // (commands/ingestion-loader.ts), never through this name, so the release
+    // layout is untouched; this lets the compiler check that boundary against
+    // the library's own declarations. They are build output, which is why
+    // `npm run typecheck` builds core-ingestion first.
+    "paths": {
+      "@ix/core-ingestion": ["../core-ingestion/dist/index.d.ts"],
+      "@ix/core-ingestion/patch-builder": ["../core-ingestion/dist/patch-builder.d.ts"],
+      "@ix/core-ingestion/languages": ["../core-ingestion/dist/languages.d.ts"]
+    }
   },
   // Covers tests too, so `npm run typecheck` keeps checking them.
   // The shipped build uses tsconfig.build.json, which excludes them from dist.
