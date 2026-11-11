@@ -5,7 +5,7 @@ import * as nodePath from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { createIgnoreMatcher, parseIgnoreFile, type IgnoreMatcher } from "./ignore-globs.js";
-import { SUPPORTED_EXTENSIONS } from "./supported-extensions.js";
+import { SUPPORTED_EXTENSIONS, SUPPORTED_FILE_NAMES } from "./supported-extensions.js";
 
 /**
  * Which files are the repository: one implementation for `ix ingest`/`ix map`,
@@ -96,10 +96,8 @@ export function isGeneratedFile(basename: string): boolean {
 
 export function isSupportedSourceFile(filePath: string): boolean {
   const fileName = nodePath.basename(filePath).toLowerCase();
-  return fileName === "dockerfile"
+  return SUPPORTED_FILE_NAMES.has(fileName)
     || fileName.endsWith(".dockerfile")
-    || fileName === "makefile"
-    || fileName === "gnumakefile"
     || SUPPORTED_EXTENSIONS.has(nodePath.extname(filePath).toLowerCase());
 }
 
