@@ -1,5 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { numberValue } from "./env.js";
+
 // ---------------------------------------------------------------------------
 // Run-scoped cutoff for an ingest whose every commit is failing.
 //
@@ -53,25 +55,18 @@
 // what lets a backend that has recovered mid-run prove so and unstick the rest.
 // ---------------------------------------------------------------------------
 
-const DEFAULT_LIMIT = 5;
-
-/** Consecutive failed commits before a run stops trying. 0 disables the cutoff. */
+/**
+ * Consecutive failed commits before a run stops trying. 0 disables the cutoff.
+ *
+ * Read with env.ts's number parser, never `parseInt`, which read "0.5" as 0 --
+ * silently DISABLING the cutoff -- and "1e3" as 1. A fraction keeps the
+ * default (5), and an all-space value is empty, not 0. A whole number too
+ * large to be exact is still an unambiguous instruction, "effectively never
+ * trip", so it is clamped to MAX_SAFE_INTEGER rather than falling back to the
+ * TIGHTEST cutoff, the one direction where guessing wrong loses writes.
+ */
 export function commitFailureLimit(raw = process.env.IX_COMMIT_FAILURE_LIMIT): number {
-  if (raw === undefined || raw === "") return DEFAULT_LIMIT;
-  // Matched, not coerced. `parseInt` stopped at the first non-digit, reading
-  // "0.5" as 0 -- silently DISABLING the cutoff, the opposite of a
-  // conservative fallback -- and "1e3" as 1, tripping on the very first
-  // failure. `Number` fixes those but accepts its own surprises: whitespace
-  // coerces to 0 (disabling it again) and "0x10" to 16. A plain-decimal match
-  // accepts exactly what the docs describe and falls back on everything else.
-  if (!/^\d+$/.test(raw.trim()) || raw.trim() !== raw) return DEFAULT_LIMIT;
-  const n = Number(raw);
-  // A plain-decimal value too large to be exact is still an unambiguous
-  // instruction: "effectively never trip". Falling back to the default gave
-  // them the TIGHTEST cutoff instead -- the opposite of what they asked for,
-  // and the one direction where guessing wrong loses writes.
-  if (!Number.isSafeInteger(n)) return Number.MAX_SAFE_INTEGER;
-  return n;
+  return numberValue("IX_COMMIT_FAILURE_LIMIT", raw);
 }
 
 export interface CommitBreaker {

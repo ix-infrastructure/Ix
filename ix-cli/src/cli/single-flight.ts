@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { hostname } from "node:os";
 import { createHash } from "node:crypto";
 import { ixHome } from "./ix-home.js";
+import { envNumber } from "./env.js";
 
 // ---------------------------------------------------------------------------
 // CLI-level single-flight lock for `ix map` / ingest.
@@ -32,10 +33,10 @@ function lockDir(): string {
   return process.env.IX_LOCK_DIR || join(ixHome(), "locks");
 }
 
-// Default: a held lock older than this is presumed stale (its holder crashed
-// without cleanup, or is a zombie). Generous enough to outlast a legitimately
-// slow map on a large repo, short enough that a wedge self-heals within a turn.
-const DEFAULT_LOCK_MAX_MS = 20 * 60 * 1000;
+// A held lock older than IX_MAP_LOCK_MAX_MS (default 20 min, in env.ts) is
+// presumed stale (its holder crashed without cleanup, or is a zombie). Generous
+// enough to outlast a legitimately slow map on a large repo, short enough that
+// a wedge self-heals within a turn.
 
 interface LockMeta {
   pid: number;
@@ -50,16 +51,10 @@ export interface LockHandle {
 }
 
 function lockMaxMs(): number {
-  const raw = process.env.IX_MAP_LOCK_MAX_MS;
-  if (!raw) return DEFAULT_LOCK_MAX_MS;
-  // Matched, not parsed. `Number.parseInt` reads any prefix, so an operator
-  // following the env table and writing `20m` got TWENTY MILLISECONDS: every
-  // held lock reads as abandoned on the next process's first look, and
-  // single-flight goes inert for the map lock and the stitch lock alike. The
-  // stitch cooldown backstops one of those; the map lock has nothing.
-  if (!/^\d+$/.test(raw)) return DEFAULT_LOCK_MAX_MS;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_LOCK_MAX_MS;
+  // Never `Number.parseInt`: it reads any prefix, so `20m` was TWENTY
+  // MILLISECONDS and every held lock read as abandoned on the next process's
+  // first look. env.ts's parser keeps the default for it.
+  return envNumber("IX_MAP_LOCK_MAX_MS");
 }
 
 function lockPathFor(key: string): string {

@@ -35,6 +35,9 @@
  * sees what it always saw. `IX_LEGACY_EXIT_CODES=1` collapses 2, 3 and 4 back
  * to 1 for an integration that compares the status against 1.
  */
+
+import { envFlag } from "./env.js";
+
 export const EXIT_OK = 0;
 export const EXIT_ERROR = 1;
 export const EXIT_AMBIGUOUS = 2;
@@ -65,13 +68,8 @@ Exit codes:
   errors again (exit 2 and 3). Exit 2 without --strict: a name only fuzzy
   matches carry and no source file mentions, or a --pick past the end. ${LEGACY_EXIT_CODES_ENV}=1 makes every non-zero exit 1.`;
 
-function envSwitch(name: string): boolean {
-  const value = process.env[name]?.trim().toLowerCase();
-  return !!value && value !== "0" && value !== "false" && value !== "no";
-}
-
 export function legacyExitCodes(): boolean {
-  return envSwitch(LEGACY_EXIT_CODES_ENV);
+  return envFlag(LEGACY_EXIT_CODES_ENV);
 }
 
 /**
@@ -79,7 +77,7 @@ export function legacyExitCodes(): boolean {
  * 3), as it was before ambiguous targets and text matches were answered.
  */
 export function strictTargets(opts?: { strict?: boolean }): boolean {
-  return !!opts?.strict || envSwitch(STRICT_TARGETS_ENV);
+  return !!opts?.strict || envFlag(STRICT_TARGETS_ENV);
 }
 
 /**

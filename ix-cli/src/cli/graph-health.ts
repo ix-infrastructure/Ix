@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import type { IxClient } from "../client/api.js";
 import { ixHome } from "./ix-home.js";
 import { revisionToken } from "./map-result-cache.js";
+import { envFlag, envNumber } from "./env.js";
 
 /**
  * Is the graph a command is about to answer from structurally intact?
@@ -281,8 +282,7 @@ function writeCached(key: string, revision: string, health: GraphHealth): void {
 
 /** How long the stats probe may take before the answer goes out without it. */
 export function graphHealthTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = Number(env.IX_GRAPH_HEALTH_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : 2000;
+  return envNumber("IX_GRAPH_HEALTH_TIMEOUT_MS", env);
 }
 
 /**
@@ -305,7 +305,7 @@ export async function checkGraphHealth(
   scope: GraphHealthScope,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<GraphHealth> {
-  if (env.IX_GRAPH_HEALTH === "0") return UNKNOWN;
+  if (!envFlag("IX_GRAPH_HEALTH", env)) return UNKNOWN;
   const key = cacheKey(client.endpoint, scope);
   if (!key) return UNKNOWN;
   try {

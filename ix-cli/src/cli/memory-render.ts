@@ -7,6 +7,7 @@ import chalk from "chalk";
 import { currentRunSignal } from "../client/run-signal.js";
 import { isLoopbackEndpoint } from "./endpoint.js";
 import { ixHome } from "./ix-home.js";
+import { envNumber, numberDefault } from "./env.js";
 
 /**
  * Small helpers shared by `ix note` and `ix session` (commands/note.ts,
@@ -55,14 +56,11 @@ export const STDIN_MAX_BYTES = 1024 * 1024;
  * LLM streaming into a pipe) is never cut off; `IX_STDIN_IDLE_MS` overrides
  * it, and 0 turns it off.
  */
-export const STDIN_IDLE_MS = 5 * 60_000;
+export const STDIN_IDLE_MS = numberDefault("IX_STDIN_IDLE_MS");
 
 /** The idle bound in effect: `IX_STDIN_IDLE_MS` when it is a non-negative number, else STDIN_IDLE_MS. */
 export function stdinIdleMs(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env.IX_STDIN_IDLE_MS?.trim();
-  if (!raw) return STDIN_IDLE_MS;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : STDIN_IDLE_MS;
+  return envNumber("IX_STDIN_IDLE_MS", env);
 }
 
 /**

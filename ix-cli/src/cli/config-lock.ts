@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import { hostname } from "node:os";
 import { randomBytes } from "node:crypto";
 import { namedLockPath } from "./single-flight.js";
+import { envNumber } from "./env.js";
 
 /**
  * The lock every write of config.yaml holds.
@@ -45,23 +46,13 @@ interface LockMeta {
   label: string;
 }
 
-const DEFAULT_WAIT_MS = 30_000;
-const DEFAULT_STALE_MS = 30_000;
 /** A lock file with no readable meta yet is being written; give it this long. */
 const UNREADABLE_GRACE_MS = 5_000;
 
-/** A positive whole number of ms from the environment, or the default. Digits only: "30s" is not 30 ms. */
-function envMs(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw || !/^\d+$/.test(raw)) return fallback;
-  const n = Number.parseInt(raw, 10);
-  return n > 0 ? n : fallback;
-}
-
 /** How long a writer waits for the lock before failing. */
-function waitMs(): number { return envMs("IX_CONFIG_LOCK_WAIT_MS", DEFAULT_WAIT_MS); }
+function waitMs(): number { return envNumber("IX_CONFIG_LOCK_WAIT_MS"); }
 /** A lock untouched for this long is presumed abandoned. */
-function staleMs(): number { return envMs("IX_CONFIG_LOCK_STALE_MS", DEFAULT_STALE_MS); }
+function staleMs(): number { return envNumber("IX_CONFIG_LOCK_STALE_MS"); }
 
 const pause = new Int32Array(new SharedArrayBuffer(4));
 /** A synchronous sleep: config writes run inside synchronous callers. */

@@ -18,6 +18,7 @@ import { resetReadScope } from "../cli/resolve.js";
 import { releaseLocksOwnedBy, setLockOwnerResolver } from "../cli/single-flight.js";
 import { IX_CALLER_ENV } from "../cli/next-step.js";
 import { runWithSignal } from "../client/run-signal.js";
+import { envFlag } from "../cli/env.js";
 
 const execFileAsync = promisify(execFile);
 const CLI_ENTRYPOINT = fileURLToPath(new URL("../cli/main.js", import.meta.url));
@@ -655,6 +656,6 @@ export async function runCurrentIx(
  * process path.
  */
 export function resolveDefaultRunner(options: InProcessRunnerOptions = {}): IxRunner {
-  if (process.env.IX_MCP_SUBPROCESS === "1") return runCurrentIx;
+  if (envFlag("IX_MCP_SUBPROCESS")) return runCurrentIx;
   return createInProcessRunner(options);
 }

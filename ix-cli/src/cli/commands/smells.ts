@@ -10,6 +10,7 @@ import { printJson, sliceRanked, truncationHint, type Slice } from "../format.js
 import { formatOption, MAX_WAIT_SECONDS, parseWaitSecondsOption } from "../options.js";
 import { forMcp } from "../next-step.js";
 import { canRenderProgress } from "../stderr.js";
+import { numberValue } from "../env.js";
 
 export interface SmellCandidate {
   file_id: string;
@@ -122,11 +123,10 @@ const PROGRESS_EVERY_MS = 10_000;
  */
 function smellsWaitSeconds(format: string, wait?: number, env = process.env.IX_SMELLS_WAIT): number {
   if (wait !== undefined) return wait;
-  const raw = forMcp() ? undefined : env?.trim();
-  // Matched, not parsed: `parseInt("15m")` is 15. A malformed value is ignored.
-  if (raw && /^\d+$/.test(raw) && Number(raw) > 0 && Number.isSafeInteger(Number(raw))) {
-    return Math.min(Number(raw), MAX_WAIT_SECONDS);
-  }
+  // env.ts's parser, never `parseInt` (`parseInt("15m")` is 15): a malformed
+  // value is ignored, and one past MAX_WAIT_SECONDS is cut to it.
+  const fromEnv = forMcp() ? undefined : numberValue("IX_SMELLS_WAIT", env);
+  if (fromEnv !== undefined) return fromEnv;
   return format === "json" || format === "llm" ? AGENT_WAIT_SECONDS : TEXT_WAIT_SECONDS;
 }
 

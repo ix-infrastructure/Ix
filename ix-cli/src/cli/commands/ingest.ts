@@ -45,7 +45,7 @@ import {
   drainInPasses,
   perFileAction,
 } from '../commit-breaker.js';
-import { retryCommit, TRANSIENT_RETRY_BUDGET_MS } from '../commit-retry.js';
+import { retryCommit } from '../commit-retry.js';
 import { createDatabaseProbe, probeDatabase } from '../database-probe.js';
 // Moved to commit-retry.ts with the retry loop that uses them; re-exported so
 // existing importers keep working.
@@ -76,6 +76,7 @@ import { createClient } from "../../client/factory.js";
 import { mapLimit } from "../../client/request-memo.js";
 import { createLimiter, type Limiter } from "../tree-walk.js";
 import { describeUnavailableGrammars, readGrammarStatus, unavailableGrammarFiles, type UnavailableGrammarFiles } from "../grammar-status.js";
+import { envFlag, envNumber, numberDefault, numberValue, parseNumber } from "../env.js";
 // ---------------------------------------------------------------------------
 // File discovery
 // ---------------------------------------------------------------------------
@@ -112,14 +113,12 @@ function parseLangs(raw: string): Set<string> {
 
 const MAX_FILE_BYTES = 1024 * 1024; // 1 MB
 
-/** Parse workers at most, unless IX_PARSE_WORKERS says otherwise. */
-const DEFAULT_PARSE_WORKERS = 8;
 /** Files a parse worker should have before another one is worth starting. */
 const FILES_PER_PARSE_WORKER = 50;
 
 /**
  * How many parse workers `expectedTasks` files deserve: one per 50 files,
- * never more than the cores less one or IX_PARSE_WORKERS (default 8), never
+ * never more than the cores less one or IX_PARSE_WORKERS (default 8, env.ts), never
  * fewer than one. Each worker loads every grammar, about 70 MB, so a worker
  * per core for a one-file edit cost more than the parse.
  */
@@ -128,8 +127,7 @@ export function parsePoolSize(
   cores: number = os.availableParallelism(),
   configured: string | undefined = process.env.IX_PARSE_WORKERS,
 ): number {
-  const fromEnv = Number(configured);
-  const cap = configured !== undefined && Number.isInteger(fromEnv) && fromEnv > 0 ? fromEnv : DEFAULT_PARSE_WORKERS;
+  const cap = numberValue('IX_PARSE_WORKERS', configured);
   return Math.max(1, Math.min(cores - 1, cap, Math.ceil(expectedTasks / FILES_PER_PARSE_WORKER)));
 }
 const MINIFIED_BYTES_THRESHOLD = 200 * 1024;
@@ -138,14 +136,14 @@ const MINIFIED_AVG_LINE_THRESHOLD = 2_000;
 const SLOW_WORK_LOG_MS = 5_000;
 const SLOW_WORK_REPEAT_MS = 10_000;
 
+/**
+ * A positive whole number from `process.env[name]`, or `fallback`. Read with
+ * env.ts's number parser, never `parseInt`, which reads any numeric prefix
+ * (`2k` meant 2). Registered variables are read with `envNumber` instead, which
+ * takes the default from the registry; this stays for other callers.
+ */
 export function parsePositiveIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name]?.trim();
-  if (!raw) return fallback;
-  // Matched, not parsed, as in single-flight's lockMaxMs: `parseInt` reads any
-  // numeric prefix, so `1e3` meant 1 and `2k` meant 2.
-  if (!/^\d+$/.test(raw)) return fallback;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  return parseNumber(process.env[name], { type: 'int', zero: false }) ?? fallback;
 }
 
 /**
@@ -154,11 +152,7 @@ export function parsePositiveIntEnv(name: string, fallback: number): number {
  * setting impossible to turn off (IX_COMMIT_CONFLICT_RETRIES=0 retried 6 times).
  */
 export function parseNonNegativeIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name]?.trim();
-  if (!raw) return fallback;
-  if (!/^\d+$/.test(raw)) return fallback;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isSafeInteger(parsed) ? parsed : fallback;
+  return parseNumber(process.env[name], { type: 'int', zero: true }) ?? fallback;
 }
 
 
@@ -601,19 +595,14 @@ export interface OrphanSweepBudget {
 }
 
 /** Default time budget of a run's orphan sweep (`IX_ORPHAN_SWEEP_MAX_MS`). */
-export const ORPHAN_SWEEP_MAX_MS = 60_000;
+export const ORPHAN_SWEEP_MAX_MS = numberDefault('IX_ORPHAN_SWEEP_MAX_MS');
 /** Default request budget of a run's orphan sweep (`IX_ORPHAN_SWEEP_MAX_REQUESTS`). */
-export const ORPHAN_SWEEP_MAX_REQUESTS = 25_000;
+export const ORPHAN_SWEEP_MAX_REQUESTS = numberDefault('IX_ORPHAN_SWEEP_MAX_REQUESTS');
 
 export function orphanSweepBudget(env: NodeJS.ProcessEnv = process.env): OrphanSweepBudget {
-  const read = (raw: string | undefined, fallback: number): number => {
-    if (raw === undefined || raw.trim() === '') return fallback;
-    const n = Number(raw);
-    return Number.isFinite(n) && n >= 0 ? n : fallback;
-  };
   return {
-    maxMs: read(env.IX_ORPHAN_SWEEP_MAX_MS, ORPHAN_SWEEP_MAX_MS),
-    maxRequests: read(env.IX_ORPHAN_SWEEP_MAX_REQUESTS, ORPHAN_SWEEP_MAX_REQUESTS),
+    maxMs: envNumber('IX_ORPHAN_SWEEP_MAX_MS', env),
+    maxRequests: envNumber('IX_ORPHAN_SWEEP_MAX_REQUESTS', env),
     usedMs: 0,
     requests: 0,
     skipped: 0,
@@ -888,9 +877,8 @@ export function backendAppliesBulkDeletes(
   health: { release_version?: unknown } | null | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  const forced = env.IX_BULK_DELETES;
-  if (forced === '1') return true;
-  if (forced === '0') return false;
+  const forced = envFlag('IX_BULK_DELETES', env);
+  if (forced !== undefined) return forced;
   return releaseAtLeast(health, BULK_DELETES_SINCE) === true;
 }
 
@@ -1180,7 +1168,7 @@ export function parseSuggestedMaxPatches(err: unknown): number | undefined {
  * 49,900 documents on every map but a backend's first. Over it, a request is
  * refused with a 413 before any write; this default stays under it.
  */
-export const DEFAULT_COMMIT_MAX_OPS = 45_000;
+export const DEFAULT_COMMIT_MAX_OPS = numberDefault('IX_COMMIT_MAX_OPS');
 
 /** Per-request bounds on a bulk commit. A run lowers them when a commit is too large. */
 export interface BulkLimits {
@@ -2204,7 +2192,7 @@ export async function ingestFiles(
   // out of it, a timed-out ingest kept fanning out per-file commits that failed
   // at once on the aborted signal and charged them to the backend.
   opts = { ...opts, deadlineSignal: combineSignals(opts.deadlineSignal, currentRunSignal()) };
-  const debug = opts.debug || process.env.IX_DEBUG === '1';
+  const debug = opts.debug || envFlag('IX_DEBUG');
   const mapMode = opts.mapMode === true;
   const pruneStaleWorkspace = opts.pruneStaleWorkspace === true;
   // Before anything is re-keyed: the prune is local-only.
@@ -2906,7 +2894,7 @@ export async function ingestFiles(
     // an edited file's reconcile to the second stored patch; an ordinary edit
     // reads only the first, as before IN-20.
     const reconcileOrphans = extractorChanged(previousBaseline, currentExtractor)
-      || (Boolean(opts.force) && process.env.IX_RECONCILE_ON_FORCE === '1');
+      || (Boolean(opts.force) && envFlag('IX_RECONCILE_ON_FORCE'));
     // The same-hash sweep reads, per file, the stored patch an earlier
     // extractor wrote for the file's hash. On an extractor change that is the
     // extractor the baseline recorded. On an opted-in --force at the current
@@ -3309,10 +3297,10 @@ export async function ingestFiles(
     // and overlaps well with commit (~5s) + parse (~5s).
     // IX_PARSE_STREAM_CHUNK is for tests: it lets a run of a hundred files
     // cross the same batch boundaries as a run of a thousand. Unset, 500.
-    const PARSE_STREAM_CHUNK     = parsePositiveIntEnv('IX_PARSE_STREAM_CHUNK', 500);
-    const COMMIT_HTTP_MAX_FILES  = parsePositiveIntEnv('IX_COMMIT_HTTP_MAX_FILES', 1000); // files per HTTP request to the backend
+    const PARSE_STREAM_CHUNK     = envNumber('IX_PARSE_STREAM_CHUNK');
+    const COMMIT_HTTP_MAX_FILES  = envNumber('IX_COMMIT_HTTP_MAX_FILES'); // files per HTTP request to the backend
     // Ops per HTTP request; see DEFAULT_COMMIT_MAX_OPS.
-    const COMMIT_MAX_OPS         = parsePositiveIntEnv('IX_COMMIT_MAX_OPS', DEFAULT_COMMIT_MAX_OPS);
+    const COMMIT_MAX_OPS         = envNumber('IX_COMMIT_MAX_OPS');
     /**
      * The bulk bounds for the rest of the run. A 413 lowers them, so later
      * batches start at a size that fits instead of failing and splitting again.
@@ -3375,15 +3363,15 @@ export async function ingestFiles(
       }
       return cutToLimits(items);
     };
-    const COMMIT_CONCURRENCY     = parsePositiveIntEnv('IX_COMMIT_CONCURRENCY', 8); // parallel HTTP save requests
+    const COMMIT_CONCURRENCY     = envNumber('IX_COMMIT_CONCURRENCY'); // parallel HTTP save requests
     // Retries of one commit after a lock conflict or a transport drop. 0: none.
-    const COMMIT_CONFLICT_RETRIES = parseNonNegativeIntEnv('IX_COMMIT_CONFLICT_RETRIES', 6);
+    const COMMIT_CONFLICT_RETRIES = envNumber('IX_COMMIT_CONFLICT_RETRIES');
     // Total wait for re-sending a BULK the backend answered 502/503/504/429
     // (at most three retries, `Retry-After` cut to it). 0: no such retries.
     // Its own knob, so turning conflict retries off leaves these alone.
-    const COMMIT_TRANSIENT_RETRY_MS = parseNonNegativeIntEnv('IX_COMMIT_TRANSIENT_RETRY_MS', TRANSIENT_RETRY_BUDGET_MS);
+    const COMMIT_TRANSIENT_RETRY_MS = envNumber('IX_COMMIT_TRANSIENT_RETRY_MS');
     // Re-sends of a commit that lost the base-rev race to another writer; see retryOnBaseRevRace.
-    const COMMIT_BASE_REV_RETRIES = parsePositiveIntEnv('IX_COMMIT_BASE_REV_RETRIES', 8);
+    const COMMIT_BASE_REV_RETRIES = envNumber('IX_COMMIT_BASE_REV_RETRIES');
     let baseRevRetries = 0;
     const noteBaseRevRetry = (): void => {
       baseRevRetries++;
