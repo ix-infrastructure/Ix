@@ -13,10 +13,10 @@ import { isFileStale } from "../stale.js";
 import { anchorSpan, bareName } from "../edge-sites.js";
 import { WALK_ENTRY_BUDGET, WALK_IGNORE_DIRS, basenameMatcher } from "../symbol-read-check.js";
 import { relativePath, printJson } from "../format.js";
-import { llmError, llmLine, llmShortId, printLlmLines } from "../llm.js";
+import { llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { formatOption, pathOption, pickOption } from "../options.js";
 import { disambiguationHint } from "../next-step.js";
-import { reportResolutionNotices, reportUnresolvedTarget } from "../ui.js";
+import { reportFailure, reportResolutionNotices, reportUnresolvedTarget } from "../ui.js";
 import type { ReadAmbiguityJson, ReadFailureJson, ReadJson } from "../contracts/read.js";
 
 /** The answer before its path is made workspace-relative; see contracts/read.ts. */
@@ -44,16 +44,14 @@ function checkStale(filePath: string): boolean {
 function guardReadable(absPath: string, explicitRoot: string | undefined, what: string, format: string): boolean {
   if (isReadablePath(absPath, explicitRoot)) return true;
   const message = `Refusing to read ${what} outside the workspace: ${absPath}`;
-  if (format === "json") {
-    printJson(readFailureJson("path_outside_workspace", message));
-  } else if (format === "llm") {
-    console.log(llmError("path_outside_workspace", message));
-  } else {
-    stderr(chalk.red(message));
+  // The json record is ReadFailureJson (contracts/read.ts).
+  reportFailure("path_outside_workspace" satisfies ReadFailureJson["error"], message, format);
+  // The roots are guidance for a person, so they go with the prose on stderr;
+  // llm's record is the whole report.
+  if (format !== "llm") {
     for (const root of readableRoots(explicitRoot)) stderr(chalk.dim(`  allowed root: ${root}`));
     stderr(chalk.dim("  Use --root to read from a different workspace, or ix init to register one."));
   }
-  process.exitCode = 1;
   return false;
 }
 
@@ -61,14 +59,7 @@ function reportInvalidLineRange(target: string, format: string, paged = false): 
   const message = paged
     ? `Invalid line range in "${target}". Line numbers must start at 1, the end must not precede the start, and a page start (@n) must fall inside the range.`
     : `Invalid line range in "${target}". Line numbers must start at 1 and the end must not precede the start.`;
-  if (format === "json") {
-    printJson(readFailureJson("invalid_line_range", message));
-  } else if (format === "llm") {
-    console.log(llmError("invalid_line_range", message));
-  } else {
-    stderr(chalk.red(message));
-  }
-  process.exitCode = 1;
+  reportFailure("invalid_line_range" satisfies ReadFailureJson["error"], message, format);
 }
 
 /**
@@ -348,10 +339,6 @@ export function outputResult(result: ReadResult, format: string): void {
 /** The `--format json` answer: the read, with its path workspace-relative. */
 function readJson(result: ReadResult): ReadJson {
   return { ...result, path: relativePath(result.path) ?? result.path };
-}
-
-function readFailureJson(error: ReadFailureJson["error"], message: string): ReadFailureJson {
-  return { error, message };
 }
 
 function outputAmbiguity(result: AmbiguityResult, target: string, format: string): void {

@@ -10,6 +10,7 @@ import { roundFloat, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
 import { formatOption, parsePickOption } from "../options.js";
 import { setOutcome } from "../outcome.js";
+import { CliUsageError } from "../errors.js";
 import { renderMapText, renderMapLlm, type MapRegion, type MapResult } from "./map.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm } from "../map-freshness.js";
 import {
@@ -119,49 +120,24 @@ Examples:
       verbose?: boolean;
       explain?: boolean;
     }) => {
+      // Flag conflicts first: a usage error needs no backend, and is answered
+      // by the top-level handler in this command's format.
+      const target = resolveSubsystemTarget(positionalTarget, opts.target);
+      const pick = { value: opts.pick };
+      if (target.error) throw new CliUsageError(target.error);
+      if (opts.list && target.value) throw new CliUsageError("Scoped targets are not supported with --list.");
+      if (opts.list && opts.explain) throw new CliUsageError("--explain cannot be used with --list.");
+      if (opts.detailed && !opts.list) throw new CliUsageError("--detailed requires --list.");
+      const detailedQuery = parseDetailedListQuery(opts);
+      if (detailedQuery.error) throw new CliUsageError(detailedQuery.error);
+      if (!target.value && pick.value !== undefined) throw new CliUsageError("--pick requires a target.");
+      if (opts.explain && !target.value) throw new CliUsageError("--explain requires a target.");
+
       const client = createClient();
       // Auto-detect a multi-repo system; scope by system_id (spanning all member
       // repos) when present, otherwise the single-repo workspace_id.
       const systemId = await resolveReadSystemId(client);
       const scope = { workspaceId: systemId ? undefined : resolveWorkspaceId(), systemId };
-      const target = resolveSubsystemTarget(positionalTarget, opts.target);
-      const pick = { value: opts.pick };
-      if (target.error) {
-        console.error(chalk.red("Error:"), target.error);
-        process.exitCode = 1;
-        return;
-      }
-      if (opts.list && target.value) {
-        console.error(chalk.red("Error:"), "Scoped targets are not supported with --list.");
-        process.exitCode = 1;
-        return;
-      }
-      if (opts.list && opts.explain) {
-        console.error(chalk.red("Error:"), "--explain cannot be used with --list.");
-        process.exitCode = 1;
-        return;
-      }
-      if (opts.detailed && !opts.list) {
-        console.error(chalk.red("Error:"), "--detailed requires --list.");
-        process.exitCode = 1;
-        return;
-      }
-      const detailedQuery = parseDetailedListQuery(opts);
-      if (detailedQuery.error) {
-        console.error(chalk.red("Error:"), detailedQuery.error);
-        process.exitCode = 1;
-        return;
-      }
-      if (!target.value && pick.value !== undefined) {
-        console.error(chalk.red("Error:"), "--pick requires a target.");
-        process.exitCode = 1;
-        return;
-      }
-      if (opts.explain && !target.value) {
-        console.error(chalk.red("Error:"), "--explain requires a target.");
-        process.exitCode = 1;
-        return;
-      }
 
       // An `ix map` after an edit may have left the map for this read (CL-13).
       // Never throws and never moves the exit code. The json and llm answers
@@ -172,19 +148,11 @@ Examples:
       const sayStaleLlm = (): void => { for (const line of mapStaleLlm(mapState)) console.log(line); };
 
       if (opts.list) {
-        let result: SubsystemListResult;
-        try {
+        let result = await loadSubsystemScores(client, detailedQuery.value ?? {}, scope);
+        // Auto-trigger scoring if no persisted scores exist yet
+        if (result.scores.length === 0) {
+          await client.scoreSubsystems(scope);
           result = await loadSubsystemScores(client, detailedQuery.value ?? {}, scope);
-          // Auto-trigger scoring if no persisted scores exist yet
-          if (result.scores.length === 0) {
-            await client.scoreSubsystems(scope);
-            result = await loadSubsystemScores(client, detailedQuery.value ?? {}, scope);
-          }
-        } catch (err: any) {
-          if (opts.format === "llm") console.log(llmError("backend_error", err.message ?? "subsystems request failed"));
-          else console.error(chalk.red("Error:"), err.message);
-          process.exitCode = 1;
-          return;
         }
 
         warnSubsystemListTruncation(result);
@@ -242,28 +210,17 @@ Examples:
           setSubsystemErrorExit(body);
           return;
         }
-        console.error(chalk.red("Error:"), err.message);
-        process.exitCode = 1;
-        return;
+        throw err;
       }
 
       if (opts.explain) {
         if (!isScopedSubsystemResult(result)) {
-          console.error(chalk.red("Error:"), "--explain requires a scoped subsystem target.");
-          process.exitCode = 1;
-          return;
+          throw new CliUsageError("--explain requires a scoped subsystem target.");
         }
 
-        let scoreResult: { scores?: SubsystemScore[] };
-        try {
-          scoreResult = await client.listSubsystems(scope);
-          if ((scoreResult.scores ?? []).length === 0) {
-            scoreResult = await client.scoreSubsystems(scope);
-          }
-        } catch (err: any) {
-          console.error(chalk.red("Error:"), err.message);
-          process.exitCode = 1;
-          return;
+        let scoreResult: { scores?: SubsystemScore[] } = await client.listSubsystems(scope);
+        if ((scoreResult.scores ?? []).length === 0) {
+          scoreResult = await client.scoreSubsystems(scope);
         }
 
         const score = (scoreResult.scores ?? []).find((candidate) => candidate.region_id === result.target.id) ?? null;
