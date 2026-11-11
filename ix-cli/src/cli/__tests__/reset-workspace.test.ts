@@ -17,7 +17,7 @@ vi.mock("../../client/api.js", () => ({
 }));
 
 import { registerResetCommand } from "../commands/reset.js";
-import { ingestMtimeCachePath, saveConfig } from "../config.js";
+import { WORKSPACE_STATE_FILES, ingestMtimeCachePath, saveConfig } from "../config.js";
 
 /**
  * `ix reset --workspace`: the repair a degraded graph points at. It must touch
@@ -87,6 +87,25 @@ describe("ix reset --workspace", () => {
     expect(fs.existsSync(cache)).toBe(false);
     expect(out.join("\n")).toContain("Workspace 'mine' (id bbbb0002) wiped. Other workspace ids untouched.");
     expect(process.exitCode).toBeUndefined();
+  });
+
+  it("clears every registered ingest and map state file of the workspace, and only those", async () => {
+    // Registering a new state file in a group is all it takes to be cleared;
+    // one left out of the registry fails the registry test in workspace-state.test.ts.
+    for (const root of [mine, theirs]) {
+      for (const f of WORKSPACE_STATE_FILES) {
+        fs.mkdirSync(path.dirname(f.path(root)), { recursive: true });
+        fs.writeFileSync(f.path(root), "{}");
+      }
+    }
+    process.chdir(mine);
+
+    await run(["--workspace", "--yes"]);
+
+    for (const f of WORKSPACE_STATE_FILES) {
+      expect(fs.existsSync(f.path(mine)), `${f.name} (${f.group})`).toBe(f.group === "kept");
+      expect(fs.existsSync(f.path(theirs)), `other workspace's ${f.name}`).toBe(true);
+    }
   });
 
   it("refuses a directory no workspace covers, rather than resetting the default one", async () => {
