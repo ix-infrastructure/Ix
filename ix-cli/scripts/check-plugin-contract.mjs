@@ -13,7 +13,8 @@
  *   node scripts/check-plugin-contract.mjs <plugins-dir>   # one checkout per plugin under it
  *   node scripts/check-plugin-contract.mjs --clone          # shallow-clone the six plugins' main first
  *
- * Needs a build (`npm run build`): the surface comes from scripts/dump-cli-surface.mjs.
+ * Needs a build (`npm run build`): the surface comes from scripts/dump-cli-surface.mjs,
+ * and the Pro command names from dist/cli/register/pro-surface.js.
  * Exit 1 when an invocation names an unknown command or flag. Known false
  * positives go in scripts/plugin-contract-ignore.json.
  */
@@ -22,7 +23,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, extname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /* global process, console */
 
@@ -31,11 +32,8 @@ const PLUGINS = [
   "ix-claude-plugin", "ix-codex-plugin", "ix-cursor-plugin",
   "ix-gemini-plugin", "ix-openclaw-plugin", "ix-opencode-plugin",
 ];
-/** Ix Pro commands: registered by @ix/pro, not by this build. */
-const PRO_COMMANDS = new Set([
-  "plan", "plans", "task", "tasks", "workflow", "workflows", "decide", "decisions",
-  "goal", "goals", "truth", "bug", "bugs", "briefing",
-]);
+/** No Pro surface: every Pro command reads as unknown. main() loads the real one. */
+const NO_PRO = { commands: new Set(), retired: new Map() };
 /** Accepted by every command (commander adds --help; --version is the root's). */
 const GLOBAL_FLAGS = new Set(["--help", "--version"]);
 const CODE_EXT = new Set([".ts", ".mts", ".cts", ".js", ".mjs", ".cjs", ".py"]);
@@ -55,6 +53,16 @@ function loadSurface() {
     });
   }
   return commands;
+}
+
+/**
+ * Ix Pro commands (registered by @ix/pro, not by this build) and retired Pro
+ * names, from the one table in src/cli/register/pro-surface.ts — read from the
+ * build, like the rest of the surface, so this script never keeps its own list.
+ */
+export async function loadProSurface(path = join(here, "..", "dist", "cli", "register", "pro-surface.js")) {
+  const { PRO_COMMAND_NAMES, PRO_RETIRED } = await import(pathToFileURL(path).href);
+  return { commands: new Set(PRO_COMMAND_NAMES), retired: new Map(Object.entries(PRO_RETIRED)) };
 }
 
 function loadIgnores() {
@@ -159,11 +167,13 @@ function flagName(token) {
   return token.split("=")[0].replace(/[\\`'",.;:!?)\]}]+$/, "");
 }
 
-/** What is wrong with one invocation, or null. */
-export function check(argv, surface) {
+/** What is wrong with one invocation, or null. `pro` comes from {@link loadProSurface}. */
+export function check(argv, surface, pro = NO_PRO) {
   const cmd = argv[0];
   if (!/^[a-z][a-z-]*$/.test(cmd)) return null; // a placeholder or a variable
-  if (PRO_COMMANDS.has(cmd)) return null;
+  if (pro.commands.has(cmd)) return null;
+  const replacement = pro.retired.get(cmd);
+  if (replacement) return `retired Pro command "${cmd}": use "ix ${replacement}"`;
   const top = surface.get(cmd);
   if (!top) return `unknown command "${cmd}"`;
   let entry = top;
@@ -182,7 +192,7 @@ export function check(argv, surface) {
   return bad.length ? `"${name}" has no ${bad.join(", ")}` : null;
 }
 
-function main(argv) {
+async function main(argv) {
   let dir = argv.find((a) => !a.startsWith("--"));
   if (argv.includes("--clone")) {
     dir = mkdtempSync(join(tmpdir(), "ix-plugins-"));
@@ -195,6 +205,13 @@ function main(argv) {
     return 2;
   }
   const surface = loadSurface();
+  let pro;
+  try {
+    pro = await loadProSurface();
+  } catch (err) {
+    console.error(`cannot load the Pro surface from dist/: run 'npm run build' in ix-cli first.\n${err}`);
+    return 2;
+  }
   const ignores = loadIgnores();
   const problems = [];
   let checked = 0;
@@ -213,7 +230,7 @@ function main(argv) {
       ];
       for (const inv of invocations) {
         checked++;
-        const problem = check(inv.argv, surface);
+        const problem = check(inv.argv, surface, pro);
         if (!problem) continue;
         const where = `${repo}/${relative(root, file)}:${inv.line}`;
         if (ignores.some((ig) => where.startsWith(ig.where) && (!ig.match || inv.snippet.includes(ig.match)))) continue;
@@ -233,4 +250,4 @@ function main(argv) {
 // Run as a script, not when a test imports it. Real paths, so a symlinked
 // invocation still runs the check rather than exiting 0 having checked nothing.
 const isMain = process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
-if (isMain) process.exit(main(process.argv.slice(2)));
+if (isMain) process.exit(await main(process.argv.slice(2)));

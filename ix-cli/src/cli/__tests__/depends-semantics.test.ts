@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import { registerDependsCommand } from "../commands/depends.js";
+import { expandAnswer } from "./helpers/expand-answer.js";
 
 /**
  * `ix depends` presents results in dependency direction, walks the upstream
@@ -94,8 +95,8 @@ beforeEach(() => {
   process.exitCode = undefined;
   search.mockReset().mockImplementation(async (term: string, opts?: { kind?: string }) =>
     [TARGET].filter((n) => n.name.toLowerCase().includes(term.toLowerCase()) && (!opts?.kind || n.kind === opts.kind)));
-  expand.mockReset().mockImplementation(async (id: string, opts: { predicates: string[] }) =>
-    ({ nodes: INBOUND[`${id}|${opts.predicates[0]}`] ?? [], edges: [] }));
+  expand.mockReset().mockImplementation(async (id: string, opts: { direction: string; predicates: string[] }) =>
+    expandAnswer(id, opts.direction, Object.fromEntries(opts.predicates.map((p) => [p, INBOUND[`${id}|${p}`] ?? []])), opts.predicates));
 });
 
 afterEach(() => {
@@ -112,15 +113,14 @@ describe("depends direction semantics", () => {
     expect(command.description()).not.toContain("reverse CALLS");
   });
 
-  it("walks inbound edges one hop and one predicate at a time, across all five predicates", async () => {
+  it("walks inbound edges one hop at a time, one request per node for all five predicates", async () => {
     await run(["Target", "--format", "json"]);
     expect(expand).toHaveBeenCalled();
     for (const [, opts] of expand.mock.calls) {
       expect(opts).toMatchObject({ direction: "in", hops: 1 });
-      expect(opts.predicates).toHaveLength(1);
+      expect(opts.predicates).toEqual(["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "IMPLEMENTS"]);
     }
-    const atRoot = new Set(expand.mock.calls.filter(([id]) => id === "target-id").map(([, opts]) => opts.predicates[0]));
-    expect(atRoot).toEqual(new Set(["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "IMPLEMENTS"]));
+    expect(expand.mock.calls.filter(([id]) => id === "target-id")).toHaveLength(1);
   });
 
   it("text heading uses dependency-oriented language", async () => {

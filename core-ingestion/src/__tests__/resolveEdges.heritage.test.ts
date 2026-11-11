@@ -417,7 +417,7 @@ describe('EXTENDS resolution for TypeScript bases', () => {
       parseFile('/repo/src/widget.ts', 'export class W extends Base {}\n')!,
     ];
     const index = buildGlobalResolutionIndex(
-      parsed.map(r => r.filePath), undefined, undefined,
+      parsed.map(r => r.filePath),
       new Map(parsed.map(r => [r.filePath, summarizeParseResult(r)])),
     );
     expect(resolveEdges([parsed[1]], undefined, index)
@@ -474,7 +474,7 @@ describe('EXTENDS resolution for TypeScript bases', () => {
         const { tsModule: _m, tsGlobalTypes: _g, ...old } = summarizeParseResult(r);
         return [r.filePath, r.filePath === srcPath ? summarizeParseResult(r) : { ...old, sig: 'old' }];
       }));
-      const index = buildGlobalResolutionIndex(parsed.map(r => r.filePath), undefined, undefined, summaries);
+      const index = buildGlobalResolutionIndex(parsed.map(r => r.filePath), summaries);
       return resolveEdges(parsed.filter(r => r.filePath === srcPath), undefined, index)
         .filter(edge => edge.predicate === 'EXTENDS')
         .map(edge => `${edge.dstName} -> ${edge.dstFilePath}`);

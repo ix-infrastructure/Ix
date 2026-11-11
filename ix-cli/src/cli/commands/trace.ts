@@ -18,7 +18,7 @@ import {
 import { compactTreeNode, relativePath, printJson } from "../format.js";
 import { llmLine, llmShortId, type LlmValue } from "../llm.js";
 import { traversalHint } from "./depends.js";
-import { parseCountOption, parsePickOption, STRICT_TARGET_HELP } from "../options.js";
+import { formatOption, parseCountOption, pathOption, pickOption, strictOption } from "../options.js";
 import { createLimiter, EXPAND_CONCURRENCY, walkTree, type Limiter, type TreeWalkResult } from "../tree-walk.js";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -186,9 +186,11 @@ async function buildTraceTree(
     rootId,
     maxDepth,
     maxNodes,
-    // One call per predicate (matches depends.ts behaviour — order and dedup are stable)
+    // One call per node for all predicates, split by edge predicate (as in
+    // depends.ts — order and dedup are stable)
     predicates,
     expand: (nodeId, p) => client.expand(nodeId, { direction, predicates: [p], hops: 1 }),
+    expandAll: (nodeId, ps) => client.expand(nodeId, { direction, predicates: ps, hops: 1 }),
     makeNode: (n, _p, { name, resolved, cycle }) => ({
       id: n.id,
       name: resolved ? name : n.id.slice(0, 8),
@@ -519,10 +521,10 @@ export function registerTraceCommand(program: Command): void {
     .option("--kind <kind>", "Relationship kind: calls|imports|depends|contains")
     .option("--depth <n>", "Cap traversal depth in edges (also applies to --to)")
     .option("--cap <n>", "Cap nodes visited per direction, or across the --to search (including the source)")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(pickOption())
+    .addOption(strictOption())
+    .addOption(pathOption())
+    .addOption(formatOption())
     .option("--include-tests", "Include test and fixture entities")
     .option("--tests-only", "Show only test and fixture entities")
     .addHelpText(

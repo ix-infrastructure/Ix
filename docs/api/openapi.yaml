@@ -96,30 +96,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/StructuredContext"
 
-  /v1/ingest:
-    post:
-      tags: [ingestion]
-      summary: Ingest a path into the graph (long-running, up to 30 min)
-      operationId: ingest
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [path]
-              properties:
-                path: { type: string, description: Absolute path to ingest }
-                recursive: { type: boolean }
-                force: { type: boolean, description: Re-ingest unchanged files }
-      responses:
-        "200":
-          description: Ingestion result
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/IngestResult"
-
   /v1/map:
     post:
       tags: [ingestion]
@@ -1403,10 +1379,63 @@ components:
         attrs: { type: object, additionalProperties: true }
         createdRev: { type: integer }
         deletedRev: { type: integer }
+    Factor:
+      type: object
+      required: [value, reason]
+      properties:
+        value: { type: number }
+        reason: { type: string }
+    ConfidenceBreakdown:
+      type: object
+      description: >-
+        The factors behind a claim's confidence. The combined confidence is the
+        product of the six factor values, clamped to [0, 1]; it is not
+        serialized in this object (compactClaims[].confidence.score carries
+        it). ScoredClaim.finalScore is relevance × confidence, not confidence.
+      required: [baseAuthority, verification, recency, corroboration, conflictPenalty, intentAlignment]
+      properties:
+        baseAuthority: { $ref: "#/components/schemas/Factor" }
+        verification: { $ref: "#/components/schemas/Factor" }
+        recency: { $ref: "#/components/schemas/Factor" }
+        corroboration: { $ref: "#/components/schemas/Factor" }
+        conflictPenalty: { $ref: "#/components/schemas/Factor" }
+        intentAlignment: { $ref: "#/components/schemas/Factor" }
+    Claim:
+      type: object
+      required: [id, entityId, statement, status]
+      properties:
+        id: { type: string }
+        entityId: { type: string }
+        statement: { type: string }
+        status:
+          type: string
+          enum: [Active, Stale, Retracted]
+        value:
+          description: The claimed value (any JSON value)
+        confidence:
+          description: Confidence stored on the claim itself; the scored breakdown is ScoredClaim.confidence
+        provenance:
+          type: object
+          properties:
+            sourceUri: { type: string, description: Workspace-relative path }
+            sourceHash: { type: string }
+            extractor: { type: string }
+            sourceType: { type: string }
+            observedAt: { type: string, format: date-time }
+        createdRev: { type: integer }
+        deletedRev: { type: integer }
+    ScoredClaim:
+      type: object
+      required: [claim, confidence, relevance, finalScore]
+      properties:
+        claim: { $ref: "#/components/schemas/Claim" }
+        confidence: { $ref: "#/components/schemas/ConfidenceBreakdown" }
+        relevance: { type: number }
+        finalScore: { type: number, description: relevance × confidence }
     StructuredContext:
       type: object
       properties:
-        claims: { type: array, items: { type: object } }
+        claims: { type: array, items: { $ref: "#/components/schemas/ScoredClaim" } }
         compactClaims: { type: array, items: { type: object } }
         conflicts: { type: array, items: { type: object } }
         decisions: { type: array, items: { type: object } }
@@ -1421,22 +1450,6 @@ components:
             hopsExpanded: { type: integer }
             asOfRev: { type: integer }
             depth: { type: string }
-    IngestResult:
-      type: object
-      properties:
-        filesProcessed: { type: integer }
-        patchesApplied: { type: integer }
-        filesSkipped: { type: integer }
-        entitiesCreated: { type: integer }
-        latestRev: { type: integer }
-        skipReasons:
-          type: object
-          properties:
-            unchanged: { type: integer }
-            emptyFile: { type: integer }
-            parseError: { type: integer }
-            tooLarge: { type: integer }
-            minifiedLikely: { type: integer }
     NodeCreationResult:
       type: object
       properties:

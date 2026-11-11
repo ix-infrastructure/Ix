@@ -13,24 +13,24 @@ import { inferRiskSemantics, humanizeLabel, type ImpactFacts, type RiskSemantics
 import { captureJson, lineSpan, printJson, relativePath, rowLocation, sliceEdgeResults, stripNulls, type Slice } from "../format.js";
 import { forMcp, suggest, type Relation } from "../next-step.js";
 import { llmLine, llmShortId } from "../llm.js";
-import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
+import { formatOption, kindOption, noSuggestOption, pathOption, pickOption, strictOption } from "../options.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
+import { CONTAINER_KINDS } from "../graph-model.js";
 
-const CONTAINER_KINDS = new Set(["class", "module", "file", "object", "trait", "interface"]);
 
 export function registerImpactCommand(program: Command): void {
   program
     .command("impact <target>")
     .description("System risk analysis — what behavior is at risk if this changes")
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--no-suggest", "Disable did-you-mean candidates on unresolved targets")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(noSuggestOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
     .option("--all", "When the target is ambiguous, analyse every candidate; each analysis is tagged with its candidate")
     .option("--depth <n>", "Expansion depth for callers/importers (default 1, max 3)", "1")
     .option("--limit <n>", "Max top-impacted members (and llm caller/callee rows) to show", "10")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .addHelpText(
       "after",
       "\nExamples:\n  ix impact IngestionService\n  ix impact IngestionService --kind class\n  ix impact verify_token --format json\n  ix impact AuthProvider --limit 5\n  ix impact handle --all --format llm\n" +

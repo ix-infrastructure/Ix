@@ -14,10 +14,12 @@ import {
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import type {
+  ConfidenceBreakdown,
   ConflictReport,
   DecisionReport,
   GraphNode,
   IntentReport,
+  ScoredClaim,
   StructuredContext,
 } from "../../client/types.js";
 import { resolveWorkspaceRoot } from "../config.js";
@@ -48,7 +50,7 @@ import { companionHistory, expandIssueCompanions } from "../explain/issue-compan
 import { collectTextReferences, gitRepoAccess, type RepoAccess, type TextSource } from "../explain/text-references.js";
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
-import { parseBudgetOption, parsePickOption, STRICT_TARGET_HELP, parseRevisionOption } from "../options.js";
+import { formatOption, kindOption, parseBudgetOption, parseRevisionOption, pathOption, pickOption, strictOption } from "../options.js";
 import { activeReadScope, ensureReadScope, isRawId, resolveFileOrEntityFull, resolveFileOrReport, type ResolutionNotice, type ResolvedEntity } from "../resolve.js";
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
 import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure } from "../ui.js";
@@ -57,6 +59,7 @@ import { forMcp, suggest, toolCall } from "../next-step.js";
 import {
   assessTargetStructure, checkGraphHealth, graphHealthJson, isUnhealthy, worseHealth, type GraphHealth,
 } from "../graph-health.js";
+import { CONTAINER_KINDS } from "../graph-model.js";
 
 /** The `--max-*` knobs that bound a bundle. */
 interface BudgetSnapshot {
@@ -379,10 +382,10 @@ export function registerContextCommand(program: Command): void {
       "--lean",
       "With --from-issue: only the starting points Ix trusts and the next few files, or one line saying it trusts none",
     )
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
     .option(
       "--depth <depth>",
       `Context-graph expansion depth (${CONTEXT_DEPTHS.join("|")})`,
@@ -408,7 +411,7 @@ export function registerContextCommand(program: Command): void {
       `${budgetField("maxChars").help} (overrides --max-tokens; clamped to ${budgetField("maxChars").min}-${budgetField("maxChars").max})`,
       budgetParser("maxChars"),
     )
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .option("--out <path>", "Write the JSON bundle to this file instead of stdout")
     .option("--save <id>", "Persist the bundle as a resumable investigation state")
     .option("--resume <id>", "Render a saved investigation state without a backend")
@@ -2515,6 +2518,36 @@ const TIER = { target: 0, issue: 1, structural: 2, claims: 3, relationships: 4, 
 const TIER_WIDTH = 1000;
 const tierScore = (tier: number, index = 0): number => tier * TIER_WIDTH + Math.min(index, TIER_WIDTH - 1);
 
+/** The six factors the backend multiplies into a claim's confidence. */
+const CONFIDENCE_FACTORS = [
+  "baseAuthority",
+  "verification",
+  "recency",
+  "corroboration",
+  "conflictPenalty",
+  "intentAlignment",
+] as const;
+
+/**
+ * A claim's confidence for its evidence reason, to two places: the product of
+ * the six factor values in `confidence`, clamped to [0, 1]. That is the
+ * backend's `ConfidenceBreakdown.score` (and `compactClaims[].confidence.score`),
+ * which is not serialized in `claims[].confidence`, so reading
+ * `confidence.score` printed "n/a" for every claim (#1007). `finalScore` is
+ * not used here: it is relevance × confidence, and the reason already names
+ * relevance on its own. "n/a" when any factor value is missing.
+ */
+function claimConfidence(scored: ScoredClaim): string {
+  const breakdown = scored.confidence as Partial<ConfidenceBreakdown> | undefined;
+  let product = 1;
+  for (const name of CONFIDENCE_FACTORS) {
+    const value = breakdown?.[name]?.value;
+    if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
+    product *= value;
+  }
+  return String(Math.round(Math.min(1, Math.max(0, product)) * 100) / 100);
+}
+
 /** Deterministic evidence ranking: tier, then a stable id tiebreaker. */
 function rankEvidence(input: {
   resolved: { id: string; name: string; kind: string };
@@ -2683,7 +2716,7 @@ function rankEvidence(input: {
       source: "context.claims",
       title: scored.claim.statement,
       score: tierScore(TIER.claims, 0),
-      reason: `context claim (relevance ${scored.relevance}, confidence ${scored.confidence?.score ?? "n/a"})`,
+      reason: `context claim (relevance ${scored.relevance}, confidence ${claimConfidence(scored)})`,
       refs: [scored.claim.entityId],
     });
   }
@@ -3100,7 +3133,7 @@ function summariseCut(dropped: EvidenceItem[]): Array<{ what: string; count: num
 function cutLever(bundle: ContextBundle, top: { what: string }): string {
   if (forMcp()) return mcpCutLever(bundle, top);
   const name = bundle.target.name;
-  const container = CONTAINER_TARGET_KINDS.includes(bundle.target.kind.toLowerCase());
+  const container = CONTAINER_KINDS.has(bundle.target.kind.toLowerCase());
   switch (top.what) {
     case "member":
       return container
@@ -3124,8 +3157,6 @@ function cutLever(bundle: ContextBundle, top: { what: string }): string {
   }
 }
 
-const CONTAINER_TARGET_KINDS: readonly string[] = ["file", "module", "class", "object", "trait", "interface"];
-
 /**
  * {@link cutLever} for an MCP caller: only core tools, and `max_tokens` for
  * the budget, since `ix_context` takes no flags. `ix contains`, `ix depends`
@@ -3134,7 +3165,7 @@ const CONTAINER_TARGET_KINDS: readonly string[] = ["file", "module", "class", "o
  */
 function mcpCutLever(bundle: ContextBundle, top: { what: string }): string {
   const { name, path } = bundle.target;
-  const container = CONTAINER_TARGET_KINDS.includes(bundle.target.kind.toLowerCase());
+  const container = CONTAINER_KINDS.has(bundle.target.kind.toLowerCase());
   const pin = container ? {} : { path };
   const budget = "raise max_tokens (default 3000)";
   switch (top.what) {

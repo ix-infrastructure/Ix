@@ -18,18 +18,13 @@ import { isFileStale } from "../stale.js";
 import { stderr } from "../stderr.js";
 import { relativePath, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
-import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
+import { formatOption, kindOption, noSuggestOption, pickOption, strictOption } from "../options.js";
 import { getEffectiveSystemPath, hasMapData } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { renderSection, renderKeyValue, renderNote, renderWarning, renderBreadcrumb, reportAmbiguousTarget, reportResolutionNotices } from "../ui.js";
 import { forMcp } from "../next-step.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
-
-const CONTAINER_KINDS = new Set(["class", "module", "file", "trait", "object", "interface"]);
-const FILE_KINDS = new Set(["file"]);
-
-// Region kinds whose names should be humanized in system path
-const REGION_KINDS = new Set(["system", "subsystem", "module", "region"]);
+import { CONTAINER_KINDS, FILE_KINDS, REGION_KINDS } from "../graph-model.js";
 
 interface LocateOutput {
   resolvedTarget: { id: string; kind: string; name: string; path?: string } | null;
@@ -56,12 +51,12 @@ export function registerLocateCommand(program: Command): void {
   program
     .command("locate <symbols...>")
     .description("Resolve symbols to their position in the codebase and system hierarchy")
-    .option("--kind <kind>", "Filter target entity by kind")
+    .addOption(kindOption())
     .option("--path <path>", "Restrict to results from files matching this path substring")
-    .option("--no-suggest", "Disable did-you-mean candidates on unresolved targets")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(noSuggestOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
+    .addOption(formatOption())
     .addHelpText("after", `\nExamples:
   ix locate IngestionService
   ix locate verify_token --kind function
