@@ -6,8 +6,8 @@
 // extension a parser handles belongs here, or those files are never walked by
 // `ix map` / `ix watch` / stale detection. It previously lived as three drifting
 // copies (ingest/watch/stale) that fell behind every new parser — hence one
-// shared set. Dockerfile/Makefile and other extensionless files are matched by
-// name in the individual commands, not here.
+// shared set. Files whose name, not extension, makes them source (Dockerfile,
+// Makefile, shell dotfiles) are in SUPPORTED_FILE_NAMES below.
 export const SUPPORTED_EXTENSIONS = new Set<string>([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
   ".py", ".pyi", ".java", ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp",
@@ -36,4 +36,14 @@ export const SUPPORTED_EXTENSIONS = new Set<string>([
   ".tf", ".tfvars", ".hcl",
   ".css", ".scss", ".sass", ".less",
   ".tex", ".sty", ".cls", ".ltx", ".latex",
+]);
+
+// Whole file names (lowercased) that are source although `path.extname` gives
+// nothing useful: `extname('.bashrc')` is ''. The same list as core-ingestion's
+// FILE_NAME_MAP (languages.ts); its extension-parity test fails if they differ,
+// as it does for SUPPORTED_EXTENSIONS and EXT_MAP.
+export const SUPPORTED_FILE_NAMES: ReadonlySet<string> = new Set<string>([
+  "dockerfile", "makefile", "gnumakefile",
+  ".bashrc", ".bash_profile", ".bash_aliases", ".bash_logout",
+  ".zshrc", ".zprofile", ".zshenv", ".profile",
 ]);

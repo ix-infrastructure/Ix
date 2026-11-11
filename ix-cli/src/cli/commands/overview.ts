@@ -12,11 +12,7 @@ import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
 import { renderSection, renderKeyValue, renderNote, renderBreadcrumb } from "../ui.js";
 import { forMcp } from "../next-step.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
-
-const CONTAINER_KINDS = new Set(["class", "module", "file", "trait", "object", "interface"]);
-const STRUCTURAL_CONTAINER_KINDS = new Set(["class", "object", "trait", "interface"]);
-const REGION_KINDS = new Set(["system", "subsystem", "module", "region"]);
-const FILE_KINDS = new Set(["file"]);
+import { CONTAINER_KINDS, FILE_KINDS, REGION_KINDS, TYPE_KINDS } from "../graph-model.js";
 
 const KEY_ITEMS_LIMIT = 5;
 
@@ -274,7 +270,7 @@ async function overviewLeaf(
   let containerId: string | null = null;
 
   const parents = parentResult.nodes as any[];
-  const structuralParent = parents.find((p) => STRUCTURAL_CONTAINER_KINDS.has(p.kind));
+  const structuralParent = parents.find((p) => TYPE_KINDS.has(p.kind));
   const fileParent = parents.find((p) => FILE_KINDS.has(p.kind));
   const bestParent = structuralParent ?? fileParent ?? parents[0];
 
@@ -451,7 +447,7 @@ function renderOverviewHeader(
     renderKeyValue("File", displayPath);
   }
   if (containedIn) {
-    const containerLabel = STRUCTURAL_CONTAINER_KINDS.has(containedIn.kind)
+    const containerLabel = TYPE_KINDS.has(containedIn.kind)
       ? `${containedIn.kind} ${containedIn.name}`
       : containedIn.name;
     renderKeyValue("Contained in", containerLabel);

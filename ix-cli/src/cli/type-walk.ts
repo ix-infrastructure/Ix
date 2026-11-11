@@ -2,7 +2,8 @@
 
 import type { IxClient } from "../client/api.js";
 import { mapLimit } from "../client/request-memo.js";
-import { ALL_CONCURRENCY, DISPATCH_DEPTH, DISPATCH_MAX_TYPES, TYPE_KINDS, byName } from "./commands/callers.js";
+import { ALL_CONCURRENCY, DISPATCH_DEPTH, DISPATCH_MAX_TYPES, byName } from "./commands/callers.js";
+import { TYPE_KINDS } from "./graph-model.js";
 import { SourceFiles } from "./edge-sites.js";
 import { expandCapped, rowLocation } from "./format.js";
 import { activeReadScope } from "./resolve.js";

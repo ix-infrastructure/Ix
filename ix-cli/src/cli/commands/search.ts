@@ -13,6 +13,7 @@ import { llmLine } from "../llm.js";
 import { isQuiet, projectRow } from "../output-shape.js";
 import { normalizePathSeparators } from "../path-match.js";
 import { checkGraphHealth } from "../graph-health.js";
+import { STRUCTURAL_KINDS } from "../graph-model.js";
 
 /** One `ix search` row as the llm renderer takes it. */
 export interface SearchLlmRow {
@@ -84,12 +85,6 @@ export function emptySearchHint(term: string, opts: { kind?: string; path?: stri
 /** Said instead of {@link emptySearchHint} when the scope holds no nodes at all. */
 export const WORKSPACE_EMPTY_MESSAGE =
   "The graph for this workspace has no nodes, so no search can match. Run ix map to build it.";
-
-/** Structural kinds that should rank higher than incidental matches. */
-const STRUCTURAL_KINDS = new Set([
-  "class", "trait", "object", "interface", "function", "method", "module", "file",
-  "constant",
-]);
 
 /**
  * Compute a ranking score for a search result.

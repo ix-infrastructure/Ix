@@ -10,6 +10,7 @@ import { getSystemPath } from "../hierarchy.js";
 import type { CommitRef } from "./history.js";
 import { isTestPath, type RelatedRef } from "./related-files.js";
 import { forMcp, toolCall } from "../next-step.js";
+import { TYPE_KINDS } from "../graph-model.js";
 
 /** A related entity and where it is defined. */
 export interface EntityLocation {
@@ -209,10 +210,6 @@ const MEMBER_USE_CAP = 50;
 const MEMBER_USE_CONCURRENCY = 6;
 const USE_PREDICATES = ["CALLS", "REFERENCES", "IMPORTS"];
 
-/** Kinds whose own members are worth one more hop: a class's methods are not
- * listed under its file. */
-const CONTAINER_KINDS = new Set(["class", "interface", "trait", "object", "struct", "enum"]);
-
 /** Kinds a reader navigates by. Everything else ranks after them. */
 const PRIMARY_MEMBER_KINDS = new Set([
   "class", "interface", "function", "method", "type", "enum", "trait", "struct", "object", "module",
@@ -291,7 +288,8 @@ async function collectNeighbourMembers(
       // `IxClient`, and `reset`, `resetCode` and `deleteWorkspace` -- three of
       // one task's four answers -- hang off that. One level down, for the
       // leading container only.
-      const container = direct.find(m => CONTAINER_KINDS.has(m.kind));
+      // Type kinds only: a file's nested module is not one more hop.
+      const container = direct.find(m => TYPE_KINDS.has(m.kind));
       let nested: EntityLocation[] = [];
       if (container) {
         try {

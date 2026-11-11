@@ -3,18 +3,21 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, relative, sep } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   dedupeDiscoveredFilePaths,
+  collectExcludePatterns,
   isSupportedSourceFile,
   discoverIngestFilePaths,
   isWithinDiscoveryRoot,
   tryGitLsFiles,
 } from '../commands/ingest.js';
+import { createIgnoreMatcher } from '../ignore-globs.js';
 import { discoverSourceFiles, emptyDiscoveryCounts, walkFiles } from '../file-discovery.js';
+import { SUPPORTED_FILE_NAMES } from '../supported-extensions.js';
 
 describe('dedupeDiscoveredFilePaths', () => {
   it('collapses alternate discovered paths that point at the same canonical file', () => {
@@ -48,6 +51,27 @@ describe('dedupeDiscoveredFilePaths', () => {
     expect(isSupportedSourceFile('GNUmakefile')).toBe(true);
     expect(isSupportedSourceFile('build/common.mk')).toBe(true);
     expect(isSupportedSourceFile('README.txt')).toBe(false);
+  });
+
+  it('discovers the shell dotfiles core-ingestion parses as Bash', () => {
+    // languageFromPath maps these extensionless names to Bash, but
+    // path.extname('.bashrc') is '', so the extension check alone never
+    // matched them and `ix map` never handed them to the parser (Ix#960).
+    for (const f of [
+      '.bashrc', '.bash_profile', '.bash_aliases', '.bash_logout',
+      '.zshrc', '.zprofile', '.zshenv', '.profile', 'home/.bashrc', 'dotfiles/.ZSHRC',
+    ]) {
+      expect(isSupportedSourceFile(f), f).toBe(true);
+    }
+    expect(isSupportedSourceFile('.gitignore')).toBe(false);
+    expect(isSupportedSourceFile('.bashrc.bak')).toBe(false);
+  });
+
+  it('accepts every special file name it lists', () => {
+    // The other half of core-ingestion's extension-parity test, which checks
+    // these names against languageFromPath.
+    expect(SUPPORTED_FILE_NAMES.size).toBeGreaterThan(5);
+    expect([...SUPPORTED_FILE_NAMES].filter((name) => !isSupportedSourceFile(`repo/${name}`))).toEqual([]);
   });
 
   it('discovers TeX/LaTeX source files', () => {
@@ -299,4 +323,73 @@ describe('discovery symlink containment', () => {
       expect(counts.unreadable).toBe(0);
     },
   );
+});
+
+describe('shell dotfile discovery', () => {
+  const scratch: string[] = [];
+
+  afterEach(() => {
+    for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  // `realpathSync.native`, the call discovery canonicalises with. On Windows
+  // the plain `realpathSync` keeps an 8.3 short name (`RUNNER~1`) that the
+  // native one expands, so a base taken the other way does not prefix the
+  // discovered paths.
+  function dotfileRepo(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ix-dotfiles-'));
+    scratch.push(dir);
+    const repo = realpathSync.native(dir);
+    writeFileSync(join(repo, '.bashrc'), 'alias ll="ls -l"\n');
+    mkdirSync(join(repo, 'zsh'), { recursive: true });
+    writeFileSync(join(repo, 'zsh', '.zshrc'), 'export EDITOR=vim\n');
+    return repo;
+  }
+
+  function rel(repo: string, paths: Iterable<string>): string[] {
+    return [...paths].map((p) => relative(repo, p).split(sep).join('/')).sort();
+  }
+
+  /** True when git is here and `repo` is now a work tree with everything added. */
+  function gitAdd(repo: string): boolean {
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: repo });
+      execFileSync('git', ['add', '-A'], { cwd: repo });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  it('walks and lists shell dotfiles, with or without git', () => {
+    const repo = dotfileRepo();
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n');
+
+    expect(rel(repo, walkFiles(repo, true))).toEqual(['.bashrc', 'zsh/.zshrc']);
+
+    if (!gitAdd(repo)) return; // no git — the walk above is the whole check
+    expect(rel(repo, discoverSourceFiles(repo))).toEqual(['.bashrc', 'zsh/.zshrc']);
+  });
+
+  it('drops a dotfile named in .gitignore, with or without git', () => {
+    const repo = dotfileRepo();
+    writeFileSync(join(repo, '.gitignore'), '.bashrc\n');
+
+    expect(rel(repo, walkFiles(repo, true))).toEqual(['zsh/.zshrc']);
+
+    if (!gitAdd(repo)) return;
+    expect(rel(repo, discoverSourceFiles(repo))).toEqual(['zsh/.zshrc']);
+  });
+
+  it('drops a dotfile named in .ixignore, with or without git', () => {
+    const repo = dotfileRepo();
+    writeFileSync(join(repo, '.ixignore'), '.bashrc\n');
+    const exclude = { matcher: createIgnoreMatcher(collectExcludePatterns(repo)), root: repo };
+
+    expect(rel(repo, walkFiles(repo, true, exclude))).toEqual(['zsh/.zshrc']);
+
+    // Tracked, so only the .ixignore stands between git's list and the file.
+    if (!gitAdd(repo)) return;
+    expect(rel(repo, discoverSourceFiles(repo, { exclude }))).toEqual(['zsh/.zshrc']);
+  });
 });

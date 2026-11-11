@@ -1,6 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import type { Command } from "commander";
+import { PRO_COMMAND_NAMES, PRO_RETIRED, proCommandsRegistered } from "../register/pro-surface.js";
 
 const WORKFLOWS_TEXT = `
 Recommended Development Loop:
@@ -61,11 +62,29 @@ Advanced (low-level graph commands):
 Use "ix <command> --help" for details on any command.
 `;
 
-/** Retired plural names -> the singular that absorbed them as a subcommand. */
-const COLLAPSED_HELP_TOPICS: Record<string, string> = {
-  goals: "goal",
-  bugs: "bug",
-};
+/** Retired Pro names -> the command that absorbed them (pro-surface.ts). */
+const COLLAPSED_HELP_TOPICS: Record<string, string> = Object.fromEntries(
+  Object.entries(PRO_RETIRED).map(([old, now]) => [old, now.split(" ")[0]]),
+);
+
+/**
+ * The Pro commands WORKFLOWS_TEXT recommends, in order of first mention. Read
+ * from the text itself, so a new example cannot leave the note behind.
+ */
+const PRO_IN_WORKFLOWS: string[] = (() => {
+  const pro = new Set(PRO_COMMAND_NAMES);
+  const seen: string[] = [];
+  for (const [, name] of WORKFLOWS_TEXT.matchAll(/\bix ([a-z][a-z-]*)/g)) {
+    if (pro.has(name) && !seen.includes(name)) seen.push(name);
+  }
+  return seen;
+})();
+
+/** One line for installs without Pro, whose commands WORKFLOWS_TEXT recommends. */
+function proNote(): string {
+  const names = PRO_IN_WORKFLOWS.map((n) => `ix ${n}`).join(", ");
+  return `Note: ${names} need Ix Pro, which is not installed.`;
+}
 
 export function registerWorkflowsHelpCommand(program: Command): void {
   const help = program
@@ -79,6 +98,8 @@ export function registerWorkflowsHelpCommand(program: Command): void {
       }
 
       if (topic === "workflows" || topic === "workflow") {
+        // First, so a reader without Pro sees it before the commands it covers.
+        if (!proCommandsRegistered(program)) console.log(proNote());
         console.log(WORKFLOWS_TEXT);
         return;
       }
@@ -92,7 +113,8 @@ export function registerWorkflowsHelpCommand(program: Command): void {
       // (`ix goals` -> `ix goal list`, Ix-pro#103; `ix bugs` -> `ix bug list`,
       // Ix-pro#108). The plural is no longer a command anywhere, so `ix help
       // bugs` would fall through to "Unknown help topic". Forward it to the
-      // singular, whose help documents the new subcommand.
+      // singular, whose help documents the new subcommand. The pairs are
+      // PRO_RETIRED in register/pro-surface.ts.
       const collapsed = COLLAPSED_HELP_TOPICS[topic];
       if (collapsed) {
         const target = program.commands.find(

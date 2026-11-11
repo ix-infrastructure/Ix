@@ -1,5 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { DEFAULT_ENDPOINT, isLoopbackEndpoint } from "../cli/endpoint.js";
 import { isPreConnectionFailure, RESET_RECONCILIATION_ERROR } from "./transport.js";
 import { Limiter, RequestMemo } from "./request-memo.js";
 import { CORRELATION_ID_HEADER, debugRequest, nextCorrelationId } from "./correlation.js";
@@ -126,7 +127,7 @@ export class IxClient {
   constructor(
     // readonly so callers can ask which endpoint a response came FROM, rather
     // than being handed a second string that is only equal by inspection.
-    public readonly endpoint: string = "http://localhost:8090",
+    public readonly endpoint: string = DEFAULT_ENDPOINT,
     private deadlineSignal?: AbortSignal,
     options: IxClientOptions = {},
   ) {
@@ -734,13 +735,10 @@ export class IxClient {
   // True when the configured endpoint is a local memory-layer. A local
   // backend has no proxy in front of it, so the sync reset path connects
   // directly and returns in milliseconds — there is nothing to fix there.
+  // The same rule that decides whether the token is sent: one definition, so
+  // `http://[::1]:8090` cannot be local for the token and remote for reset.
   private isLocalEndpoint(): boolean {
-    try {
-      const host = new URL(this.endpoint).hostname.toLowerCase();
-      return host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host === "::1";
-    } catch {
-      return false;
-    }
+    return isLoopbackEndpoint(this.endpoint);
   }
 
   // Reset can take minutes on a large graph. Against a cloud deployment a

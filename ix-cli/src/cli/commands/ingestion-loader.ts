@@ -3,10 +3,14 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { readGrammarStatus, type GrammarStatus } from "../grammar-status.js";
+
 type IngestionModule = {
   parseFile: (filePath: string, source: string) => any;
   resolveEdges: (results: any[], stats?: any, globalIndex?: any) => any[];
   isGrammarSupported: (filePath: string) => boolean;
+  /** Absent from a core-ingestion build older than #967; read it through `readGrammarStatus`. */
+  grammarStatus?: () => GrammarStatus[];
   buildGlobalResolutionIndex: (
     filePaths: string[],
     sources?: Map<string, string>,
@@ -139,4 +143,16 @@ export async function loadWatchIngestionModules(): Promise<[
     importModule(resolveIngestionModule("../../../../core-ingestion/dist/index.js")),
     importModule(resolveIngestionModule("../../../../core-ingestion/dist/patch-builder.js")),
   ]);
+}
+
+/**
+ * Which tree-sitter grammars loaded in this install (#967), for `ix doctor`.
+ *
+ * Loads only the parser entry point, and is deliberately not
+ * `loadIngestionModules`: reading grammar status parses nothing, and doctor's
+ * tests count that function's calls to prove the re-parse check stays idle on
+ * an unhealthy backend.
+ */
+export async function loadGrammarStatus(): Promise<GrammarStatus[]> {
+  return readGrammarStatus(await importModule(resolveIngestionModule("../../../../core-ingestion/dist/index.js")));
 }
