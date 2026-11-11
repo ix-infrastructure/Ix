@@ -7,6 +7,7 @@ import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { llmLine, type LlmValue } from "../llm.js";
 import { printJson } from "../format.js";
+import { formatOption } from "../options.js";
 
 /** Render `ix stats` as llm records: one `nodes` line and one `edges` line. */
 export function renderStatsLlm(result: any): string[] {
@@ -25,11 +26,13 @@ export function registerStatsCommand(program: Command): void {
   program
     .command("stats")
     .description("Show graph statistics — node/edge counts by type")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .action(async (opts: { format: string }) => {
       // /v1/stats takes seconds on a large graph: no read deadline.
       const client = createClient({ longRunning: true });
       const systemId = await resolveReadSystemId(client);
+      // A backend failure goes to the top-level handler, which answers it in
+      // this command's format with the endpoint's next step.
       const result = await client.stats({ workspaceId: systemId ? undefined : resolveWorkspaceId(), systemId });
 
       if (opts.format === "json") {

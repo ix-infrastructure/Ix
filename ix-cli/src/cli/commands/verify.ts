@@ -17,6 +17,7 @@ import {
   type VerifyFileResult,
   type VerifyReport,
 } from "../verify.js";
+import { formatOption } from "../options.js";
 
 /**
  * `ix verify --format llm`: one `verify` record with the verdict and the fix,
@@ -127,7 +128,7 @@ export function registerVerifyCommand(program: Command): void {
     .option("--sample <n>", `How many files to check (default ${DEFAULT_VERIFY_SAMPLE}, or the number of paths given)`)
     .option("--seed <n>", `Seed for the random part of the sample (default ${DEFAULT_VERIFY_SEED})`)
     .option("--root <dir>", "Workspace root directory")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .action(async (paths: string[] | undefined, opts: { format: string; root?: string; sample?: string; seed?: string }) => {
       const named = paths ?? [];
       const sample = parseCount("--sample", opts.sample, named.length > 0 ? named.length : DEFAULT_VERIFY_SAMPLE, 1);

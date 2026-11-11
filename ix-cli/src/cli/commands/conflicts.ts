@@ -3,12 +3,13 @@
 import type { Command } from "commander";
 import { createClient } from "../../client/factory.js";
 import { formatConflicts } from "../format.js";
+import { formatOption } from "../options.js";
 
 export function registerConflictsCommand(program: Command): void {
   program
     .command("conflicts")
     .description("List detected conflicts")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .action(async (opts: { format: string }) => {
       const client = createClient();
       const conflicts = await client.conflicts();

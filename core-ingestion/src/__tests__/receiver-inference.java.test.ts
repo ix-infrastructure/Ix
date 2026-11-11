@@ -133,7 +133,7 @@ describe('Java typed receivers (fixture)', () => {
 
   it('resolves a batch against summaries exactly as the full run does', () => {
     const summaries = new Map(results.map(r => [r.filePath, summarizeParseResult(r)]));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
+    const index = buildGlobalResolutionIndex([...summaries.keys()], summaries);
     const filter = results.find(r => r.filePath.endsWith('TimeoutFilter.java'))!;
     expect(resolveEdges([filter], undefined, index)).toEqual(edges.filter(e => e.srcFilePath === filter.filePath));
   });
@@ -143,7 +143,7 @@ describe('Java typed receivers (fixture)', () => {
       const { receiverFactories: _f, receiverHeritage: _h, receiverPackage: _p, ...old } = summarizeParseResult(r);
       return [r.filePath, old];
     }));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
+    const index = buildGlobalResolutionIndex([...summaries.keys()], summaries);
     const filter = results.find(r => r.filePath.endsWith('TimeoutFilter.java'))!;
     const batch = resolveEdges([filter], undefined, index);
     expect(typedEdges(batch)).toEqual([]);

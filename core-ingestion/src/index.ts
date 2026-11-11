@@ -95,35 +95,57 @@ import PHP from 'tree-sitter-php';
 // @ts-ignore
 import Scala from 'tree-sitter-scala';
 const _require = createRequire(import.meta.url);
-function tryLoadGrammar(pkg: string): any {
-  try { return _require(pkg); } catch { return null; }
+/**
+ * Every grammar loaded through the quiet helpers below, by language: the
+ * package it came from and, when it did not load, why. `grammarStatus()` reads
+ * it. Keeping the reason here is what lets `ix map` and `ix doctor` name a
+ * missing grammar instead of only counting its files as unparsed (#967).
+ * Recording costs nothing per parse worker; printing is left to the caller.
+ */
+const QUIET_GRAMMARS = new Map<SupportedLanguages, { pkg: string; reason?: string }>();
+/** One line of a load error: the message, never a stack. */
+function grammarLoadReason(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.split('\n')[0].trim() || 'unknown error';
+}
+function tryLoadGrammar(language: SupportedLanguages, pkg: string): any {
+  QUIET_GRAMMARS.set(language, { pkg });
+  try {
+    return _require(pkg);
+  } catch (err) {
+    QUIET_GRAMMARS.set(language, { pkg, reason: grammarLoadReason(err) });
+    return null;
+  }
 }
 // Async sibling of tryLoadGrammar for grammars that publish ESM bindings with
 // top-level await (they can't go through CJS require). Returns null silently
 // when the optional grammar can't load on this platform — same contract as
 // tryLoadGrammar. An unavailable optional grammar (e.g. no native prebuild for
-// this OS/arch) is expected and must not be logged per parse worker.
-async function tryImportGrammar(pkg: string): Promise<any> {
+// this OS/arch) is expected and must not be logged per parse worker; the
+// reason is kept for grammarStatus() instead.
+async function tryImportGrammar(language: SupportedLanguages, pkg: string): Promise<any> {
+  QUIET_GRAMMARS.set(language, { pkg });
   try {
     const mod: any = await import(pkg);
     return mod?.default ?? mod;
-  } catch {
+  } catch (err) {
+    QUIET_GRAMMARS.set(language, { pkg, reason: grammarLoadReason(err) });
     return null;
   }
 }
-const Kotlin = tryLoadGrammar('tree-sitter-kotlin');
-const Swift  = tryLoadGrammar('tree-sitter-swift');
-const R = tryLoadGrammar('@davisvaughan/tree-sitter-r');
-const Elixir = tryLoadGrammar('tree-sitter-elixir');
-const Make = tryLoadGrammar('tree-sitter-make');
-const Bash = tryLoadGrammar('tree-sitter-bash');
-const Haskell = tryLoadGrammar('tree-sitter-haskell');
-const Zig = tryLoadGrammar('@tree-sitter-grammars/tree-sitter-zig');
-const Html = tryLoadGrammar('tree-sitter-html');
+const Kotlin = tryLoadGrammar(SupportedLanguages.Kotlin, 'tree-sitter-kotlin');
+const Swift  = tryLoadGrammar(SupportedLanguages.Swift, 'tree-sitter-swift');
+const R = tryLoadGrammar(SupportedLanguages.R, '@davisvaughan/tree-sitter-r');
+const Elixir = tryLoadGrammar(SupportedLanguages.Elixir, 'tree-sitter-elixir');
+const Make = tryLoadGrammar(SupportedLanguages.Makefile, 'tree-sitter-make');
+const Bash = tryLoadGrammar(SupportedLanguages.Bash, 'tree-sitter-bash');
+const Haskell = tryLoadGrammar(SupportedLanguages.Haskell, 'tree-sitter-haskell');
+const Zig = tryLoadGrammar(SupportedLanguages.Zig, '@tree-sitter-grammars/tree-sitter-zig');
+const Html = tryLoadGrammar(SupportedLanguages.HTML, 'tree-sitter-html');
 // tree-sitter-xml exports { xml, dtd }; we use the xml sub-grammar.
-const XmlPkg = tryLoadGrammar('@tree-sitter-grammars/tree-sitter-xml');
+const XmlPkg = tryLoadGrammar(SupportedLanguages.XML, '@tree-sitter-grammars/tree-sitter-xml');
 const Xml = XmlPkg?.xml ?? null;
-const HclPkg = tryLoadGrammar('@tree-sitter-grammars/tree-sitter-hcl');
+const HclPkg = tryLoadGrammar(SupportedLanguages.HCL, '@tree-sitter-grammars/tree-sitter-hcl');
 const Hcl = HclPkg?.default ?? HclPkg;
 // SAS / Lua / CSS publish ESM bindings with top-level await, so they load via
 // import() through the quiet helper above. A grammar that can't load on this
@@ -137,17 +159,17 @@ const Hcl = HclPkg?.default ?? HclPkg;
 // tree-sitter-sas stays bare: its `main` is already a full filename and it
 // declares `"exports"`, so it never warns and a subpath import of it throws
 // ERR_PACKAGE_PATH_NOT_EXPORTED.
-const SAS = await tryImportGrammar('tree-sitter-sas');
+const SAS = await tryImportGrammar(SupportedLanguages.SAS, 'tree-sitter-sas');
 // Lua and CSS are both `"type": "module"` with a directory `"main"` and no
 // `"exports"`, so the bare specifier makes Node fall back to directory-index
 // lookup and warn — once per parse worker, onto the same stderr the `ix map`
 // progress bar draws on. Pointing straight at the file skips that resolution.
-const Lua = await tryImportGrammar('@tree-sitter-grammars/tree-sitter-lua/bindings/node/index.js');
-const Css = await tryImportGrammar('tree-sitter-css/bindings/node/index.js');
+const Lua = await tryImportGrammar(SupportedLanguages.Lua, '@tree-sitter-grammars/tree-sitter-lua/bindings/node/index.js');
+const Css = await tryImportGrammar(SupportedLanguages.CSS, 'tree-sitter-css/bindings/node/index.js');
 // tree-sitter-powershell is the same shape: ESM bindings with top-level await,
 // a directory `main` and no `"exports"`, so it needs the async helper and the
 // explicit file path for the same two reasons Lua and CSS do.
-const PowerShell = await tryImportGrammar('tree-sitter-powershell/bindings/node/index.js');
+const PowerShell = await tryImportGrammar(SupportedLanguages.PowerShell, 'tree-sitter-powershell/bindings/node/index.js');
 
 import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
@@ -276,10 +298,13 @@ export interface ImportBinding {
  * name: `export default function debug` → { local: "debug", public: "default" };
  * `export { impl as format }` → { local: "impl", public: "format" }. Lets the
  * provider advertise the symbol by the name consumers actually import.
+ * A renaming re-export, `export { impl as format } from './impl'`, also carries
+ * the module it names: `local` is then that module's export, not an entity here.
  */
 export interface ExportPublicName {
   local: string;   // local entity name in the provider file
   public: string;  // name consumers import it by ("default" for default export)
+  source?: string; // module specifier of a re-export (`... from './impl'`)
 }
 
 export interface FileParseResult {
@@ -556,6 +581,52 @@ export function isGrammarSupported(filePath: string): boolean {
   return GRAMMAR_MAP[language] !== undefined;
 }
 
+/** One tree-sitter grammar and whether it loaded on this machine. */
+export interface GrammarStatus {
+  /** A `SupportedLanguages` value, e.g. `kotlin`. */
+  language: string;
+  loaded: boolean;
+  /**
+   * The npm package that provides it. Present for grammars loaded through the
+   * quiet optional path; absent for the statically imported ones, which load
+   * or take this whole module down with them.
+   */
+  package?: string;
+  /** First line of the load error, when `loaded` is false. */
+  reason?: string;
+}
+
+/** `@scope/name/sub/path.js` -> `@scope/name`; `name/sub` -> `name`. */
+function packageName(specifier: string): string {
+  const parts = specifier.split('/');
+  return specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
+}
+
+/**
+ * Every tree-sitter grammar this module knows, loaded or not, sorted by
+ * language. Hand-parsed formats (YAML, SQL, ...) have no grammar and are not
+ * listed. A grammar that did not load keeps the reason its import failed, so a
+ * caller can say why a language's files went unparsed (#967).
+ */
+export function grammarStatus(): GrammarStatus[] {
+  const out: GrammarStatus[] = [];
+  const languages = new Set<SupportedLanguages>([
+    ...(Object.keys(GRAMMAR_MAP) as SupportedLanguages[]),
+    ...QUIET_GRAMMARS.keys(),
+  ]);
+  for (const language of languages) {
+    const quiet = QUIET_GRAMMARS.get(language);
+    const loaded = GRAMMAR_MAP[language] !== undefined;
+    const entry: GrammarStatus = { language, loaded };
+    if (quiet) entry.package = packageName(quiet.pkg);
+    // A package that loaded but exposes no grammar (tree-sitter-xml without
+    // its `xml` export) is still unavailable, and still owed a reason.
+    if (!loaded) entry.reason = quiet?.reason ?? 'the package loaded but exports no grammar';
+    out.push(entry);
+  }
+  return out.sort((a, b) => a.language.localeCompare(b.language));
+}
+
 // ---------------------------------------------------------------------------
 // Parser instance (reused across calls)
 // ---------------------------------------------------------------------------
@@ -708,6 +779,56 @@ function extractJsImportBindings(stmtNode: any, rawSpec: string): ImportBinding[
     }
   }
   return out;
+}
+
+/**
+ * Rust: the in-crate paths a file's top-level items bind to a name, as
+ * `[name, path]` -- `mod stats;` → [stats, self::stats], `use crate::stats;` →
+ * [stats, crate::stats], `use super::{stats as totals}` → [totals, super::stats].
+ * Only paths that start at `crate`, `self` or `super`: any other first segment
+ * is another crate, or a name this list already explains.
+ */
+function rustModuleAliases(rootNode: any): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  const use = (node: any, prefix: string): void => {
+    const join = (text: string): string => prefix ? `${prefix}::${text}` : text;
+    if (node.type === 'identifier' || node.type === 'scoped_identifier') {
+      const path = join(node.text);
+      if (/^(crate|self|super)(::\w+)+$/.test(path)) out.push([path.slice(path.lastIndexOf('::') + 2), path]);
+    } else if (node.type === 'use_as_clause') {
+      const path = node.childForFieldName('path');
+      const alias = node.childForFieldName('alias');
+      if (path && alias && /^(crate|self|super)(::\w+)+$/.test(join(path.text))) out.push([alias.text, join(path.text)]);
+    } else if (node.type === 'scoped_use_list') {
+      const path = node.childForFieldName('path');
+      const list = node.childForFieldName('list');
+      if (list) use(list, path ? join(path.text) : prefix);
+    } else if (node.type === 'use_list') {
+      for (let i = 0; i < node.namedChildCount; i++) use(node.namedChild(i), prefix);
+    }
+  };
+  for (let i = 0; i < rootNode.namedChildCount; i++) {
+    const item = rootNode.namedChild(i);
+    if (item.type === 'mod_item' && !item.childForFieldName('body')) {
+      const name = item.childForFieldName('name')?.text;
+      if (name) out.push([name, `self::${name}`]);
+    } else if (item.type === 'use_declaration') {
+      const argument = item.childForFieldName('argument');
+      if (argument) use(argument, '');
+    }
+  }
+  return out;
+}
+
+/** Rust: the type of the `impl` block around a node, for `impl Trait for Type` too. */
+function rustImplType(node: any): string | null {
+  for (let scope = node.parent; scope; scope = scope.parent) {
+    if (scope.type !== 'impl_item') continue;
+    const type = scope.childForFieldName('type');
+    const name = type?.type === 'generic_type' ? type.childForFieldName('type') : type;
+    return name?.type === 'type_identifier' ? name.text : null;
+  }
+  return null;
 }
 
 /**
@@ -1009,19 +1130,21 @@ function isJsTsImportShadowed(
  * Walk a JS/TS tree for provider-side public export names that differ from the
  * local entity name: `export { impl as format }` (no source) → {impl, format};
  * `export default function debug` → {debug, "default"}. Lets a provider advertise
- * a symbol by the name a consumer imports it as. Purely additive.
+ * a symbol by the name a consumer imports it as. A renaming re-export,
+ * `export { impl as format } from './impl'`, is recorded with its source.
+ * Purely additive.
  */
 function extractJsExportPublicNames(rootNode: any): ExportPublicName[] {
   const out: ExportPublicName[] = [];
   const seen = new Set<string>();
   const visit = (node: any): void => {
     if (node.type === 'export_statement') {
-      let hasSource = false;
+      let source: string | undefined;
       let isDefault = false;
       for (let i = 0; i < node.childCount; i++) {
         const c = node.child(i);
         if (c.type === 'default') isDefault = true;
-        if (c.type === 'string') hasSource = true;
+        if (c.type === 'string') source = c.text.slice(1, -1);
       }
       let clause: any = null;
       let decl: any = null;
@@ -1033,8 +1156,9 @@ function extractJsExportPublicNames(rootNode: any): ExportPublicName[] {
           || c.type === 'lexical_declaration' || c.type === 'generator_function_declaration') decl = c;
         else if (c.type === 'identifier') defaultIdentifier = c;
       }
-      // Local re-export `export { a as b }` (NOT `... from './x'`): a is public as b.
-      if (clause && !hasSource) {
+      // `export { a as b }`: a is public as b. With `... from './x'`, a is an
+      // export of './x' rather than a local entity, so the source goes along.
+      if (clause) {
         for (let j = 0; j < clause.namedChildCount; j++) {
           const spec = clause.namedChild(j);
           if (spec.type !== 'export_specifier') continue;
@@ -1045,7 +1169,7 @@ function extractJsExportPublicNames(rootNode: any): ExportPublicName[] {
           const pub = pubN && pubN.text ? pubN.text : local;
           if (pub !== local) {
             const k = `${local}\x00${pub}`;
-            if (!seen.has(k)) { seen.add(k); out.push({ local, public: pub }); }
+            if (!seen.has(k)) { seen.add(k); out.push({ local, public: pub, ...(source !== undefined ? { source } : {}) }); }
           }
         }
       }
@@ -2813,6 +2937,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
 
     // Track class ranges for containment: [name, startLine, endLine]
     const classRanges: Array<{ name: string; start: number; end: number }> = [];
+    // PHP class name → the class it `extends`, for `parent::method()`.
+    const phpParentClass = new Map<string, string>();
     // Python: key the typed-receiver maps the way the lookup does
     // (findEnclosingDefinition): `Container.name` for a function inside a
     // class, the bare name otherwise. The container is found exactly as for
@@ -3066,6 +3192,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           dstName: heritageExtends.node.text,
           predicate: 'EXTENDS',
         });
+        if (language === SupportedLanguages.PHP && heritageExtends.name === 'heritage.extends' && heritageExtends.node.type === 'name') {
+          phpParentClass.set(heritageClass.node.text, heritageExtends.node.text);
+        }
         continue;
       }
 
@@ -3495,6 +3624,23 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           let phpReceiverIsSupported = true;
           if (language === SupportedLanguages.PHP) {
             const receiverNode = qualifierCapture.node;
+            if (phpCallKind === 'static') {
+              // `Foo::bar()` names its class, so the call is `Foo.bar` and never
+              // a bare `bar` that matches any method of that name. `self` and
+              // `static` are the enclosing class and `parent` is the class it
+              // extends. A namespaced name (`\App\Foo::bar()`) or a dynamic
+              // scope (`$class::bar()`) keeps the bare name, as an untyped
+              // receiver does.
+              const enclosingClass = findEnclosing(classRanges, callLine, '');
+              const staticClass = receiverNode.type === 'name'
+                ? receiverNode.text
+                : receiverNode.type !== 'relative_scope' || !enclosingClass
+                  ? undefined
+                  : receiverNode.text.toLowerCase() === 'parent'
+                    ? phpParentClass.get(enclosingClass)
+                    : enclosingClass;
+              return staticClass ? `${staticClass}.${callee}` : callee;
+            }
             if (receiverNode.type === 'variable_name') {
               qualifier = receiverNode.firstNamedChild?.text ?? receiverNode.text.replace(/^\$/, '');
             } else if (receiverNode.type === 'member_access_expression') {
@@ -3520,6 +3666,19 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
             // Substitute so e.g. `this.save()` → `Document.save` instead of `this.save`.
             const enclosingClass = findEnclosing(classRanges, callLine, '');
             if (enclosingClass) qualifier = enclosingClass;
+          } else if (language === SupportedLanguages.Rust) {
+            if (qualifier === 'Self') {
+              // `Self` is the type of the enclosing impl: `Self::fresh()` → `Counter.fresh`.
+              const enclosingType = findEnclosing(classRanges, callLine, '') ?? rustImplType(qualifierCapture.node);
+              if (enclosingType) qualifier = enclosingType;
+            } else if (qualifier.includes('::')) {
+              // A longer path keeps every segment (`crate::stats::report()` →
+              // `crate.stats.report`), so the resolver can find the module. Not
+              // with `::`, which the patch builder reads as an external package.
+              qualifier = /^\w+(::\w+)+$/.test(qualifier)
+                ? qualifier.replaceAll('::', '.')
+                : qualifierCapture.node.childForFieldName?.('name')?.text ?? qualifier.slice(qualifier.lastIndexOf('::') + 2);
+            }
           } else if (language === SupportedLanguages.Python) {
             // Typed-parameter substitution: if the qualifier is a param with a declared type,
             // use the type name so e.g. `query.filter(...)` → `Query.filter`.
@@ -3745,6 +3904,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     if (language === SupportedLanguages.TypeScript) {
       for (const [name, spec] of tsRequireAliases(tree.rootNode)) importAliases[name] ??= spec;
     }
+    if (language === SupportedLanguages.Rust) {
+      for (const [name, modulePath] of rustModuleAliases(tree.rootNode)) importAliases[name] ??= modulePath;
+    }
     const tsGlobalTypes = isTsSource ? tsGlobalTypeNames(tree.rootNode) : [];
     const tsModule = isTsSource && isTsModule(tree.rootNode);
 
@@ -3782,18 +3944,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
 // Cross-file CALLS resolution
 // ---------------------------------------------------------------------------
 
-export interface ResolvedCallEdge {
-  callerFilePath: string;
-  callerName: string;           // the caller entity (function/method/file)
-  calleeFilePath: string;       // the file where the callee is actually defined
-  calleeName: string;           // plain name as it appears in the CALLS relationship
-  calleeQualifiedKey: string;   // qualified key used for nodeId in the callee file
-                                // e.g. 'PaymentService.charge' for a class method,
-                                // or plain 'processPayment' for a module-level function
-  confidence: number;           // 0.9 import-scoped | 0.5 global
-}
-
-/** Generalised form of ResolvedCallEdge that covers any cross-file edge predicate. */
+/** A cross-file edge, any predicate, resolved to the file that defines its target. */
 export interface ResolvedEdge {
   srcFilePath: string;
   srcName: string;
@@ -3817,7 +3968,7 @@ export interface ResolvedEdge {
 export type ResolutionTier = 'type' | 'binding' | 'import' | 'transitive' | 'qualifier' | 'global';
 
 // ---------------------------------------------------------------------------
-// resolveCallEdges helpers
+// resolveEdges helpers
 // ---------------------------------------------------------------------------
 
 /** Build the qualified key for an entity (mirrors buildPatch's entityQKey logic). */
@@ -3857,6 +4008,15 @@ function ambiguousPhpTypeNames(entities: ParsedEntity[]): Set<string> {
 }
 
 /**
+ * `public -> local` for the export names that rename an entity of the file
+ * itself. A renaming re-export names another module's export, so it is left
+ * out: a same-named local entity is not what it exports.
+ */
+function localPublicNames(names: NonNullable<FileSummary['exportPublicNames']>): Map<string, string> {
+  return new Map(names.filter(name => name[2] === undefined).map(([pub, local]) => [pub, local]));
+}
+
+/**
  * What resolution needs from a file it resolves TO (see `FileSummary`). The
  * same rules `resolveEdges` applies to a batch file, so a file looks the same
  * to resolution whether it is in the batch or only in the index.
@@ -3867,7 +4027,8 @@ export function summarizeParseResult(r: FileParseResult): FileSummary {
     if (e.kind === 'file' || e.kind === 'module') continue;
     qkeys.push([e.name, qualifiedKey(e)]);
   }
-  const exportPublicNames = r.exportPublicNames?.map((n): [string, string] => [n.public, n.local]);
+  const exportPublicNames = r.exportPublicNames?.map((n): [string, string, string?] =>
+    n.source === undefined ? [n.public, n.local] : [n.public, n.local, n.source]);
   let phpTypes: Array<[string, string]> | undefined;
   if (r.language === SupportedLanguages.PHP) {
     const ambiguous = ambiguousPhpTypeNames(r.entities);
@@ -3983,26 +4144,24 @@ function qkeyMapOf(summary: FileSummary): Map<string, string[]> {
 }
 
 /**
- * Build a GlobalResolutionIndex from a list of file paths (and optional source
- * texts for entity extraction). Covers the entire repository so that each
- * streaming batch can resolve edges pointing to files outside the batch.
+ * Build a GlobalResolutionIndex from a list of file paths and per-file
+ * summaries. Covers the entire repository so that each streaming batch can
+ * resolve edges pointing to files outside the batch.
+ *
+ * A file's symbols come from its summary (`summarizeParseResult`) and nowhere
+ * else, so the index answers exactly as `resolveEdges` would with the file in
+ * the batch. A path with no summary contributes to the path maps only.
  */
 export function buildGlobalResolutionIndex(
   filePaths: string[],
-  sources?: Map<string, string>,
-  // Parse results the caller already has. The parser-derived language blocks
-  // below (PHP, JS/TS, R, SAS) call parseFile synchronously on the main thread,
-  // which is fine for a handful of files and not fine for a whole repository's
-  // worth of TypeScript. The CLI owns a worker pool; letting it parse in
-  // parallel and hand the results in keeps the work off this thread entirely.
-  // Absent an entry, each block falls back to parsing here, so callers that do
-  // not have a pool (tests, library use) behave exactly as before.
-  preParsed?: Map<string, FileParseResult>,
-  // Summaries of any files, any language (see FileSummary). A summarized file's
-  // symbols come from its summary, not from the per-language blocks below,
-  // which then only serve callers that have no summaries.
   summaries?: Map<string, FileSummary>,
 ): GlobalResolutionIndex {
+  // The sources and preParsed parameters that used to sit between these two
+  // are gone (#968). A caller still passing four arguments would otherwise get
+  // `summaries` silently ignored and an index with no symbols in it.
+  if (arguments.length > 2) {
+    throw new TypeError('buildGlobalResolutionIndex(filePaths, summaries): pass summaries as the second argument; sources and preParsed were removed');
+  }
   const stemToFiles = new Map<string, string[]>();
   const dirToIndexFiles = new Map<string, string[]>();
   const packageToFiles = new Map<string, string[]>();
@@ -4072,171 +4231,18 @@ export function buildGlobalResolutionIndex(
     }
   }
 
-  // Entity maps (built from sources if provided, via fast regex scan)
+  // Entity maps, from the summaries alone.
   const fileQKeys = new Map<string, Map<string, string[]>>();
   const filePublicNames = new Map<string, Map<string, string>>();
   const fileHasSymbol = new Map<string, Set<string>>();
   const symbolToFiles = new Map<string, string[]>();
-
-  if (sources) {
-    const pkgRe = /^package\s+(\w+)/m;
-    const typeRe = /^type\s+([A-Z]\w*)\s+/gm;
-    const funcRe = /^func\s+([A-Z]\w*)\s*[(\[]/gm;
-    const methodRe = /^func\s+\([^)]+\)\s+([A-Z]\w*)\s*[(\[]/gm;
-
-    for (const [fp, src] of sources) {
-      if (nodePath.extname(fp) !== '.go') continue;
-
-      const qkMap = new Map<string, string[]>();
-
-      // Package name — critical for qualifier-assisted REFERENCES resolution
-      const pkgMatch = pkgRe.exec(src);
-      if (pkgMatch) {
-        const name = pkgMatch[1];
-        qkMap.set(name, [name]);
-      }
-
-      // Exported types (struct/interface/aliases/type defs)
-      typeRe.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = typeRe.exec(src)) !== null) {
-        const name = m[1];
-        if (!qkMap.has(name)) qkMap.set(name, [name]);
-      }
-
-      // Exported top-level functions
-      funcRe.lastIndex = 0;
-      while ((m = funcRe.exec(src)) !== null) {
-        const name = m[1];
-        if (!qkMap.has(name)) qkMap.set(name, [name]);
-      }
-
-      // Exported methods (receiver form)
-      methodRe.lastIndex = 0;
-      while ((m = methodRe.exec(src)) !== null) {
-        const name = m[1];
-        if (!qkMap.has(name)) qkMap.set(name, [name]);
-      }
-
-      if (qkMap.size > 0) {
-        fileQKeys.set(fp, qkMap);
-        fileHasSymbol.set(fp, new Set(qkMap.keys()));
-      }
-    }
-
-    // JavaScript/TypeScript: index definitions for cross-batch resolution from
-    // the same parser output used by the normal ingest path. A path-only index
-    // can find an imported file outside the current streaming batch, but without
-    // its symbols resolveEdges cannot verify the destination and drops the edge.
-    const jsTsExtensions = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx']);
-    for (const [fp, src] of sources) {
-      if (!jsTsExtensions.has(nodePath.extname(fp).toLowerCase())) continue;
-      const parsed = preParsed?.get(fp) ?? parseFile(fp, src);
-      if (!parsed) continue;
-      const qkMap = new Map<string, string[]>();
-      for (const e of parsed.entities) {
-        if (e.kind === 'file' || e.kind === 'module') continue;
-        const list = qkMap.get(e.name) ?? [];
-        list.push(qualifiedKey(e));
-        qkMap.set(e.name, list);
-      }
-      if (qkMap.size > 0) {
-        fileQKeys.set(fp, qkMap);
-        fileHasSymbol.set(fp, new Set(qkMap.keys()));
-      }
-      if (parsed.exportPublicNames) {
-        filePublicNames.set(fp, new Map(parsed.exportPublicNames.map(name => [name.public, name.local])));
-      }
-    }
-
-    // R: index function definitions for cross-batch Tier-3 resolution. Derive
-    // them from the parser's definition.function entities (not a regex) so this
-    // never drifts from what the in-batch path extracts in resolveEdges — the
-    // parser also captures forms a regex misses (`= function`, string-keyed S3
-    // method names like "print.myClass"). Mirrors the qkMap construction at
-    // resolveEdges (key by name, value qkey). Same pattern as the SAS index.
-    for (const [fp, src] of sources) {
-      if (nodePath.extname(fp).toLowerCase() !== '.r') continue;
-      const parsed = preParsed?.get(fp) ?? parseFile(fp, src);
-      if (!parsed) continue;
-      const qkMap = new Map<string, string[]>();
-      for (const e of parsed.entities) {
-        if (e.kind !== 'function') continue;
-        const list = qkMap.get(e.name) ?? [];
-        list.push(qualifiedKey(e));
-        qkMap.set(e.name, list);
-      }
-      if (qkMap.size > 0) {
-        fileQKeys.set(fp, qkMap);
-        fileHasSymbol.set(fp, new Set(qkMap.keys()));
-      }
-    }
-
-    // PHP: index definitions so an incremental batch can resolve typed receiver
-    // calls to classes and interfaces in unchanged files.
-    for (const [fp, src] of sources) {
-      if (nodePath.extname(fp).toLowerCase() !== '.php') continue;
-      const parsed = preParsed?.get(fp) ?? parseFile(fp, src);
-      if (!parsed) continue;
-      const qkMap = new Map<string, string[]>();
-      const ambiguousTypes = ambiguousPhpTypeNames(parsed.entities);
-      for (const e of parsed.entities) {
-        if (e.kind === 'file' || e.kind === 'module') continue;
-        const list = qkMap.get(e.name) ?? [];
-        list.push(qualifiedKey(e));
-        qkMap.set(e.name, list);
-        const fqcn = phpTypeFqcn(e);
-        if (fqcn && !ambiguousTypes.has(e.name.toLowerCase())) {
-          const entries = phpFqcnToTypes.get(fqcn) ?? [];
-          if (!entries.some(entry => entry.filePath === fp && entry.typeName === e.name)) {
-            entries.push({ filePath: fp, typeName: e.name });
-          }
-          phpFqcnToTypes.set(fqcn, entries);
-        }
-      }
-      if (qkMap.size > 0) {
-        fileQKeys.set(fp, qkMap);
-        fileHasSymbol.set(fp, new Set(qkMap.keys()));
-      }
-    }
-
-    // SAS: index macro definitions for cross-batch Tier-3 resolution. Derive
-    // them from the parser's definition.macro entities (not a regex) so this
-    // never drifts from what the in-batch path extracts in resolveEdges — the
-    // parser also captures forms a regex misses (e.g. %macro /*comment*/ name).
-    // Mirrors the qkMap construction at resolveEdges (key by name, value qkey).
-    for (const [fp, src] of sources) {
-      if (nodePath.extname(fp).toLowerCase() !== '.sas') continue;
-      const parsed = preParsed?.get(fp) ?? parseFile(fp, src);
-      if (!parsed) continue;
-      const qkMap = new Map<string, string[]>();
-      for (const e of parsed.entities) {
-        if (e.kind !== 'macro') continue;
-        const list = qkMap.get(e.name) ?? [];
-        list.push(qualifiedKey(e));
-        qkMap.set(e.name, list);
-      }
-      if (qkMap.size > 0) {
-        fileQKeys.set(fp, qkMap);
-        fileHasSymbol.set(fp, new Set(qkMap.keys()));
-      }
-    }
-
-  }
 
   if (summaries) {
     for (const [fp, summary] of summaries) {
       const qkMap = qkeyMapOf(summary);
       fileQKeys.set(fp, qkMap);
       fileHasSymbol.set(fp, new Set(qkMap.keys()));
-      if (summary.exportPublicNames) filePublicNames.set(fp, new Map(summary.exportPublicNames));
-      else filePublicNames.delete(fp);
-    }
-    // PHP types for summarized files come from their summaries alone.
-    for (const [fqcn, entries] of phpFqcnToTypes) {
-      phpFqcnToTypes.set(fqcn, entries.filter(entry => !summaries.has(entry.filePath)));
-    }
-    for (const [fp, summary] of summaries) {
+      if (summary.exportPublicNames) filePublicNames.set(fp, localPublicNames(summary.exportPublicNames));
       for (const [fqcn, typeName] of summary.phpTypes ?? []) {
         const entries = phpFqcnToTypes.get(fqcn) ?? [];
         if (!entries.some(entry => entry.filePath === fp && entry.typeName === typeName)) {
@@ -4627,7 +4633,7 @@ export function resolveEdges(
     ? new Map<string, Map<string, string>>(globalIndex.filePublicNames ?? [])
     : new Map<string, Map<string, string>>();
   for (const s of batchSummaries) {
-    if (s.exportPublicNames) filePublicNames.set(s.filePath, new Map(s.exportPublicNames));
+    if (s.exportPublicNames) filePublicNames.set(s.filePath, localPublicNames(s.exportPublicNames));
     else filePublicNames.delete(s.filePath);
   }
 
@@ -5609,6 +5615,55 @@ export function resolveEdges(
   }
 
   /**
+   * Rust: the files of the module an in-crate path names, seen from
+   * `srcFilePath` -- `crate::stats`, `self::stats` (a `mod stats;` of the
+   * file), `super::stats`. A module `x` is `x.rs` or `x/mod.rs` in the
+   * directory that holds its parent's children: the parent's own directory for
+   * `main.rs`, `lib.rs` and `mod.rs`, else the directory named after the parent.
+   */
+  function rustModuleFiles(srcFilePath: string, modulePath: string): string[] {
+    const segments = modulePath.split('::');
+    const src = srcFilePath.replace(/\\/g, '/');
+    const srcDir = nodePath.posix.dirname(src);
+    const indexed = (filePath: string): string[] => normalizedPathToFiles.get(normalizedPathKey(filePath)) ?? [];
+    const ownsItsDirectory = /^(main|lib|mod)\.rs$/.test(nodePath.posix.basename(src));
+    let dir: string | undefined;
+    let i = 1;
+    if (segments[0] === 'self') {
+      dir = ownsItsDirectory ? srcDir : src.replace(/\.rs$/, '');
+    } else if (segments[0] === 'super') {
+      dir = ownsItsDirectory ? nodePath.posix.dirname(srcDir) : srcDir;
+      for (; segments[i] === 'super'; i++) dir = nodePath.posix.dirname(dir);
+    } else if (segments[0] === 'crate') {
+      // The crate root is the nearest directory above with a `lib.rs` or `main.rs`.
+      for (let up = srcDir, depth = 0; depth < 32; up = nodePath.posix.dirname(up), depth++) {
+        if (indexed(`${up}/lib.rs`).length > 0 || indexed(`${up}/main.rs`).length > 0) { dir = up; break; }
+        if (up === nodePath.posix.dirname(up)) break;
+      }
+    }
+    if (dir === undefined || i >= segments.length) return [];
+    const module = `${dir}/${segments.slice(i).join('/')}`;
+    return [...indexed(`${module}.rs`), ...indexed(`${module}/mod.rs`)];
+  }
+
+  /**
+   * Rust: what `path::member()` calls, given the in-crate path its qualifier
+   * stands for -- the function `member` of the module file the path names, or
+   * the associated function of a type (the path's last segment) in the module
+   * before it. Undefined when the path names neither in exactly one file.
+   */
+  function rustPathCallTarget(srcFilePath: string, modulePath: string, memberPart: string): { fp: string; key: string } | undefined {
+    const functions = rustModuleFiles(srcFilePath, modulePath)
+      .filter(fp => (fileQKeys.get(fp)?.get(memberPart) ?? []).includes(memberPart));
+    if (functions.length > 0) return functions.length === 1 ? { fp: functions[0], key: memberPart } : undefined;
+    const typeAt = modulePath.lastIndexOf('::');
+    const typeName = modulePath.slice(typeAt + 2);
+    const members = rustModuleFiles(srcFilePath, modulePath.slice(0, typeAt))
+      .filter(fp => fileDefinesQualifiedMember(fp, typeName, memberPart));
+    return members.length === 1 ? { fp: members[0], key: `${typeName}.${memberPart}` } : undefined;
+  }
+
+  /**
    * Python: the files of the module a dotted qualifier names through this
    * file's own imports -- `base` after `from pkg import base` (or
    * `from . import base`), `pkg.base` after `import pkg.base`. An absolute
@@ -6068,6 +6123,26 @@ export function resolveEdges(
               continue;
             }
           }
+          // `export { inner as outer } from './impl'`: the barrel names the
+          // symbol without defining it, and the transitive tier below would
+          // look for `outer` in impl. Follow the re-export to its source, one
+          // hop, under the name it has there.
+          const reexport = srcIsJsTs && providerFiles.length === 1
+            ? summaries.get(providerFiles[0])?.exportPublicNames?.find(name => name[0] === binding.imported && name[2] !== undefined)
+            : undefined;
+          if (reexport) {
+            const barrel = providerFiles[0];
+            const reexportMatches: Array<{ fp: string; local: string }> = [];
+            for (const fp of jsTsModuleSpecFiles(barrel, fileLanguage.get(barrel) ?? srcLanguage, reexport[2]!)) {
+              const local = reexport[1] === 'default' ? filePublicNames.get(fp)?.get('default') : reexport[1];
+              if (local && (fileQKeys.get(fp)?.get(local) ?? []).includes(local)) reexportMatches.push({ fp, local });
+            }
+            if (reexportMatches.length === 1) {
+              const { fp, local } = reexportMatches[0];
+              resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey: local, predicate: rel.predicate, confidence: 0.8, tier: 'transitive' });
+              continue;
+            }
+          }
         }
       }
 
@@ -6114,6 +6189,24 @@ export function resolveEdges(
         const qualifierPart = dstName.slice(0, qualDot);
         const memberPart = dstName.slice(qualDot + 1);
         if (memberPart && qualifierPart) {
+          // Rust `stats::report()`: `stats` is a module, bound by `mod stats;` or
+          // `use crate::stats;`, or the call spells the path itself
+          // (`crate::stats::report()`). A path into another crate, or one that
+          // names no module file here, falls through to the tiers below.
+          if (srcLanguage === SupportedLanguages.Rust && rel.predicate === 'CALLS') {
+            const [head, ...rest] = qualifierPart.split('.');
+            const aliases = result.importAliases;
+            const headPath = aliases && Object.hasOwn(aliases, head) ? aliases[head]
+              : rest.length > 0 && (head === 'crate' || head === 'self' || head === 'super') ? head
+              : undefined;
+            const target = headPath !== undefined
+              ? rustPathCallTarget(srcFilePath, [headPath, ...rest].join('::'), memberPart)
+              : undefined;
+            if (target) {
+              resolved.push({ srcFilePath, srcName, dstFilePath: target.fp, dstName: origDstName, dstQualifiedKey: target.key, predicate: rel.predicate, confidence: 0.9, tier: 'qualifier' });
+              continue;
+            }
+          }
           const elixirAliasedModule = srcLanguage === SupportedLanguages.Elixir ? result.importAliases?.[qualifierPart]: undefined;
           // Python `import a.b as m`: `m.f` is `f` in the one file a.b names.
           // An ambiguous module stays unresolved here, as without the alias.
@@ -6123,6 +6216,11 @@ export function resolveEdges(
           : elixirAliasedModule ? (symbolToFiles.get(elixirAliasedModule) ?? []).filter(fp => fp !== srcFilePath)
           : pythonAliasedFiles.length === 1 ? pythonAliasedFiles
           : [];
+          // The caller's own file defines `qualifier.member` (a `this.m()` /
+          // `self.m()` call, which the parser rewrites to `Class.m`): the call
+          // stays in this file, whatever same-named class defines it elsewhere.
+          // A qualifier that is an import alias names another module instead.
+          if (aliasedImportMatches.length === 0 && fileDefinesQualifiedMember(srcFilePath, qualifierPart, memberPart)) continue;
           // Try import-scoped qualifier first
           const qualifierSearchPool = aliasedImportMatches.length > 0
             ? aliasedImportMatches
@@ -6330,18 +6428,6 @@ export function resolveEdges(
     });
   }
   return resolved;
-}
-
-/** @deprecated Use resolveEdges instead. */
-export function resolveCallEdges(results: FileParseResult[]): ResolvedCallEdge[] {
-  return resolveEdges(results).map(e => ({
-    callerFilePath: e.srcFilePath,
-    callerName: e.srcName,
-    calleeFilePath: e.dstFilePath,
-    calleeName: e.dstName,
-    calleeQualifiedKey: e.dstQualifiedKey,
-    confidence: e.confidence,
-  }));
 }
 
 // ---------------------------------------------------------------------------

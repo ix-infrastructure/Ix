@@ -20,7 +20,10 @@ import { clearMapStale, markMapStale, mapStaleNotice, readMapStale, type MapStal
 import { resolveMapRoot } from "../map-root.js";
 import { readBackendHealth } from "./upgrade.js";
 import { renderWarning } from "../ui.js";
+import { describeUnavailableGrammars } from "../grammar-status.js";
 import type { IxClient } from "../../client/api.js";
+import { formatOption } from "../options.js";
+import { DEFAULT_FORMAT_CHOICES } from "../default-format.js";
 
 // Hard wall-clock budget for a single `ix map`. Past this, the shared deadline
 // signal aborts every in-flight request and the command exits, so a single
@@ -326,8 +329,18 @@ export function describeDroppedFiles(
   return `${parts.join(" and ")} — those files are absent from the graph. Re-run with 'ix ingest' to see the per-file errors.`;
 }
 
+/**
+ * The languages whose files went unparsed because their grammar did not load
+ * (#967), one line each, ready for stderr. Exported for tests.
+ */
+export function describeGrammarSkips(
+  ingest: Pick<IngestFilesSummary, "grammarUnavailable"> | undefined,
+): string[] {
+  return describeUnavailableGrammars(ingest?.grammarUnavailable ?? []).map((line) => `grammar unavailable: ${line}`);
+}
+
 function emitDroppedFileWarning(
-  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "filesTooLarge"> | undefined,
+  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "filesTooLarge" | "grammarUnavailable"> | undefined,
   silent: boolean,
 ): void {
   const message = describeDroppedFiles(ingest);
@@ -339,6 +352,9 @@ function emitDroppedFileWarning(
   if (silent) return;
   const tooLarge = describeTooLargeFiles(ingest);
   if (tooLarge) process.stderr.write(chalk.dim(`  ${tooLarge}\n`));
+  // Also not under --silent, for the same reason: a missing grammar recurs on
+  // every run. stderr, so no JSON or llm payload changes shape.
+  for (const line of describeGrammarSkips(ingest)) process.stderr.write(chalk.yellow(`  ${line}\n`));
 }
 
 /**
@@ -438,7 +454,7 @@ export function registerMapCommand(program: Command): void {
   program
     .command("map [path]")
     .description("Map the architectural hierarchy of a codebase")
-    .option("--format <fmt>", "Output format (text|json|llm|silent)", "text")
+    .addOption(formatOption([...DEFAULT_FORMAT_CHOICES, "silent"]))
     .option("--level <n>", "Show only regions at this level (1=finest, higher=coarser)")
     .option("--min-confidence <n>", "Only show regions above this confidence threshold (0-1)", "0")
     .option("--max-items <n>", "Max items to show per section in text output (default: 10)", "10")

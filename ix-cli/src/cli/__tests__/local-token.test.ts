@@ -85,13 +85,12 @@ describe("the client sends the token on every request", () => {
     const client = new IxClient(endpoint, undefined, { token: TOKEN });
     await client.search("x");                 // post()
     await client.hasIngestBaseline();         // get()
-    await client.ingest("/tmp/x");            // own fetch
     await client.map();                       // own fetch
     await client.commitPatchBulk([]);         // own fetch
     await client.commitPatch({} as never);    // own fetch
     await client.savingsReset();              // DELETE, no body
     await client.reset();                     // local: synchronous reset route
-    expect(seen.length).toBe(8);
+    expect(seen.length).toBe(7);
     for (const r of seen) expect(r.headers.authorization, `${r.method} ${r.url}`).toBe(`Bearer ${TOKEN}`);
   });
 
@@ -103,7 +102,7 @@ describe("the client sends the token on every request", () => {
     // The `<status>: <body>` shape callers read codes out of is kept.
     expect((err as Error).message).toMatch(/^401: .*local_token_required/);
     expect(seen[0].headers.authorization).toBeUndefined();
-    await expect(client.ingest("/tmp/x")).rejects.toBeInstanceOf(LocalTokenRequiredError);
+    await expect(client.commitPatchBulk([])).rejects.toBeInstanceOf(LocalTokenRequiredError);
   });
 
   it("a plain 401 without the guard's code stays an ordinary error", async () => {

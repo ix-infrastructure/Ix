@@ -50,7 +50,7 @@ import { companionHistory, expandIssueCompanions } from "../explain/issue-compan
 import { collectTextReferences, gitRepoAccess, type RepoAccess, type TextSource } from "../explain/text-references.js";
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
-import { parseBudgetOption, parsePickOption, STRICT_TARGET_HELP, parseRevisionOption } from "../options.js";
+import { formatOption, kindOption, parseBudgetOption, parseRevisionOption, pathOption, pickOption, strictOption } from "../options.js";
 import { activeReadScope, ensureReadScope, isRawId, resolveFileOrEntityFull, resolveFileOrReport, type ResolutionNotice, type ResolvedEntity } from "../resolve.js";
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
 import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure } from "../ui.js";
@@ -59,6 +59,7 @@ import { forMcp, suggest, toolCall } from "../next-step.js";
 import {
   assessTargetStructure, checkGraphHealth, graphHealthJson, isUnhealthy, worseHealth, type GraphHealth,
 } from "../graph-health.js";
+import { CONTAINER_KINDS } from "../graph-model.js";
 
 /** The `--max-*` knobs that bound a bundle. */
 interface BudgetSnapshot {
@@ -381,10 +382,10 @@ export function registerContextCommand(program: Command): void {
       "--lean",
       "With --from-issue: only the starting points Ix trusts and the next few files, or one line saying it trusts none",
     )
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
     .option(
       "--depth <depth>",
       `Context-graph expansion depth (${CONTEXT_DEPTHS.join("|")})`,
@@ -410,7 +411,7 @@ export function registerContextCommand(program: Command): void {
       `${budgetField("maxChars").help} (overrides --max-tokens; clamped to ${budgetField("maxChars").min}-${budgetField("maxChars").max})`,
       budgetParser("maxChars"),
     )
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .option("--out <path>", "Write the JSON bundle to this file instead of stdout")
     .option("--save <id>", "Persist the bundle as a resumable investigation state")
     .option("--resume <id>", "Render a saved investigation state without a backend")
@@ -1797,7 +1798,7 @@ async function buildIssueBundle(
   const { starts, centre, walked } = await chooseCentre(
     plan.starts, plan.bm25, (path) => findFileNode(client, path), CENTRE_FALLBACK_TRIES, plan.sourcePaths);
   if (!centre) {
-    issueFailure(
+    reportFailure(
       "issue_unresolved",
       starts.length === 0
         ? `Nothing the issue names resolved to a definition${plan.unresolved.length > 0 ? ` (tried ${plan.unresolved.slice(0, 5).join(", ")})` : ""}, and no tracked source file matched its text. Name a symbol or file and run ix context <target>.`
@@ -1927,7 +1928,7 @@ async function readIssueOrReport(arg: string, format: string | undefined): Promi
   try {
     text = await readIssueText(arg);
   } catch (error) {
-    issueFailure(
+    reportFailure(
       "issue_unreadable",
       `Cannot read the issue from ${arg === "-" ? "stdin" : `"${arg}"`}: ${(error as Error).message}`,
       format,
@@ -1935,7 +1936,7 @@ async function readIssueOrReport(arg: string, format: string | undefined): Promi
     return undefined;
   }
   if (!text.trim()) {
-    issueFailure("empty_issue", `The issue ${arg === "-" ? "on stdin" : `in "${arg}"`} is empty.`, format);
+    reportFailure("empty_issue", `The issue ${arg === "-" ? "on stdin" : `in "${arg}"`} is empty.`, format);
     return undefined;
   }
   return text;
@@ -2041,21 +2042,6 @@ export function renderLeanIssueLlm(view: LeanIssueView): string[] {
   }
   for (const f of view.alsoRanked) out.push(llmLine("ranked", [["path", f.path]]));
   return out;
-}
-
-/**
- * A `--from-issue` failure, readable by the format asked for. `reportFailure`
- * writes nothing to stdout under `--format json`, so a JSON caller got an empty
- * stdout and had to scrape stderr; this prints the record the other commands'
- * JSON failures use.
- */
-function issueFailure(code: string, message: string, format: string | undefined): void {
-  if (format === "json") {
-    printJson({ error: code, message });
-    process.exitCode = 1;
-    return;
-  }
-  reportFailure(code, message, format);
 }
 
 /** A secondary starting point's one-hop facts and related files. Best-effort. */
@@ -3132,7 +3118,7 @@ function summariseCut(dropped: EvidenceItem[]): Array<{ what: string; count: num
 function cutLever(bundle: ContextBundle, top: { what: string }): string {
   if (forMcp()) return mcpCutLever(bundle, top);
   const name = bundle.target.name;
-  const container = CONTAINER_TARGET_KINDS.includes(bundle.target.kind.toLowerCase());
+  const container = CONTAINER_KINDS.has(bundle.target.kind.toLowerCase());
   switch (top.what) {
     case "member":
       return container
@@ -3156,8 +3142,6 @@ function cutLever(bundle: ContextBundle, top: { what: string }): string {
   }
 }
 
-const CONTAINER_TARGET_KINDS: readonly string[] = ["file", "module", "class", "object", "trait", "interface"];
-
 /**
  * {@link cutLever} for an MCP caller: only core tools, and `max_tokens` for
  * the budget, since `ix_context` takes no flags. `ix contains`, `ix depends`
@@ -3166,7 +3150,7 @@ const CONTAINER_TARGET_KINDS: readonly string[] = ["file", "module", "class", "o
  */
 function mcpCutLever(bundle: ContextBundle, top: { what: string }): string {
   const { name, path } = bundle.target;
-  const container = CONTAINER_TARGET_KINDS.includes(bundle.target.kind.toLowerCase());
+  const container = CONTAINER_KINDS.has(bundle.target.kind.toLowerCase());
   const pin = container ? {} : { path };
   const budget = "raise max_tokens (default 3000)";
   switch (top.what) {

@@ -15,8 +15,9 @@ import { isQuiet } from "./output-shape.js";
 import type { AmbiguousResult, ResolutionNotice, ResolveResult, Suggestion } from "./resolve.js";
 import { forMcp } from "./next-step.js";
 import { graphHealthJson, graphHealthLlmFields, graphHealthProse, type GraphHealth } from "./graph-health.js";
-import { setOutcome } from "./outcome.js";
+import { EXIT_ERROR, outcomeForCode, setOutcome } from "./outcome.js";
 import { didYouMeanRows, type TargetCandidate } from "./target-suggestions.js";
+import { ambiguousTargetJson, ambiguousTargetMessage, unresolvedTargetJson } from "./contracts/miss.js";
 
 // ── Brand palette ─────────────────────────────────────────────────────────────
 //
@@ -125,29 +126,41 @@ export function renderResolvedHeader(kind: string, name: string): void {
 
 /**
  * Report a command failure in the format the caller asked for, and mark the run
- * failed.
+ * failed. The one failure printer for a command that refuses or fails without
+ * throwing; a command that can throw (`CliUsageError`, a backend error) lets
+ * `renderCliError` answer instead, in the same shapes.
  *
- * Both halves matter. `--format llm` gets the `error code=... message="..."`
- * record on stdout that `callers.ts`, `contains.ts`, `depends.ts`, `diff.ts` and
- * `history.ts` already emit and that docs/llm-format.md specifies: an agent is
- * told to pass the flag unconditionally, so an error it cannot parse is an
- * error it cannot act on. Every other format gets the human line on stderr, so
- * a `--format json` caller piping to `jq` never finds prose in the payload.
+ * One record per format, as `emitErrorRecord` writes for the top-level handler:
+ *   - llm: `error code=... message="..." <extra>` on stdout, and nothing else
+ *     (docs/llm-format.md); an agent is told to pass the flag unconditionally,
+ *     so an error it cannot parse is an error it cannot act on.
+ *   - json: `{"error": code, "message": ..., <extra>}` on stdout, and the human
+ *     line on stderr, where callers already read their error guidance.
+ *   - text: the human line on stderr only.
  *
- * One function because it was otherwise written twice, byte for byte including
- * its docblock, in `context.ts` and `diff.ts`, while five more refusals in the
- * same handler wrote `renderWarning` — which is `console.log` — and left the
- * exit code at 0, so a script could not tell a refusal from an empty success.
- * `subsystems.ts` carries six more copies of the stderr half.
+ * The exit code follows outcome.ts: `unresolved_target`, `ambiguous_target`
+ * and `workspace_not_mapped` get their own codes (and `IX_LEGACY_EXIT_CODES`),
+ * anything else is an error (1).
  *
  * Here rather than in `llm.ts`: this is an output-routing decision, and putting
  * it there forced `chalk` into the module documented as the token-minimal wire
  * format renderer, for the sake of one human-facing line.
  */
-export function reportFailure(code: string, message: string, format?: string): void {
-  if (format === "llm") console.log(llmError(code, message));
-  else console.error(chalk.red("Error:"), message);
-  process.exitCode = 1;
+export function reportFailure(
+  code: string,
+  message: string,
+  format?: string,
+  extra: Array<[string, string]> = [],
+): void {
+  if (format === "llm") {
+    console.log(llmError(code, message, extra));
+  } else {
+    if (format === "json") printJson({ error: code, message, ...Object.fromEntries(extra) });
+    console.error(chalk.red("Error:"), message);
+  }
+  const outcome = outcomeForCode(code);
+  if (outcome) setOutcome(outcome);
+  else process.exitCode = EXIT_ERROR;
 }
 
 /** Report a resolver miss without corrupting machine-readable stdout. */
@@ -166,15 +179,6 @@ export function unresolvedTargetMessage(target: string | string[]): string {
   return `No entity found matching "${target}".`;
 }
 
-/** The `--format json` record for a target that does not exist. */
-export function unresolvedTargetRecord(target: string | string[]): { error: string; message: string; targets?: string[] } {
-  return {
-    error: "unresolved_target",
-    message: unresolvedTargetMessage(target),
-    ...(Array.isArray(target) ? { targets: target } : {}),
-  };
-}
-
 export function reportUnresolvedTarget(
   target: string | string[],
   format?: string,
@@ -189,15 +193,14 @@ export function reportUnresolvedTarget(
   // the suggestion rows, whose ids resolve an entity directly.
   const display = didYouMeanRows(near, detail?.didYouMean);
   if (format === "json") {
-    printJson({
-      ...unresolvedTargetRecord(target),
-      message,
-      ...(detail?.reason ? { reason: detail.reason } : {}),
-      ...(detail?.files?.length ? { files: detail.files } : {}),
-      ...(near.length ? { suggestions: near } : {}),
-      ...(detail?.didYouMean ? { didYouMean: detail.didYouMean } : {}),
-      ...(detail?.graph ? { graph: graphHealthJson(detail.graph) } : {}),
-    });
+    printJson(unresolvedTargetJson(message, {
+      targets: Array.isArray(target) ? target : undefined,
+      reason: detail?.reason,
+      files: detail?.files,
+      suggestions: near,
+      didYouMean: detail?.didYouMean,
+      graph: detail?.graph ? graphHealthJson(detail.graph) : undefined,
+    }));
   } else if (format === "llm") {
     const lines = [
       llmError("unresolved_target", message, [
@@ -259,16 +262,9 @@ export function reportAmbiguousTarget(
   format?: string,
   opts?: { kind?: string; path?: string; offerAll?: boolean },
 ): void {
-  const message = `Ambiguous symbol "${target}".`;
+  const message = ambiguousTargetMessage(target);
   if (format === "json") {
-    printJson({
-      error: "ambiguous_target",
-      message,
-      candidates: result.candidates,
-      ...(result.total != null ? { total: result.total } : {}),
-      ...(result.truncated ? { truncated: true } : {}),
-      diagnostics: result.diagnostics ?? [],
-    });
+    printJson(ambiguousTargetJson(target, result));
     return;
   }
   if (format === "llm") {

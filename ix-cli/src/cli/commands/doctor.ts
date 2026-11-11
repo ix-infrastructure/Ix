@@ -45,7 +45,10 @@ import { loadMapBaseline } from "../map-baseline.js";
 import { printJson } from "../format.js";
 import { runVerify, type VerifyReport } from "../verify.js";
 import { healthFromError } from "../database-probe.js";
+import type { GrammarStatus } from "../grammar-status.js";
+import { loadGrammarStatus } from "./ingestion-loader.js";
 import type { CapabilitiesResponse, HealthResponse } from "../../client/types.js";
+import { formatOption } from "../options.js";
 
 interface CheckResult {
   ok: boolean;
@@ -423,6 +426,45 @@ export function checkRipgrep(run: () => string = () => execFileSync("rg", ["--ve
   }
 }
 
+/** The doctor check that lists language grammars (#967). */
+export const GRAMMAR_CHECK_NAME = "Language grammars loaded";
+
+/**
+ * "Language grammars loaded": which tree-sitter grammars this install can use.
+ *
+ * Never a failure or a warning. An optional grammar with no prebuild for this
+ * platform (tree-sitter-sas on Windows) cannot be fixed by the user, and a
+ * permanent warning on every such install would teach people to ignore the
+ * yellow line. What was missing was the information: a missing grammar's files
+ * went unparsed with no language named anywhere. So the detail names each one
+ * with its load error, and `grammarLines` lists every grammar under the check.
+ * A parser that will not load at all is "not checked", as in the verify check.
+ */
+export function assessGrammars(statuses: readonly GrammarStatus[]): CheckResult {
+  if (statuses.length === 0) return { ok: true, detail: "not checked: the parser reported no grammars" };
+  const missing = statuses.filter((s) => !s.loaded);
+  if (missing.length === 0) return { ok: true, detail: `all ${statuses.length} loaded` };
+  const named = missing.map((s) => `${s.language} (${s.reason ?? "unknown error"})`).join(", ");
+  return {
+    ok: true,
+    detail: `${statuses.length - missing.length} of ${statuses.length} loaded; unavailable: ${named} — ` +
+      `files in ${missing.length === 1 ? "that language are" : "those languages are"} not parsed`,
+  };
+}
+
+/** Text-mode lines under the grammar check: the loaded grammars, then each missing one with its reason. */
+export function grammarLines(statuses: readonly GrammarStatus[]): Array<{ loaded: boolean; text: string }> {
+  const loaded = statuses.filter((s) => s.loaded).map((s) => s.language);
+  const lines: Array<{ loaded: boolean; text: string }> = [];
+  if (loaded.length > 0) lines.push({ loaded: true, text: `loaded: ${loaded.join(", ")}` });
+  for (const s of statuses) {
+    if (s.loaded) continue;
+    const pkg = s.package ? ` (${s.package})` : "";
+    lines.push({ loaded: false, text: `unavailable: ${s.language}${pkg} — ${s.reason ?? "unknown error"}` });
+  }
+  return lines;
+}
+
 /**
  * "Graph matches a re-parse": the last line of defence for a graph whose
  * counts look fine and whose nodes do not (see `verify.ts`).
@@ -483,7 +525,7 @@ export function registerDoctorCommand(program: Command): void {
   program
     .command("doctor")
     .description("Check Ix system health — server, database, graph integrity")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .action(async (opts: { format: string }) => {
       const { endpoint, client } = doctorClient();
       // Asked of the file directly: with IX_ENDPOINT and IX_TOKEN set,
@@ -553,6 +595,8 @@ export function registerDoctorCommand(program: Command): void {
         throw e;
       }));
 
+      /** Filled by the grammar check below; `[]` until it runs or when it cannot. */
+      let grammars: GrammarStatus[] = [];
       const checks: Check[] = [
         {
           name: "Server reachable",
@@ -822,6 +866,17 @@ export function registerDoctorCommand(program: Command): void {
           ),
         },
         { name: "ripgrep on PATH", run: async () => checkRipgrep() },
+        {
+          name: GRAMMAR_CHECK_NAME,
+          run: async () => {
+            try {
+              grammars = await loadGrammarStatus();
+            } catch (e: any) {
+              return { ok: true, detail: `not checked: the parser did not load (${String(e?.message ?? e).split("\n")[0]})` };
+            }
+            return assessGrammars(grammars);
+          },
+        },
       );
 
       // Windows-only: a launcher pointing at a CLI the upgrade moved (Ix#385).
@@ -861,7 +916,9 @@ export function registerDoctorCommand(program: Command): void {
       }
 
       if (opts.format === "json") {
-        printJson({ healthy: !hasFailure, hasWarnings: hasWarning, checks: results });
+        // `grammars` is additive: every grammar and whether it loaded, with the
+        // load error for one that did not (#967). `[]` when not checked.
+        printJson({ healthy: !hasFailure, hasWarnings: hasWarning, checks: results, grammars });
         return;
       }
 
@@ -871,6 +928,11 @@ export function registerDoctorCommand(program: Command): void {
         const icon = r.ok ? chalk.green("✓") : r.warn ? chalk.yellow("!") : chalk.red("✗");
         const detail = chalk.dim(` — ${r.detail}`);
         console.log(`  ${icon} ${r.name}${detail}`);
+        if (r.name === GRAMMAR_CHECK_NAME) {
+          for (const line of grammarLines(grammars)) {
+            console.log(`      ${line.loaded ? chalk.dim(line.text) : chalk.yellow(line.text)}`);
+          }
+        }
       }
 
       console.log();

@@ -10,6 +10,7 @@ import { rowLocation } from "./format.js";
 import { checkGraphHealth, isUnhealthy, type GraphHealth } from "./graph-health.js";
 import { isTestPath } from "./explain/related-files.js";
 import { heuristicTests } from "./around-tests.js";
+import { TYPE_REFERENCE_KINDS } from "./graph-model.js";
 
 /**
  * `ix around`: who depends on the code at a place in a file.
@@ -106,12 +107,6 @@ export interface AroundSymbol {
   declarations?: { lineStart: number; lineEnd: number };
 }
 
-/** Definitions whose "callers" are references to a type rather than calls. */
-export const CONTAINER_KINDS = new Set([
-  "class", "interface", "enum", "struct", "trait", "object", "module", "record",
-  "annotation", "union", "namespace", "impl", "type",
-]);
-
 /**
  * The edited lines inside container `d` that no member of it covers -- its
  * fields and declarations, which the graph does not index as definitions
@@ -121,7 +116,7 @@ export const CONTAINER_KINDS = new Set([
 export function declarationLines(
   d: PlacedDef, placed: PlacedDef[], ranges: LineRange[],
 ): { start: number; end: number } | undefined {
-  if (!CONTAINER_KINDS.has(d.kind.toLowerCase())) return undefined;
+  if (!TYPE_REFERENCE_KINDS.has(d.kind.toLowerCase())) return undefined;
   const members = placed.filter((o) => o.id !== d.id && o.start >= d.start && o.end <= d.end
     && (o.end - o.start) < (d.end - d.start));
   let lo = Infinity;

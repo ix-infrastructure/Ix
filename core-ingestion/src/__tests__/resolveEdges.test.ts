@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { buildGlobalResolutionIndex, parseFile, type FileParseResult, type ParsedEntity, type ParsedRelationship } from '../index.js';
+import { buildGlobalResolutionIndex, parseFile, summarizeParseResult, type FileParseResult, type ParsedEntity, type ParsedRelationship } from '../index.js';
 import { resolveEdges } from './helpers/untiered.js';
 import { SupportedLanguages } from '../languages.js';
 
@@ -20,6 +20,17 @@ function entity(
     language,
     container,
   };
+}
+
+/**
+ * The global index the CLI builds: every file's symbols come from
+ * `summarizeParseResult(parseFile(...))`, the only way the index learns them.
+ */
+function summaryIndex(filePaths: string[], sources: Map<string, string>) {
+  return buildGlobalResolutionIndex(
+    filePaths,
+    new Map([...sources].map(([fp, src]) => [fp, summarizeParseResult(parseFile(fp, src)!)])),
+  );
 }
 
 const defaultFileRole = { role: 'production' as const, role_confidence: 0.5, role_signals: [] };
@@ -194,7 +205,7 @@ describe('resolveEdges', () => {
       ['/repo/pkg/controlplane/apiserver/apiserver.go', 'package apiserver\ntype Config struct{}\n'],
       ['/repo/pkg/controlplane/apiserver/aggregator.go', 'package apiserver\nfunc CreateAggregatorServer() {}\n'],
     ]);
-    const globalIndex = buildGlobalResolutionIndex(
+    const globalIndex = summaryIndex(
       ['/repo/pkg/controlplane/apiserver/apiserver.go', '/repo/pkg/controlplane/apiserver/aggregator.go'],
       sources,
     );
@@ -238,7 +249,7 @@ describe('resolveEdges', () => {
       ],
     );
     const targetPath = '/repo/DomainService.php';
-    const globalIndex = buildGlobalResolutionIndex(
+    const globalIndex = summaryIndex(
       ['/repo/UseCase.php', targetPath],
       new Map([
         [
@@ -721,6 +732,98 @@ namespace Second {
     expect(resolveEdges([consumer, first, second])).toEqual([]);
   });
 
+  it('resolves a PHP static call to the class it names, not to a same-named method', () => {
+    const consumer = parseFile(
+      '/repo/app/Svc.php',
+      `<?php
+namespace App;
+use App\\OrderId;
+use App\\UserId;
+class Svc
+{
+    public function orderIdOwner(): void { UserId::from('a'); }
+    public function both(): void { OrderId::from('a'); UserId::from('b'); }
+}
+      `,
+    )!;
+    const orderId = parseFile(
+      '/repo/app/OrderId.php',
+      '<?php namespace App; class OrderId { public static function from(string $v): self { return new self(); } }',
+    )!;
+    const userId = parseFile(
+      '/repo/app/UserId.php',
+      '<?php namespace App; class UserId { public static function from(string $v): self { return new self(); } }',
+    )!;
+
+    const calls = resolveEdges([consumer, orderId, userId])
+      .filter(edge => edge.predicate === 'CALLS')
+      .map(edge => `${edge.srcName} -> ${edge.dstFilePath} ${edge.dstQualifiedKey}`);
+    expect(calls.sort()).toEqual([
+      'Svc.both -> /repo/app/OrderId.php OrderId.from',
+      'Svc.both -> /repo/app/UserId.php UserId.from',
+      'Svc.orderIdOwner -> /repo/app/UserId.php UserId.from',
+    ]);
+  });
+
+  it('does not resolve a PHP static call on a class outside the repo', () => {
+    const consumer = parseFile(
+      '/repo/app/OrderService.php',
+      `<?php
+namespace App;
+use Illuminate\\Support\\Facades\\DB;
+class OrderService
+{
+    public function place(): void { DB::rollBack(); }
+}
+      `,
+    )!;
+    const unrelated = parseFile(
+      '/repo/app/ReportController.php',
+      '<?php namespace App; class ReportController { public function rollBack(int $id): void {} }',
+    )!;
+
+    expect(consumer.relationships).toContainEqual({
+      srcName: 'OrderService.place',
+      dstName: 'DB.rollBack',
+      predicate: 'CALLS',
+      phpCallKind: 'static',
+    });
+    expect(resolveEdges([consumer, unrelated]).filter(edge => edge.predicate === 'CALLS')).toEqual([]);
+  });
+
+  it('resolves PHP self and parent static calls to the enclosing and extended class', () => {
+    const child = parseFile(
+      '/repo/app/Child.php',
+      `<?php
+namespace App;
+class Child extends Base
+{
+    public function save(): bool { return parent::save(); }
+    public static function boot(): void { parent::boot(); }
+}
+      `,
+    )!;
+    const base = parseFile(
+      '/repo/app/Base.php',
+      `<?php
+namespace App;
+class Base
+{
+    public function save(): bool { return true; }
+    public static function boot(): void {}
+}
+      `,
+    )!;
+
+    const calls = resolveEdges([child, base])
+      .filter(edge => edge.predicate === 'CALLS')
+      .map(edge => `${edge.srcName} -> ${edge.dstFilePath} ${edge.dstQualifiedKey}`);
+    expect(calls.sort()).toEqual([
+      'Child.boot -> /repo/app/Base.php Base.boot',
+      'Child.save -> /repo/app/Base.php Base.save',
+    ]);
+  });
+
   it('resolves imports from a grouped PHP use statement', () => {
     const consumer = parseFile(
       '/repo/UseCase.php',
@@ -766,7 +869,7 @@ final class UseCase
     ];
 
     const targetPath = '/repo/target.ts';
-    const globalIndex = buildGlobalResolutionIndex(
+    const globalIndex = summaryIndex(
       ['/repo/consumer.ts', targetPath],
       new Map([[targetPath, 'export function crossBatchTarget() {}\n']]),
     );
@@ -891,6 +994,101 @@ final class UseCase
     }));
   });
 
+  it('resolves a call through a barrel that renames a re-export', () => {
+    const impl = parseFile('/repo/re/impl.ts', 'export function innerName(): number { return 1; }\n')!;
+    const barrel = parseFile('/repo/re/index.ts', 'export { innerName as outerName } from "./impl";\n')!;
+    const user = parseFile(
+      '/repo/re/user.ts',
+      'import { outerName } from "./index";\nexport function callsOuter(): number { return outerName(); }\n',
+    )!;
+
+    expect(barrel.exportPublicNames).toEqual([{ local: 'innerName', public: 'outerName', source: './impl' }]);
+    const call = {
+      srcFilePath: '/repo/re/user.ts',
+      srcName: 'callsOuter',
+      dstFilePath: '/repo/re/impl.ts',
+      dstQualifiedKey: 'innerName',
+      predicate: 'CALLS',
+      confidence: 0.8,
+    };
+    expect(resolveEdges([user, barrel, impl])).toContainEqual(expect.objectContaining(call));
+    // The barrel and its source only in the index: the summary carries the mapping.
+    const index = buildGlobalResolutionIndex(
+      ['/repo/re/index.ts', '/repo/re/impl.ts'],
+      new Map([barrel, impl].map(r => [r.filePath, summarizeParseResult(r)])),
+    );
+    expect(resolveEdges([user], undefined, index)).toContainEqual(expect.objectContaining(call));
+  });
+
+  it('follows a renamed re-export to the file it names, not to another definer of the local name', () => {
+    const a = parseFile('/repo/re/a.ts', 'export function run() { return "a"; }\n')!;
+    const b = parseFile('/repo/re/b.ts', 'export function run() { return "b"; }\n')!;
+    const barrel = parseFile(
+      '/repo/re/index.ts',
+      'export { run as runA } from "./a";\nexport { run as runB } from "./b";\n'
+        // A same-named local is not what the re-export names.
+        + 'export function run() { return "barrel"; }\n',
+    )!;
+    const user = parseFile(
+      '/repo/re/user.ts',
+      'import { runA, runB as second } from "./index";\n'
+        + 'export function first() { return runA(); }\nexport function other() { return second(); }\n',
+    )!;
+
+    const calls = resolveEdges([user, barrel, a, b])
+      .filter(edge => edge.predicate === 'CALLS')
+      .map(edge => [edge.srcName, edge.dstFilePath, edge.dstQualifiedKey]);
+    expect(calls).toEqual(expect.arrayContaining([
+      ['first', '/repo/re/a.ts', 'run'],
+      ['other', '/repo/re/b.ts', 'run'],
+    ]));
+    expect(calls).toHaveLength(2);
+  });
+
+  it('follows a re-exported default to the name it has in its own file', () => {
+    const button = parseFile('/repo/ui/Button.ts', 'export default function Button() { return 1; }\n')!;
+    const logger = parseFile('/repo/ui/logger.ts', 'export function renderLine() { return 2; }\n')!;
+    const barrel = parseFile(
+      '/repo/ui/index.ts',
+      'export { default as Btn } from "./Button";\nexport { renderLine as default } from "./logger";\n',
+    )!;
+    const page = parseFile(
+      '/repo/ui/page.ts',
+      'import fmt, { Btn } from "./index";\n'
+        + 'export function render() { return Btn(); }\nexport function line() { return fmt(); }\n',
+    )!;
+
+    const calls = resolveEdges([page, barrel, button, logger])
+      .filter(edge => edge.predicate === 'CALLS')
+      .map(edge => [edge.srcName, edge.dstFilePath, edge.dstQualifiedKey]);
+    expect(calls).toEqual(expect.arrayContaining([
+      ['render', '/repo/ui/Button.ts', 'Button'],
+      ['line', '/repo/ui/logger.ts', 'renderLine'],
+    ]));
+  });
+
+  it('keeps unrenamed and same-named default re-exports resolving', () => {
+    const button = parseFile('/repo/ui/Button.ts', 'export default function Button() { return 1; }\n')!;
+    const worker = parseFile('/repo/ui/worker.ts', 'export function execute() { return 2; }\n')!;
+    const barrel = parseFile(
+      '/repo/ui/index.ts',
+      'export { default as Button } from "./Button";\nexport { execute } from "./worker";\n',
+    )!;
+    const page = parseFile(
+      '/repo/ui/page.ts',
+      'import { Button, execute } from "./index";\n'
+        + 'export function render() { return Button(); }\nexport function run() { return execute(); }\n',
+    )!;
+
+    const calls = resolveEdges([page, barrel, button, worker])
+      .filter(edge => edge.predicate === 'CALLS')
+      .map(edge => [edge.srcName, edge.dstFilePath, edge.dstQualifiedKey]);
+    expect(calls).toEqual(expect.arrayContaining([
+      ['render', '/repo/ui/Button.ts', 'Button'],
+      ['run', '/repo/ui/worker.ts', 'execute'],
+    ]));
+  });
+
   it('resolves a call through a provider export alias', () => {
     const provider = parseFile(
       '/repo/provider.ts',
@@ -975,7 +1173,7 @@ final class UseCase
       'import localName from "./provider";\nexport function caller() { return localName(); }\n',
     )!;
     const providerPath = '/repo/provider.ts';
-    const globalIndex = buildGlobalResolutionIndex(
+    const globalIndex = summaryIndex(
       ['/repo/consumer.ts', providerPath],
       new Map([[providerPath, 'function actualName() { return 1; }\nexport default actualName;\n']]),
     );
@@ -1239,11 +1437,10 @@ final class UseCase
     ).toEqual([]);
   });
 
-  it('uses caller-supplied parse results instead of re-parsing', () => {
-    // The CLI parses prescan sources on its worker pool and hands the results
-    // in, so the index costs no main-thread parsing. Proven by supplying a
-    // parse result whose entity does not appear in the source text: if the
-    // index re-parsed, `fromPool` could not be resolved.
+  it('takes a file\'s symbols from its summary alone', () => {
+    // The CLI parses on its worker pool and hands summaries in, so the index
+    // costs no main-thread parsing. `fromPool` exists only in the summary: no
+    // source text names it, so only the summary can have put it there.
     const targetPath = '/repo/target.ts';
     const caller = fileResult(
       '/repo/consumer.ts',
@@ -1265,8 +1462,7 @@ final class UseCase
 
     const globalIndex = buildGlobalResolutionIndex(
       ['/repo/consumer.ts', targetPath],
-      new Map([[targetPath, '// the pool result is authoritative, not this text\n']]),
-      new Map([[targetPath, poolResult]]),
+      new Map([[targetPath, summarizeParseResult(poolResult)]]),
     );
 
     expect(resolveEdges([caller], undefined, globalIndex)).toContainEqual({
@@ -1278,6 +1474,19 @@ final class UseCase
       predicate: 'CALLS',
       confidence: 0.9,
     });
+  });
+
+  it('learns a file\'s symbols only from summaries, never from source text', () => {
+    // The old `sources` / `preParsed` arguments are gone: a caller still
+    // passing them fails loudly instead of getting an index with no symbols.
+    const legacyCall = buildGlobalResolutionIndex as (...args: unknown[]) => unknown;
+    expect(() => legacyCall(['/repo/a.go'], undefined, undefined, new Map())).toThrow(TypeError);
+    expect(buildGlobalResolutionIndex.length).toBe(2);
+
+    // What the summary says is what the index holds: an unexported Go function,
+    // which the removed column-0 regex scan for exported names never indexed.
+    const index = summaryIndex(['/repo/pkg/a.go'], new Map([['/repo/pkg/a.go', 'package pkg\n\nfunc helper() {}\n']]));
+    expect(index.symbolToFiles.get('helper')).toEqual(['/repo/pkg/a.go']);
   });
 
   it('resolves Elixir alias-qualified calls through the implicit short alias', () => {
@@ -1347,6 +1556,50 @@ final class UseCase
     );
 
     expect(resolveEdges([caller, duplicateQualifierA, duplicateQualifierB])).toEqual([]);
+  });
+
+  describe('a call through the caller\'s own class', () => {
+    const calls = (files: Record<string, string>): string[] =>
+      resolveEdges(Object.entries(files).map(([filePath, source]) => parseFile(filePath, source)!))
+        .filter(edge => edge.predicate === 'CALLS')
+        .map(edge => `${edge.srcName} -> ${edge.dstFilePath}:${edge.dstQualifiedKey} ${edge.confidence}`);
+
+    it('keeps a TypeScript this call out of a same-named class in another file', () => {
+      expect(calls({
+        '/repo/a/config.ts': 'export class Config {\n  load() { return this.parse(); }\n  parse() { return 1; }\n}\n',
+        '/repo/b/config.ts': 'export class Config {\n  parse() { return 2; }\n}\n',
+      })).toEqual([]);
+    });
+
+    it('keeps a Python self call out of a same-named class in another file', () => {
+      expect(calls({
+        '/repo/a/models.py': 'class Base:\n    def save(self):\n        self.validate()\n\n    def validate(self):\n        pass\n',
+        '/repo/b/other.py': 'class Base:\n    def validate(self):\n        pass\n',
+      })).toEqual([]);
+    });
+
+    it('keeps a PHP $this call out of a same-named class in another file', () => {
+      expect(calls({
+        '/repo/a/Conf.php': '<?php\nnamespace A;\nclass Conf {\n    public function load() { return $this->parse(); }\n    public function parse() { return 1; }\n}\n',
+        '/repo/b/Conf.php': '<?php\nnamespace B;\nclass Conf {\n    public function parse() { return 2; }\n}\n',
+      })).toEqual([]);
+    });
+
+    it('keeps it out of a same-named class in a file the caller imports', () => {
+      expect(calls({
+        '/repo/a/__init__.py': '',
+        '/repo/b/__init__.py': '',
+        '/repo/a/models.py': 'from b import other\n\nclass Base:\n    def save(self):\n        self.validate()\n        other.helper()\n\n    def validate(self):\n        pass\n',
+        '/repo/b/other.py': 'class Base:\n    def validate(self):\n        pass\n\ndef helper():\n    pass\n',
+      })).toEqual(['Base.save -> /repo/b/other.py:helper 0.9']);
+    });
+
+    it('still resolves a qualified member the caller\'s file does not define', () => {
+      expect(calls({
+        '/repo/a/service.py': 'def run(query: Query):\n    query.narrow()\n',
+        '/repo/b/query.py': 'class Query:\n    def narrow(self):\n        pass\n',
+      })).toContain('run -> /repo/b/query.py:Query.narrow 0.7');
+    });
   });
 
   it('resolves tier-2 import-scoped edges and rejects ambiguous imports', () => {
@@ -1782,7 +2035,7 @@ final class UseCase
     )!;
     const localPath = '/repo/a/utils.ts';
     const unrelatedPath = '/repo/b/utils.ts';
-    const globalIndex = buildGlobalResolutionIndex(
+    const globalIndex = summaryIndex(
       [localPath, unrelatedPath],
       new Map([
         [localPath, 'export function target() { return 1; }\n'],
@@ -2151,7 +2404,7 @@ final class UseCase
     expect(resolved.filter(e => e.predicate === 'IMPORTS' && e.dstName === 'HttpClient')).toEqual([]);
   });
 
-  // The R cross-batch index is parser-derived (not regex), so it captures every
+  // The R cross-batch index comes from the file's summary, so it captures every
   // definition form the parser does — including `= function` and string-keyed S3
   // method names that the old `<- function(` regex missed.
   it('R: cross-batch index captures <-, = and string-keyed S3 function defs', () => {
@@ -2161,7 +2414,7 @@ final class UseCase
       '"print.myClass" <- function(z) z',
     ].join('\n');
     const sources = new Map([['/repo/funcs.r', src]]);
-    const index = buildGlobalResolutionIndex(['/repo/funcs.r'], sources);
+    const index = summaryIndex(['/repo/funcs.r'], sources);
 
     expect(index.symbolToFiles.get('clean_data')).toContain('/repo/funcs.r');     // <- form
     expect(index.symbolToFiles.get('fit_model')).toContain('/repo/funcs.r');      // = form (regex missed)

@@ -9,6 +9,7 @@ import { llmLine } from "../llm.js";
 import { normalizeForPathMatch, normalizePathSeparators } from "../path-match.js";
 import { printJson } from "../format.js";
 import { mapLimit } from "../../client/request-memo.js";
+import { formatOption } from "../options.js";
 
 type Metric = "dependents" | "callers" | "importers" | "members";
 
@@ -362,7 +363,7 @@ export function registerRankCommand(program: Command): void {
     .option("--path <path>", "Filter entities by source path substring")
     .option("--exclude-path <path>", "Exclude entities whose source path contains this substring")
     .option("--exclude-kind <kinds>", "Comma-separated kinds to exclude from results")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .addHelpText(
       "after",
       `\nExamples:
