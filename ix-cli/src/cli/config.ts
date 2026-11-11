@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 import type * as Yaml from "yaml";
 import { IxClient } from "../client/api.js";
 import { ixHome } from "./ix-home.js";
-import { isLocalEndpoint } from "./backend-version.js";
+import { DEFAULT_ENDPOINT, isLoopbackEndpoint } from "./endpoint.js";
 import { renameWithRetry, withConfigLock } from "./config-lock.js";
 
 export { ConfigLockError } from "./config-lock.js";
@@ -279,7 +279,7 @@ export interface IxConfig {
 }
 
 /** The backend a config with no `endpoint` (or no config at all) points at. */
-export const DEFAULT_ENDPOINT = "http://localhost:8090";
+export { DEFAULT_ENDPOINT };
 
 const defaultConfig: IxConfig = {
   endpoint: DEFAULT_ENDPOINT,
@@ -527,7 +527,7 @@ export function getEndpoint(): string {
  * carries no Authorization header, so a bearer set here would replace it.
  */
 export function getLocalToken(endpoint: string = getEndpoint()): string | undefined {
-  if (!isLocalEndpoint(endpoint)) return undefined;
+  if (!isLoopbackEndpoint(endpoint)) return undefined;
   const explicit = process.env.IX_TOKEN?.trim();
   if (explicit) return explicit;
   return storedLocalToken();

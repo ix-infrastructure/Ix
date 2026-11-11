@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { buildGlobalResolutionIndex, parseFile, type FileParseResult, type ParsedEntity, type ParsedRelationship } from '../index.js';
+import { buildGlobalResolutionIndex, parseFile, summarizeParseResult, type FileParseResult, type ParsedEntity, type ParsedRelationship } from '../index.js';
 import { resolveEdges } from './helpers/untiered.js';
 import { SupportedLanguages } from '../languages.js';
 
@@ -983,6 +983,103 @@ final class UseCase
     }));
   });
 
+  it('resolves a call through a barrel that renames a re-export', () => {
+    const impl = parseFile('/repo/re/impl.ts', 'export function innerName(): number { return 1; }\n')!;
+    const barrel = parseFile('/repo/re/index.ts', 'export { innerName as outerName } from "./impl";\n')!;
+    const user = parseFile(
+      '/repo/re/user.ts',
+      'import { outerName } from "./index";\nexport function callsOuter(): number { return outerName(); }\n',
+    )!;
+
+    expect(barrel.exportPublicNames).toEqual([{ local: 'innerName', public: 'outerName', source: './impl' }]);
+    const call = {
+      srcFilePath: '/repo/re/user.ts',
+      srcName: 'callsOuter',
+      dstFilePath: '/repo/re/impl.ts',
+      dstQualifiedKey: 'innerName',
+      predicate: 'CALLS',
+      confidence: 0.8,
+    };
+    expect(resolveEdges([user, barrel, impl])).toContainEqual(expect.objectContaining(call));
+    // The barrel and its source only in the index: the summary carries the mapping.
+    const index = buildGlobalResolutionIndex(
+      ['/repo/re/index.ts', '/repo/re/impl.ts'],
+      undefined,
+      undefined,
+      new Map([barrel, impl].map(r => [r.filePath, summarizeParseResult(r)])),
+    );
+    expect(resolveEdges([user], undefined, index)).toContainEqual(expect.objectContaining(call));
+  });
+
+  it('follows a renamed re-export to the file it names, not to another definer of the local name', () => {
+    const a = parseFile('/repo/re/a.ts', 'export function run() { return "a"; }\n')!;
+    const b = parseFile('/repo/re/b.ts', 'export function run() { return "b"; }\n')!;
+    const barrel = parseFile(
+      '/repo/re/index.ts',
+      'export { run as runA } from "./a";\nexport { run as runB } from "./b";\n'
+        // A same-named local is not what the re-export names.
+        + 'export function run() { return "barrel"; }\n',
+    )!;
+    const user = parseFile(
+      '/repo/re/user.ts',
+      'import { runA, runB as second } from "./index";\n'
+        + 'export function first() { return runA(); }\nexport function other() { return second(); }\n',
+    )!;
+
+    const calls = resolveEdges([user, barrel, a, b])
+      .filter(edge => edge.predicate === 'CALLS')
+      .map(edge => [edge.srcName, edge.dstFilePath, edge.dstQualifiedKey]);
+    expect(calls).toEqual(expect.arrayContaining([
+      ['first', '/repo/re/a.ts', 'run'],
+      ['other', '/repo/re/b.ts', 'run'],
+    ]));
+    expect(calls).toHaveLength(2);
+  });
+
+  it('follows a re-exported default to the name it has in its own file', () => {
+    const button = parseFile('/repo/ui/Button.ts', 'export default function Button() { return 1; }\n')!;
+    const logger = parseFile('/repo/ui/logger.ts', 'export function renderLine() { return 2; }\n')!;
+    const barrel = parseFile(
+      '/repo/ui/index.ts',
+      'export { default as Btn } from "./Button";\nexport { renderLine as default } from "./logger";\n',
+    )!;
+    const page = parseFile(
+      '/repo/ui/page.ts',
+      'import fmt, { Btn } from "./index";\n'
+        + 'export function render() { return Btn(); }\nexport function line() { return fmt(); }\n',
+    )!;
+
+    const calls = resolveEdges([page, barrel, button, logger])
+      .filter(edge => edge.predicate === 'CALLS')
+      .map(edge => [edge.srcName, edge.dstFilePath, edge.dstQualifiedKey]);
+    expect(calls).toEqual(expect.arrayContaining([
+      ['render', '/repo/ui/Button.ts', 'Button'],
+      ['line', '/repo/ui/logger.ts', 'renderLine'],
+    ]));
+  });
+
+  it('keeps unrenamed and same-named default re-exports resolving', () => {
+    const button = parseFile('/repo/ui/Button.ts', 'export default function Button() { return 1; }\n')!;
+    const worker = parseFile('/repo/ui/worker.ts', 'export function execute() { return 2; }\n')!;
+    const barrel = parseFile(
+      '/repo/ui/index.ts',
+      'export { default as Button } from "./Button";\nexport { execute } from "./worker";\n',
+    )!;
+    const page = parseFile(
+      '/repo/ui/page.ts',
+      'import { Button, execute } from "./index";\n'
+        + 'export function render() { return Button(); }\nexport function run() { return execute(); }\n',
+    )!;
+
+    const calls = resolveEdges([page, barrel, button, worker])
+      .filter(edge => edge.predicate === 'CALLS')
+      .map(edge => [edge.srcName, edge.dstFilePath, edge.dstQualifiedKey]);
+    expect(calls).toEqual(expect.arrayContaining([
+      ['render', '/repo/ui/Button.ts', 'Button'],
+      ['run', '/repo/ui/worker.ts', 'execute'],
+    ]));
+  });
+
   it('resolves a call through a provider export alias', () => {
     const provider = parseFile(
       '/repo/provider.ts',
@@ -1439,6 +1536,50 @@ final class UseCase
     );
 
     expect(resolveEdges([caller, duplicateQualifierA, duplicateQualifierB])).toEqual([]);
+  });
+
+  describe('a call through the caller\'s own class', () => {
+    const calls = (files: Record<string, string>): string[] =>
+      resolveEdges(Object.entries(files).map(([filePath, source]) => parseFile(filePath, source)!))
+        .filter(edge => edge.predicate === 'CALLS')
+        .map(edge => `${edge.srcName} -> ${edge.dstFilePath}:${edge.dstQualifiedKey} ${edge.confidence}`);
+
+    it('keeps a TypeScript this call out of a same-named class in another file', () => {
+      expect(calls({
+        '/repo/a/config.ts': 'export class Config {\n  load() { return this.parse(); }\n  parse() { return 1; }\n}\n',
+        '/repo/b/config.ts': 'export class Config {\n  parse() { return 2; }\n}\n',
+      })).toEqual([]);
+    });
+
+    it('keeps a Python self call out of a same-named class in another file', () => {
+      expect(calls({
+        '/repo/a/models.py': 'class Base:\n    def save(self):\n        self.validate()\n\n    def validate(self):\n        pass\n',
+        '/repo/b/other.py': 'class Base:\n    def validate(self):\n        pass\n',
+      })).toEqual([]);
+    });
+
+    it('keeps a PHP $this call out of a same-named class in another file', () => {
+      expect(calls({
+        '/repo/a/Conf.php': '<?php\nnamespace A;\nclass Conf {\n    public function load() { return $this->parse(); }\n    public function parse() { return 1; }\n}\n',
+        '/repo/b/Conf.php': '<?php\nnamespace B;\nclass Conf {\n    public function parse() { return 2; }\n}\n',
+      })).toEqual([]);
+    });
+
+    it('keeps it out of a same-named class in a file the caller imports', () => {
+      expect(calls({
+        '/repo/a/__init__.py': '',
+        '/repo/b/__init__.py': '',
+        '/repo/a/models.py': 'from b import other\n\nclass Base:\n    def save(self):\n        self.validate()\n        other.helper()\n\n    def validate(self):\n        pass\n',
+        '/repo/b/other.py': 'class Base:\n    def validate(self):\n        pass\n\ndef helper():\n    pass\n',
+      })).toEqual(['Base.save -> /repo/b/other.py:helper 0.9']);
+    });
+
+    it('still resolves a qualified member the caller\'s file does not define', () => {
+      expect(calls({
+        '/repo/a/service.py': 'def run(query: Query):\n    query.narrow()\n',
+        '/repo/b/query.py': 'class Query:\n    def narrow(self):\n        pass\n',
+      })).toContain('run -> /repo/b/query.py:Query.narrow 0.7');
+    });
   });
 
   it('resolves tier-2 import-scoped edges and rejects ambiguous imports', () => {

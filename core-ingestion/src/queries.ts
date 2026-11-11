@@ -1393,9 +1393,17 @@ export const KOTLIN_QUERIES = `
   (simple_identifier) @name) @definition.function
 
 ; ── Properties ───────────────────────────────────────────────────────────
-(property_declaration
-  (variable_declaration
-    (simple_identifier) @name)) @definition.property
+; Top-level and member properties only. A local val/var inside a function body
+; is also a property_declaration; capturing it would make it a member of the
+; enclosing class and take over the calls in its initializer.
+(source_file
+  (property_declaration
+    (variable_declaration
+      (simple_identifier) @name)) @definition.property)
+(class_body
+  (property_declaration
+    (variable_declaration
+      (simple_identifier) @name)) @definition.property)
 
 ; ── Enum entries ─────────────────────────────────────────────────────────
 (enum_entry
@@ -1443,7 +1451,16 @@ export const KOTLIN_QUERIES = `
       (user_type (type_identifier) @heritage.extends)))) @heritage
 
 ; ── Type references ───────────────────────────────────────────────────────────
-(type_reference (user_type (type_identifier) @reference.type))
+; tree-sitter-kotlin has no type_reference wrapper node: a type in a parameter,
+; property, return or generic-argument position is a bare user_type. Only those
+; positions are listed, so a constructor call or a supertype (already a CALLS or
+; heritage capture above) does not also become a reference.
+(parameter (user_type (type_identifier) @reference.type))
+(class_parameter (user_type (type_identifier) @reference.type))
+(variable_declaration (user_type (type_identifier) @reference.type))
+(function_declaration (user_type (type_identifier) @reference.type))
+(nullable_type (user_type (type_identifier) @reference.type))
+(type_projection (user_type (type_identifier) @reference.type))
 `;
 
 // Swift queries - works with tree-sitter-swift
