@@ -5,7 +5,7 @@ import chalk from "chalk";
 import { createClient } from "../../client/factory.js";
 import { llmLine, printLlmLines } from "../llm.js";
 import { printJson } from "../format.js";
-import { formatOption } from "../options.js";
+import { choiceOption, formatOption } from "../options.js";
 
 interface CommandBreakdown {
   count: number;
@@ -141,7 +141,7 @@ export function registerSavingsCommand(program: Command): void {
     .command("savings")
     .description("Show token savings from Ix usage")
     .option("--detail", "Include per-command breakdown")
-    .option("--model <model>", "Pricing model (opus|sonnet|haiku|gpt-4o)", "opus")
+    .addOption(choiceOption("--model <model>", "Pricing model (opus|sonnet|haiku|gpt-4o)", ["opus", "sonnet", "haiku", "gpt-4o"], "opus"))
     .addOption(formatOption());
 
   cmd.action(async (opts: { detail?: boolean; model: string; format: string }) => {

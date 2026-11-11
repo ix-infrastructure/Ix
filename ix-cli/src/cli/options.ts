@@ -237,6 +237,36 @@ export function formatOption(formats: readonly string[] = DEFAULT_FORMAT_CHOICES
     .default("text");
 }
 
+/** The values each `choiceOption` accepts, for `applyOssSetup` to enforce. */
+const SETUP_CHOICES = new WeakMap<Option, readonly string[]>();
+
+/**
+ * An option that accepts only `values`, declared on the command that owns it.
+ *
+ * The values are enforced by `applyOssSetup` (`register/oss-setup.ts`), on
+ * every OSS command it sets up -- the full registration and the startup fast
+ * path alike -- not by this declaration. That is where they were enforced
+ * when they lived in one table keyed by command name, and commander's
+ * `.choices()` replaces any parser the option declares: `ix context --depth`
+ * has its own, which a command registered on its own still runs.
+ */
+export function choiceOption(
+  flags: string,
+  description: string,
+  values: readonly string[],
+  defaultValue?: string,
+): Option {
+  const option = new Option(flags, description);
+  if (defaultValue !== undefined) option.default(defaultValue);
+  SETUP_CHOICES.set(option, values);
+  return option;
+}
+
+/** What `choiceOption` declared for `option`, if it came from there. */
+export function declaredChoices(option: Option): readonly string[] | undefined {
+  return SETUP_CHOICES.get(option);
+}
+
 /** What `addTargetOptions` declares, as the action receives it. */
 export interface TargetOptionValues {
   kind?: string;

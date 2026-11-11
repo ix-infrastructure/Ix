@@ -50,7 +50,7 @@ import { companionHistory, expandIssueCompanions } from "../explain/issue-compan
 import { collectTextReferences, gitRepoAccess, type RepoAccess, type TextSource } from "../explain/text-references.js";
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
-import { formatOption, kindOption, parseBudgetOption, parseRevisionOption, pathOption, pickOption, strictOption } from "../options.js";
+import { choiceOption, formatOption, kindOption, parseBudgetOption, parseRevisionOption, pathOption, pickOption, strictOption } from "../options.js";
 import { activeReadScope, ensureReadScope, isRawId, resolveFileOrEntityFull, resolveFileOrReport, type ResolutionNotice, type ResolvedEntity } from "../resolve.js";
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
 import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure } from "../ui.js";
@@ -386,10 +386,9 @@ export function registerContextCommand(program: Command): void {
     .addOption(pathOption())
     .addOption(pickOption())
     .addOption(strictOption())
-    .option(
-      "--depth <depth>",
-      `Context-graph expansion depth (${CONTEXT_DEPTHS.join("|")})`,
-      parseContextDepthOption,
+    .addOption(
+      choiceOption("--depth <depth>", `Context-graph expansion depth (${CONTEXT_DEPTHS.join("|")})`, CONTEXT_DEPTHS)
+        .argParser(parseContextDepthOption),
     )
     .option("--as-of-rev <n>", "Historical context as of a graph revision", parseRevisionOption)
     // No Commander default on the --max-* flags, so `parseRequestedBudgets`

@@ -147,6 +147,27 @@ Breaking changes: use `feat!:` or `fix!:` prefix.
 
 ## CLI Standards
 
+### Adding a command
+
+1. Write `ix-cli/src/cli/commands/<name>.ts`, with the copyright header and a
+   `register<Name>Command(program)` function that declares the command.
+2. Add one entry for it at the end of `OSS_COMMANDS` in
+   `ix-cli/src/cli/register/commands.ts`: every name and alias it registers,
+   its `load` import, and its `ix --help` line. Put the help line's name in a
+   `ROOT_HELP_SECTIONS` section in the same file. Leave `help` out only for a
+   command that should not be listed.
+
+Do not reorder the existing entries. The fast-path table, `registerOssCommands()`
+and the root help are all built from that list, and Ix Pro registers its
+commands after them. When a name is registered twice, the first registration wins.
+
+Declare shared options with the builders in `ix-cli/src/cli/options.ts` rather than
+copying a neighbour's: `formatOption()` for `--format`, `choiceOption()` for an
+option with a fixed set of values, `addTargetOptions()` and `addPagingOptions()`
+for the target and paging flags. `command-manifest.test.ts`,
+`help-coverage.test.ts` and `startup-fast-path.test.ts` fail if the entry and the
+command disagree.
+
 ### Output quality
 - Clean, minimal output — no unnecessary verbosity
 - Consistent formatting across all commands
