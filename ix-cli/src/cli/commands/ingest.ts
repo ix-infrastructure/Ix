@@ -52,6 +52,12 @@ import { createDatabaseProbe, probeDatabase } from '../database-probe.js';
 export { isAbortError, isRetryableCommitConflict } from '../commit-retry.js';
 import { readBackendHealth } from './upgrade.js';
 import {
+  BATCH_NODE_READS_SINCE,
+  BULK_DELETES_SINCE,
+  releaseAtLeast as reportedReleaseAtLeast,
+  routeMissing,
+} from '../../client/features.js';
+import {
   createIgnoreMatcher, parseIgnoreFile, parseIgnorePattern, type IgnorePattern,
 } from '../ignore-globs.js';
 import { canRenderProgress } from '../stderr.js';
@@ -699,10 +705,6 @@ function writtenBy(node: GraphNode | undefined, patch: GraphPatchPayload): boole
     && (provenance?.sourceHash ?? provenance?.source_hash) === patch.source.sourceHash;
 }
 
-function isUnsupportedRouteError(error: unknown): boolean {
-  return /^(?:Error:\s*)?(?:404|405|501):/.test(String(error));
-}
-
 /**
  * The orphan node ids to delete for each file, in `files` order. Never one a
  * patch of this batch upserts (`batchUpserts`), and never one the backend does
@@ -805,7 +807,9 @@ export async function sweepOrphanNodes(
           if (node && typeof node.id === 'string') live.set(node.id, node);
         }
       } catch (err) {
-        if (isUnsupportedRouteError(err)) {
+        // Removable once MIN_BACKEND_VERSION reaches 1.0.33 (`batchNodes` in
+        // client/features.ts).
+        if (routeMissing('batchNodes', err)) {
           throw new BatchNodeReadsUnsupported('the backend does not serve the batched node read (POST /v1/nodes)');
         }
         for (const id of ids) unread.add(id);
@@ -869,8 +873,10 @@ export function patchRequiresPerFileCommit(patch: GraphPatchPayload, bulkDeletes
  * The first release whose bulk route applies DeleteNode/DeleteEdge in the
  * patch's own workspace, by indexed sweep and primary key (Ix-memory #211,
  * #237): checked live on that release before delete-bearing patches moved there.
+ * Defined with the other optional features in client/features.ts; the per-file
+ * route for older backends is removable once MIN_BACKEND_VERSION reaches it.
  */
-export const BULK_DELETES_SINCE = '1.0.32';
+export { BULK_DELETES_SINCE };
 
 /**
  * Whether the backend's bulk route can take delete-bearing patches. Decided by
@@ -893,21 +899,11 @@ export function backendAppliesBulkDeletes(
  * reports none, or one that does not parse.
  */
 function releaseAtLeast(health: { release_version?: unknown } | null | undefined, min: string): boolean | null {
-  const release = health?.release_version;
-  if (typeof release !== 'string') return null;
-  const parse = (v: string): number[] | null => {
-    const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(v.trim());
-    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
-  };
-  const have = parse(release);
-  const need = parse(min)!;
-  if (have === null) return null;
-  for (let i = 0; i < 3; i++) if (have[i] !== need[i]) return have[i] > need[i];
-  return true;
+  return reportedReleaseAtLeast(health?.release_version, min);
 }
 
-/** The first release that serves `POST /v1/nodes` (Ix-memory batch reads). */
-export const BATCH_NODE_READS_SINCE = '1.0.33';
+/** The first release that serves `POST /v1/nodes` (Ix-memory batch reads); see client/features.ts. */
+export { BATCH_NODE_READS_SINCE };
 
 /**
  * Why the same-hash orphan sweep (IN-20) cannot run against this backend, or
@@ -1804,8 +1800,8 @@ function stitchFailureStatus(error: unknown): number | null {
  * such a backend, for a step it was never going to perform.
  */
 export function isStitchUnsupported(error: unknown): boolean {
-  const status = stitchFailureStatus(error);
-  return status === 404 || status === 501;
+  // Decided by `stitch` in client/features.ts, which names when it can go.
+  return routeMissing('stitch', error);
 }
 
 /**
@@ -5225,7 +5221,7 @@ export async function ingestFiles(
           }
         }
       } catch (err) {
-        // Unsupported is not failed: an older backend answers 404 here, and
+        // Unsupported is not failed: an older backend has no /v1/stitch, and
         // that is the case this call has always been allowed to shrug off.
         if (!isStitchUnsupported(err)) {
           stitchErrors++;

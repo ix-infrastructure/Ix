@@ -1755,7 +1755,9 @@ async function fileNodeId(client: IxClient, path: string): Promise<string> {
  * and returns every file sharing the basename, so the limit has to reach past
  * a monorepo's `index.ts`, `__init__.py` or `mod.rs` -- at 10 a file ranked
  * eleventh among its namesakes had no node, and `--from-issue` discarded a path
- * the issue named for a BM25 guess.
+ * the issue named for a BM25 guess. The headroom exists for backends that
+ * ignore `scope`, so it can shrink once MIN_BACKEND_VERSION reaches 1.0.31
+ * (`searchScope` in client/features.ts).
  */
 const FILE_NODE_SEARCH_LIMIT = 200;
 
