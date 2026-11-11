@@ -11,7 +11,7 @@ import { registerProStubs } from "./register/pro-stubs.js";
 import { planStartup, registerForPlan } from "./register/oss-table.js";
 import { tryLoadProCommands } from "./register/pro-loader.js";
 import { registerOssFallbacks } from "./register/oss-fallbacks.js";
-import { isRepairInvocation } from "./register/pro-failure.js";
+import { isRepairInvocation, skipsProLoading } from "./register/pro-failure.js";
 import { buildHelpText } from "./help-text.js";
 import { stderrIsTerminal } from "./stderr.js";
 import {
@@ -95,13 +95,12 @@ const lazy = await registerForPlan(program, planStartup(process.argv.slice(2)));
   // OUTSIDE the parseAsync try/catch below — render the failure here rather
   // than letting it reach the unhandledRejection handler by accident.
   let proLoaded = false;
-  // `ix hook` runs inside an agent harness after every edit and must exit 0
-  // with nothing on stdout whenever it cannot help. A broken Pro install would
-  // otherwise make it exit 1 before its action runs, and it needs nothing Pro
-  // registers.
-  const isHook = process.argv[2] === "hook";
+  // `ix hook` and `ix capabilities` never load Pro (see skipsProLoading): a
+  // broken Pro install would otherwise make the hook exit 1 before its action
+  // runs, and capabilities promises to resolve Pro without initializing it.
+  const skipPro = skipsProLoading(process.argv);
   try {
-    if (!isHook && !lazy) proLoaded = await tryLoadProCommands(program);
+    if (!skipPro && !lazy) proLoaded = await tryLoadProCommands(program);
   } catch (err) {
     if (!isRepairInvocation(process.argv)) {
       renderCliError(err, debug, safeEndpoint()); // exits 1

@@ -25,7 +25,9 @@ loaded or initialized.
    "pro":{"available":false,"state":"absent"},"hooks":["claude-post-edit"]}
 
 pro.state is absent, installed, or broken (installed but its entry point does
-not resolve). The answer changes only when the CLI or Ix Pro is reinstalled,
+not resolve). installed is read from module resolution only: a Pro that then
+fails to initialize still reads installed, and the next Pro command exits 1
+saying so; treat that as Pro unavailable until ix upgrade. The answer changes only when the CLI or Ix Pro is reinstalled,
 so cache it per resolved ix path and its modification time. A new field is
 not a breaking change; a breaking one changes "schema". Exits 0 whenever it
 answers.`)

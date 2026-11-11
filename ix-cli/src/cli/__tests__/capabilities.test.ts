@@ -12,7 +12,7 @@ import {
 } from "../capabilities.js";
 import { registerHookCommand } from "../commands/hook.js";
 import { proInstallState } from "../register/pro-loader.js";
-import { isRepairInvocation } from "../register/pro-failure.js";
+import { isRepairInvocation, skipsProLoading } from "../register/pro-failure.js";
 import { setPrettyJson } from "../format.js";
 
 /**
@@ -149,5 +149,25 @@ describe("the fast path's arguments", () => {
 describe("a broken Ix Pro", () => {
   it("does not stop ix capabilities, which reports it", () => {
     expect(isRepairInvocation(["node", "ix", "capabilities"])).toBe(true);
+  });
+});
+
+describe("an installed Ix Pro", () => {
+  // The help text and flags.md promise Pro is resolved, never loaded or
+  // initialized. main.ts's fast path keeps that for `--format <fmt>`; every
+  // other form (`--help`, `--quiet`, no `--format`) reaches run-cli, which must
+  // skip tryLoadProCommands for it as it does for `ix hook`.
+  it("is never loaded by ix capabilities on the full CLI path", () => {
+    for (const rest of [[], ["--help"], ["--quiet"], ["--format", "json", "--fields", "x"]]) {
+      expect(skipsProLoading(["node", "ix", "capabilities", ...rest])).toBe(true);
+    }
+    expect(skipsProLoading(["node", "ix", "hook", "claude-post-edit"])).toBe(true);
+  });
+
+  it("is still loaded for every other command", () => {
+    for (const word of ["status", "briefing", "doctor", "help", undefined]) {
+      const argv = word === undefined ? ["node", "ix"] : ["node", "ix", word];
+      expect(skipsProLoading(argv)).toBe(false);
+    }
   });
 });

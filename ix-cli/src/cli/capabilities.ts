@@ -35,7 +35,11 @@ export interface Capabilities {
   /** This CLI's version, as `ix --version` prints it. */
   version: string;
   pro: {
-    /** True when Pro commands should be tried: `state` is `installed`. */
+    /**
+     * True when Pro commands should be tried: `state` is `installed`. Pro is
+     * not initialized to check, so one that then fails to start still reads
+     * true; the Pro command that loads it exits 1 saying so.
+     */
     available: boolean;
     /** See {@link ProInstallState}. Pro is resolved, never loaded, here. */
     state: ProInstallState;
