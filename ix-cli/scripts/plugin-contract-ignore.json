@@ -64,6 +64,11 @@
       "where": "ix-opencode-plugin/tests/real-ix.test.ts",
       "match": "ix rejected an argv",
       "why": "error message prose in a test assertion"
+    },
+    {
+      "where": "ix-openclaw-plugin/tools/base.ts",
+      "match": "ix did not answer",
+      "why": "error message text, not an ix invocation"
     }
   ]
 }

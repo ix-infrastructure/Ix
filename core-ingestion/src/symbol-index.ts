@@ -22,8 +22,11 @@ export interface FileSummary {
   entityCount: number;
   /** `[name, qualifiedKey]` per entity other than the file and module nodes, in source order. */
   qkeys: Array<[string, string]>;
-  /** `[public, local]` export names (JS/TS), when the file has any. */
-  exportPublicNames?: Array<[string, string]>;
+  /**
+   * `[public, local]` export names (JS/TS), when the file has any. A renaming
+   * re-export adds the module specifier it names: `[public, local, source]`.
+   */
+  exportPublicNames?: Array<[string, string, string?]>;
   /** The file's IMPORTS relationships, as the import resolver reads them. */
   imports: Array<{ dstName: string; importRaw?: string; importVia?: string; importAliased?: boolean }>;
   /** `[fqcn, typeName]` for unambiguous PHP types. */
@@ -47,7 +50,7 @@ export interface FileSummary {
 export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNames' | 'phpTypes' | 'receiverFactories' | 'receiverHeritage' | 'receiverPackage'> & Partial<Pick<FileSummary, 'imports' | 'importAliases' | 'tsGlobalTypes'>>): string {
   const parts: unknown[] = [
     [...s.qkeys].map(([n, q]) => `${n}\0${q}`).sort(),
-    [...(s.exportPublicNames ?? [])].map(([p, l]) => `${p}\0${l}`).sort(),
+    [...(s.exportPublicNames ?? [])].map(([p, l, src]) => src === undefined ? `${p}\0${l}` : `${p}\0${l}\0${src}`).sort(),
     [...(s.phpTypes ?? [])].map(([f, t]) => `${f}\0${t}`).sort(),
   ];
   // Receiver facts only when present, so other files keep their signature.

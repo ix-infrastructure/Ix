@@ -20,6 +20,7 @@ import { clearMapStale, markMapStale, mapStaleNotice, readMapStale, type MapStal
 import { resolveMapRoot } from "../map-root.js";
 import { readBackendHealth } from "./upgrade.js";
 import { renderWarning } from "../ui.js";
+import { describeUnavailableGrammars } from "../grammar-status.js";
 import type { IxClient } from "../../client/api.js";
 
 // Hard wall-clock budget for a single `ix map`. Past this, the shared deadline
@@ -326,8 +327,18 @@ export function describeDroppedFiles(
   return `${parts.join(" and ")} — those files are absent from the graph. Re-run with 'ix ingest' to see the per-file errors.`;
 }
 
+/**
+ * The languages whose files went unparsed because their grammar did not load
+ * (#967), one line each, ready for stderr. Exported for tests.
+ */
+export function describeGrammarSkips(
+  ingest: Pick<IngestFilesSummary, "grammarUnavailable"> | undefined,
+): string[] {
+  return describeUnavailableGrammars(ingest?.grammarUnavailable ?? []).map((line) => `grammar unavailable: ${line}`);
+}
+
 function emitDroppedFileWarning(
-  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "filesTooLarge"> | undefined,
+  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "filesTooLarge" | "grammarUnavailable"> | undefined,
   silent: boolean,
 ): void {
   const message = describeDroppedFiles(ingest);
@@ -339,6 +350,9 @@ function emitDroppedFileWarning(
   if (silent) return;
   const tooLarge = describeTooLargeFiles(ingest);
   if (tooLarge) process.stderr.write(chalk.dim(`  ${tooLarge}\n`));
+  // Also not under --silent, for the same reason: a missing grammar recurs on
+  // every run. stderr, so no JSON or llm payload changes shape.
+  for (const line of describeGrammarSkips(ingest)) process.stderr.write(chalk.yellow(`  ${line}\n`));
 }
 
 /**

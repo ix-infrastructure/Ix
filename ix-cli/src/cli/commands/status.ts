@@ -6,8 +6,8 @@ import { createClient } from "../../client/factory.js";
 import { readBackendHealth } from "./upgrade.js";
 import { findWorkspaceForCwd, getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { detectStaleFiles } from "../stale.js";
-import { llmError, llmLine, printLlmLines } from "../llm.js";
-import { backendUnreachableError, isBackendUnreachable } from "../errors.js";
+import { llmLine, printLlmLines } from "../llm.js";
+import { backendUnreachableError, emitErrorRecord, isBackendUnreachable } from "../errors.js";
 import { printJson } from "../format.js";
 import {
   checkGraphHealth,
@@ -270,9 +270,9 @@ export function registerStatusCommand(program: Command): void {
         // llm` parses the failure the same way it parses a result rather than
         // hitting an unparseable human sentence. Exit code is unchanged.
         const unreachable = backendUnreachableError(getEndpoint());
-        if (opts.format === "llm") {
-          console.log(llmError(unreachable.error, unreachable.message, [["hint", unreachable.next ?? null]]));
-        } else {
+        // The boundary's record, in this command's format: llm replaces the
+        // prose, json goes to stdout with the prose kept on stderr.
+        if (!emitErrorRecord(unreachable.error, unreachable.message, unreachable.next, [], opts.format)) {
           console.error(unreachable.message);
           if (unreachable.next) console.error(unreachable.next);
         }

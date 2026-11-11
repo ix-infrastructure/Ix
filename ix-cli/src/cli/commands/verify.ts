@@ -6,8 +6,8 @@ import * as nodePath from "node:path";
 import { renderSection, renderKeyValue, renderWarning, renderNote, renderSuccess } from "../ui.js";
 import { createClient } from "../../client/factory.js";
 import { canonicalWorkspacePath, getEndpoint, resolveWorkspaceRoot } from "../config.js";
-import { llmError, llmLine, printLlmLines } from "../llm.js";
-import { backendUnreachableError, CliUsageError, isBackendUnreachable } from "../errors.js";
+import { llmLine, printLlmLines } from "../llm.js";
+import { backendUnreachableError, emitErrorRecord, CliUsageError, isBackendUnreachable } from "../errors.js";
 import { printJson } from "../format.js";
 import { normalizePathSeparators } from "../path-match.js";
 import {
@@ -145,9 +145,9 @@ export function registerVerifyCommand(program: Command): void {
         // anything else reaches the shared boundary in errors.ts.
         if (!isBackendUnreachable(err)) throw err;
         const unreachable = backendUnreachableError(getEndpoint());
-        if (opts.format === "llm") {
-          console.log(llmError(unreachable.error, unreachable.message, [["hint", unreachable.next ?? null]]));
-        } else {
+        // The boundary's record, in this command's format: llm replaces the
+        // prose, json goes to stdout with the prose kept on stderr.
+        if (!emitErrorRecord(unreachable.error, unreachable.message, unreachable.next, [], opts.format)) {
           console.error(unreachable.message);
           if (unreachable.next) console.error(unreachable.next);
         }

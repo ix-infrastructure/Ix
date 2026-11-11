@@ -74,6 +74,7 @@ export async function buildDependencyTree(
     maxNodes: opts?.maxNodes ?? MAX_NODES,
     predicates: activePredicates,
     expand: (nodeId, p) => client.expand(nodeId, { direction: "in", predicates: [p], hops: 1 }),
+    expandAll: (nodeId, ps) => client.expand(nodeId, { direction: "in", predicates: ps, hops: 1 }),
     // Rank before the cap, or the cap keeps whatever the graph returned
     // first. A node whose name is a raw id is a dangling reference nothing
     // can follow, and one with no path costs a `locate` before it can be
