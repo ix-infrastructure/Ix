@@ -186,6 +186,11 @@ export interface HookState {
 /** A session's file is dropped this long after the hook last wrote it. */
 const STATE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** Where every hook subcommand keeps its state: IX_HOOK_STATE_DIR, else `<IX_HOME>/hook-state`. */
+export function hookStateDir(env: NodeJS.ProcessEnv = process.env): string {
+  return env.IX_HOOK_STATE_DIR || path.join(env.IX_HOME || path.join(os.homedir(), ".ix"), "hook-state");
+}
+
 /**
  * One file per (session, worktree), under IX_HOOK_STATE_DIR or
  * `<IX_HOME>/hook-state`. The worktree is keyed by its canonical path, so one
@@ -195,7 +200,7 @@ const STATE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
  * and another user could plant a link where the hook is about to write.
  */
 export function statePath(sessionId: string | undefined, worktree: string, env: NodeJS.ProcessEnv = process.env): string {
-  const dir = env.IX_HOOK_STATE_DIR || path.join(env.IX_HOME || path.join(os.homedir(), ".ix"), "hook-state");
+  const dir = hookStateDir(env);
   const key = fingerprint(`${sessionId ?? "no-session"}\0${canonicalPath(worktree)}`).slice(0, 24);
   return path.join(dir, `${key}.json`);
 }
