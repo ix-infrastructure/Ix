@@ -62,7 +62,7 @@ node ix-cli/scripts/check-links.mjs            # dead links in markdown (--offli
 
 cd ix-cli
 npm run lint
-npm run typecheck
+npm run typecheck                              # builds core-ingestion first: the CLI is checked against its .d.ts
 npm run knip                                   # unused files and exports, in ix-cli and core-ingestion
 npm run build                                  # also builds core-ingestion; doc-parity reads dist/
 npm run test:unit

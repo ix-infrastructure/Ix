@@ -5,31 +5,18 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { readGrammarStatus, type GrammarStatus } from "../grammar-status.js";
 
-type IngestionModule = {
-  parseFile: (filePath: string, source: string) => any;
-  resolveEdges: (results: any[], stats?: any, globalIndex?: any) => any[];
-  isGrammarSupported: (filePath: string) => boolean;
-  /** Absent from a core-ingestion build older than #967; read it through `readGrammarStatus`. */
-  grammarStatus?: () => GrammarStatus[];
-  buildGlobalResolutionIndex: (filePaths: string[], summaries?: Map<string, any>) => any;
-  summarizeParseResult: (parsed: any) => { filePath: string; [key: string]: unknown };
-};
-
-type PatchBuilderModule = {
-  buildPatch: (parsed: any, hash: string, workspaceId: string, previousSourceHash?: string) => any;
-  buildPatchWithResolution: (parsed: any, hash: string, workspaceId: string, resolvedEdges: any[], previousSourceHash?: string) => any;
-  buildDeletionPatch: (filePath: string, previousSourceHash: string, deletionToken: string, workspaceId: string, ops: any[], multiRepo?: any) => any;
-  sourcePatchIdCandidates: (filePath: string, sourceHash: string, workspaceId: string) => string[];
-  fileNodeId: (workspaceId: string, filePath: string) => string;
-  symbolNodeId: (workspaceId: string, filePath: string, qualifiedKey: string) => string;
-  extractorName: () => string;
-  /** Earlier extractor names, newest first: `sourcePatchIdCandidates` order after the current one. */
-  PREVIOUS_EXTRACTORS?: readonly string[];
-};
-
-type LanguagesModule = {
-  languageFromPath: (filePath: string) => string | null;
-};
+/**
+ * The three entry points, typed by core-ingestion's own declarations (#953).
+ *
+ * Type-only: `@ix/core-ingestion` is a tsconfig `paths` entry onto the built
+ * `.d.ts` files, and every use here is erased. At run time the modules are still
+ * loaded by relative file URL below, so the release layout (`cli/` beside
+ * `core-ingestion/`) is unchanged. Before this the CLI described them with
+ * hand-written signatures that had drifted from the library and checked nothing.
+ */
+export type IngestionModule = typeof import("@ix/core-ingestion");
+export type PatchBuilderModule = typeof import("@ix/core-ingestion/patch-builder");
+type LanguagesModule = typeof import("@ix/core-ingestion/languages");
 
 const importViaFunction = new Function(
   "specifier",
