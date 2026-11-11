@@ -29,6 +29,7 @@ import { getEndpoint, readConfiguredFormat } from "./config.js";
 import { readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { envFlag } from "./env.js";
 
 let cliVersion = "0.0.0";
 try {
@@ -38,7 +39,7 @@ try {
 } catch {}
 
 // Set IX_DEBUG=1 to append stack traces to any rendered error.
-const debug = process.env.IX_DEBUG === "1";
+const debug = envFlag("IX_DEBUG");
 
 // Before anything can throw. The handlers below are installed for
 // `unhandledRejection` and `uncaughtException`, which can fire before

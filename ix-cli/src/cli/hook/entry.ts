@@ -7,6 +7,7 @@ import {
   fingerprint, gitDiffHead, gitTopLevel, loadState, parseUnifiedDiff, saveState, statePath,
 } from "./session.js";
 import type { HookDeps, HookOptions, PostToolUseInput } from "./claude-post-edit.js";
+import { envFlag } from "../env.js";
 
 /**
  * The post-edit hook's front door, loaded before -- and instead of -- the
@@ -159,7 +160,7 @@ export function parseHookArgs(argv: string[]): HookOptions {
 export async function runHookProcess(opts: HookOptions): Promise<void> {
   const started = Date.now();
   const timeout = hookTimeoutMs();
-  const debugOn = process.env.IX_HOOK_DEBUG === "1";
+  const debugOn = envFlag("IX_HOOK_DEBUG");
   const debug = (msg: string) => { if (debugOn) process.stderr.write(`[ix hook] ${msg}\n`); };
   let out: string | undefined;
   try {

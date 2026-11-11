@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import { isLoopbackEndpoint } from "./endpoint.js";
 import { routeMissing } from "../client/features.js";
 import { acquireLockAt, namedLockPath, type LockHandle } from "./single-flight.js";
+import { envNumber } from "./env.js";
 
 // ---------------------------------------------------------------------------
 // Admission control for POST /v1/stitch.
@@ -62,35 +63,22 @@ import { acquireLockAt, namedLockPath, type LockHandle } from "./single-flight.j
 // and #568 is a report of 10–16 concurrent copies at 800–1200% CPU.
 // ---------------------------------------------------------------------------
 
-const DEFAULT_COOLDOWN_MS = 15 * 60 * 1000;
-/** Budget for waiting out a stitch that is merely in flight. */
-const DEFAULT_WAIT_MS = 30 * 1000;
 /** Poll interval while waiting. Short: a healthy stitch is over in ~30ms. */
 const POLL_MS = 250;
 
-function positiveEnvMs(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw === "") return fallback;
-  // Matched, not parsed. `Number.parseInt` reads any prefix it can, so an
-  // operator following the env table and writing `15m` for the cooldown got
-  // FIFTEEN MILLISECONDS -- past the `n >= 0` check, no fallback, nothing
-  // logged, and `ix map` back to stacking joins with no sign anything is wrong.
-  // `1e6` gave 1 the same way. `commitFailureLimit` learned this already.
-  if (!/^\d+$/.test(raw)) return fallback;
-  const n = Number.parseInt(raw, 10);
-  // 0 is meaningful (disable), so only a negative or unparseable value falls
-  // back. `Number.isFinite` alone would let "" and "abc" through as NaN.
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
+// Both are read with env.ts's number parser, never `Number.parseInt`: an
+// operator writing `15m` for the cooldown once got FIFTEEN MILLISECONDS, and
+// `ix map` went back to stacking joins with no sign anything was wrong. 0 is
+// a value (no cooldown, no wait); the defaults are in env.ts.
 
 /** How long to refuse a new stitch after one that may still be running. 0 disables. */
 export function stitchCooldownMs(): number {
-  return positiveEnvMs("IX_STITCH_COOLDOWN_MS", DEFAULT_COOLDOWN_MS);
+  return envNumber("IX_STITCH_COOLDOWN_MS");
 }
 
 /** How long to wait for the in-flight stitch to finish before shedding. */
 export function stitchWaitMs(): number {
-  return positiveEnvMs("IX_STITCH_WAIT_MS", DEFAULT_WAIT_MS);
+  return envNumber("IX_STITCH_WAIT_MS");
 }
 
 /**

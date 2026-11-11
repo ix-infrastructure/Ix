@@ -2,10 +2,13 @@
 
 /**
  * The hook's process contract, kept free of the CLI's imports: this module is
- * loaded on every hooked tool call, most of which change nothing.
+ * loaded on every hooked tool call, most of which change nothing. (env.ts
+ * imports nothing.)
  */
 
-export const DEFAULT_HOOK_TIMEOUT_MS = 3000;
+import { envNumber, numberDefault } from "../env.js";
+
+export const DEFAULT_HOOK_TIMEOUT_MS = numberDefault("IX_HOOK_TIMEOUT_MS");
 
 /**
  * The one place the hook's stdout contract lives: Claude Code reads
@@ -19,8 +22,7 @@ export function postToolUseOutput(additionalContext: string): string {
 }
 
 export function hookTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = Number(env.IX_HOOK_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_HOOK_TIMEOUT_MS;
+  return envNumber("IX_HOOK_TIMEOUT_MS", env);
 }
 
 /** All of stdin, or "" when there is none or it does not arrive in time. */

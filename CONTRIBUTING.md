@@ -69,6 +69,7 @@ npm run test:unit
 npm run smoke                                  # parser smoke test
 node scripts/check-api-parity.mjs              # docs/api matches the HTTP client
 node scripts/check-doc-parity.mjs              # registered flags match the flag reference
+node scripts/check-env-registry.mjs            # IX_* variables are registered in src/cli/env.ts and the docs table matches (--write regenerates it)
 cd ..
 
 cd core-ingestion                              # installed and built by the ix-cli build above

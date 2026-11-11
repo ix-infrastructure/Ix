@@ -8,6 +8,7 @@ import type { IxClient } from "../client/api.js";
 import { mapRefreshOutcomePath, mapStalePath } from "./config.js";
 import { loadIngestBaseline } from "./ingest-baseline.js";
 import { llmLine } from "./llm.js";
+import { envFlag, numberValue } from "./env.js";
 
 /**
  * The architecture map left for later (CL-13).
@@ -119,19 +120,12 @@ function clearMapStaleIfUnchanged(projectRoot: string, seen: MapStaleInfo): void
   clearMapStale(projectRoot);
 }
 
-const DEFAULT_REFRESH_DEBOUNCE_MS = 30_000;
-
 /**
- * How long after an attempted refresh another may start, in ms; 0 = no
- * debounce. Matched, not parsed, as the other IX_*_MS settings are: a value
- * that is not a plain number of ms keeps the default.
+ * How long after an attempted refresh another may start, in ms; 0 or empty =
+ * no debounce. A value that is not a number of ms keeps the default (env.ts).
  */
 export function mapRefreshDebounceMs(raw = process.env.IX_MAP_REFRESH_DEBOUNCE_MS): number {
-  if (raw === undefined) return DEFAULT_REFRESH_DEBOUNCE_MS;
-  const trimmed = raw.trim();
-  if (trimmed === "") return 0;
-  if (!/^\d+$/.test(trimmed)) return DEFAULT_REFRESH_DEBOUNCE_MS;
-  return Number.parseInt(trimmed, 10);
+  return numberValue("IX_MAP_REFRESH_DEBOUNCE_MS", raw);
 }
 
 export interface EnsureFreshMapOptions {
@@ -149,22 +143,17 @@ export interface EnsureFreshMapOptions {
  * leave the refresh to `ix map --remap`. They never map inline either way.
  */
 export function mapBackgroundRefreshEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = env.IX_MAP_BACKGROUND_REFRESH;
-  return raw === undefined || raw.trim() !== "0";
+  return envFlag("IX_MAP_BACKGROUND_REFRESH", env);
 }
-
-const DEFAULT_BACKGROUND_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
  * The background refresh's hard wall-clock limit, in ms: well above any hook's
  * budget, so a slow map gets to finish, and finite, so a wedged one cannot hold
- * the map lock forever. IX_MAP_BACKGROUND_TIMEOUT_MS, a plain number of ms > 0;
+ * the map lock forever. IX_MAP_BACKGROUND_TIMEOUT_MS, a number of ms > 0;
  * anything else keeps the 5 min default.
  */
 export function mapBackgroundTimeoutMs(raw = process.env.IX_MAP_BACKGROUND_TIMEOUT_MS): number {
-  if (raw === undefined || !/^\d+$/.test(raw.trim())) return DEFAULT_BACKGROUND_TIMEOUT_MS;
-  const n = Number.parseInt(raw.trim(), 10);
-  return n > 0 ? n : DEFAULT_BACKGROUND_TIMEOUT_MS;
+  return numberValue("IX_MAP_BACKGROUND_TIMEOUT_MS", raw);
 }
 
 /** The first argument that makes the CLI entry run a background refresh (see `main.ts`). */

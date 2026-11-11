@@ -21,6 +21,7 @@ import {
 import { backendComposeArgs } from "../backend-compose.js";
 import { ixHome } from "../ix-home.js";
 import { DEFAULT_ENDPOINT } from "../endpoint.js";
+import { envFlag } from "../env.js";
 
 // Re-exported for the existing importers of this module (tests and call sites
 // that predate backend-version.ts). recordBackendRelease is deliberately NOT
@@ -1276,18 +1277,12 @@ export function updateCheckEnabled(
   // where a stray notice is a protocol error, and `install` asks questions on
   // stderr that a notice arriving mid-prompt would break up.
   if (argv[0] === "upgrade" || argv[0] === "mcp" || argv[0] === "install") return false;
-  if (env.IX_MCP_CHILD === "1") return false;
-  if (isTruthyEnv(env.IX_NO_UPDATE_CHECK)) return false;
+  if (envFlag("IX_MCP_CHILD", env)) return false;
+  if (envFlag("IX_NO_UPDATE_CHECK", env)) return false;
   if (!stderrIsTerminal) return false;
   const format = requestedFormat(argv);
   if (format !== undefined && format !== "text") return false;
   return true;
-}
-
-function isTruthyEnv(value: string | undefined): boolean {
-  if (value === undefined) return false;
-  const normalized = value.trim().toLowerCase();
-  return normalized !== "" && normalized !== "0" && normalized !== "false";
 }
 
 function requestedFormat(argv: readonly string[]): string | undefined {

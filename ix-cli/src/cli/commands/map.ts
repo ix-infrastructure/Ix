@@ -24,24 +24,20 @@ import { describeUnavailableGrammars } from "../grammar-status.js";
 import type { IxClient } from "../../client/api.js";
 import { formatOption } from "../options.js";
 import { DEFAULT_FORMAT_CHOICES } from "../default-format.js";
+import { envFlag, flagValue, numberValue } from "../env.js";
 
 // Hard wall-clock budget for a single `ix map`. Past this, the shared deadline
 // signal aborts every in-flight request and the command exits, so a single
 // invocation can never grind for hours against an unhealthy backend. Tunable
-// via IX_MAP_DEADLINE_MS; 0 disables the budget.
-const DEFAULT_MAP_DEADLINE_MS = 15 * 60 * 1000;
+// via IX_MAP_DEADLINE_MS (default 15 min, in env.ts); 0 disables the budget.
 
 /** The map budget in ms, or undefined when disabled. */
 export function mapDeadlineMs(raw = process.env.IX_MAP_DEADLINE_MS): number | undefined {
-  if (raw === undefined) return DEFAULT_MAP_DEADLINE_MS;
-  const trimmed = raw.trim();
-  // Matched, not parsed: `parseInt("15m")` is 15, a 15 ms budget that aborted
-  // every request of every map. A value that is not a plain number of ms keeps
-  // the default; empty and 0 keep disabling it, as they did.
-  if (trimmed !== "" && !/^\d+$/.test(trimmed)) return DEFAULT_MAP_DEADLINE_MS;
-  const budget = Number.parseInt(trimmed, 10);
-  if (!Number.isFinite(budget) || budget <= 0) return undefined; // disabled
-  return budget;
+  // Never `parseInt`: `parseInt("15m")` is 15, a 15 ms budget that aborted
+  // every request of every map. A value that is not a number of ms keeps the
+  // default; empty and 0 keep disabling it, as they did.
+  const budget = numberValue("IX_MAP_DEADLINE_MS", raw);
+  return budget > 0 ? budget : undefined; // 0: disabled
 }
 
 export function mapDeadlineSignal(): AbortSignal | undefined {
@@ -57,7 +53,7 @@ export function mapDeadlineSignal(): AbortSignal | undefined {
 // opts the automatic path back in for users who do want remote auto-refresh.
 export function shouldSkipAutoMap(opts: { auto: boolean; cloudReady: boolean }): boolean {
   if (!opts.auto || !opts.cloudReady) return false;
-  if (process.env.IX_AUTO_MAP_CLOUD === "1") return false;
+  if (envFlag("IX_AUTO_MAP_CLOUD")) return false;
   return true;
 }
 
@@ -65,9 +61,7 @@ export function shouldSkipAutoMap(opts: { auto: boolean; cloudReady: boolean }):
 export function requestedMapCoalesceExitCode(
   raw = process.env.IX_MAP_COALESCE_EXIT_CODE,
 ): number | undefined {
-  if (raw === undefined) return undefined;
-  const code = Number(raw);
-  return Number.isInteger(code) && code >= 1 && code <= 255 ? code : undefined;
+  return numberValue("IX_MAP_COALESCE_EXIT_CODE", raw);
 }
 
 export function applyRequestedMapCoalesceExitCode(
@@ -87,7 +81,7 @@ export function applyRequestedMapCoalesceExitCode(
  * view to refresh them. An `ix map` run by hand always computes.
  */
 export function mapEager(raw = process.env.IX_MAP_EAGER): boolean {
-  return raw === "1";
+  return flagValue("IX_MAP_EAGER", raw);
 }
 
 /**
@@ -120,7 +114,7 @@ export async function resolveMapScope(
 
 /** Watch opts into full patches; ordinary `ix map` keeps its topology-only ingest. */
 export function mapModeForIngest(raw = process.env.IX_MAP_FULL_INGEST): boolean {
-  return raw !== "1";
+  return !flagValue("IX_MAP_FULL_INGEST", raw);
 }
 
 export interface MapRegion {
@@ -1089,7 +1083,7 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
   // remote backend, skip: a remote graph should be fed deliberately, not by
   // a write on every change from every client. Manual `ix map` is never
   // skipped; opt the automatic path back in with IX_AUTO_MAP_CLOUD=1.
-  const autoMap = process.env.IX_AUTO_MAP === "1";
+  const autoMap = envFlag("IX_AUTO_MAP");
   const cloudReady = await isCloudReady();
   if (shouldSkipAutoMap({ auto: autoMap, cloudReady })) {
     if (!silent && opts.format !== "json" && opts.format !== "llm") {

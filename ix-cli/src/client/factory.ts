@@ -4,6 +4,7 @@ import { getEndpoint, getLocalToken } from "../cli/connection.js";
 import { IxClient } from "./api.js";
 import { QUERY_CLIENT_OPTIONS } from "./request-memo.js";
 import { combineSignals, currentRunSignal } from "./run-signal.js";
+import { envNumber, numberDefault } from "../cli/env.js";
 
 export interface CreateClientOptions {
   /** Backend URL. Defaults to `getEndpoint()` (IX_ENDPOINT, then config.yaml). */
@@ -27,16 +28,13 @@ export interface CreateClientOptions {
 }
 
 /** The default whole-command bound on reads; `IX_READ_DEADLINE_MS` overrides it, 0 turns it off. */
-export const DEFAULT_READ_DEADLINE_MS = 60_000;
+export const DEFAULT_READ_DEADLINE_MS = numberDefault("IX_READ_DEADLINE_MS");
 
 /** At most this many requests in flight per client, for every command. */
 export const DEFAULT_MAX_IN_FLIGHT = 12;
 
 export function readDeadlineMs(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env.IX_READ_DEADLINE_MS?.trim();
-  if (!raw) return DEFAULT_READ_DEADLINE_MS;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_READ_DEADLINE_MS;
+  return envNumber("IX_READ_DEADLINE_MS", env);
 }
 
 /**
