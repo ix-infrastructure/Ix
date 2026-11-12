@@ -135,6 +135,46 @@ describe("field reads in plugin code", () => {
     expect(fieldReads(py, "a.py", commands)).toEqual([]);
   });
 
+  it("ends a parameter's or loop variable's shadow where its function or loop ends", () => {
+    const ts = [
+      'const out = JSON.parse(await runIx(["locate", s, "--format", "json"]));',
+      "for (const out of rows) { use(out.score); }",
+      "items.forEach(function (out) { return out.x; });",
+      "out.confidence;",
+      "items.map((out) => out.y);",
+      "try { go(); } catch (out) { log(out.message); }",
+      "for (const { out } of pairs) use(out.z);",
+      "out.lineRange;",
+    ].join("\n");
+    expect(fieldReads(ts, "a.ts", commands).map((r) => [r.path, r.line])).toEqual([["confidence", 4], ["lineRange", 8]]);
+    // An assignment inside the shadowing function is to its parameter.
+    const inner = [
+      'const out = JSON.parse(await runIx(["locate", s]));',
+      "function f(out) { out = load(); return out.other; }",
+      "out.candidates;",
+    ].join("\n");
+    expect(fieldReads(inner, "a.ts", commands).map((r) => r.path)).toEqual(["candidates"]);
+  });
+
+  it("follows Python scope: def bodies and comprehensions end, a for statement rebinds", () => {
+    const py = [
+      'data = run_ix_json(["locate", s])',
+      "def f(",
+      "        data,",
+      "):",
+      '    return data["x"]',
+      'print(data["confidence"])',
+      'names = [data.get("n") for data in rows]',
+      'print(data["candidates"])',
+      "for data in rows:",
+      '    data["confidence"]',
+      'data["lineRange"]',
+    ].join("\n");
+    expect(fieldReads(py, "a.py", commands).map((r) => [r.path, r.line])).toEqual([["confidence", 6], ["candidates", 8]]);
+    const withAs = ['data = run_ix_json(["locate", s])', "with open(p) as data:", '    data["confidence"]'].join("\n");
+    expect(fieldReads(withAs, "a.py", commands)).toEqual([]);
+  });
+
   it("leaves reads it cannot tie to a published command alone", () => {
     const sh = [
       "st=$(ix status --format json)",
@@ -219,6 +259,42 @@ describe("MCP tool and result names in skill text", () => {
     expect(mcpReferences(text).map((ref) => checkMcp(ref, fields.mcp)).filter(Boolean)).toEqual([
       'unknown MCP tool "ix_lib"', 'unknown MCP tool "ix_run"', 'unknown MCP tool "ix_fetch"',
       'unknown MCP tool "ix_tools"', 'unknown MCP tool "ix_query"',
+    ]);
+  });
+
+  it("takes the MCP tools a plugin serves itself for its own, names and fields both", () => {
+    const code = [
+      'server.tool("ix_query", schema, run);',
+      'export const tools = [{ name: "ix_status", handler }];',
+      "const TABLE = { ix_docs_tool: { run } };",
+      "api.registerTool('ix_neighbors', spec);",
+      '@mcp.tool(name="ix_ask")',
+      "def ask(q): ...",
+      "const ix_impact = makeTool(impactSpec);",
+    ].join("\n");
+    const served = definedHelpers(code, "mcp/server.ts");
+    expect([...served].sort()).toEqual(["ix_ask", "ix_docs_tool", "ix_impact", "ix_neighbors", "ix_query", "ix_status"]);
+    const text = [
+      "Use `ix_query` and read `results.items`; `ix_status` gives `graph.ready`.",
+      "`ix_neighbors` returns `callers.count`. `ix_impact` has `traversal.nodes_visited`.",
+      "`ix_explain` gives `facts.calleeCount`.",
+    ].join("\n");
+    // The plugin's ix_impact is its own tool, not ix mcp's, whatever it returns.
+    expect(mcpReferences(text).map((ref) => checkMcp(ref, fields.mcp, served)).filter(Boolean)).toEqual([
+      '"ix_explain" returns `--format llm` records, not JSON: it has no field "facts.calleeCount"',
+    ]);
+  });
+
+  it("takes on/for/with as an argument only right after the tool", () => {
+    const text = [
+      "After `ix_impact`, check for `traversal.nodes_visited` and `facts.calleeCount`.",
+      "Sort `ix_impact` results with `summary.risk`.",
+      "Run `ix_impact` on `auth.verify`, `api.get` and `db.connect`; `ix_explain` for `client.query`.",
+    ].join("\n");
+    expect(mcpReferences(text).filter((ref) => ref.path).map((ref) => [ref.tool, ref.path])).toEqual([
+      ["ix_impact", "traversal.nodes_visited"],
+      ["ix_impact", "facts.calleeCount"],
+      ["ix_impact", "summary.risk"],
     ]);
   });
 

@@ -41,18 +41,22 @@
  *
  * 3. MCP names (the text files): a code span naming an `ix_…` tool must name
  *    one `ix mcp` serves (src/mcp/server.ts, both tiers). An `ix_…` name the
- *    plugin defines itself is a helper, not a tool: a shell, Python or JS
- *    function (`ix_lib() {`, `def ix_lib`), a file or directory (`ix_lib.sh`),
- *    and any `ix_<cmd>_json` wrapper. A code span that
- *    is a JSON path (`a.b`, `a[0]`, `.a`) after a tool in the same Markdown
- *    section (up to a heading or an `ix …` command span) fails when that tool
- *    returns `--format llm` records, which have no fields to read: everything
- *    not in IX_MCP_JSON_RESULT_TOOLS. Not checked, because they read the same
- *    as a symbol name or a URL in an example: a plain name (`ok`,
- *    `risk_level`); a dotted name given as an argument, with `on`, `for`,
- *    `with`, `named`, `like`, `e.g.`, `symbol` and the like just before it
- *    (`ix_callers` on `auth.verify_token`, or `client.query`); and a host name
- *    (`docs.example.com`).
+ *    plugin defines itself is the plugin's, not `ix mcp`'s, and is not
+ *    checked, nor is a field read after it: a shell, Python or JS function
+ *    (`ix_lib() {`, `def ix_lib`), a file or directory (`ix_lib.sh`), an MCP
+ *    tool the plugin serves from its own code (`name: "ix_query"`,
+ *    `server.tool("ix_query"`, a `{ ix_query: { … } }` table), and any
+ *    `ix_<cmd>_json` wrapper. A code span
+ *    that is a JSON path (`a.b`, `a[0]`, `.a`) after a tool in the same
+ *    Markdown section (up to a heading or an `ix …` command span) fails when
+ *    that tool returns `--format llm` records, which have no fields to read:
+ *    everything not in IX_MCP_JSON_RESULT_TOOLS. Not checked, because they
+ *    read the same as a symbol name or a URL in an example: a plain name
+ *    (`ok`, `risk_level`); a dotted name given as an argument, either right
+ *    after the tool with `on`, `for` or `with` between (`ix_callers` on
+ *    `auth.verify_token`) or anywhere after `named`, `like`, `e.g.`, `symbol`
+ *    and the like (`a symbol like `client.query``), and the names listed
+ *    after it with `,`, `or`, `and`; and a host name (`docs.example.com`).
  *
  * Changelogs and dated plans or logs are skipped: they quote old forms on
  * purpose.
@@ -501,20 +505,22 @@ function codeReads(text, commands, python) {
     }
     return null;
   };
-  const bind = (name, index, value) => {
+  /** `end`: where the binding's scope closes (a function body, a loop); none for the rest of the file. */
+  const bind = (name, index, value, end) => {
     if (!vars.has(name)) vars.set(name, []);
-    vars.get(name).push({ index, value });
+    vars.get(name).push({ index, value, end });
   };
-  for (const m of text.matchAll(assign)) bind(m[1], m.index + m[0].length - 1, valueOf(m.index + m[0].length));
-  // A parameter of the same name is another variable: it holds nothing known.
-  for (const m of text.matchAll(python ? PY_PARAMS : JS_PARAMS)) {
-    if (/^(?:if|for|while|switch|catch|return)$/.test(m[1] ?? m[3] ?? "")) continue;
-    for (const part of splitTop((python ? m[2] : m[2] ?? m[4] ?? m[5] ?? m[6]) ?? "", ",")) {
-      const name = /^\s*(?:\.\.\.|\*{1,2})?([A-Za-z_$][\w$]*)/.exec(part)?.[1];
-      if (name) bind(name, m.index, null);
-    }
+  // Parameters and loop variables of the same name are other variables: they
+  // hold nothing known, and only inside their function or loop. Bound first,
+  // so an assignment inside that scope is scoped with them.
+  for (const b of scopedBindings(text, python)) bind(b.name, b.index, null, b.end);
+  for (const m of text.matchAll(assign)) {
+    const index = m.index + m[0].length - 1;
+    // Inside a scope that shadows the name, the assignment is to the inner variable.
+    const shadow = (vars.get(m[1]) ?? []).filter((a) => a.end !== undefined && a.index < index && index < a.end)
+      .sort((x, y) => x.end - y.end)[0];
+    bind(m[1], index, valueOf(m.index + m[0].length), shadow?.end);
   }
-  for (const list of vars.values()) list.sort((x, y) => x.index - y.index);
   if (!python) {
     for (const m of text.matchAll(/\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*/g)) {
       const value = valueOf(m.index + m[0].length);
@@ -543,9 +549,148 @@ function read(text, command, path, index) {
   return { command, path, line, snippet: text.split("\n")[line - 1].trim().slice(0, 100), index };
 }
 
-/** The value a variable held at `index`: its last assignment before it. */
+/** The value a variable held at `index`: its last binding before it whose scope is still open. */
 function valueAt(vars, name, index) {
-  return (vars.get(name) ?? []).filter((a) => a.index < index).at(-1)?.value;
+  let best;
+  for (const a of vars.get(name) ?? []) {
+    if (a.index < index && (a.end === undefined || index < a.end) && (!best || a.index >= best.index)) best = a;
+  }
+  return best?.value;
+}
+
+/** Skip a string or comment starting at `i`; the index just past it, or `i` when there is none. */
+function skipLiteral(text, i, python) {
+  const c = text[i];
+  if (c === '"' || c === "'" || c === "`") {
+    for (let j = i + 1; j < text.length; j++) {
+      if (text[j] === "\\") j++;
+      else if (text[j] === c) return j + 1;
+      else if (text[j] === "\n" && c !== "`" && !python) return j;
+    }
+    return text.length;
+  }
+  if (python ? c === "#" : text.startsWith("//", i)) {
+    const e = text.indexOf("\n", i);
+    return e < 0 ? text.length : e;
+  }
+  if (!python && text.startsWith("/*", i)) {
+    const e = text.indexOf("*/", i + 2);
+    return e < 0 ? text.length : e + 2;
+  }
+  return i;
+}
+
+/**
+ * Scan from `start` at bracket depth 0 to where an enclosing bracket closes
+ * (its index), or, with `stops`, to the first of those characters at depth 0.
+ */
+function scanTo(text, start, python, stops = "") {
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    const skip = skipLiteral(text, i, python);
+    if (skip !== i) { i = skip - 1; continue; }
+    const c = text[i];
+    if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c)) { if (depth === 0) return i; depth--; }
+    else if (depth === 0 && stops.includes(c)) return i;
+  }
+  return text.length;
+}
+
+/** The end of a JS body starting at or after `from`: a `{…}` block, or a statement or expression. */
+function jsBodyEnd(text, from) {
+  const at = from + /^\s*/.exec(text.slice(from))[0].length;
+  if (text[at] === "{") return Math.min(text.length, scanTo(text, at + 1, false) + 1);
+  return scanTo(text, at, false, ",;");
+}
+
+/** The end of the indented Python block under the `def` at `def`, whose header ends at `from`. */
+function pyBlockEnd(text, def, from) {
+  const startOfLine = text.lastIndexOf("\n", def - 1) + 1;
+  const indent = /^[ \t]*/.exec(text.slice(startOfLine))[0].length;
+  let pos = text.indexOf("\n", from);
+  while (pos >= 0 && pos < text.length) {
+    const next = text.indexOf("\n", pos + 1);
+    const line = text.slice(pos + 1, next < 0 ? text.length : next);
+    if (/\S/.test(line) && !/^\s*#/.test(line) && /^[ \t]*/.exec(line)[0].length <= indent) return pos + 1;
+    if (next < 0) break;
+    pos = next;
+  }
+  return text.length;
+}
+
+/**
+ * The names a parameter list or a loop target binds: `a, b = 1`, `a: T`,
+ * `...rest`, `*args`, and inside a destructuring pattern `{ a, b: c }` or
+ * `[a, b]` the names it binds (`a`, `c`, `b`).
+ */
+function boundNames(list, pattern = false) {
+  const names = [];
+  for (const raw of splitTop(list, ",")) {
+    let part = raw.trim();
+    if (pattern) {
+      // `key: target`: the target is what is bound.
+      const renamed = /^[A-Za-z_$][\w$]*\s*:\s*([\s\S]*)$/.exec(part);
+      if (renamed) part = renamed[1].trim();
+    }
+    if (/^[[({]/.test(part)) {
+      const close = scanTo(part, 1, false);
+      names.push(...boundNames(part.slice(1, close), part[0] !== "("));
+      continue;
+    }
+    const name = /^(?:\.\.\.|\*{1,2})?([A-Za-z_$][\w$]*)/.exec(part)?.[1];
+    if (name) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * Bindings that make a name another variable: `[{ name, index, end }]`, `end`
+ * undefined when it lasts to the end of the file.
+ *   - JS: function, method, arrow and catch parameters, for the function body;
+ *     `for (const x of …)` and `for (x in …)` variables, for the loop.
+ *   - Python: `def` parameters, for the indented body; comprehension
+ *     variables, for the brackets; and, to the end of the file, since Python
+ *     has no block scope, `for x in` statement variables and `with … as x:`.
+ */
+function scopedBindings(text, python) {
+  const out = [];
+  const add = (names, index, end) => { for (const name of names) out.push({ name, index, end }); };
+  if (python) {
+    for (const m of text.matchAll(PY_PARAMS)) add(boundNames(m[2]), m.index, pyBlockEnd(text, m.index, m.index + m[0].length));
+    for (const m of text.matchAll(/\bfor\s+([A-Za-z_(][\w\s,()]*?)\s+in\b/g)) {
+      const names = boundNames(m[1]);
+      const lineStart = text.lastIndexOf("\n", m.index - 1) + 1;
+      if (/^\s*(?:async\s+)?$/.test(text.slice(lineStart, m.index))) { add(names, m.index); continue; }
+      // A comprehension: the variable lives inside its brackets.
+      let depth = 0, open = -1;
+      for (let i = m.index - 1; i >= 0; i--) {
+        const c = text[i];
+        if (")]}".includes(c)) depth++;
+        else if ("([{".includes(c)) { if (depth === 0) { open = i; break; } depth--; }
+      }
+      if (open < 0) add(names, m.index);
+      else add(names, open, scanTo(text, open + 1, true));
+    }
+    for (const m of text.matchAll(/\bas\s+([A-Za-z_]\w*)\s*:/g)) add([m[1]], m.index);
+    return out;
+  }
+  for (const m of text.matchAll(JS_PARAMS)) {
+    if (/^(?:if|for|while|switch|return)$/.test(m[1] ?? m[3] ?? "")) continue;
+    const params = m[2] ?? m[4] ?? m[5] ?? m[6] ?? "";
+    const end = m[0].endsWith("{")
+      ? jsBodyEnd(text, m.index + m[0].length - 1)
+      : m[0].endsWith("=>")
+        ? jsBodyEnd(text, m.index + m[0].length)
+        : jsBodyEnd(text, Math.max(m.index + m[0].length, text.indexOf("{", m.index + m[0].length)));
+    add(boundNames(params), m.index, end);
+  }
+  for (const m of text.matchAll(/\bfor\s*(?:await\s*)?\(\s*(?:(?:const|let|var)\s+)?([[{][^\]}]*[\]}]|[A-Za-z_$][\w$]*)\s+(?:of|in)\b/g)) {
+    const header = text.indexOf("(", m.index);
+    const close = scanTo(text, header + 1, false);
+    add(boundNames(m[1]), m.index, jsBodyEnd(text, close + 1));
+  }
+  return out;
 }
 
 /** `?.a.b[0]["c"]` or Python `["a"][0].get("b")` -> `a.b[].c`, up to a method call. */
@@ -577,7 +722,13 @@ function chainPath(rest, python) {
 const FILE_EXT = /\.(?:[cm]?[jt]sx?|py|md|mdc|json|ya?ml|toml|sh|bash|go|rs|java|kt|rb|php|c|h|cpp|cs|scala|txt|lock|cfg|ini|env|html|css|sql|xml)$/;
 
 /** Words that, just before a dotted code span, make it a tool's argument (a qualified symbol name), not a read. */
-const ARGUMENT_BEFORE = /\b(?:on|for|with|named|called|like|e\.g\.|i\.e\.|such as|symbol|function|method|class|module|argument|arg|target|pass|passing|query)[\s:,]*$/i;
+const ARGUMENT_BEFORE = /\b(?:named|called|like|e\.g\.|i\.e\.|such as|symbol|function|method|class|module|argument|arg|target|pass|passing|(?:the|a|its) query)[\s:,]*$/i;
+/**
+ * Words that make a dotted span an argument only right after the tool's own
+ * span (`ix_callers` on `a.b`, `ix_search` for `client.query`). Anywhere
+ * else they are ordinary prose ("check for `traversal.nodes_visited`").
+ */
+const ARGUMENT_AFTER_TOOL = /^[\s,]*(?:on|for|with|query)[\s:,]*$/i;
 
 /** A host name: `docs.example.com`. */
 const HOST_NAME = /\.(?:com|org|net|io|dev|ai|app|co|edu|gov|sh)$/;
@@ -614,16 +765,20 @@ export function mcpReferences(text, ext = ".md") {
     const snippet = raw.trim().slice(0, 100);
     let after = 0;
     let argument = false;
+    let toolSpan = false;
     for (const m of raw.matchAll(/`([^`]+)`/g)) {
       const span = m[1].trim();
       const before = raw.slice(after, m.index);
       after = m.index + m[0].length;
       // The next item of a list of arguments: `on `a.b`, `c.d` or `e.f``.
       const listed = argument && /^\s*(?:,|,?\s*(?:or|and))\s*$/.test(before);
+      const afterTool = toolSpan && ARGUMENT_AFTER_TOOL.test(before);
       argument = false;
+      toolSpan = false;
       const named = /^(ix_[a-z][a-z0-9_]*)(?=$|[\s(])/.exec(span);
       if (named) {
         tool = named[1];
+        toolSpan = true;
         found.push({ tool, line: i + 1, snippet });
         continue;
       }
@@ -631,7 +786,7 @@ export function mcpReferences(text, ext = ".md") {
       if (/^ix\s/.test(span)) { tool = null; continue; }
       if (!tool || /^ix/.test(span) || FILE_EXT.test(span)) continue;
       const plain = /^[a-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(span);
-      if (plain && (listed || ARGUMENT_BEFORE.test(before))) { argument = true; continue; }
+      if (plain && (listed || afterTool || ARGUMENT_BEFORE.test(before))) { argument = true; continue; }
       if (plain && HOST_NAME.test(span)) continue;
       const dotted = /^[a-z_][A-Za-z0-9_]*(?:\??\.[A-Za-z_][A-Za-z0-9_]*|\[\d*\])+$/.test(span);
       const jq = /^\.[A-Za-z_][A-Za-z0-9_]*(?:\??\.[A-Za-z_][A-Za-z0-9_]*|\[\d*\])*$/.test(span);
@@ -644,7 +799,10 @@ export function mcpReferences(text, ext = ".md") {
 /**
  * The `ix_…` names a plugin defines itself, from one of its files: functions
  * (shell `ix_x() {` or `function ix_x`, Python `def ix_x`, JS `function ix_x`
- * or `const ix_x =`) and the file's own path segments (`ix_lib.sh`, `ix_lib/`).
+ * or `const ix_x =`), the file's own path segments (`ix_lib.sh`, `ix_lib/`),
+ * and the MCP tools it serves itself: a tool registered by name
+ * (`name: "ix_x"`, `name="ix_x"`, `"name": "ix_x"`, `server.tool("ix_x"`,
+ * `registerTool("ix_x"`) or keyed by it in a table (`ix_x: {`).
  */
 export function definedHelpers(text, file) {
   const names = new Set();
@@ -654,6 +812,15 @@ export function definedHelpers(text, file) {
   }
   const definition = /(?:^|[\s;{(])(?:(?:function|def)\s+(ix_[a-z0-9_]+)\b|(?:const|let|var)\s+(ix_[a-z0-9_]+)\s*=|(ix_[a-z0-9_]+)\s*\(\s*\)\s*\{)/gm;
   for (const m of text.matchAll(definition)) names.add(m[1] ?? m[2] ?? m[3]);
+  const served = [
+    // name: "ix_x", name="ix_x", "name": "ix_x", tool_name = 'ix_x'
+    /\b(?:tool_?)?name["']?\s*[:=]\s*["'`](ix_[a-z0-9_]+)["'`]/gi,
+    // server.tool("ix_x", …), registerTool("ix_x", …), add_tool('ix_x'), defineTool(`ix_x`)
+    /\b(?:tool|register_?tool|add_?tool|define_?tool)\s*\(\s*["'`](ix_[a-z0-9_]+)["'`]/gi,
+    // a tool table: { ix_x: { … } } or { "ix_x": { … } }
+    /(?:^|[\s{,])["']?(ix_[a-z0-9_]+)["']?\s*:\s*\{/gm,
+  ];
+  for (const re of served) for (const m of text.matchAll(re)) names.add(m[1]);
   return names;
 }
 
@@ -662,11 +829,15 @@ const JSON_WRAPPER = /^ix_[a-z]+_json$/;
 
 /**
  * What is wrong with one MCP reference, or null. `helpers` are the `ix_…`
- * names the plugin defines itself (definedHelpers): naming one is not naming a tool.
+ * names the plugin defines itself (definedHelpers): naming one is not naming
+ * an `ix mcp` tool, and a field read after one is a read from the plugin's own
+ * function or tool, whose output this CLI does not define, so it is not checked
+ * either, even when `ix mcp` serves a tool of the same name.
  */
 export function checkMcp(ref, mcp, helpers = new Set()) {
+  if (helpers.has(ref.tool)) return null;
   if (ref.path === undefined) {
-    if (mcp.tools.has(ref.tool) || helpers.has(ref.tool) || JSON_WRAPPER.test(ref.tool)) return null;
+    if (mcp.tools.has(ref.tool) || JSON_WRAPPER.test(ref.tool)) return null;
     return `unknown MCP tool "${ref.tool}"`;
   }
   if (!mcp.tools.has(ref.tool) || mcp.jsonResults.has(ref.tool)) return null;
@@ -707,7 +878,8 @@ async function main(argv) {
   for (const repo of PLUGINS) {
     const root = join(dir, repo);
     try { statSync(root); } catch { console.error(`missing ${root}`); return 2; }
-    // The plugin's own ix_… helpers, so its docs may name them.
+    // The plugin's own ix_… helpers and the MCP tools it serves itself, so its
+    // docs may name them and read their fields.
     const helpers = new Set();
     for (const file of walk(root)) {
       const ext = extname(file);
