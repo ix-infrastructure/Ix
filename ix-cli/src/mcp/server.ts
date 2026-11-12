@@ -52,6 +52,7 @@ export const IX_MCP_OSS_TOOL_NAMES = [
   // `--tools=all`; `--tools=core` advertises this instead.
   "ix_neighbors",
   "ix_callers",
+  "ix_tests_for",
   "ix_callees",
   "ix_imported_by",
   "ix_imports",
@@ -144,6 +145,7 @@ const TOOL_ANNOTATIONS: Record<(typeof IX_MCP_TOOL_NAMES)[number], ToolAnnotatio
   ix_diff: { ...READ_ONLY, title: "Graph diff between revisions" },
   ix_neighbors: { ...READ_ONLY, title: "Callers, callees, imports, importers" },
   ix_callers: { ...READ_ONLY, title: "Callers" },
+  ix_tests_for: { ...READ_ONLY, title: "Tests for a symbol or file" },
   ix_callees: { ...READ_ONLY, title: "Callees" },
   ix_imported_by: { ...READ_ONLY, title: "Importers" },
   ix_imports: { ...READ_ONLY, title: "Imports" },
@@ -552,6 +554,7 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     },
   );
   registerSymbolTool(ctx, runIx, "ix_callers", "Who calls this, with path:lines. Prefer ix_neighbors.", "callers", EDGE_TOOL_INPUT);
+  registerSymbolTool(ctx, runIx, "ix_tests_for", "Rank tests reaching a symbol or file, with evidence and inferred run commands. Static evidence, not runtime coverage.", "tests-for");
   registerSymbolTool(ctx, runIx, "ix_callees", "What this calls, with path:lines. Prefer ix_neighbors.", "callees", EDGE_TOOL_INPUT);
   registerSymbolTool(ctx, runIx, "ix_imported_by", "What imports this, with path:lines. Prefer ix_neighbors.", "imported-by", EDGE_TOOL_INPUT);
   registerSymbolTool(ctx, runIx, "ix_imports", "What this imports, with path:lines. Prefer ix_neighbors.", "imports", EDGE_TOOL_INPUT);

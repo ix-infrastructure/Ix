@@ -1,0 +1,2 @@
+import { runCheck } from './checks.js';
+it('runs checks', () => { runCheck(); });

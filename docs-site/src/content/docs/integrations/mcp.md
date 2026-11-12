@@ -61,6 +61,12 @@ flags.
 `ix mcp --tools=all` advertises every tool instead, including `ix_health`, `ix_text`, `ix_locate`, `ix_overview`
 and `ix_explain`, which were in the default set before.
 
+It also includes `ix_tests_for` (`symbol=<name or file>`, optional `kind`, `path`,
+`pick`, `limit`): ranked static test evidence with path:line, route and an inferred
+run command. Run `ix map` after upgrading to populate TESTS edges. This reports
+static dependencies, not runtime coverage. The CLI equivalent is
+`ix tests-for <symbol|file>`; see `docs/tests-for.md` in the source repository.
+
 ## Repair a moved launcher
 
 If you move or reinstall `ix`, a client may still point at the old path. For Cursor, VS Code, opencode and OpenClaw

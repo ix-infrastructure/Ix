@@ -16,6 +16,8 @@ import type { SupportedLanguages } from './languages.js';
  * resolution independent of how the files are batched.
  */
 export interface FileSummary {
+  /** Test classification survives incremental resolution against stored summaries. */
+  isTest?: true;
   filePath: string;
   language: SupportedLanguages;
   /** Entities, file node included -- only the count is used (Go package anchors). */
@@ -44,7 +46,7 @@ export interface FileSummary {
 }
 
 /** The part of a summary other files depend on, hashed. */
-export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNames' | 'phpTypes' | 'receiverFactories' | 'receiverHeritage' | 'receiverPackage'> & Partial<Pick<FileSummary, 'imports' | 'importAliases' | 'tsGlobalTypes'>>): string {
+export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNames' | 'phpTypes' | 'receiverFactories' | 'receiverHeritage' | 'receiverPackage'> & Partial<Pick<FileSummary, 'imports' | 'importAliases' | 'tsGlobalTypes' | 'isTest'>>): string {
   const parts: unknown[] = [
     [...s.qkeys].map(([n, q]) => `${n}\0${q}`).sort(),
     [...(s.exportPublicNames ?? [])].map(([p, l]) => `${p}\0${l}`).sort(),
@@ -66,6 +68,7 @@ export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNam
   if (namespaceExports.length > 0) parts.push(['export:', ...namespaceExports.map(([k, m]) => `${k}\0${m}`).sort()]);
   // TypeScript globals an unimported heritage base may name.
   if (s.tsGlobalTypes?.length) parts.push(['global:', ...[...s.tsGlobalTypes].sort()]);
+  if (s.isTest) parts.push(['test']);
   const canonical = JSON.stringify(parts);
   return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 32);
 }

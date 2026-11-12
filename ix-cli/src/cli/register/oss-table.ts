@@ -67,6 +67,7 @@ export const OSS_COMMAND_TABLE: Readonly<Record<string, () => Promise<RegisterCo
   mcp: async () => (await import("../commands/mcp.js")).registerMcpCommand,
   context: async () => (await import("../commands/context.js")).registerContextCommand,
   around: async () => (await import("../commands/around.js")).registerAroundCommand,
+  "tests-for": async () => (await import("../commands/tests-for.js")).registerTestsForCommand,
   hook: async () => (await import("../commands/hook.js")).registerHookCommand,
   verify: async () => (await import("../commands/verify.js")).registerVerifyCommand,
 };
