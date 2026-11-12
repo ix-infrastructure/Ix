@@ -180,6 +180,10 @@ command disagree.
 ### Output quality
 - Clean, minimal output — no unnecessary verbosity
 - Consistent formatting across all commands
+- A new command's output is a `Renderer<T>` (`text`, `json`, `llm`) in
+  `ix-cli/src/cli/render/<command>.ts`, printed with `emit(renderer, value, format)`
+  from `ix-cli/src/cli/output/emit.ts`. Do not compare `format` by hand, and do
+  not add renderers to `format.ts`: it only re-exports names that moved out of it
 
 ### Error handling
 - No raw stack traces in normal mode
