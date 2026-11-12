@@ -1,0 +1,5 @@
+import { describe, it, expect } from 'vitest';
+import { double } from './calc.js';
+describe('arithmetic', () => {
+  it('doubles', () => { expect(double(2)).toBe(4); });
+});

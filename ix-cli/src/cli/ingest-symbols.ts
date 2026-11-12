@@ -307,6 +307,7 @@ function onDiskGen(target: string): string | undefined {
 // and refers to, so the run can find those files without reading the rest.
 
 type SummaryFields = {
+  isTest?: true;
   language?: string;
   qkeys?: Array<[string, string]>;
   exportPublicNames?: Array<[string, string]>;
@@ -379,6 +380,10 @@ export function changedNames(before: StoredSummary | undefined, after: StoredSum
   const was = bindings(before);
   const now = bindings(after);
   const out = new Set<string>();
+  if (Boolean(b?.isTest) !== Boolean(a?.isTest)) {
+    // Existing callers must gain/lose TESTS edges when a destination changes role.
+    for (const name of [...definedNames(before), ...definedNames(after)]) out.add(name);
+  }
   for (const [key, names] of was) if (!now.has(key)) for (const n of names) out.add(n);
   for (const [key, names] of now) if (!was.has(key)) for (const n of names) out.add(n);
   return out;
@@ -389,9 +394,11 @@ export function changedNames(before: StoredSummary | undefined, after: StoredSum
  * (`export { foo } from './x'`, a Python `__init__`) passes names through its
  * imports, which its signature does not cover: when they change, files that
  * import it may resolve differently, so it counts as a path that changed.
+ * A test classification change also changes importers' TESTS evidence.
  */
 export function importsChanged(before: StoredSummary | undefined, after: StoredSummary | undefined): boolean {
   if (!before || !after) return false;
+  if (Boolean(before.isTest) !== Boolean(after.isTest)) return true;
   const key = (s: StoredSummary) =>
     JSON.stringify(((s as SummaryFields).imports ?? [])
       // An aliased Python import resolves by full path only, so adding or

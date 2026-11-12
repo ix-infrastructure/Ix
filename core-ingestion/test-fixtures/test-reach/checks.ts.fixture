@@ -1,0 +1,3 @@
+import { double } from './calc.js';
+export function runCheck() { return double(2); }
+it('checks arithmetic', () => { runCheck(); });
