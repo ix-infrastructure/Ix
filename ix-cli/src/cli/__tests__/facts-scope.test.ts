@@ -27,6 +27,10 @@ function fakeClient(calls: Call[]): IxClient {
     id, name, kind, attrs: {}, provenance: { sourceUri: `src/${name}.ts` },
   });
   return {
+    async nodes(ids: string[]) {
+      calls.push(...ids.map((id) => ({ method: "nodes", id })));
+      return { rev: 1, nodes: ids.map((id) => node(id, "callee", "function")), missing: [] };
+    },
     async entity(id: string) {
       calls.push({ method: "entity", id });
       return {
@@ -96,7 +100,7 @@ describe("collectFacts scope", () => {
 
     expect(calls.some((c) => c.id === DEPENDENT)).toBe(true);
     expect(calls.some((c) => c.predicates?.includes("IN_REGION"))).toBe(true);
-    expect(calls.filter((c) => c.method === "entity").map((c) => c.id)).toContain(CALLEE);
+    expect(calls.filter((c) => c.method === "nodes").map((c) => c.id)).toContain(CALLEE);
     expect(facts.downstreamDependents).toBeGreaterThan(0);
     expect(facts.callList?.map((c) => c.name)).toEqual(["callee"]);
   });

@@ -21,15 +21,15 @@
  * handed cannot change what another caller sees. A miss costs nothing extra --
  * the first caller's parse is the one it always did.
  *
- * A failed read is not kept: every caller waiting on it sees the failure, and
- * the next identical request goes back to the backend, as it did before.
+ * A failed read is not kept unless the caller identifies it as a stable miss
+ * (an entity 404). Transient failures still go back to the backend next time.
  */
 export class RequestMemo<V> {
   private readonly entries = new Map<string, Promise<V>>();
   /** Requests answered from the memo rather than the backend. */
   hits = 0;
 
-  run(key: string, load: () => Promise<V>): Promise<V> {
+  run(key: string, load: () => Promise<V>, keepFailure?: (err: unknown) => boolean): Promise<V> {
     const existing = this.entries.get(key);
     if (existing) {
       this.hits++;
@@ -37,8 +37,8 @@ export class RequestMemo<V> {
     }
     const pending = load();
     this.entries.set(key, pending);
-    pending.catch(() => {
-      if (this.entries.get(key) === pending) this.entries.delete(key);
+    pending.catch((err: unknown) => {
+      if (!keepFailure?.(err) && this.entries.get(key) === pending) this.entries.delete(key);
     });
     return pending;
   }
