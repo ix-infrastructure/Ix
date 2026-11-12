@@ -96,8 +96,23 @@ describe("acceptsField", () => {
     expect(acceptsField("locate", "targets[].confidence")).toBe(false);
   });
 
+  it("publishes ix status: its own fields, not the llm record's", () => {
+    expect(acceptsField("status", "graphCompleted")).toBe(true);
+    expect(acceptsField("status", "staleFiles")).toBe(true);
+    expect(acceptsField("status", "sampleChangedFiles[]")).toBe(true);
+    expect(acceptsField("status", "graphHealth.status")).toBe(true);
+    expect(acceptsField("status", "graphHealth.structuralEdges")).toBe(true);
+    expect(acceptsField("status", "verify.outdated")).toBe(true);
+    expect(acceptsField("status", "next")).toBe(true);
+    // `stale`, `graph_health` and `rev` are `--format llm` keys.
+    expect(acceptsField("status", "stale")).toBe(false);
+    expect(acceptsField("status", "graph_health")).toBe(false);
+    expect(acceptsField("status", "rev")).toBe(false);
+    expect(acceptsField("status", "verify.divergedFiles")).toBe(false);
+  });
+
   it("knows nothing about a command with no published list", () => {
-    expect(acceptsField("status", "graphCompleted")).toBeUndefined();
+    expect(acceptsField("impact", "riskLevel")).toBeUndefined();
     expect(acceptsField("toString", "x")).toBeUndefined();
   });
 });

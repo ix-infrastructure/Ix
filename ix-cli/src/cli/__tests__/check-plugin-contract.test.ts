@@ -155,6 +155,18 @@ describe("check-plugin-contract output fields", () => {
     expect(found).toEqual(['"ix locate --format json" has no field "confidence"', null, null, null]);
   });
 
+  it("fails a field ix status does not print, and passes the ones it does", async () => {
+    const fields = await load();
+    const hook = [
+      'st=$(ix status --format json 2>/dev/null)',
+      "jq -r '.stale' <<<\"$st\"",
+      "jq -r '.staleFiles, .graphHealth.status, .verify.outdated, .sampleChangedFiles[0]' <<<\"$st\"",
+    ].join("\n");
+    const found = contract.fieldReads(hook, "hooks/ix-status.sh", commands)
+      .map((r) => contract.checkField(r.command, r.path, fields));
+    expect(found).toEqual(['"ix status --format json" has no field "stale"', null, null, null, null]);
+  });
+
   it("fails a JSON path read from an MCP tool that returns records, not from one that returns JSON", async () => {
     const { mcp } = await load();
     const skill = [

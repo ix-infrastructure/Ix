@@ -23,6 +23,7 @@ import {
 import { detectSystem } from "../system.js";
 import { loadVerifyRecord, verifyRecordOutdated, type VerifyRecord } from "../verify.js";
 import { formatOption } from "../options.js";
+import type { StatusGraphHealthJson, StatusJson } from "../contracts/status.js";
 
 interface StatusStaleInfo {
   graphCompleted: boolean;
@@ -107,7 +108,7 @@ export function renderStatusLlm(
  * the check could not run (no workspace here, an old backend, a slow stats
  * probe), which is not the same as a graph that was checked and is fine.
  */
-export function graphHealthWord(graph: GraphHealth): string {
+export function graphHealthWord(graph: GraphHealth): StatusGraphHealthJson["status"] {
   return graph.status === "unknown" ? "unverified" : graph.status;
 }
 
@@ -166,7 +167,7 @@ export function registerStatusCommand(program: Command): void {
         if (opts.format === "llm") {
           printLlmLines(renderStatusLlm(health.status, getEndpoint(), staleInfo ?? null, graph, verified));
         } else if (opts.format === "json") {
-          const result: any = {
+          const result: StatusJson = {
             backend: health.status,
             graphCompleted: staleInfo?.graphCompleted ?? null,
             mapCompleted: staleInfo?.mapCompleted ?? null,
