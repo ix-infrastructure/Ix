@@ -13,6 +13,7 @@ import { registerInitCommand } from "../commands/init.js";
 import { registerTextCommand } from "../commands/text.js";
 import { registerLocateCommand } from "../commands/locate.js";
 import { registerExplainCommand } from "../commands/explain.js";
+import { registerFieldAccessCommands } from "../commands/field-access.js";
 import { registerCallersCommand } from "../commands/callers.js";
 import { registerOverridesCommand } from "../commands/overrides.js";
 import { registerImportsCommand } from "../commands/imports.js";
@@ -70,6 +71,7 @@ export function registerOssCommands(program: Command): void {
   registerLocateCommand(program);
   registerExplainCommand(program);
   registerCallersCommand(program);
+  registerFieldAccessCommands(program);
   registerOverridesCommand(program);
   registerImportsCommand(program);
   registerContainsCommand(program);
