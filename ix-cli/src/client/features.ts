@@ -97,7 +97,7 @@ export const BACKEND_FEATURES: Readonly<Record<BackendFeature, BackendFeatureSpe
     since: BATCH_NODE_READS_SINCE,
     // 405 and 501 too: a backend may route the path but not the method.
     missingStatuses: [404, 405, 501],
-    fallback: "the same-hash orphan sweep turns itself off for the run",
+    fallback: "the same-hash orphan sweep turns itself off for the run; `ix explain` reads its callees one entity at a time (src/cli/explain/facts.ts)",
     fallbackAt: "src/cli/commands/ingest.ts",
   },
   degree: {
