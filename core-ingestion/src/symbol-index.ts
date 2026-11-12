@@ -22,6 +22,10 @@ export interface FileSummary {
   entityCount: number;
   /** `[name, qualifiedKey]` per entity other than the file and module nodes, in source order. */
   qkeys: Array<[string, string]>;
+  /** Exact field keys; absent in older summaries (field resolution fails closed). */
+  fieldKeys?: string[];
+  /** Field-only base types; kept separate to preserve call resolution behavior. */
+  fieldHeritage?: Array<[string, string]>;
   /** `[public, local]` export names (JS/TS), when the file has any. */
   exportPublicNames?: Array<[string, string]>;
   /** The file's IMPORTS relationships, as the import resolver reads them. */
@@ -44,7 +48,7 @@ export interface FileSummary {
 }
 
 /** The part of a summary other files depend on, hashed. */
-export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNames' | 'phpTypes' | 'receiverFactories' | 'receiverHeritage' | 'receiverPackage'> & Partial<Pick<FileSummary, 'imports' | 'importAliases' | 'tsGlobalTypes'>>): string {
+export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNames' | 'phpTypes' | 'receiverFactories' | 'receiverHeritage' | 'receiverPackage'> & Partial<Pick<FileSummary, 'imports' | 'importAliases' | 'tsGlobalTypes' | 'fieldKeys' | 'fieldHeritage'>>): string {
   const parts: unknown[] = [
     [...s.qkeys].map(([n, q]) => `${n}\0${q}`).sort(),
     [...(s.exportPublicNames ?? [])].map(([p, l]) => `${p}\0${l}`).sort(),
@@ -66,6 +70,8 @@ export function summarySignature(s: Pick<FileSummary, 'qkeys' | 'exportPublicNam
   if (namespaceExports.length > 0) parts.push(['export:', ...namespaceExports.map(([k, m]) => `${k}\0${m}`).sort()]);
   // TypeScript globals an unimported heritage base may name.
   if (s.tsGlobalTypes?.length) parts.push(['global:', ...[...s.tsGlobalTypes].sort()]);
+  if (s.fieldKeys?.length) parts.push(['fields:', [...s.fieldKeys].sort()]);
+  if (s.fieldHeritage?.length) parts.push(['field-bases:', [...s.fieldHeritage].map(([a, b]) => `${a}\0${b}`).sort()]);
   const canonical = JSON.stringify(parts);
   return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 32);
 }

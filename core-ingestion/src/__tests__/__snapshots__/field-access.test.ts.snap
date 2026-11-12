@@ -1,0 +1,585 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`field def-use > Order.java emits exact field endpoints and all sites (golden) 1`] = `
+[
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 5,
+      "sites": [
+        {
+          "line": 5,
+          "value": ""NEW"",
+          "value_kind": "literal",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "WRITES",
+    "src": "<init>",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 8,
+      "sites": [
+        {
+          "line": 8,
+          "value": ""SHIPPED"",
+          "value_kind": "literal",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "WRITES",
+    "src": "ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 9,
+      "sites": [
+        {
+          "line": 9,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "count",
+    "predicate": "WRITES",
+    "src": "ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 9,
+      "sites": [
+        {
+          "line": 9,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "count",
+    "predicate": "READS",
+    "src": "ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 10,
+      "sites": [
+        {
+          "line": 10,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "READS",
+    "src": "ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 13,
+      "sites": [
+        {
+          "line": 13,
+          "value": "Status.DONE",
+          "value_kind": "member",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "WRITES",
+    "src": "update",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 14,
+      "sites": [
+        {
+          "line": 14,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "READS",
+    "src": "update",
+  },
+]
+`;
+
+exports[`field def-use > order.go emits exact field endpoints and all sites (golden) 1`] = `
+[
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 8,
+      "sites": [
+        {
+          "line": 8,
+          "value": ""SHIPPED"",
+          "value_kind": "literal",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "Status",
+    "predicate": "WRITES",
+    "src": "Ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 9,
+      "sites": [
+        {
+          "line": 9,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "Count",
+    "predicate": "WRITES",
+    "src": "Ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 9,
+      "sites": [
+        {
+          "line": 9,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "Count",
+    "predicate": "READS",
+    "src": "Ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 10,
+      "sites": [
+        {
+          "line": 10,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "Status",
+    "predicate": "READS",
+    "src": "Ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 13,
+      "sites": [
+        {
+          "line": 13,
+          "value": ""DONE"",
+          "value_kind": "literal",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "Status",
+    "predicate": "WRITES",
+    "src": "update",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 14,
+      "sites": [
+        {
+          "line": 14,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "Status",
+    "predicate": "READS",
+    "src": "update",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 17,
+      "sites": [
+        {
+          "line": 17,
+          "value": ""NEW"",
+          "value_kind": "literal",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "Status",
+    "predicate": "WRITES",
+    "src": "create",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 17,
+      "sites": [
+        {
+          "line": 17,
+          "value": "0",
+          "value_kind": "literal",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "Count",
+    "predicate": "WRITES",
+    "src": "create",
+  },
+]
+`;
+
+exports[`field def-use > order.js emits exact field endpoints and all sites (golden) 1`] = `
+[
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 3,
+      "sites": [
+        {
+          "line": 3,
+          "value": ""NEW"",
+          "value_kind": "literal",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "WRITES",
+    "src": "constructor",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 6,
+      "sites": [
+        {
+          "line": 6,
+          "value": ""SHIPPED"",
+          "value_kind": "literal",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "WRITES",
+    "src": "ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 7,
+      "sites": [
+        {
+          "line": 7,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "READS",
+    "src": "ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 12,
+      "sites": [
+        {
+          "line": 12,
+          "value": ""DONE"",
+          "value_kind": "literal",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "WRITES",
+    "src": "update",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 13,
+      "sites": [
+        {
+          "line": 13,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "READS",
+    "src": "update",
+  },
+]
+`;
+
+exports[`field def-use > order.py emits exact field endpoints and all sites (golden) 1`] = `
+[
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 3,
+      "sites": [
+        {
+          "line": 3,
+          "value": ""NEW"",
+          "value_kind": "literal",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "WRITES",
+    "src": "__init__",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 4,
+      "sites": [
+        {
+          "line": 4,
+          "value": "0",
+          "value_kind": "literal",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "count",
+    "predicate": "WRITES",
+    "src": "__init__",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 6,
+      "sites": [
+        {
+          "line": 6,
+          "value": ""SHIPPED"",
+          "value_kind": "literal",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "WRITES",
+    "src": "ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 7,
+      "sites": [
+        {
+          "line": 7,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "count",
+    "predicate": "WRITES",
+    "src": "ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 7,
+      "sites": [
+        {
+          "line": 7,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "count",
+    "predicate": "READS",
+    "src": "ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 8,
+      "sites": [
+        {
+          "line": 8,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "READS",
+    "src": "ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 11,
+      "sites": [
+        {
+          "line": 11,
+          "value": "Status.DONE",
+          "value_kind": "member",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "WRITES",
+    "src": "update",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 12,
+      "sites": [
+        {
+          "line": 12,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "READS",
+    "src": "update",
+  },
+]
+`;
+
+exports[`field def-use > order.ts emits exact field endpoints and all sites (golden) 1`] = `
+[
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 5,
+      "sites": [
+        {
+          "line": 5,
+          "value": ""NEW"",
+          "value_kind": "literal",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "WRITES",
+    "src": "constructor",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 8,
+      "sites": [
+        {
+          "line": 8,
+          "value": ""SHIPPED"",
+          "value_kind": "literal",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "WRITES",
+    "src": "ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 9,
+      "sites": [
+        {
+          "line": 9,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "count",
+    "predicate": "WRITES",
+    "src": "ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 9,
+      "sites": [
+        {
+          "line": 9,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "count",
+    "predicate": "READS",
+    "src": "ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 10,
+      "sites": [
+        {
+          "line": 10,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "READS",
+    "src": "ship",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 14,
+      "sites": [
+        {
+          "line": 14,
+          "value": "Status.DONE",
+          "value_kind": "member",
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "WRITES",
+    "src": "update",
+  },
+  {
+    "attrs": {
+      "confidence": 0.95,
+      "line_start": 15,
+      "sites": [
+        {
+          "line": 15,
+        },
+      ],
+      "tier": "type",
+    },
+    "dst": "status",
+    "predicate": "READS",
+    "src": "update",
+  },
+]
+`;

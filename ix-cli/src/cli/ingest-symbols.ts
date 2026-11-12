@@ -309,6 +309,8 @@ function onDiskGen(target: string): string | undefined {
 type SummaryFields = {
   language?: string;
   qkeys?: Array<[string, string]>;
+  fieldKeys?: string[];
+  fieldHeritage?: Array<[string, string]>;
   exportPublicNames?: Array<[string, string]>;
   phpTypes?: Array<[string, string]>;
   receiverFactories?: Array<[string, string]>;
@@ -327,6 +329,7 @@ export function definedNames(summary: StoredSummary | undefined): Set<string> {
   if (!summary) return names;
   const s = summary as SummaryFields;
   for (const [name, qkey] of s.qkeys ?? []) { names.add(name); names.add(qkey); }
+  for (const key of s.fieldKeys ?? []) { names.add(key); names.add(key.split(".")[0]); }
   for (const [publicName] of s.exportPublicNames ?? []) names.add(publicName);
   for (const [fqcn, typeName] of s.phpTypes ?? []) { names.add(fqcn); names.add(typeName); }
   return names;
@@ -343,6 +346,8 @@ function bindings(summary: StoredSummary | undefined): Map<string, string[]> {
   if (!summary) return out;
   const s = summary as SummaryFields;
   for (const [name, qkey] of s.qkeys ?? []) out.set(`q\0${s.receiverPackage ?? ''}\0${name}\0${qkey}`, [name, qkey]);
+  for (const key of s.fieldKeys ?? []) out.set(`field\0${key}`, [key, key.split(".")[0]]);
+  for (const [name, base] of s.fieldHeritage ?? []) out.set(`field-base\0${name}\0${base}`, [name]);
   for (const [publicName, local] of s.exportPublicNames ?? []) out.set(`e\0${publicName}\0${local}`, [publicName]);
   for (const [fqcn, typeName] of s.phpTypes ?? []) out.set(`p\0${fqcn}\0${typeName}`, [fqcn, typeName]);
   // A superclass and a factory's return type resolve through this file's

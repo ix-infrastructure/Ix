@@ -26,6 +26,8 @@ const OSS_HELP = [
   chalk.bold(`Explore:`),
   `  callers <symbol>      Who calls it`,
   `  callees <symbol>      What it calls`,
+  `  writers <field>       Who writes Type.field`,
+  `  readers <field>       Who reads Type.field`,
   `  overrides <symbol>    Its overrides and bases`,
   `  imports <target>      What it imports`,
   `  imported-by <target>  What imports it`,

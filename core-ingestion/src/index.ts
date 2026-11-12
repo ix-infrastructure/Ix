@@ -153,6 +153,7 @@ import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
 import { classifyFileRole } from './role-classifier.js';
 import type { RoleClassification } from './role-classifier.js';
+import { collectFieldAccesses, type FieldSite } from './field-access.js';
 import { callReceiver, collectReceiverFacts } from './receiver-types.js';
 import { summarySignature, type FileSummary } from './symbol-index.js';
 export type { FileSummary } from './symbol-index.js';
@@ -197,7 +198,9 @@ export interface ParsedChunk {
 export interface ParsedRelationship {
   srcName: string;
   dstName: string;
-  predicate: string;  // "CONTAINS" | "CALLS" | "IMPORTS" | "EXTENDS"
+  /** Per-access sites for exact READS/WRITES relationships, preserved in edge attrs. */
+  fieldSites?: FieldSite[];
+  predicate: string;  // CONTAINS, CALLS, IMPORTS, EXTENDS, REFERENCES, READS, WRITES
   // For path-based IMPORTS only: the unwrapped raw import specifier exactly as
   // written (e.g. "./core", "../util/x", "@nestjs/core", "alpha"), BEFORE it is
   // flattened to a bare stem. The multi-repo dependency gate needs this to tell a
@@ -3197,6 +3200,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
 
     const receiverFacts = [SupportedLanguages.Scala, SupportedLanguages.TypeScript, SupportedLanguages.Go, SupportedLanguages.Java].includes(language)
       ? collectReceiverFacts(tree.rootNode, language, checkBudget) : undefined;
+    collectFieldAccesses(tree.rootNode, language, entities, relationships, language === SupportedLanguages.JavaScript ? collectReceiverFacts(tree.rootNode, 'typescript', checkBudget) : receiverFacts, checkBudget);
 
     // --- Second pass: calls and imports ---
     for (const match of pass2Matches) {
@@ -3850,7 +3854,7 @@ function ambiguousPhpTypeNames(entities: ParsedEntity[]): Set<string> {
 export function summarizeParseResult(r: FileParseResult): FileSummary {
   const qkeys: Array<[string, string]> = [];
   for (const e of r.entities) {
-    if (e.kind === 'file' || e.kind === 'module') continue;
+    if (e.kind === 'file' || e.kind === 'module' || e.kind === 'field') continue;
     qkeys.push([e.name, qualifiedKey(e)]);
   }
   const exportPublicNames = r.exportPublicNames?.map((n): [string, string] => [n.public, n.local]);
@@ -3873,7 +3877,7 @@ export function summarizeParseResult(r: FileParseResult): FileSummary {
         ...(rel.importVia ? { importVia: rel.importVia } : {}),
         ...(rel.importAliased ? { importAliased: true } : {}),
       });
-    } else if (rel.predicate === 'CALLS' || rel.predicate === 'REFERENCES' || rel.predicate === 'EXTENDS') {
+    } else if (rel.predicate === 'CALLS' || rel.predicate === 'REFERENCES' || rel.predicate === 'EXTENDS' || rel.predicate === 'READS' || rel.predicate === 'WRITES') {
       refs.add(rel.dstName);
       if (rel.receiverType) refs.add(rel.receiverType);
       if (rel.receiverFactory) refs.add(rel.receiverFactory);
@@ -3884,6 +3888,9 @@ export function summarizeParseResult(r: FileParseResult): FileSummary {
     language: r.language,
     entityCount: r.entities.length,
     qkeys,
+    fieldKeys: r.entities.filter(e => e.kind === 'field').map(qualifiedKey),
+    ...([SupportedLanguages.TypeScript, SupportedLanguages.JavaScript, SupportedLanguages.Python, SupportedLanguages.Go, SupportedLanguages.Java].includes(r.language)
+      ? { fieldHeritage: r.relationships.filter(rel => rel.predicate === 'EXTENDS').map((rel): [string, string] => [rel.srcName, rel.dstName]) } : {}),
     ...(exportPublicNames ? { exportPublicNames } : {}),
     imports,
     ...(phpTypes ? { phpTypes } : {}),
@@ -5483,7 +5490,7 @@ export function resolveEdges(
     goReceiverFiles.set(key, files);
   }
 
-  function receiverMembers(context: string, type: string, member: string, seen = new Set<string>()): Array<{ fp: string; key: string }> {
+  function receiverMembers(context: string, type: string, member: string, seen = new Set<string>(), fieldsOnly = false): Array<{ fp: string; key: string }> {
     const providers = receiverProviders(context, type);
     if (providers.length !== 1) return [];
     const { fp, type: name } = providers[0];
@@ -5491,29 +5498,29 @@ export function resolveEdges(
     if (seen.has(marker)) return [];
     const nextSeen = new Set(seen).add(marker);
     const key = `${name}.${member}`;
-    if (summaries.get(fp)?.language === SupportedLanguages.Go) {
+    if (summaries.get(fp)?.language === SupportedLanguages.Go && !fieldsOnly) {
       const targets = (qualifiedToFiles.get(key) ?? [])
         .filter(candidate => summaries.get(candidate)?.language === SupportedLanguages.Go && goPackageKey(candidate) === goPackageKey(fp))
         .flatMap(candidate => (fileQKeys.get(candidate)?.get(member) ?? [])
           .filter(q => q === key).map(() => ({ fp: candidate, key })));
       return targets.length === 1 ? targets : [];
     }
-    const exact = (fileQKeys.get(fp)?.get(member) ?? []).filter(q => q === key);
+    const exact = (fieldsOnly ? summaries.get(fp)?.fieldKeys ?? [] : fileQKeys.get(fp)?.get(member) ?? []).filter(q => q === key);
     const java = summaries.get(fp)?.language === SupportedLanguages.Java;
     // Multiple definitions include overloads. Do not guess a signature. Java
     // overloads in one class are one node (one key), so they are one target.
     if (exact.length) return exact.length === 1 || java ? [{ fp, key }] : [];
-    const parents = (summaries.get(fp)?.receiverHeritage ?? []).filter(([child]) => child === name);
+    const parents = (summaries.get(fp)?.receiverHeritage ?? (fieldsOnly ? summaries.get(fp)?.fieldHeritage : undefined) ?? []).filter(([child]) => child === name);
     if (java) {
       // The nearest declaration: the superclass chain (listed first), then
       // each interface in declaration order.
       for (const [, parent] of parents) {
-        const found = receiverMembers(fp, parent, member, nextSeen);
+        const found = receiverMembers(fp, parent, member, nextSeen, fieldsOnly);
         if (found.length) return found;
       }
       return [];
     }
-    const inherited = parents.flatMap(([, parent]) => receiverMembers(fp, parent, member, nextSeen));
+    const inherited = parents.flatMap(([, parent]) => receiverMembers(fp, parent, member, nextSeen, fieldsOnly));
     const unique = new Map(inherited.map(target => [`${target.fp}\0${target.key}`, target]));
     return [...unique.values()];
   }
@@ -5538,13 +5545,13 @@ export function resolveEdges(
     return at;
   }
 
-  /** The one member a typed CALLS relationship names, if it names exactly one. */
-  function typedCallTarget(srcFilePath: string, rel: ParsedRelationship): { fp: string; key: string } | undefined {
+  /** The one exact member of a typed relationship; field lookups never use method keys. */
+  function typedCallTarget(srcFilePath: string, rel: ParsedRelationship, fieldsOnly = false): { fp: string; key: string } | undefined {
     const receiver = rel.receiverType
       ? rel.receiverChain ? javaChainReceiver(srcFilePath, rel.receiverType, rel.receiverChain) : { context: srcFilePath, type: rel.receiverType }
       : factoryReceiver(srcFilePath, rel.receiverFactory!);
     const member = rel.dstName.slice(rel.dstName.lastIndexOf('.') + 1);
-    const targets = receiver ? receiverMembers(receiver.context, receiver.type, member) : [];
+    const targets = receiver ? receiverMembers(receiver.context, receiver.type, member, new Set(), fieldsOnly) : [];
     return targets.length === 1 ? targets[0] : undefined;
   }
 
@@ -5784,6 +5791,12 @@ export function resolveEdges(
     };
 
     for (const rel of result.relationships) {
+      if (rel.predicate === 'READS' || rel.predicate === 'WRITES') {
+        const target = (rel.receiverType || rel.receiverFactory) ? typedCallTarget(srcFilePath, rel, true) : undefined;
+        if (target) resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: target.fp, dstName: rel.dstName,
+          dstQualifiedKey: target.key, predicate: rel.predicate, confidence: 0.95, tier: 'type' });
+        continue; // Never use any name-only resolution tier for fields.
+      }
       if (rel.predicate !== 'CALLS' && rel.predicate !== 'EXTENDS' && rel.predicate !== 'REFERENCES' && rel.predicate !== 'IMPORTS') continue;
 
       // Resolve Scala/Java dotted class imports (e.g. "ix.memory.model.ClaimId")
@@ -6320,7 +6333,8 @@ export function resolveEdges(
 
 /** @deprecated Use resolveEdges instead. */
 export function resolveCallEdges(results: FileParseResult[]): ResolvedCallEdge[] {
-  return resolveEdges(results).map(e => ({
+  // This legacy shape carries no predicate, so new field edges cannot be represented.
+  return resolveEdges(results).filter(e => e.predicate !== 'READS' && e.predicate !== 'WRITES').map(e => ({
     callerFilePath: e.srcFilePath,
     callerName: e.srcName,
     calleeFilePath: e.dstFilePath,

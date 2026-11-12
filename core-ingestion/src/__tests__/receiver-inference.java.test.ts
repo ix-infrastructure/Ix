@@ -35,7 +35,7 @@ function callEdges(results: FileParseResult[], edges = resolveEdges(results)): A
 }
 
 const typedEdges = (edges: ReturnType<typeof resolveEdges>, srcName?: string) =>
-  edges.filter(e => e.tier === 'type' && (srcName === undefined || e.srcName === srcName));
+  edges.filter(e => e.predicate === 'CALLS' && e.tier === 'type' && (srcName === undefined || e.srcName === srcName));
 
 // Provider and caller in different packages; `Other` declares a same-named member.
 const provider = (extra = '') => [
@@ -149,7 +149,7 @@ describe('Java typed receivers (fixture)', () => {
     expect(typedEdges(batch)).toEqual([]);
     // The name-based edges are the ones resolution writes without receiver types.
     const untyped = { ...filter, relationships: filter.relationships.filter(r => !r.receiverOnly), receiverTypedCalls: undefined };
-    expect(batch).toEqual(resolveEdges([untyped], undefined, index));
+    expect(batch.filter(e => e.predicate !== 'READS' && e.predicate !== 'WRITES')).toEqual(resolveEdges([untyped], undefined, index));
   });
 });
 
