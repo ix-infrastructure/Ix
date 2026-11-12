@@ -115,7 +115,7 @@ describe("ingest symbol table", () => {
     it("keeps the table readable without the journal: version 1, every field it had", () => {
       seed(3);
       const data = JSON.parse(readFileSync(tablePath(), "utf8")) as Record<string, unknown>;
-      expect(data).toMatchObject({ version: 3, root, extractor: "x" });
+      expect(data).toMatchObject({ formatVersion: 3, version: 3, root, extractor: "x" });
       expect(Object.keys(data.files as object)).toEqual(["f0.py", "f1.py", "f2.py"]);
     });
 

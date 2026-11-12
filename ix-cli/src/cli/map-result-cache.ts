@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { IxClient } from "../client/api.js";
 import { mapResultCachePath } from "./config.js";
 import { isRev } from "./ingest-baseline.js";
+import { readState, writeStateAtomic } from "./workspace-state.js";
 
 /**
  * The last `/v1/map` response for a project root, reused by an `ix map` that
@@ -62,6 +63,9 @@ export interface CachedMapResponse {
   outcome?: string;
   regions: any[];
 }
+
+/** The cache file's format version (see `workspace-state.ts`); none reads as 0, same rules. */
+const MAP_CACHE_VERSION = 1;
 
 interface SerializedMapCache {
   root: string;
@@ -165,13 +169,9 @@ function isCachedMapResponse(value: unknown): value is CachedMapResponse {
 
 /** The response stored for this slot, or undefined when there is none that matches. */
 export function loadCachedMap(projectRoot: string, slot: MapCacheSlot): CachedMapResponse | undefined {
-  try {
-    const data = JSON.parse(fs.readFileSync(mapResultCachePath(projectRoot), "utf-8")) as Partial<SerializedMapCache>;
-    if (data.root !== projectRoot || data.key !== slot.key || data.revision !== slot.revision) return undefined;
-    return isCachedMapResponse(data.result) ? data.result : undefined;
-  } catch {
-    return undefined;
-  }
+  const data = readMapCache(projectRoot);
+  if (data === null || data.key !== slot.key || data.revision !== slot.revision) return undefined;
+  return isCachedMapResponse(data.result) ? data.result : undefined;
 }
 
 /** Store a response for this slot. Best-effort: a cache that cannot be written is not an error. */
@@ -189,16 +189,23 @@ export function saveCachedMap(projectRoot: string, slot: MapCacheSlot, result: C
       regions: result.regions,
     },
   };
-  const target = mapResultCachePath(projectRoot);
-  const tmp = `${target}.${process.pid}.tmp`;
   try {
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    // Via a temp file and rename, so a reader never sees half a file.
-    fs.writeFileSync(tmp, JSON.stringify(data));
-    fs.renameSync(tmp, target);
+    // Atomically, so a reader never sees half a file.
+    writeStateAtomic(mapResultCachePath(projectRoot), MAP_CACHE_VERSION, data);
   } catch {
-    try { fs.rmSync(tmp, { force: true }); } catch { /* non-critical */ }
+    // Best-effort.
   }
+}
+
+/** The stored cache for `projectRoot`, or null when there is none for this root and format. */
+function readMapCache(projectRoot: string): Partial<SerializedMapCache> | null {
+  return readState(mapResultCachePath(projectRoot), {
+    version: MAP_CACHE_VERSION,
+    validate: (raw) => {
+      const data = raw as Partial<SerializedMapCache>;
+      return data.root === projectRoot ? data : null;
+    },
+  });
 }
 
 /**
@@ -209,11 +216,7 @@ export function saveCachedMap(projectRoot: string, slot: MapCacheSlot, result: C
  * everything else reads `loadCachedMap`.
  */
 export function loadLastMap(projectRoot: string, key: string): CachedMapResponse | undefined {
-  try {
-    const data = JSON.parse(fs.readFileSync(mapResultCachePath(projectRoot), "utf-8")) as Partial<SerializedMapCache>;
-    if (data.root !== projectRoot || data.key !== key) return undefined;
-    return isCachedMapResponse(data.result) ? data.result : undefined;
-  } catch {
-    return undefined;
-  }
+  const data = readMapCache(projectRoot);
+  if (data === null || data.key !== key) return undefined;
+  return isCachedMapResponse(data.result) ? data.result : undefined;
 }

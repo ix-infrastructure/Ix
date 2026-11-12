@@ -53,6 +53,7 @@ import { fileIdentity } from "./system.js";
 import { normalizePathSeparators } from "./path-match.js";
 import { readBoundedBytes } from "./bounded-read.js";
 import { GRAPH_MAP_FIX, GRAPH_REBUILD_FIX } from "./graph-health.js";
+import { readState, writeStateAtomic } from "./workspace-state.js";
 import { isBackendUnreachable } from "./errors.js";
 import { loadIngestionModules } from "./commands/ingestion-loader.js";
 
@@ -406,10 +407,13 @@ export function recordFromReport(report: VerifyReport): VerifyRecord {
   };
 }
 
+/** The record file's format version (see `workspace-state.ts`); none reads as 0, same rules. */
+const VERIFY_RECORD_VERSION = 1;
+
 /** The last verify for this root, or null. Never throws. */
 export function loadVerifyRecord(projectRoot: string): VerifyRecord | null {
-  try {
-    const data = JSON.parse(fs.readFileSync(verifyRecordPath(projectRoot), "utf-8")) as Partial<VerifyRecord>;
+  return readState(verifyRecordPath(projectRoot), { version: VERIFY_RECORD_VERSION, validate: (raw) => {
+    const data = raw as Partial<VerifyRecord>;
     if (typeof data.root !== "string" || typeof data.at !== "string") return null;
     // Canonical on both sides: `--root .`, a trailing slash or a symlinked
     // path names the same root as the canonical one `ix verify` saved.
@@ -428,9 +432,7 @@ export function loadVerifyRecord(projectRoot: string): VerifyRecord | null {
       divergedFiles: Array.isArray(data.divergedFiles) ? data.divergedFiles.filter((p): p is string => typeof p === "string") : [],
       fix: typeof data.fix === "string" ? data.fix : null,
     };
-  } catch {
-    return null;
-  }
+  } });
 }
 
 /**
@@ -445,16 +447,7 @@ export function verifyRecordOutdated(record: Pick<VerifyRecord, "lastIngestAt">,
 /** Best-effort, like the other per-root state files: a failed write costs a status line. */
 export function saveVerifyRecord(record: VerifyRecord): boolean {
   try {
-    const target = verifyRecordPath(record.root);
-    fs.mkdirSync(nodePath.dirname(target), { recursive: true });
-    const tmp = `${target}.${process.pid}.tmp`;
-    try {
-      fs.writeFileSync(tmp, JSON.stringify(record));
-      fs.renameSync(tmp, target);
-    } catch (err) {
-      fs.rmSync(tmp, { force: true });
-      throw err;
-    }
+    writeStateAtomic(verifyRecordPath(record.root), VERIFY_RECORD_VERSION, record);
     return true;
   } catch {
     return false;
