@@ -202,6 +202,25 @@ const TOOL_OUTPUT_SCHEMA: Partial<Record<(typeof IX_MCP_TOOL_NAMES)[number], z.Z
   // passing `structured: true` receives.
 };
 
+/**
+ * Tools whose result can be a JSON document. Every other tool returns
+ * `--format llm` records (`kind key=value`, one per line), which have no
+ * nested fields to read.
+ *
+ * Data only: nothing here routes on it. scripts/check-plugin-contract.mjs reads
+ * it to fail plugin skill text that tells a model to read a JSON path from a
+ * records tool, and mcp-argv-contract.test.ts checks it against the format
+ * each tool actually runs. `ix_smells` always answers in JSON, `ix_context`
+ * does with `structured: true`, and the Pro tools run `--format json`.
+ */
+export const IX_MCP_JSON_RESULT_TOOLS: readonly (typeof IX_MCP_TOOL_NAMES)[number][] = [
+  "ix_context",
+  "ix_map",
+  "ix_smells",
+  "ix_ingest",
+  ...IX_MCP_PRO_TOOL_NAMES,
+];
+
 /** Which catalog to advertise. */
 export type ToolsetName = "core" | "all";
 

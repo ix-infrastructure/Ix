@@ -2,21 +2,66 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 /**
- * Plugin contract check: every `ix …` invocation in the editor plugins must
- * name a command this CLI registers, with long flags that command accepts.
+ * Plugin contract check: what the six editor plugins rely on in this CLI.
  *
  * The plugins call the CLI from code (argv arrays handed to runIx / safeRun /
- * run_ix_json) and tell agents to call it from prompt and skill text. Both
- * break silently when a flag is renamed or removed here: nothing in this repo
- * ever looked at them.
+ * run_ix_json), read fields out of its `--format json` output, and tell agents
+ * to call it and its MCP tools from prompt and skill text. All of it breaks
+ * silently when something is renamed or removed here.
  *
  *   node scripts/check-plugin-contract.mjs <plugins-dir>   # one checkout per plugin under it
  *   node scripts/check-plugin-contract.mjs --clone          # shallow-clone the six plugins' main first
  *
- * Needs a build (`npm run build`): the surface comes from scripts/dump-cli-surface.mjs,
- * and the Pro command names from dist/cli/register/pro-surface.js.
- * Exit 1 when an invocation names an unknown command or flag. Known false
- * positives go in scripts/plugin-contract-ignore.json.
+ * Needs a build (`npm run build`): everything it checks against is read from
+ * dist/, so this script keeps no list of its own. Exit 1 on any problem, 2
+ * when it cannot run.
+ *
+ * What it checks
+ *
+ * 1. Invocations (.ts .js .py and the text files): every `ix …` names a
+ *    registered command (scripts/dump-cli-surface.mjs) or a Pro one
+ *    (src/cli/register/pro-surface.ts), with long flags that command accepts.
+ *    In code, argv arrays passed to a function whose name says ix; in text,
+ *    `ix …` code spans and `ix …` lines of fenced blocks.
+ *
+ * 2. Output fields (.sh .bash .ts .js .py): a field a plugin reads from a
+ *    command's json must be in that command's list in
+ *    src/cli/contracts/fields.ts. Only reads the file ties to an invocation
+ *    are checked:
+ *      - shell: a jq filter on a pipe from `ix <cmd>` or on a variable
+ *        assigned from `$(ix <cmd> …)` (also `$(run_ix_json <cmd> …)`,
+ *        `"$IX_BIN" <cmd>`, `ix_<cmd>_json`). Only the stages of a filter
+ *        that start at the root are read; `map(.x)` and the like are not.
+ *      - code: `v.a.b`, `v?.a`, `v["a"][0]`, Python `v.get("a")`, and
+ *        `const { a } = …`, on a variable assigned from JSON.parse /
+ *        json.loads / a call named *json* or *parse* over an ix argv array,
+ *        or over a variable assigned from one.
+ *    A read through a function parameter, another file, or `--format llm`
+ *    is not seen, and a command with no list in fields.ts is not checked.
+ *
+ * 3. MCP names (the text files): a code span naming an `ix_…` tool must name
+ *    one `ix mcp` serves (src/mcp/server.ts, both tiers). A code span that is
+ *    a JSON path (`a.b`, `a[0]`, `.a`) after a tool in the same Markdown
+ *    section (up to a heading or an `ix …` command span) fails when that tool returns `--format llm` records, which have
+ *    no fields to read: everything not in IX_MCP_JSON_RESULT_TOOLS. A plain
+ *    name (`ok`, `risk_level`) is not checked: it reads the same as a symbol
+ *    name in an example.
+ *
+ * Changelogs and dated plans or logs are skipped: they quote old forms on
+ * purpose.
+ *
+ * Ignoring a false positive
+ *
+ * Add an entry to scripts/plugin-contract-ignore.json:
+ *
+ *   { "where": "<plugin>/<path>", "match": "<text>", "why": "<reason>" }
+ *
+ * `where` is matched as a prefix of the reported `<plugin>/<path>:<line>`, so
+ * leave the line number off to survive edits. `match` must appear in the
+ * reported snippet (the line printed under the problem); leave it out to
+ * ignore every problem in the file. Say in `why` what the text really is
+ * (prose, a placeholder, a test of a rejected form). A real mismatch is fixed
+ * in the plugin or here, not ignored.
  */
 
 import { execFileSync } from "node:child_process";
@@ -98,7 +143,7 @@ function codeInvocations(text) {
     if (argv.length === 0) continue;
     // `[...args, "--format", "llm"]` and `["--version"]` carry no command of their own.
     if (/^\s*\.\.\./.test(m[2]) || argv[0].startsWith("-")) continue;
-    found.push({ argv, line: lineOf(text, m.index), snippet: m[0].slice(0, 100) });
+    found.push({ argv, line: lineOf(text, m.index), snippet: m[0].slice(0, 100), index: m.index, fn });
   }
   return found;
 }
@@ -192,6 +237,394 @@ export function check(argv, surface, pro = NO_PRO) {
   return bad.length ? `"${name}" has no ${bad.join(", ")}` : null;
 }
 
+// ── Output fields: what the plugins read from `--format json` (#994) ────────
+
+const SHELL_EXT = new Set([".sh", ".bash"]);
+
+/**
+ * The published field lists and the MCP catalog, from the build: `acceptsField`
+ * from src/cli/contracts/fields.ts, the tool names and the tools that can
+ * return JSON from src/mcp/server.ts.
+ */
+export async function loadFieldSurface(
+  fieldsPath = join(here, "..", "dist", "cli", "contracts", "fields.js"),
+  serverPath = join(here, "..", "dist", "mcp", "server.js"),
+) {
+  const { acceptsField } = await import(pathToFileURL(fieldsPath).href);
+  const { IX_MCP_TOOL_NAMES, IX_MCP_JSON_RESULT_TOOLS } = await import(pathToFileURL(serverPath).href);
+  return {
+    accepts: acceptsField,
+    mcp: { tools: new Set(IX_MCP_TOOL_NAMES), jsonResults: new Set(IX_MCP_JSON_RESULT_TOOLS) },
+  };
+}
+
+/** What is wrong with one field read, or null. Commands with no published list are not checked. */
+export function checkField(command, path, fields) {
+  return fields.accepts(command, path) === false ? `"ix ${command} --format json" has no field "${path}"` : null;
+}
+
+/**
+ * Field reads in plugin code, each tied to the ix command whose json output it
+ * reads: `[{ command, path, line, snippet }]`. Only reads the file itself ties
+ * to an invocation are returned; see the header for the forms recognized.
+ */
+export function fieldReads(text, file, commands) {
+  const ext = extname(file);
+  if (SHELL_EXT.has(ext)) return shellReads(text, commands);
+  if (ext === ".py") return codeReads(text, commands, true);
+  if (CODE_EXT.has(ext)) return codeReads(text, commands, false);
+  return [];
+}
+
+/** `--format llm` or `--format text` in an argv or command line: not json. */
+const NOT_JSON = /--format(?:=|\s+|",\s*")["']?(?:llm|text)\b/;
+
+/** A shell word that runs ix: `ix`, a path ending in it, `run_ix_json`, `"$IX_BIN"`. */
+function runsIx(word) {
+  const bare = word.replace(/^["']|["']$/g, "");
+  if (/^\$\{?(?:IX|[A-Z_]*_IX|IX_[A-Z_]+)\}?$/.test(bare)) return true;
+  return /(?:^|[/_-])ix(?:$|[_-])/i.test(bare);
+}
+
+/** Ix invocations on one shell line: `[{ command, json, index }]`. */
+function shellInvocations(line, commands) {
+  const found = [];
+  const word = /(?<=^|[\s;&|({"'`=])("?\$\{?[A-Za-z_]\w*\}?"?|[\w./-]+)\s+["']?([a-z][a-z-]*)["']?(?=[\s"')|;&]|$)/g;
+  for (const m of line.matchAll(word)) {
+    if (runsIx(m[1]) && commands.has(m[2])) found.push({ command: m[2], json: !NOT_JSON.test(line), index: m.index });
+  }
+  // A wrapper that names its command: `ix_locate_json "$sym"`.
+  for (const m of line.matchAll(/(?<=^|[\s;&|({"'`=])(?:[\w-]*[_-])?ix[_-]([a-z]+)(?=[_-]|\s|$)/g)) {
+    if (commands.has(m[1]) && !found.some((f) => f.index <= m.index + m[0].length && f.index >= m.index)) {
+      found.push({ command: m[1], json: !NOT_JSON.test(line), index: m.index });
+    }
+  }
+  return found.sort((a, b) => a.index - b.index);
+}
+
+/** Shell words, quotes kept: `'a b'`, `"$x"`, `--flag`. */
+function shellWords(text) {
+  return [...text.matchAll(/'[^']*'|"(?:[^"\\]|\\.)*"|[^\s|;&)]+/g)].map((m) => m[0]);
+}
+
+/** The filter of a `jq …` command, or null (`-f file`, or none found). */
+function jqFilter(rest) {
+  const words = shellWords(rest);
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (/^--(?:arg|argjson|slurpfile|rawfile)$/.test(w)) { i += 2; continue; }
+    if (/^--indent$/.test(w)) { i += 1; continue; }
+    if (w === "-f" || w === "--from-file") return null;
+    if (w.startsWith("-")) continue;
+    return { filter: w.replace(/^'([\s\S]*)'$|^"([\s\S]*)"$/, (_, a, b) => a ?? b), after: words.slice(i + 1).join(" ") };
+  }
+  return null;
+}
+
+/** Reads in a shell file: jq filters on a variable or pipe that holds ix json. */
+function shellReads(text, commands) {
+  const lines = text.split("\n");
+  /** name -> [{ line, source }], source `{command, json}` or null for a non-ix value. */
+  const vars = new Map();
+  const reads = [];
+  lines.forEach((line, i) => {
+    for (const m of line.matchAll(/(?:^|[\s;&(])(?:(?:local|export|readonly|declare(?:\s+-\w+)?)\s+)?([A-Za-z_]\w*)=(\S.*)$/g)) {
+      const invs = /\$\(|`/.test(m[2]) ? shellInvocations(m[2], commands) : [];
+      if (!vars.has(m[1])) vars.set(m[1], []);
+      vars.get(m[1]).push({ line: i, col: m.index, source: invs[0] ?? null });
+    }
+    for (const m of line.matchAll(/jq\b/g)) {
+      if (m.index > 0 && /[\w-]/.test(line[m.index - 1])) continue;
+      const jq = jqFilter(line.slice(m.index + 2));
+      if (!jq) continue;
+      const before = line.slice(0, m.index);
+      let source;
+      const pipe = /\|\s*$/.exec(before);
+      if (pipe) {
+        const left = before.slice(0, pipe.index);
+        const invs = shellInvocations(left, commands);
+        if (invs.length) source = invs.at(-1);
+        else source = lookup(vars, [...left.matchAll(/\$\{?([A-Za-z_]\w*)/g)].at(-1)?.[1], i, m.index);
+      } else {
+        source = lookup(vars, /<<<\s*"?\$\{?([A-Za-z_]\w*)/.exec(jq.after)?.[1], i, m.index);
+      }
+      if (!source?.json) continue;
+      for (const path of jqPaths(jq.filter)) {
+        reads.push({ command: source.command, path, line: i + 1, snippet: line.trim().slice(0, 100) });
+      }
+    }
+  });
+  return reads;
+}
+
+/** The value a variable held at (`line`, `col`): its last assignment before that point. */
+function lookup(vars, name, line, col) {
+  if (!name) return undefined;
+  return (vars.get(name) ?? []).filter((a) => a.line < line || (a.line === line && a.col < col)).at(-1)?.source;
+}
+
+/** Split at a top-level separator, outside strings and brackets. */
+function splitTop(text, sep) {
+  const parts = [];
+  let depth = 0, start = 0, quote = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote) { if (c === "\\") i++; else if (c === quote) quote = null; continue; }
+    if (c === '"') quote = c;
+    else if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c)) depth--;
+    else if (c === sep && depth === 0 && text[i + 1] !== "=") { parts.push(text.slice(start, i)); start = i + 1; }
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+/** `.a.b`, `.[0]`, `."k"`, `.["k"]`, `[]?`: one jq path, from its leading dot. */
+const JQ_PATH = /^\.(?:[A-Za-z_]\w*|"[^"]*"|\[[^\]]*\])?(?:\??(?:\.[A-Za-z_]\w*|\."[^"]*"|\.?\[[^\]]*\]))*\??/;
+
+/** A jq path in the syntax of contracts/fields.ts: `a.b`, `a[]`. */
+function normalizeJq(raw) {
+  return raw
+    .replace(/\?/g, "")
+    .replace(/\.?\[\s*"([^"]*)"\s*\]/g, ".$1")
+    .replace(/\."([^"]*)"/g, ".$1")
+    .replace(/\.?\[[^\]]*\]/g, "[]")
+    .replace(/^\./, "");
+}
+
+function joinPath(ctx, path) {
+  if (!ctx) return path;
+  if (!path) return ctx;
+  return path.startsWith("[") ? ctx + path : `${ctx}.${path}`;
+}
+
+/**
+ * The root-relative field paths a jq filter reads. A pipe stage that is a
+ * plain path sets the context for the next one; after any other stage the
+ * context is unknown and reading stops. Paths inside a function call
+ * (`map(.x)`, `select(.x)`) are relative to something else and are skipped.
+ */
+function jqPaths(filter) {
+  const out = [];
+  let ctx = "";
+  for (const raw of splitTop(filter, "|")) {
+    const stage = raw.trim();
+    for (const path of stagePaths(stage)) {
+      const full = joinPath(ctx, path);
+      if (full) out.push(full);
+    }
+    const whole = JQ_PATH.exec(stage);
+    if (!whole || whole[0] !== stage) break;
+    ctx = joinPath(ctx, normalizeJq(stage));
+  }
+  return out;
+}
+
+/** Paths in one pipe stage that start at its input, outside function calls. */
+function stagePaths(stage) {
+  const found = [];
+  const frames = [];
+  let quote = false;
+  for (let i = 0; i < stage.length; i++) {
+    const c = stage[i];
+    if (quote) { if (c === "\\") i++; else if (c === '"') quote = false; continue; }
+    if (c === '"') { quote = true; continue; }
+    if ("([{".includes(c)) {
+      frames.push(c === "(" && /[A-Za-z_0-9]\s*$/.test(stage.slice(0, i)) ? "call" : c);
+      continue;
+    }
+    if (")]}".includes(c)) { frames.pop(); continue; }
+    if (c !== ".") continue;
+    const prev = stage.slice(0, i).trimEnd().at(-1);
+    if (prev && /[\w$)\]."?]/.test(prev)) continue;
+    if (stage[i + 1] === ".") { i++; continue; }
+    const m = JQ_PATH.exec(stage.slice(i));
+    if (!m) continue;
+    if (!frames.includes("call")) {
+      const path = normalizeJq(m[0]);
+      if (path) found.push(path);
+    }
+    i += m[0].length - 1;
+  }
+  return found;
+}
+
+/** Parameter lists: `def f(a, b)`. */
+const PY_PARAMS = /\bdef\s+(\w+)\s*\(([^)]*)\)/g;
+/**
+ * Parameter lists: `function f(a)` (groups 1, 2), `m(a) {` (3, 4), `(a) =>`
+ * (5), `a =>` (6). An `if (…) {` matches the method form and is skipped.
+ */
+const JS_PARAMS = /(?:\bfunction\b\s*\*?\s*([\w$]*)\s*\(([^)]*)\)|\b([\w$]+)\s*\(([^()]*)\)\s*(?::\s*[^={;]+)?\{|\(([^()]*)\)\s*(?::\s*[^=;{]+)?=>|\b([A-Za-z_$][\w$]*)\s*=>)/g;
+
+/** Method names that end a property chain: what follows is not a field. */
+const CHAIN_END = new Set(["length"]);
+
+/**
+ * Reads in TypeScript, JavaScript or Python: property chains, subscripts and
+ * `.get("k")` on a variable holding parsed ix json, and destructuring of it.
+ * A variable holds parsed json when it is assigned from a call whose name
+ * says json or parse (`JSON.parse`, `json.loads`, `runIxJson`, `run_ix_json`)
+ * over an ix invocation or over a variable assigned from one.
+ */
+function codeReads(text, commands, python) {
+  const invocations = codeInvocations(text).filter((inv) => commands.has(inv.argv[0]));
+  /** name -> [{ index, value }], value `{command, json, parsed}` or null. */
+  const vars = new Map();
+  const lineEnd = (i) => { const e = text.indexOf("\n", i); return e < 0 ? text.length : e; };
+  const assign = python
+    ? /^[ \t]*([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)\s*/gm
+    : /(?:\b(?:const|let|var)\s+|^[ \t]*)([A-Za-z_$][\w$]*)\s*(?::[^=\n;]+)?=(?![=>])\s*/gm;
+  const reads = [];
+  const valueOf = (rhsStart) => {
+    const end = lineEnd(rhsStart);
+    const rhs = text.slice(rhsStart, end);
+    const parse = /(?:JSON\.parse|json\.loads?|[\w.]*(?:parse|json)\w*)\s*\(/i;
+    const inv = invocations.find((v) => v.index >= rhsStart && v.index < end);
+    if (inv) {
+      const json = !NOT_JSON.test(text.slice(inv.index, inv.index + inv.snippet.length)) && !NOT_JSON.test(inv.argv.join(" "));
+      return { command: inv.argv[0], json, parsed: parse.test(rhs.slice(0, inv.index - rhsStart)) || /json/i.test(inv.fn) };
+    }
+    const named = [...rhs.matchAll(/[A-Za-z_$][\w$]*/g)].map((m) => ({ name: m[0], at: rhsStart + m.index }));
+    for (const { name, at } of named) {
+      const held = valueAt(vars, name, at);
+      if (!held) continue;
+      if (parse.test(rhs)) return { ...held, parsed: true };
+      if (new RegExp(`^(?:await\\s+)?${name.replace(/\$/g, "\\$")}\\s*(?:as\\s+\\w[\\w<>\\[\\], ]*)?;?\\s*$`).test(rhs)) return held;
+    }
+    return null;
+  };
+  const bind = (name, index, value) => {
+    if (!vars.has(name)) vars.set(name, []);
+    vars.get(name).push({ index, value });
+  };
+  for (const m of text.matchAll(assign)) bind(m[1], m.index + m[0].length - 1, valueOf(m.index + m[0].length));
+  // A parameter of the same name is another variable: it holds nothing known.
+  for (const m of text.matchAll(python ? PY_PARAMS : JS_PARAMS)) {
+    if (/^(?:if|for|while|switch|catch|return)$/.test(m[1] ?? m[3] ?? "")) continue;
+    for (const part of splitTop((python ? m[2] : m[2] ?? m[4] ?? m[5] ?? m[6]) ?? "", ",")) {
+      const name = /^\s*(?:\.\.\.|\*{1,2})?([A-Za-z_$][\w$]*)/.exec(part)?.[1];
+      if (name) bind(name, m.index, null);
+    }
+  }
+  for (const list of vars.values()) list.sort((x, y) => x.index - y.index);
+  if (!python) {
+    for (const m of text.matchAll(/\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*/g)) {
+      const value = valueOf(m.index + m[0].length);
+      if (!value?.parsed || !value.json) continue;
+      for (const part of splitTop(m[1], ",")) {
+        const key = /^\s*([A-Za-z_$][\w$]*)/.exec(part)?.[1];
+        if (key && !part.trim().startsWith("...")) reads.push(read(text, value.command, key, m.index));
+      }
+    }
+  }
+  for (const [name, assignments] of vars) {
+    if (!assignments.some((a) => a.value?.parsed)) continue;
+    const use = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, "\\$")}(?=\\??\\.|\\[)`, "g");
+    for (const m of text.matchAll(use)) {
+      const value = valueAt(vars, name, m.index);
+      if (!value?.parsed || !value.json) continue;
+      const path = chainPath(text.slice(m.index + name.length), python);
+      if (path) reads.push(read(text, value.command, path, m.index));
+    }
+  }
+  return reads.sort((a, b) => a.index - b.index).map(({ index: _, ...r }) => r);
+}
+
+function read(text, command, path, index) {
+  const line = lineOf(text, index);
+  return { command, path, line, snippet: text.split("\n")[line - 1].trim().slice(0, 100), index };
+}
+
+/** The value a variable held at `index`: its last assignment before it. */
+function valueAt(vars, name, index) {
+  return (vars.get(name) ?? []).filter((a) => a.index < index).at(-1)?.value;
+}
+
+/** `?.a.b[0]["c"]` or Python `["a"][0].get("b")` -> `a.b[].c`, up to a method call. */
+function chainPath(rest, python) {
+  let path = "";
+  for (;;) {
+    let m;
+    if ((m = /^\??\.([A-Za-z_$][\w$]*)/.exec(rest))) {
+      if (python && m[1] === "get") {
+        const get = /^\.get\(\s*(["'])([^"']+)\1[^)]*\)/.exec(rest);
+        if (!get) break;
+        path = joinPath(path, get[2]);
+        rest = rest.slice(get[0].length);
+        continue;
+      }
+      if (CHAIN_END.has(m[1]) || /^\s*\(/.test(rest.slice(m[0].length))) break;
+      path = joinPath(path, m[1]);
+    } else if ((m = /^(?:\?\.)?\[\s*(["'])([^"']+)\1\s*\]/.exec(rest))) {
+      path = joinPath(path, m[2]);
+    } else if ((m = /^(?:\?\.)?\[\s*-?\d+\s*\]/.exec(rest))) {
+      path = `${path}[]`;
+    } else break;
+    rest = rest.slice(m[0].length);
+  }
+  return path;
+}
+
+/** File extensions: a dotted token ending in one is a file name, not a field. */
+const FILE_EXT = /\.(?:[cm]?[jt]sx?|py|md|mdc|json|ya?ml|toml|sh|bash|go|rs|java|kt|rb|php|c|h|cpp|cs|scala|txt|lock|cfg|ini|env|html|css|sql|xml)$/;
+
+/**
+ * MCP tool names and the fields text says to read from their results:
+ * `[{ tool, line, snippet }]` for a tool named in a code span, and
+ * `[{ tool, path, line, snippet }]` for a code span that is a JSON path
+ * (`a.b`, `a[0]`, `.a`) after a tool in the same section. A heading or an
+ * `ix …` command span ends the section.
+ */
+export function mcpReferences(text, ext = ".md") {
+  if (ext === ".json") {
+    let data;
+    try { data = JSON.parse(text); } catch { return mcpReferences(text); }
+    const found = [];
+    const visit = (value, path) => {
+      if (typeof value === "string") {
+        for (const ref of mcpReferences(value)) found.push({ ...ref, line: `${path}:${ref.line}` });
+      } else if (value && typeof value === "object") {
+        for (const [key, child] of Object.entries(value)) visit(child, path ? `${path}.${key}` : key);
+      }
+    };
+    visit(data, "");
+    return found;
+  }
+  const found = [];
+  let tool = null;
+  let inFence = false;
+  text.replace(/\\`/g, "`").split("\n").forEach((raw, i) => {
+    if (/^\s*```/.test(raw)) { inFence = !inFence; return; }
+    if (inFence) return;
+    if (/^\s{0,3}#{1,6}\s/.test(raw)) tool = null;
+    const snippet = raw.trim().slice(0, 100);
+    for (const m of raw.matchAll(/`([^`]+)`/g)) {
+      const span = m[1].trim();
+      const named = /^(ix_[a-z][a-z0-9_]*)(?=$|[\s(])/.exec(span);
+      if (named) {
+        tool = named[1];
+        found.push({ tool, line: i + 1, snippet });
+        continue;
+      }
+      // An `ix …` command: what follows is about the CLI's output, not a tool's.
+      if (/^ix\s/.test(span)) { tool = null; continue; }
+      if (!tool || /^ix/.test(span) || FILE_EXT.test(span)) continue;
+      const dotted = /^[a-z_][A-Za-z0-9_]*(?:\??\.[A-Za-z_][A-Za-z0-9_]*|\[\d*\])+$/.test(span);
+      const jq = /^\.[A-Za-z_][A-Za-z0-9_]*(?:\??\.[A-Za-z_][A-Za-z0-9_]*|\[\d*\])*$/.test(span);
+      if (dotted || jq) found.push({ tool, path: span.replace(/^\./, ""), line: i + 1, snippet });
+    }
+  });
+  return found;
+}
+
+/** What is wrong with one MCP reference, or null. */
+export function checkMcp(ref, mcp) {
+  if (ref.path === undefined) return mcp.tools.has(ref.tool) ? null : `unknown MCP tool "${ref.tool}"`;
+  if (!mcp.tools.has(ref.tool) || mcp.jsonResults.has(ref.tool)) return null;
+  return `"${ref.tool}" returns \`--format llm\` records, not JSON: it has no field "${ref.path}"`;
+}
+
 async function main(argv) {
   let dir = argv.find((a) => !a.startsWith("--"));
   if (argv.includes("--clone")) {
@@ -212,36 +645,59 @@ async function main(argv) {
     console.error(`cannot load the Pro surface from dist/: run 'npm run build' in ix-cli first.\n${err}`);
     return 2;
   }
+  let fields;
+  try {
+    fields = await loadFieldSurface();
+  } catch (err) {
+    console.error(`cannot load the field lists or the MCP catalog from dist/: run 'npm run build' in ix-cli first.\n${err}`);
+    return 2;
+  }
+  const commands = new Set(surface.keys());
   const ignores = loadIgnores();
   const problems = [];
-  let checked = 0;
+  const counts = { invocations: 0, reads: 0, mcp: 0 };
   for (const repo of PLUGINS) {
     const root = join(dir, repo);
     try { statSync(root); } catch { console.error(`missing ${root}`); return 2; }
     for (const file of walk(root)) {
       const ext = extname(file);
-      if (!CODE_EXT.has(ext) && !TEXT_EXT.has(ext)) continue;
+      if (!CODE_EXT.has(ext) && !TEXT_EXT.has(ext) && !SHELL_EXT.has(ext)) continue;
       if (HISTORICAL.test(file)) continue;
       const text = readFileSync(file, "utf8");
-      if (!text.includes("ix")) continue;
-      const invocations = [
-        ...(CODE_EXT.has(ext) ? codeInvocations(text) : []),
-        ...(ext === ".json" ? jsonInvocations(text) : textInvocations(text)),
-      ];
-      for (const inv of invocations) {
-        checked++;
-        const problem = check(inv.argv, surface, pro);
-        if (!problem) continue;
-        const where = `${repo}/${relative(root, file)}:${inv.line}`;
-        if (ignores.some((ig) => where.startsWith(ig.where) && (!ig.match || inv.snippet.includes(ig.match)))) continue;
-        problems.push(`${where}  ${problem}\n    ${inv.snippet}`);
+      // Case-insensitive: `runIx([...])` is an invocation with no lowercase "ix".
+      if (!/ix/i.test(text)) continue;
+      const report = (line, snippet, problem) => {
+        if (!problem) return;
+        const where = `${repo}/${relative(root, file)}:${line}`;
+        if (ignores.some((ig) => where.startsWith(ig.where) && (!ig.match || snippet.includes(ig.match)))) return;
+        problems.push(`${where}  ${problem}\n    ${snippet}`);
+      };
+      if (!SHELL_EXT.has(ext)) {
+        const invocations = [
+          ...(CODE_EXT.has(ext) ? codeInvocations(text) : []),
+          ...(ext === ".json" ? jsonInvocations(text) : textInvocations(text)),
+        ];
+        for (const inv of invocations) {
+          counts.invocations++;
+          report(inv.line, inv.snippet, check(inv.argv, surface, pro));
+        }
+      }
+      for (const read of fieldReads(text, file, commands)) {
+        counts.reads++;
+        report(read.line, read.snippet, checkField(read.command, read.path, fields));
+      }
+      if (TEXT_EXT.has(ext)) {
+        for (const ref of mcpReferences(text, ext)) {
+          counts.mcp++;
+          report(ref.line, ref.snippet, checkMcp(ref, fields.mcp));
+        }
       }
     }
   }
-  console.log(`checked ${checked} ix invocations in ${PLUGINS.length} plugins`);
+  console.log(`checked ${counts.invocations} ix invocations, ${counts.reads} output field reads and ${counts.mcp} MCP references in ${PLUGINS.length} plugins`);
   if (problems.length) {
-    console.error(`\n${problems.length} invocation(s) use a command or flag this CLI does not have:\n\n${problems.join("\n")}`);
-    console.error(`\nA false positive (prompt prose, a placeholder) goes in scripts/plugin-contract-ignore.json.`);
+    console.error(`\n${problems.length} problem(s): a command, flag, output field or MCP name this CLI does not have:\n\n${problems.join("\n")}`);
+    console.error(`\nA false positive (prompt prose, a placeholder) goes in scripts/plugin-contract-ignore.json; see the header of this script.`);
     return 1;
   }
   return 0;
