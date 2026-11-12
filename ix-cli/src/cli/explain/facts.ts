@@ -11,6 +11,7 @@ import type { CommitRef } from "./history.js";
 import { isTestPath, type RelatedRef } from "./related-files.js";
 import { suggestedCommand } from "../next-step.js";
 import { TYPE_KINDS } from "../graph-model.js";
+import { featureOff, markFeatureOff, routeMissing } from "../../client/features.js";
 
 /** A related entity and where it is defined. */
 export interface EntityLocation {
@@ -430,13 +431,61 @@ async function lookUpContainer(client: IxClient, containerId: string): Promise<E
   }
 }
 
-/** The target's callees by name, one entity read each, in edge order. */
-function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRef[]> {
+/**
+ * How long a backend that does not serve `POST /v1/nodes` is read one entity
+ * at a time before the batched read is tried again, so a long-lived `ix mcp`
+ * server picks it up after a backend upgrade.
+ */
+const BATCH_NODES_OFF_TTL_MS = 10 * 60_000;
+
+/**
+ * The callees in one `POST /v1/nodes` read (Ix-memory 1.0.33+), by id. Empty
+ * when the read is not used: the route is missing (remembered for this backend
+ * for `BATCH_NODES_OFF_TTL_MS`), the read fails, or the answer is not the
+ * expected shape. A node without a provenance object is left out, so it is
+ * read on its own and keeps the path the entity read gives it; so is every
+ * id the read does not return (`missing`: no live node behind it).
+ *
+ * Removable fallback: once MIN_BACKEND_VERSION reaches 1.0.33 (`batchNodes`
+ * in client/features.ts) the route-missing branch can go.
+ */
+async function batchReadCallees(client: IxClient, ids: string[]): Promise<Map<string, any>> {
+  const found = new Map<string, any>();
+  const endpoint = String(client.endpoint);
+  if (ids.length === 0 || featureOff("batchNodes", endpoint)) return found;
+  let answer: unknown;
+  try {
+    answer = await client.nodes(ids, "full");
+  } catch (err) {
+    if (routeMissing("batchNodes", err)) markFeatureOff("batchNodes", endpoint, BATCH_NODES_OFF_TTL_MS);
+    return found;
+  }
+  const nodes = (answer as { nodes?: unknown } | null)?.nodes;
+  if (!Array.isArray(nodes)) return found;
+  for (const n of nodes) {
+    if (n === null || typeof n !== "object") continue;
+    const node = n as any;
+    if (typeof node.id !== "string") continue;
+    if (node.provenance === null || typeof node.provenance !== "object") continue;
+    if (!found.has(node.id)) found.set(node.id, node);
+  }
+  return found;
+}
+
+/**
+ * The target's callees by name, in edge order. Read in one batched read when
+ * the backend serves it, and one entity read each for whatever that leaves out
+ * (Ix#931); either way each callee is described from the same node.
+ */
+async function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRef[]> {
+  const batched = await batchReadCallees(
+    client,
+    [...new Set(calleeEdges.map((e: any) => e.dst).filter((id: unknown): id is string => typeof id === "string"))],
+  );
   return Promise.all(
     calleeEdges.map(async (e: any): Promise<EntityRef> => {
       try {
-        const callee = await client.entity(e.dst);
-        const calleeNode = callee.node as any;
+        const calleeNode = batched.get(e.dst) ?? ((await client.entity(e.dst)).node as any);
         const name = calleeNode.name || calleeNode.attrs?.name || "";
         if (!name || isRawId(name)) {
           return {

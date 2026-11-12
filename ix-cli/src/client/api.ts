@@ -103,6 +103,9 @@ function hasCode(err: unknown, codes: ReadonlySet<string>): boolean {
 const SHARED_READ_PREFIXES = [
   "/v1/expand", "/v1/degree", "/v1/search", "/v1/context", "/v1/list",
   "/v1/entity/", "/v1/provenance/", "/v1/resolve-prefix/",
+  // The batched node read (`nodes`): a read, so it is bounded by the read
+  // deadline, retried once like any read, and does not move the deadline on.
+  "/v1/nodes",
 ];
 
 /** Per-request bound on the single-row note and session writes. */
