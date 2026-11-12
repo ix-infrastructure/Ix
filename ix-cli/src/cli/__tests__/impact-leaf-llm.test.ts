@@ -3,7 +3,9 @@
 import { describe, expect, it } from "vitest";
 import { leafRowLlm, leafTruncationLlm } from "../commands/impact.js";
 import { sliceEdgeResults } from "../format.js";
-import { IX_CALLER_ENV } from "../next-step.js";
+import { mcpCaller } from "../../mcp/hints.js";
+import { IX_MCP_CORE_TOOL_NAMES } from "../../mcp/server.js";
+import { withCaller } from "../next-step.js";
 
 const node = (name: string, line_start?: number, line_end?: number) => ({
   id: `id-${name}`,
@@ -46,17 +48,10 @@ describe("impact leaf llm rows", () => {
   });
 
   it("over MCP names the ix_neighbors call that pages the list", () => {
-    const prev = process.env[IX_CALLER_ENV];
-    process.env[IX_CALLER_ENV] = "mcp";
-    try {
-      const slice = sliceEdgeResults(Array.from({ length: 25 }, (_, i) => node(`c${i}`)), 10);
-      expect(leafTruncationLlm("callees", slice, "verify")[0]).toBe(
-        'diagnostic code=results_truncated message="25 callees; showing 10. To page them: ix_neighbors symbol=verify relation=callees"',
-      );
-    } finally {
-      if (prev === undefined) delete process.env[IX_CALLER_ENV];
-      else process.env[IX_CALLER_ENV] = prev;
-    }
+    const slice = sliceEdgeResults(Array.from({ length: 25 }, (_, i) => node(`c${i}`)), 10);
+    expect(withCaller(mcpCaller(IX_MCP_CORE_TOOL_NAMES), () => leafTruncationLlm("callees", slice, "verify"))[0]).toBe(
+      'diagnostic code=results_truncated message="25 callees; showing 10. To page them: ix_neighbors symbol=verify relation=callees"',
+    );
   });
 
   it("emits no diagnostic when the list fits", () => {

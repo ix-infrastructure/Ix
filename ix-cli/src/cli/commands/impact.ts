@@ -11,7 +11,7 @@ import { checkGraphHealth, graphHealthJson, graphHealthLlmFields, graphHealthPro
 import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type BucketMember, type SystemPath } from "../hierarchy.js";
 import { inferRiskSemantics, humanizeLabel, type ImpactFacts, type RiskSemantics } from "../impact/risk-semantics.js";
 import { captureJson, lineSpan, printJson, relativePath, rowLocation, sliceEdgeResults, stripNulls, type Slice } from "../format.js";
-import { forMcp, suggest, type Relation } from "../next-step.js";
+import { currentCaller, type Relation } from "../next-step.js";
 import { llmLine, llmShortId } from "../llm.js";
 import { formatOption, kindOption, noSuggestOption, pathOption, pickOption, strictOption } from "../options.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
@@ -688,9 +688,10 @@ export function leafRowLlm(kind: string, node: any): string {
 export function leafTruncationLlm(relation: Relation, slice: Slice<unknown>, target: string): string[] {
   if (!slice.truncated) return [];
   const head = `${slice.total} ${relation}; showing ${slice.shown}.`;
-  const page = suggest.neighbors(target, relation);
-  const message = forMcp()
-    ? `${head} To page them: ${page}`
+  const caller = currentCaller();
+  const page = caller.command({ action: "neighbors", symbol: target, relation });
+  const message = caller.style === "tool"
+    ? (page ? `${head} To page them: ${page}` : head)
     : `${head} Raise --limit to see them, or page them with ${page}`;
   return [llmLine("diagnostic", [
     ["code", "results_truncated"],

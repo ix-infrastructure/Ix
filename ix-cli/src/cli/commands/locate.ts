@@ -19,10 +19,9 @@ import { stderr } from "../stderr.js";
 import { relativePath, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
 import { formatOption, kindOption, noSuggestOption, pickOption, strictOption } from "../options.js";
-import { getEffectiveSystemPath, hasMapData } from "../hierarchy.js";
+import { getEffectiveSystemPath, hasMapData, noSystemMap } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { renderSection, renderKeyValue, renderNote, renderWarning, renderBreadcrumb, reportAmbiguousTarget, reportResolutionNotices } from "../ui.js";
-import { forMcp } from "../next-step.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
 import { CONTAINER_KINDS, FILE_KINDS, REGION_KINDS } from "../graph-model.js";
 import { ambiguousTargetMessage, unresolvedTargetJson } from "../contracts/miss.js";
@@ -180,7 +179,7 @@ async function locateOne(
   // Diagnostic for missing map data
   const hasMap = hasMapData(systemPath);
   if (!hasMap) {
-    diagnostics.push(`No system map. Run ${forMcp() ? "ix_map" : "`ix map`"} to see hierarchy.`);
+    diagnostics.push(noSystemMap());
   }
 
   // Build system path: append resolved symbol for non-file targets
