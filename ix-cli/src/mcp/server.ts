@@ -336,10 +336,11 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   registerTool(
     ctx,
     "ix_context",
-    "Use first on an issue, a task, or an unfamiliar symbol or file (target=<name or path>, or issue=<text>). Returns ranked evidence (definition, members, callers, importers, related files, recent commits), each row path:lines, then next calls. Not for a literal string: use Grep.",
+    "Use first on an issue or task (issue=<text>), or an unfamiliar symbol or file (target=<name or path>). Returns ranked pointers with path:lines. Not for a literal string: use Grep.",
     {
       target: z.string().min(1).optional(),
       issue: z.string().min(1).max(200_000).optional().describe("issue or task text, instead of target"),
+      full: z.boolean().optional().describe("issue only: full bundle instead of default lean view"),
       kind: SYMBOL_TOOL_INPUT.kind,
       path: SYMBOL_TOOL_INPUT.path,
       pick: SYMBOL_TOOL_INPUT.pick,
@@ -358,7 +359,7 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       structured: z
         .boolean()
         .optional()
-        .describe("JSON bundle as structuredContent, not records"),
+        .describe("JSON as structuredContent, not records"),
     },
     async (input) => {
       const hasTarget = typeof input.target === "string";
@@ -374,7 +375,9 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
               ? "pass max_tokens or max_chars, not both; they bound the same evidence in different units"
               : undefined;
       if (refusal) return textResult(JSON.stringify({ error: refusal, tool: "ix_context" }), true);
+      const leanIssue = hasIssue && input.full !== true;
       const options: string[] = symbolOptions(input, { limit: false });
+      if (leanIssue) options.push("--lean");
       if (typeof input.as_of_rev === "number") options.push(`--as-of-rev=${numberArg(input, "as_of_rev")}`);
       if (typeof input.max_entities === "number") options.push(`--max-entities=${numberArg(input, "max_entities")}`);
       if (typeof input.max_relationships === "number")
@@ -388,7 +391,7 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
         // structuredContent — so a 20 KB bundle cost 40 KB, and the copy a model
         // actually reads is the smaller `llm` one that was not being sent at all.
         input.structured === true
-          ? runJsonStructured(runIx, "ix_context", argv)
+          ? runJsonStructured(runIx, "ix_context", argv, leanIssue)
           : runFormatted(runIx, "ix_context", argv);
       if (hasTarget) return run(ix("context", [stringArg(input, "target")], options));
       // `--from-issue` reads a file. The in-process runner has no stdin to give
@@ -1005,6 +1008,7 @@ async function runJsonStructured(
   runIx: IxRunner,
   tool: string,
   argv: IxArgv,
+  leanIssue = false,
 ): Promise<CallToolResult> {
   const result = await runIx(toArgv(argv, "json"), DEFAULT_TIMEOUT_MS);
   if (!result.ok) {
@@ -1020,12 +1024,12 @@ async function runJsonStructured(
   if (!isRecord(parsed) || Object.keys(parsed).length === 0) {
     return textResult(text || JSON.stringify({ error: `${argv.command} produced no parseable JSON`, tool }), true);
   }
-  // `structured: true` asked for a bundle. A name the graph has no entity for
+  // `structured: true` asked for the selected view. A name the graph has no entity for
   // but source files mention exits 0 with a `text_matches` record instead
   // (text-matches.ts): useful to read, but not the bundle, so it goes back as
   // text marked as an error — the failure signal a structured caller keys on —
   // never as structuredContent posing as one.
-  if (parsed.schema !== BUNDLE_SCHEMA) return textResult(text, true);
+  if (leanIssue ? parsed.kind !== "issue_lean" : parsed.schema !== BUNDLE_SCHEMA) return textResult(text, true);
   const { generatedAt: _perCall, ...stable } = parsed;
   return {
     content: [{ type: "text", text: JSON.stringify(stable) }],

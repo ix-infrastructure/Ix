@@ -10,6 +10,20 @@ ix mcp
 The client launches the server in the active workspace, so every Ix tool uses
 that repository's graph and configuration.
 
+## Issue context
+
+`ix_context` with `issue: "<issue or task text>"` returns a lean view by default:
+trusted starting points, where those symbols are used, and a few ranked files.
+Pass `full: true` with the issue to request the full context bundle, including
+graph evidence and related files. `full` applies only to issue mode; `target`
+calls keep their existing bundle behavior.
+
+With `structured: true`, the selected view is returned as JSON in
+`structuredContent`: lean issue views have `kind: "issue_lean"`, while full
+bundles have `schema: "ix-context-bundle/1"`. CLI behavior is unchanged:
+`ix context --from-issue <file>` still returns the full bundle; add `--lean`
+for the lean view.
+
 ## Registering clients
 
 ```bash

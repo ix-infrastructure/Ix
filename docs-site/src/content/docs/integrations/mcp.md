@@ -53,6 +53,12 @@ codex mcp add ix-memory -- ix mcp
 | `ix_impact` | What does a change to this reach? |
 | `ix_read` | The source of a symbol by name, or a line range |
 
+For issue text, `ix_context` returns a lean view by default: trusted starting points, where those symbols are used,
+and a few ranked files. Pass `full: true` with `issue` for the full context bundle. `full` applies only to issue mode;
+`target` calls keep their existing bundle behavior. With `structured: true`, the selected view is JSON in
+`structuredContent`: `kind: "issue_lean"` for lean issue views, or `schema: "ix-context-bundle/1"` for full bundles.
+The CLI still defaults to the full bundle for `ix context --from-issue <file>`; `--lean` selects its lean view.
+
 The server also sends `instructions` when a client connects, saying when to use Ix instead of Grep and which tool to
 reach for first. Clients that load tool schemas only on demand still show these to the model. Over MCP, hints and
 `next` records are written as tool calls with arguments, such as `ix_neighbors symbol=X relation=callers`, not as CLI
