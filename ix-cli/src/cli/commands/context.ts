@@ -1,9 +1,13 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import type { Command } from "commander";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, relative, isAbsolute } from "node:path";
+import {
+  bundleContextCandidates, contextItemLimit, leanContextCandidates, preciseContextLlmLines,
+  selectContextItems, type ContextSelectionOptions,
+} from "../precise-context.js";
 
 import {
   BUNDLE_SCHEMA,
@@ -195,6 +199,11 @@ interface ContextOptions extends Partial<BudgetSnapshot> {
   fromIssue?: string;
   /** With `--from-issue`: only the trusted starting points and a few ranked files. */
   lean?: boolean;
+  full?: boolean;
+  limit?: number;
+  cursor?: string;
+  /** Transient issue text for excerpt explanations; never serialized. */
+  issueQuery?: string;
   kind?: string;
   path?: string;
   pick?: number;
@@ -380,6 +389,9 @@ export function registerContextCommand(program: Command): void {
       "--lean",
       "With --from-issue: only the starting points Ix trusts and the next few files, or one line saying it trusts none",
     )
+    .option("--full", "Return the legacy bundle/row contract (JSON: ix-context-bundle/1)")
+    .option("--limit <n>", "Code items per JSON/LLM page (default: 8; range: 1-50; confidence floor: 0.55)", contextItemLimit)
+    .option("--cursor <cursor>", "Continue the same JSON/LLM query using its returned cursor")
     .option("--kind <kind>", "Filter target entity by kind")
     .option("--path <path>", "Restrict to symbols from files matching this path substring")
     .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
@@ -428,7 +440,7 @@ export function registerContextCommand(program: Command): void {
       // The output the evidence budget is charged against; --out writes JSON.
       const fmt = opts.out ? "json" : bundleFormat(opts.format);
       if (opts.resume) {
-        renderSavedInvestigation(opts.resume, opts.format);
+        renderSavedInvestigation(opts.resume, opts.format, opts);
         return;
       }
       if (opts.list) {
@@ -617,7 +629,7 @@ async function emitBundle(bundle: ContextBundle, opts: ContextOptions): Promise<
     renderNote(`Wrote ${parsed.data.entities.length} entities, ${parsed.data.relationships.length} relationships, ${parsed.data.evidence.length} evidence items to ${out}`);
     return;
   }
-  renderBundle(bundle, opts.format);
+  renderBundle(bundle, opts.format, { ...opts, read: contextSourceReader() });
 }
 
 /**
@@ -758,6 +770,11 @@ export function detectContextModeConflict(
   opts: ContextModeOptions,
   target?: string,
 ): string | undefined {
+  if ((opts.limit !== undefined || opts.cursor !== undefined)
+    && (opts.full || opts.save || opts.out || opts.list || opts.diff || !["json", "llm"].includes(opts.format ?? "text"))) {
+    return "--limit and --cursor shape compact JSON/LLM context only; drop them or use --format json|llm without --full, --save, --out, --list or --diff.";
+  }
+  if (opts.full && (opts.list || opts.diff)) return "--full shapes context output, not --list or --diff; drop --full.";
   if (opts.lean && opts.fromIssue === undefined) {
     return "--lean only shapes a bundle built with --from-issue; add --from-issue <file>, or drop --lean.";
   }
@@ -1271,9 +1288,13 @@ export function loadInvestigation(id: string, format?: string): SavedInvestigati
   return { ...state, id: displayId(state.id) };
 }
 
-export function renderSavedInvestigation(id: string, format: string): void {
+export function renderSavedInvestigation(id: string, format: string, options: ContextSelectionOptions & { full?: boolean } = { full: true }): void {
   const saved = loadInvestigation(id, format);
   if (!saved) return;
+  if (!options.full && (format === "json" || format === "llm")) {
+    renderBundle(saved.bundle, format, options);
+    return;
+  }
   if (format === "json") {
     printJson(saved);
     return;
@@ -1285,11 +1306,11 @@ export function renderSavedInvestigation(id: string, format: string): void {
     // was taken. `classification=current` says it was fresh when it was
     // saved, not when that was.
     printLlmLines([llmLine("resumed", { id: saved.id, saved_at: saved.savedAt })]);
-    renderBundle(saved.bundle, format);
+    renderFullBundle(saved.bundle, format);
     return;
   }
   renderNote(`Resumed investigation "${saved.id}" saved ${saved.savedAt}`);
-  renderBundle(saved.bundle, format);
+  renderFullBundle(saved.bundle, format);
 }
 
 /**
@@ -1787,6 +1808,7 @@ async function buildIssueBundle(
 ): Promise<ContextBundle | undefined> {
   const text = await readIssueOrReport(arg, opts.format);
   if (text === undefined) return undefined;
+  opts.issueQuery = text;
   const client = createClient({ query: true });
   const plan = await planIssueWith(client, text);
   // A path start has no node yet, and the graph may not have one either: it
@@ -1973,6 +1995,17 @@ async function emitLeanIssue(arg: string, opts: ContextOptions): Promise<void> {
   if (text === undefined) return;
   const client = createClient({ query: true });
   const view = await addUsedIn(client, leanIssueView(await planIssueWith(client, text)));
+  if (!opts.full && (opts.format === "json" || opts.format === "llm")) {
+    try {
+      const options = { ...opts, issueQuery: text, read: contextSourceReader(), maxChars: clampBudgets(opts, bundleFormat(opts.format)).maxChars - 200 };
+      const page = selectContextItems(leanContextCandidates(view, options), options);
+      if (opts.format === "json") printJson({ ...page, confidence: view.confidence, reason: view.reason });
+      else printLlmLines([...preciseContextLlmLines(page), ...(view.reason ? [llmLine("diagnostic", { reason: view.reason })] : [])]);
+    } catch (error) {
+      reportFailure("context_selection", (error as Error).message, opts.format);
+    }
+    return;
+  }
   if (opts.format === "json") {
     printJson({ kind: "issue_lean", ...view });
   } else if (opts.format === "llm") {
@@ -2971,7 +3004,61 @@ export function textEvidenceLines(item: EvidenceItem): string[] {
 /** Rough size of the prose header, charged before the evidence in `--format text`. */
 const TEXT_HEADER_ESTIMATE = 600;
 
-export function renderBundle(bundle: ContextBundle, format: string): void {
+/** A lazy, tracked-source reader; never follow a graph path outside the workspace. */
+function contextSourceReader(): (path: string) => string | undefined {
+  let access: RepoAccess | undefined;
+  let tracked: Set<string> | undefined;
+  let root: string;
+  const cache = new Map<string, string | undefined>();
+  return (path) => {
+    if (cache.has(path)) return cache.get(path);
+    try {
+      root ??= realpathSync(resolveWorkspaceRoot());
+      if (!tracked) {
+        access = gitRepoAccess(root);
+        tracked = new Set(access?.files());
+      }
+      if (!tracked.has(path)) return undefined;
+      const rel = relative(root, realpathSync(resolve(root, path)));
+      if (rel === ".." || rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(rel)) return undefined;
+      const text = access?.read(path);
+      cache.set(path, text);
+      return text;
+    } catch { return undefined; }
+  };
+}
+
+/** Compact tool contract. The original bundle/row contract is explicit --full. */
+export function renderBundle(bundle: ContextBundle, format: string, options: ContextSelectionOptions & { full?: boolean } = {}): void {
+  if (options.full || (format !== "json" && format !== "llm")) {
+    renderFullBundle(bundle, format);
+    return;
+  }
+  try {
+    const metadata = { target: bundle.target, freshness: bundle.freshness,
+      ...(bundle.graph ? { graph: bundle.graph } : {}),
+      sourceTruncation: bundle.truncation,
+    };
+    const selectionOptions = { ...options,
+      maxChars: (options.maxChars ?? bundle.budgets.maxChars) - JSON.stringify(metadata, null, 2).length - 100,
+    };
+    const page = selectContextItems(bundleContextCandidates(bundle, options), selectionOptions);
+    if (format === "json") printJson({ ...page, ...metadata });
+    else printLlmLines([
+      llmLine("target", { name: bundle.target.name, classification: bundle.freshness.classification }),
+      ...(bundle.graph ? [llmLine("graph", { status: asString(bundle.graph.status), message: asString(bundle.graph.message), fix: asString(bundle.graph.fix) })] : []),
+      ...preciseContextLlmLines(page),
+      ...(bundle.truncation.entitiesTruncated || bundle.truncation.evidenceTruncated ? [llmLine("diagnostic", {
+        code: "source_truncated", entities: bundle.truncation.entitiesTruncated, evidence: bundle.truncation.evidenceTruncated,
+        message: "Increase --max-entities/--max-evidence for a larger candidate pool; --full returns the legacy bundle",
+      })] : []),
+    ]);
+  } catch (error) {
+    reportFailure("context_selection", (error as Error).message, format);
+  }
+}
+
+export function renderFullBundle(bundle: ContextBundle, format: string): void {
   if (format === "json") {
     printJson(bundle);
     return;

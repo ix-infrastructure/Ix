@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { GraphEdge, GraphNode } from "../../client/types.js";
-import { buildBundle, clampBudgets, renderBundle } from "../commands/context.js";
+import { buildBundle, clampBudgets, renderFullBundle as renderBundle } from "../commands/context.js";
 import type { ContextFacts, EntityLocation } from "../explain/facts.js";
 
 /**

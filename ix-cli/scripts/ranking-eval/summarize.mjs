@@ -45,3 +45,21 @@ for (const [v, m] of byVariant) {
   }
   console.log(cells.join(" | "));
 }
+
+// Micro precision keeps every returned item in the denominator; macro F@5
+// stays paired on the same instances so an empty answer cannot win by silence.
+if (recs.some((r) => r.contextPrecision)) {
+  console.log("\ncontext precision | before returned/acted/precision/F@5 | after returned/acted/precision/F@5");
+  for (const [variant, records] of byVariant) {
+    const paired = [...records.values()].filter((r) => r.contextPrecision);
+    const cells = [variant];
+    for (const side of ["before", "after"]) {
+      const values = paired.map((r) => r.contextPrecision[side]);
+      const returned = values.reduce((n, v) => n + v.items_returned, 0);
+      const acted = values.reduce((n, v) => n + v.items_acted_on, 0);
+      const recall = values.map((v) => v.file_recall_at_5).filter((v) => v !== null);
+      cells.push(`${returned}/${acted}/${returned ? f3(acted / returned) : "n/a"}/${recall.length ? f3(mean(recall)) : "n/a"}`);
+    }
+    console.log(cells.join(" | "));
+  }
+}
