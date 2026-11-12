@@ -9,7 +9,7 @@ import { buildDependencyTree } from "../commands/depends.js";
 import { getSystemPath } from "../hierarchy.js";
 import type { CommitRef } from "./history.js";
 import { isTestPath, type RelatedRef } from "./related-files.js";
-import { forMcp, toolCall } from "../next-step.js";
+import { suggestedCommand } from "../next-step.js";
 import { TYPE_KINDS } from "../graph-model.js";
 
 /** A related entity and where it is defined. */
@@ -443,7 +443,7 @@ function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRe
             name: name || e.dst,
             kind: calleeNode.kind,
             resolved: false,
-            suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
+            ...suggestedCommand({ action: "text", pattern: e.dst.slice(0, 8), quote: true }),
           };
         }
         return {
@@ -452,14 +452,14 @@ function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRe
           id: e.dst,
           resolved: true,
           path: relativePath(calleeNode.provenance?.source_uri ?? calleeNode.provenance?.sourceUri),
-          suggestedCommand: forMcp() ? toolCall("ix_explain", { symbol: name }) : `ix explain "${name}"`,
+          ...suggestedCommand({ action: "explain", symbol: name, quote: true }),
         };
       } catch {
         return {
           name: e.dst,
           resolved: false,
           diagnostic: "unresolved_call_target",
-          suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
+          ...suggestedCommand({ action: "text", pattern: e.dst.slice(0, 8), quote: true }),
         } as EntityRef;
       }
     }),

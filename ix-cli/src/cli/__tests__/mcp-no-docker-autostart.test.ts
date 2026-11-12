@@ -13,7 +13,7 @@ vi.mock("node:child_process", async (importOriginal) => ({
   execFileSync: (...args: unknown[]) => execFileSync(...args),
 }));
 
-const saved = { IX_CALLER: process.env.IX_CALLER, IX_ENDPOINT: process.env.IX_ENDPOINT };
+const saved = { IX_ENDPOINT: process.env.IX_ENDPOINT };
 afterEach(() => {
   for (const [k, v] of Object.entries(saved)) {
     if (v === undefined) delete process.env[k];
@@ -24,10 +24,11 @@ afterEach(() => {
 
 describe("ensureBackendAvailable under ix mcp", () => {
   it("reports backend_unreachable instead of starting Docker", async () => {
-    process.env.IX_CALLER = "mcp";
     process.env.IX_ENDPOINT = "http://localhost:8090";
     const { ensureBackendAvailable } = await import("../bootstrap.js");
-    await expect(ensureBackendAvailable()).rejects.toThrow(/backend_unreachable/);
+    const { withCaller } = await import("../next-step.js");
+    const { mcpCaller } = await import("../../mcp/hints.js");
+    await expect(withCaller(mcpCaller(), () => ensureBackendAvailable())).rejects.toThrow(/backend_unreachable/);
     expect(execFileSync).not.toHaveBeenCalled();
   });
 });

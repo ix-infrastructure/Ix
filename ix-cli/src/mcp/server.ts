@@ -22,6 +22,8 @@ import {
   resolveDefaultRunner,
   type IxRunner,
 } from "./runner.js";
+import { mcpCaller } from "./hints.js";
+import { withCaller } from "../cli/next-step.js";
 
 export type { IxRunner } from "./runner.js";
 
@@ -326,10 +328,13 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   // process.stdout and process.exit, which a caller supplying its own runner
   // (every test, and any embedder) must not have done to it.
   let fallback: IxRunner | undefined;
-  const runIx: IxRunner =
+  const baseRunIx: IxRunner =
     options.runIx ??
     ((args, timeoutMs) =>
       (fallback ??= resolveDefaultRunner({ version, redirectIdleStdout: true }))(args, timeoutMs));
+  // Every command runs for this session's reader, so its hints name only the
+  // tools this session offers (`hintCaller`, below).
+  const runIx: IxRunner = (args, timeoutMs) => withCaller(hintCaller, () => baseRunIx(args, timeoutMs));
 
   const server = new McpServer(
     {
@@ -354,6 +359,8 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       || core.has(name)
       || (IX_MCP_PRO_TOOL_NAMES as readonly string[]).includes(name),
   };
+  // The OSS tools this session offers. Hints never name a Pro tool.
+  const hintCaller = mcpCaller(IX_MCP_OSS_TOOL_NAMES.filter((name) => ctx.advertise(name)));
 
   // First, so it heads tools/list: it is where a session should start.
   registerTool(
