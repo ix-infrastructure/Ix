@@ -12,7 +12,7 @@ import { ParsePool } from './parse-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
 import { combineSignals, currentRunSignal } from '../../client/run-signal.js';
-import type { GraphNode, GraphPatchPayload } from '../../client/types.js';
+import type { GraphNode, GraphPatchPayload, PatchOp, UpsertNodeOp } from '../../client/types.js';
 import { canonicalWorkspacePath, getEndpoint, isPathInside, loadWorkspaces, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
 import { resolveIngestRootWithSource } from '../map-root.js';
 import { acquireMapLock, requestMapRerun, takeMapRerun } from '../single-flight.js';
@@ -27,11 +27,11 @@ import {
 } from '../ingest-baseline.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
-import { loadIngestionModules } from './ingestion-loader.js';
+import { loadIngestionModules, loadSymbolIndex } from './ingestion-loader.js';
 import { declaredPackageDirs } from '../package-dirs.js';
 import { assertStaleWorkspacePruneAllowed, clearPendingPrune, ensureWorkspaceIdState, staleWorkspaceCleanup, workspaceStateFor, type StaleWorkspaceKeepReason } from '../bootstrap.js';
 import {
-  changedNames, findDependents, importsChanged, loadIngestSymbols, resolutionHash, saveIngestSymbols,
+  loadIngestSymbols, resolutionHash, saveIngestSymbols,
   type StoredSummary, type SymbolEntry,
 } from '../ingest-symbols.js';
 import { detectSystem, fileIdentity, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
@@ -51,6 +51,12 @@ import { createDatabaseProbe, probeDatabase } from '../database-probe.js';
 // existing importers keep working.
 export { isAbortError, isRetryableCommitConflict } from '../commit-retry.js';
 import { readBackendHealth } from './upgrade.js';
+import {
+  BATCH_NODE_READS_SINCE,
+  BULK_DELETES_SINCE,
+  releaseAtLeast as reportedReleaseAtLeast,
+  routeMissing,
+} from '../../client/features.js';
 import {
   createIgnoreMatcher, parseIgnoreFile, parseIgnorePattern, type IgnorePattern,
 } from '../ignore-globs.js';
@@ -288,15 +294,14 @@ function isLikelyMinifiedSource(source: string): boolean {
  * `ix map` graph.
  */
 export function stripMapModeOps(patch: GraphPatchPayload): GraphPatchPayload {
-  const droppedNodes = new Set<unknown>(
-    patch.ops.filter(op => op.type === 'UpsertNode' && op['kind'] === 'chunk').map(op => op['id']),
-  );
+  const isChunk = (op: PatchOp): op is UpsertNodeOp => op.type === 'UpsertNode' && op.kind === 'chunk';
+  const droppedNodes = new Set<string>(patch.ops.filter(isChunk).map(op => op.id));
   return {
     ...patch,
     ops: patch.ops.filter(op => {
       if (op.type === 'AssertClaim' || op.type === 'RetractClaim') return false;
-      if (op.type === 'UpsertNode' && op['kind'] === 'chunk') return false;
-      if (op.type === 'UpsertEdge' && (droppedNodes.has(op['src']) || droppedNodes.has(op['dst']))) return false;
+      if (isChunk(op)) return false;
+      if (op.type === 'UpsertEdge' && (droppedNodes.has(op.src) || droppedNodes.has(op.dst))) return false;
       return true;
     }),
   };
@@ -564,9 +569,9 @@ export async function reconcileRemovedEntities(
   return {
     ...patch,
     ops: [
-      ...removedNodeIds.map(id => ({ type: 'DeleteNode', id })),
+      ...removedNodeIds.map((id): PatchOp => ({ type: 'DeleteNode', id })),
       ...nodeOps,
-      ...[...removedEdgeIds].map(id => ({ type: 'DeleteEdge', id })),
+      ...[...removedEdgeIds].map((id): PatchOp => ({ type: 'DeleteEdge', id })),
       ...edgeOps,
       ...otherOps,
     ],
@@ -699,10 +704,6 @@ function writtenBy(node: GraphNode | undefined, patch: GraphPatchPayload): boole
     && (provenance?.sourceHash ?? provenance?.source_hash) === patch.source.sourceHash;
 }
 
-function isUnsupportedRouteError(error: unknown): boolean {
-  return /^(?:Error:\s*)?(?:404|405|501):/.test(String(error));
-}
-
 /**
  * The orphan node ids to delete for each file, in `files` order. Never one a
  * patch of this batch upserts (`batchUpserts`), and never one the backend does
@@ -805,7 +806,9 @@ export async function sweepOrphanNodes(
           if (node && typeof node.id === 'string') live.set(node.id, node);
         }
       } catch (err) {
-        if (isUnsupportedRouteError(err)) {
+        // Removable once MIN_BACKEND_VERSION reaches 1.0.33 (`batchNodes` in
+        // client/features.ts).
+        if (routeMissing('batchNodes', err)) {
           throw new BatchNodeReadsUnsupported('the backend does not serve the batched node read (POST /v1/nodes)');
         }
         for (const id of ids) unread.add(id);
@@ -869,8 +872,10 @@ export function patchRequiresPerFileCommit(patch: GraphPatchPayload, bulkDeletes
  * The first release whose bulk route applies DeleteNode/DeleteEdge in the
  * patch's own workspace, by indexed sweep and primary key (Ix-memory #211,
  * #237): checked live on that release before delete-bearing patches moved there.
+ * Defined with the other optional features in client/features.ts; the per-file
+ * route for older backends is removable once MIN_BACKEND_VERSION reaches it.
  */
-export const BULK_DELETES_SINCE = '1.0.32';
+export { BULK_DELETES_SINCE };
 
 /**
  * Whether the backend's bulk route can take delete-bearing patches. Decided by
@@ -893,21 +898,11 @@ export function backendAppliesBulkDeletes(
  * reports none, or one that does not parse.
  */
 function releaseAtLeast(health: { release_version?: unknown } | null | undefined, min: string): boolean | null {
-  const release = health?.release_version;
-  if (typeof release !== 'string') return null;
-  const parse = (v: string): number[] | null => {
-    const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(v.trim());
-    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
-  };
-  const have = parse(release);
-  const need = parse(min)!;
-  if (have === null) return null;
-  for (let i = 0; i < 3; i++) if (have[i] !== need[i]) return have[i] > need[i];
-  return true;
+  return reportedReleaseAtLeast(health?.release_version, min);
 }
 
-/** The first release that serves `POST /v1/nodes` (Ix-memory batch reads). */
-export const BATCH_NODE_READS_SINCE = '1.0.33';
+/** The first release that serves `POST /v1/nodes` (Ix-memory batch reads); see client/features.ts. */
+export { BATCH_NODE_READS_SINCE };
 
 /**
  * Why the same-hash orphan sweep (IN-20) cannot run against this backend, or
@@ -1804,8 +1799,8 @@ function stitchFailureStatus(error: unknown): number | null {
  * such a backend, for a step it was never going to perform.
  */
 export function isStitchUnsupported(error: unknown): boolean {
-  const status = stitchFailureStatus(error);
-  return status === 404 || status === 501;
+  // Decided by `stitch` in client/features.ts, which names when it can go.
+  return routeMissing('stitch', error);
 }
 
 /**
@@ -4283,7 +4278,7 @@ export async function ingestFiles(
           sweepable.forEach((b, i) => {
             const ids = orphans[i]!;
             if (ids.length === 0) return;
-            b.patch = { ...b.patch, ops: [...ids.map(id => ({ type: 'DeleteNode', id })), ...b.patch.ops] };
+            b.patch = { ...b.patch, ops: [...ids.map((id): PatchOp => ({ type: 'DeleteNode', id })), ...b.patch.ops] };
             if (orphanRepair || writtenBefore.has(i)) {
               // The backend already holds this file's patch id: a repair runs
               // at the current extractor, and an extractor-change run may
@@ -4820,6 +4815,7 @@ export async function ingestFiles(
     const packagesChanged = pathsAddedOrDeleted.some(rel => nodePath.posix.basename(rel) === '__init__.py');
     if (incrementalRun && (summaryBeforeRun.size > 0 || deletedRel.length > 0 || pendingRel.length > 0 || packagesChanged)) {
       const table = symbolTable();
+      const { changedNames, findDependents, importsChanged } = await loadSymbolIndex();
       const names = new Set<string>();
       // Paths whose importers may resolve differently: files that appeared,
       // and files that changed what they import (a re-export moved).
@@ -5225,7 +5221,7 @@ export async function ingestFiles(
           }
         }
       } catch (err) {
-        // Unsupported is not failed: an older backend answers 404 here, and
+        // Unsupported is not failed: an older backend has no /v1/stitch, and
         // that is the case this call has always been allowed to shrug off.
         if (!isStitchUnsupported(err)) {
           stitchErrors++;

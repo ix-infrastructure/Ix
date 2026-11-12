@@ -7,6 +7,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { callerFromChildEnv, childHintEnv, HINT_TOOL_NAMES, mcpCaller, toolCall } from "../../mcp/hints.js";
 import { createInProcessRunner } from "../../mcp/runner.js";
 import {
   createIxMcpServer,
@@ -17,7 +18,7 @@ import {
 } from "../../mcp/server.js";
 import { NEXT_READ_MAX_LINES, nextReads, nextToolCalls, truncationAdvice } from "../commands/context.js";
 import { inferRiskSemantics, type ImpactFacts } from "../impact/risk-semantics.js";
-import { disambiguationHint, forMcp, IX_CALLER_ENV, toolCall } from "../next-step.js";
+import { CLI_CALLER, currentCaller, disambiguationHint, setProcessCaller, withCaller } from "../next-step.js";
 import { roleHint } from "../role-filter.js";
 import { reportAmbiguousTarget } from "../ui.js";
 
@@ -35,10 +36,10 @@ function expectRunnableOverMcp(text: string): void {
   }
 }
 
-function withCaller(value: string | undefined): void {
-  if (value === undefined) delete process.env[IX_CALLER_ENV];
-  else process.env[IX_CALLER_ENV] = value;
-}
+/** A core MCP session's reader, the default toolset. */
+const CORE_SESSION = mcpCaller(IX_MCP_CORE_TOOL_NAMES);
+/** A `--tools=all` session's reader. */
+const ALL_SESSION = mcpCaller(IX_MCP_TOOL_NAMES);
 
 const clients: Client[] = [];
 afterEach(async () => {
@@ -82,8 +83,8 @@ describe("server instructions", () => {
 });
 
 describe("hints produced for an MCP caller", () => {
-  beforeEach(() => withCaller("mcp"));
-  afterEach(() => withCaller(undefined));
+  beforeEach(() => setProcessCaller(CORE_SESSION));
+  afterEach(() => setProcessCaller(CLI_CALLER));
 
   function bundle(
     target: { name: string; kind: string; path?: string },
@@ -251,10 +252,8 @@ describe("hints produced for an MCP caller", () => {
 });
 
 describe("hints produced for the CLI", () => {
-  beforeEach(() => withCaller(undefined));
-
   it("are unchanged", () => {
-    expect(forMcp()).toBe(false);
+    expect(currentCaller()).toBe(CLI_CALLER);
     expect(roleHint(1)).toBe("1 test/fixture candidate hidden. Use --include-tests to include.");
     expect(disambiguationHint("Use --pick <n> or --path to disambiguate.")).toBe("Use --pick <n> or --path to disambiguate.");
     expect(nextReads({ evidence: [{ location: { path: "src/a.ts", lineStart: 1, lineEnd: 900 } }] } as never)).toEqual([
@@ -272,20 +271,121 @@ describe("toolCall", () => {
 });
 
 describe("the MCP runner", () => {
-  afterEach(() => withCaller(undefined));
+  const probe = () => {
+    const program = new Command();
+    program.command("probe").action(async () => {
+      // After an await too: the reader follows the command's async work.
+      await new Promise((resolve) => setImmediate(resolve));
+      const caller = currentCaller();
+      console.log(`style=${caller.style} hosted=${caller.hosted} map=${caller.command({ action: "map" }) ?? "-"}`);
+    });
+    return program;
+  };
 
-  it("marks every command it runs as serving MCP, and only while it runs", async () => {
-    withCaller(undefined);
-    const runIx = createInProcessRunner({
-      createProgram: () => {
-        const program = new Command();
-        program.command("probe").action(() => console.log(`caller=${process.env[IX_CALLER_ENV] ?? "cli"}`));
-        return program;
+  it("runs every command for the session that asked, and only while it runs", async () => {
+    const runIx = createInProcessRunner({ createProgram: probe });
+    const result = await withCaller(ALL_SESSION, () => runIx(["probe"]));
+    expect(result.stdout.trim()).toBe("style=tool hosted=true map=ix_map");
+    expect(currentCaller()).toBe(CLI_CALLER);
+    expect(process.env.IX_CALLER).toBeUndefined();
+  });
+
+  it("names no tool when run outside a session, which offered none", async () => {
+    const runIx = createInProcessRunner({ createProgram: probe });
+    const result = await runIx(["probe"]);
+    expect(result.stdout.trim()).toBe("style=tool hosted=true map=-");
+  });
+});
+
+describe("the MCP server", () => {
+  async function callersSeen(tools?: "core" | "all"): Promise<ReadonlySet<string>> {
+    let seen: ReadonlySet<string> | undefined;
+    const server = createIxMcpServer({
+      version: "test",
+      tools,
+      runIx: async () => {
+        const caller = currentCaller() as ReturnType<typeof mcpCaller>;
+        seen = caller.advertised;
+        return { ok: true, stdout: "ok", stderr: "" };
       },
     });
-    const result = await runIx(["probe"]);
-    expect(result.stdout.trim()).toBe("caller=mcp");
-    expect(process.env[IX_CALLER_ENV]).toBeUndefined();
+    const client = new Client({ name: "ix-mcp-hints-test", version: "1.0.0" });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await server.connect(st);
+    await client.connect(ct);
+    clients.push(client);
+    await client.callTool({ name: "ix_impact", arguments: { target: "verify" } });
+    return seen!;
+  }
+
+  it("runs every command for a reader offered exactly the session's tools", async () => {
+    expect([...(await callersSeen())].sort()).toEqual([...IX_MCP_CORE_TOOL_NAMES].sort());
+    const all = await callersSeen("all");
+    for (const tool of HINT_TOOL_NAMES) expect(all.has(tool), tool).toBe(true);
+  });
+});
+
+describe("hints by toolset", () => {
+  const cut = (what: string) => ({
+    target: { id: "t", resolutionMode: "exact", name: "verify", kind: "function", path: "src/auth.ts" },
+    evidence: [],
+    truncation: { entitiesTruncated: 0, relationshipsTruncated: 0, evidenceTruncated: 3, charactersTruncated: 0, cut: [{ what, count: 3 }] },
+  }) as never;
+
+  it("name only tools the session was offered, and the first offered step", () => {
+    // ix_depends is outside the core set: a core session gets the nearest core tool.
+    expect(withCaller(CORE_SESSION, () => truncationAdvice(cut("relationship")))).toContain(
+      "ix_impact target=verify path=src/auth.ts, or raise max_tokens",
+    );
+    expect(withCaller(ALL_SESSION, () => truncationAdvice(cut("relationship")))).toContain(
+      "ix_depends symbol=verify, or raise max_tokens",
+    );
+    // No tool answers `ix conflicts`: the budget alone, in every toolset.
+    expect(withCaller(ALL_SESSION, () => truncationAdvice(cut("conflict")))).toMatch(/— raise max_tokens \(default 3000\)$/);
+  });
+
+  it("drop a step whose tool the session lacks, rather than name it", () => {
+    const none = mcpCaller([]);
+    const bundle = {
+      target: { id: "t", resolutionMode: "exact", name: "verify", kind: "function", path: "src/auth.ts" },
+      evidence: [{ location: { path: "src/auth.ts", lineStart: 1, lineEnd: 9 } }],
+    } as never;
+    expect(withCaller(none, () => nextToolCalls(bundle))).toEqual([]);
+    expect(withCaller(none, () => truncationAdvice(cut("caller")))).toMatch(/— raise max_tokens \(default 3000\)$/);
+    for (const tool of HINT_TOOL_NAMES) {
+      expect(IX_MCP_TOOL_NAMES as readonly string[], `${tool} is a real tool`).toContain(tool);
+    }
+  });
+
+  it("send ix_impact's next step to the richer tool when the session has it", () => {
+    const facts: ImpactFacts = {
+      name: "NodeKind", kind: "enum", targetPath: "src/x.ts", members: 24, callers: 2, callees: 1,
+      directImporters: 8, directDependents: 12, memberLevelCallers: 0, propagationBuckets: [],
+    };
+    const core = withCaller(CORE_SESSION, () => inferRiskSemantics(facts).nextStep);
+    const all = withCaller(ALL_SESSION, () => inferRiskSemantics(facts).nextStep);
+    const cli = inferRiskSemantics(facts).nextStep;
+    expect(core).toMatch(/^List every importer, with path:lines: ix_neighbors symbol=NodeKind relation=imported_by/);
+    expect(all).toBe("Understand its system role: ix_explain symbol=NodeKind");
+    expect(cli).toBe("Understand its system role: ix explain NodeKind");
+  });
+
+  it("keep scopes apart: concurrent runs each see their own reader", async () => {
+    const seen = await Promise.all([CORE_SESSION, ALL_SESSION, CLI_CALLER].map((caller) =>
+      withCaller(caller, async () => {
+        await new Promise((resolve) => setImmediate(resolve));
+        return currentCaller();
+      })));
+    expect(seen).toEqual([CORE_SESSION, ALL_SESSION, CLI_CALLER]);
+  });
+});
+
+describe("the child-process runner's reader", () => {
+  it("carries the session's tools across the process boundary", () => {
+    const child = callerFromChildEnv(childHintEnv(CORE_SESSION));
+    expect([...child.advertised].sort()).toEqual([...IX_MCP_CORE_TOOL_NAMES].sort());
+    expect(child.style).toBe("tool");
+    expect(callerFromChildEnv({}).advertised.size).toBe(0);
   });
 });
 

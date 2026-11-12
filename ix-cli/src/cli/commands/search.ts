@@ -372,7 +372,9 @@ Examples:
             // backend ignores the unknown field, and the client-side filter
             // and widening loop below still apply either way. Separators only:
             // the backend lowercases both sides itself, and the stored side is
-            // POSIX by construction (see path-match.ts).
+            // POSIX by construction (see path-match.ts). The widening for an
+            // older backend is removable once MIN_BACKEND_VERSION reaches
+            // 1.0.31 (`searchScope` in client/features.ts).
             scope: effectivePathFilter ? normalizePathSeparators(effectivePathFilter) : undefined,
           });
       let rawNodes = await fetchCandidates(fetchLimit);

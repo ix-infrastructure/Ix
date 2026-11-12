@@ -1,60 +1,33 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import chalk from "chalk";
+import { OSS_COMMANDS, ROOT_HELP_SECTIONS, type HelpLine } from "./register/commands.js";
 
-const OSS_HELP = [
-  `${chalk.cyan("ix")} — System Intelligence CLI`,
-  ``,
-  chalk.bold(`Start:`),
-  `  map [path]            Map system`,
-  `  watch                 Watch changes`,
-  `  ingest [path]         Ingest files or GitHub data`,
-  `  config                Update config`,
-  ``,
-  chalk.bold(`Understand:`),
-  `  context [target]      Bounded context bundle (start here)`,
-  `  search <term>         Search system`,
-  `  text <term>           Search text (ripgrep)`,
-  `  locate <symbol>       Find definition`,
-  `  explain <symbol>      Explain behavior`,
-  `  impact <target>       Analyze impact`,
-  `  overview <target>     Summarize structure`,
-  `  read <target>         Read source`,
-  `  around <path:line>    Who depends on it`,
-  `  smells                Detect issues`,
-  ``,
-  chalk.bold(`Explore:`),
-  `  callers <symbol>      Who calls it`,
-  `  callees <symbol>      What it calls`,
-  `  overrides <symbol>    Its overrides and bases`,
-  `  imports <target>      What it imports`,
-  `  imported-by <target>  What imports it`,
-  `  contains <target>     Its members`,
-  `  depends <target>      Upstream dependents`,
-  `  entity <id>           Entity details`,
-  `  trace <symbol>        Trace flow`,
-  `  subsystems            Explore structure`,
-  `  inventory             List components`,
-  `  rank                  Rank importance`,
-  `  history <target>      Show history`,
-  `  diff <from> <to>      Compare changes`,
-  `  patches               Recent patches`,
-  `  conflicts             Detected conflicts`,
-  ``,
-  chalk.bold(`System:`),
-  `  status                Check status`,
-  `  stats                 Show stats`,
-  `  doctor                Diagnose issues`,
-  `  verify                Compare graph to a re-parse`,
-  `  mcp [install|doctor]  Serve agent tools over MCP`,
-  `  install               Install the Ix skill into agent harnesses`,
-  `  docker <action>       Manage backend`,
-  `  view                  Open visualizer`,
-  `  reset                 Reset map`,
-  `  savings               Show token savings`,
-  `  upgrade               Update ix`,
-  ``,
-].join("\n");
+/** Where a summary starts, as the hand-written help always had it. */
+const USAGE_WIDTH = 22;
+
+/**
+ * The OSS part of `ix --help`, built from the command manifest
+ * (`register/commands.ts`): each section's help lines, in the section's order.
+ */
+function ossHelp(): string {
+  const lines = new Map<string, HelpLine>();
+  for (const entry of OSS_COMMANDS) {
+    for (const line of entry.help ?? []) lines.set(line.usage.split(" ")[0], line);
+  }
+  const out = [`${chalk.cyan("ix")} — System Intelligence CLI`, ``];
+  for (const section of ROOT_HELP_SECTIONS) {
+    out.push(chalk.bold(`${section.title}:`));
+    for (const name of section.commands) {
+      const line = lines.get(name);
+      // The manifest test holds every section name to a help line; this only
+      // keeps a mistake from printing "undefined" before CI catches it.
+      if (line) out.push(`  ${line.usage.padEnd(USAGE_WIDTH)}${line.summary}`);
+    }
+    out.push(``);
+  }
+  return out.join("\n");
+}
 
 /**
  * The commands `register/oss-fallbacks.ts` registers when Ix Pro is absent.
@@ -72,7 +45,7 @@ const FOOTER = `Use "ix <command> --help" for details.
 export function buildHelpText(
   proCommands?: { name: string; desc: string }[],
 ): string {
-  let text = OSS_HELP;
+  let text = ossHelp();
 
   // No list means Pro did not load, so the OSS fallbacks are what answer.
   if (proCommands === undefined) text += `\n${OSS_MEMORY_HELP}\n\n`;

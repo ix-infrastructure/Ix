@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { getEndpoint, getLocalToken } from "../cli/config.js";
+import { getEndpoint, getLocalToken } from "../cli/connection.js";
 import { IxClient } from "./api.js";
 import { QUERY_CLIENT_OPTIONS } from "./request-memo.js";
 import { combineSignals, currentRunSignal } from "./run-signal.js";

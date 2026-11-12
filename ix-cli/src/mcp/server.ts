@@ -22,6 +22,8 @@ import {
   resolveDefaultRunner,
   type IxRunner,
 } from "./runner.js";
+import { mcpCaller } from "./hints.js";
+import { withCaller } from "../cli/next-step.js";
 
 export type { IxRunner } from "./runner.js";
 
@@ -202,6 +204,25 @@ const TOOL_OUTPUT_SCHEMA: Partial<Record<(typeof IX_MCP_TOOL_NAMES)[number], z.Z
   // passing `structured: true` receives.
 };
 
+/**
+ * Tools whose result can be a JSON document. Every other tool returns
+ * `--format llm` records (`kind key=value`, one per line), which have no
+ * nested fields to read.
+ *
+ * Data only: nothing here routes on it. scripts/check-plugin-contract.mjs reads
+ * it to fail plugin skill text that tells a model to read a JSON path from a
+ * records tool, and mcp-argv-contract.test.ts checks it against the format
+ * each tool actually runs. `ix_smells` always answers in JSON, `ix_context`
+ * does with `structured: true`, and the Pro tools run `--format json`.
+ */
+export const IX_MCP_JSON_RESULT_TOOLS: readonly (typeof IX_MCP_TOOL_NAMES)[number][] = [
+  "ix_context",
+  "ix_map",
+  "ix_smells",
+  "ix_ingest",
+  ...IX_MCP_PRO_TOOL_NAMES,
+];
+
 /** Which catalog to advertise. */
 export type ToolsetName = "core" | "all";
 
@@ -307,10 +328,13 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   // process.stdout and process.exit, which a caller supplying its own runner
   // (every test, and any embedder) must not have done to it.
   let fallback: IxRunner | undefined;
-  const runIx: IxRunner =
+  const baseRunIx: IxRunner =
     options.runIx ??
     ((args, timeoutMs) =>
       (fallback ??= resolveDefaultRunner({ version, redirectIdleStdout: true }))(args, timeoutMs));
+  // Every command runs for this session's reader, so its hints name only the
+  // tools this session offers (`hintCaller`, below).
+  const runIx: IxRunner = (args, timeoutMs) => withCaller(hintCaller, () => baseRunIx(args, timeoutMs));
 
   const server = new McpServer(
     {
@@ -335,6 +359,8 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       || core.has(name)
       || (IX_MCP_PRO_TOOL_NAMES as readonly string[]).includes(name),
   };
+  // The OSS tools this session offers. Hints never name a Pro tool.
+  const hintCaller = mcpCaller(IX_MCP_OSS_TOOL_NAMES.filter((name) => ctx.advertise(name)));
 
   // First, so it heads tools/list: it is where a session should start.
   registerTool(

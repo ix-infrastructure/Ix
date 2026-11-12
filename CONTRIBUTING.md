@@ -42,6 +42,10 @@ This is a quick check that the build works. It is not everything CI runs: see
 
 ## Development Workflow
 
+For a map of the code — the two packages, how commands are registered, how a
+file becomes graph patches, and the rules that hold it together — read
+[docs/architecture.md](docs/architecture.md) first.
+
 1. Create a branch from `main`
 2. Make your changes
 3. Run the checks in [Before you open a PR](#before-you-open-a-pr)
@@ -108,7 +112,12 @@ in `ci.yml`:
 Other workflows report on the PR as well. The PR title must be a conventional
 commit (`pr-title.yml`). The [security checks](#security-checks) also run.
 A change under `ix-cli/src/cli/` runs the advisory plugin contract check
-(`plugin-contract.yml`).
+(`plugin-contract.yml`): the commands, flags, json fields and MCP tool names
+the editor plugins use. Its scope and its ignore list are described at the top
+of `ix-cli/scripts/check-plugin-contract.mjs`. It also reads the MCP tool lists
+in `ix-cli/src/mcp/server.ts`, but a PR that only changes `ix-cli/src/mcp/`
+does not trigger it: there it runs nightly, or by hand with
+`npm run build && node scripts/check-plugin-contract.mjs --clone` in `ix-cli/`.
 
 ## Branch Naming
 
@@ -146,6 +155,27 @@ Breaking changes: use `feat!:` or `fix!:` prefix.
 | Any change | Everything in [Before you open a PR](#before-you-open-a-pr) |
 
 ## CLI Standards
+
+### Adding a command
+
+1. Write `ix-cli/src/cli/commands/<name>.ts`, with the copyright header and a
+   `register<Name>Command(program)` function that declares the command.
+2. Add one entry for it at the end of `OSS_COMMANDS` in
+   `ix-cli/src/cli/register/commands.ts`: every name and alias it registers,
+   its `load` import, and its `ix --help` line. Put the help line's name in a
+   `ROOT_HELP_SECTIONS` section in the same file. Leave `help` out only for a
+   command that should not be listed.
+
+Do not reorder the existing entries. The fast-path table, `registerOssCommands()`
+and the root help are all built from that list, and Ix Pro registers its
+commands after them. When a name is registered twice, the first registration wins.
+
+Declare shared options with the builders in `ix-cli/src/cli/options.ts` rather than
+copying a neighbour's: `formatOption()` for `--format`, `choiceOption()` for an
+option with a fixed set of values, `addTargetOptions()` and `addPagingOptions()`
+for the target and paging flags. `command-manifest.test.ts`,
+`help-coverage.test.ts` and `startup-fast-path.test.ts` fail if the entry and the
+command disagree.
 
 ### Output quality
 - Clean, minimal output — no unnecessary verbosity

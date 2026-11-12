@@ -16,7 +16,7 @@ import { formatOption, kindOption, noSuggestOption, pathOption, pickOption, stri
 import { EXIT_CODES_HELP } from "../outcome.js";
 import { renderSection, renderWarning, renderNote } from "../ui.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm } from "../map-freshness.js";
-import { forMcp, toolCall } from "../next-step.js";
+import { hint, suggestedCommand } from "../next-step.js";
 import {
   assessTargetStructure, checkGraphHealth, graphHealthJson, graphHealthProse, isUnhealthy, worseHealth,
 } from "../graph-health.js";
@@ -188,7 +188,7 @@ async function rawExplain(
               name: name || e.dst,
               kind: calleeNode.kind,
               resolved: false,
-              suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
+              ...suggestedCommand({ action: "text", pattern: e.dst.slice(0, 8), quote: true }),
             };
           }
           return {
@@ -197,14 +197,14 @@ async function rawExplain(
             id: e.dst,
             resolved: true,
             path: relativePath(calleeNode.provenance?.source_uri ?? calleeNode.provenance?.sourceUri),
-            suggestedCommand: forMcp() ? toolCall("ix_explain", { symbol: name }) : `ix explain "${name}"`,
+            ...suggestedCommand({ action: "explain", symbol: name, quote: true }),
           };
         } catch {
           return {
             name: e.dst,
             resolved: false,
             diagnostic: "unresolved_call_target",
-            suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
+            ...suggestedCommand({ action: "text", pattern: e.dst.slice(0, 8), quote: true }),
           } as EntityRef;
         }
       })
@@ -214,7 +214,7 @@ async function rawExplain(
     if (unresolvedCount > 0) {
       diagnostics.push({
         code: "unresolved_call_target",
-        message: `${unresolvedCount} callee(s) could not be resolved to named entities. Use ${forMcp() ? "ix_text" : "ix text"} to locate them.`,
+        message: `${unresolvedCount} callee(s) could not be resolved to named entities.${locateWith(hint({ action: "text" }))}`,
       });
     }
   }
@@ -229,7 +229,7 @@ async function rawExplain(
         ...unresolvedCalls.names.map((name): EntityRef => ({
           name,
           resolved: false,
-          suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: name }) : `ix text "${name}"`,
+          ...suggestedCommand({ action: "text", pattern: name, quote: true }),
         })),
       ];
     }
@@ -285,4 +285,9 @@ async function rawExplain(
     if (stale) renderWarning("Source has changed since last ingest. Run ix map to update.");
     formatExplain(result, "text");
   }
+}
+
+/** ` Use ix text to locate them.`, or nothing when the reader has no text search. */
+function locateWith(text: string | undefined): string {
+  return text ? ` Use ${text} to locate them.` : "";
 }

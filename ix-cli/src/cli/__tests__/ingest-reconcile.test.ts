@@ -3,7 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import * as nodePath from "node:path";
 
-import type { GraphNode, GraphPatchPayload } from "../../client/types.js";
+import type { GraphNode, GraphPatchPayload, PatchOp } from "../../client/types.js";
 import {
   BATCH_NODE_READS_SINCE,
   BULK_DELETES_SINCE,
@@ -18,7 +18,10 @@ import {
 } from "../commands/ingest.js";
 import { createLimiter } from "../tree-walk.js";
 
-function patchWith(ops: GraphPatchPayload["ops"]): GraphPatchPayload {
+/** A fixture op may leave out the fields the code under test does not read. */
+type OpFixture = { type: PatchOp["type"] } & Record<string, unknown>;
+
+function patchWith(ops: OpFixture[]): GraphPatchPayload {
   return {
     patchId: "next-patch",
     actor: "ix/ingestion",
@@ -31,7 +34,7 @@ function patchWith(ops: GraphPatchPayload["ops"]): GraphPatchPayload {
       workspaceId: "deadbeef",
     },
     baseRev: 0,
-    ops,
+    ops: ops as PatchOp[],
     replaces: [],
   };
 }
@@ -417,7 +420,7 @@ describe("reconcileRemovedEntities", () => {
 
       expect(entity.mock.calls.map(c => c[0]).sort()).toEqual(["a", "h1"]);
       expect(deleted(reconciled).sort()).toEqual(["a", "h1"]);
-      expect(reconciled.ops.some(o => o["id"] === "chunk-L9")).toBe(false);
+      expect(reconciled.ops.some(o => "id" in o && o.id === "chunk-L9")).toBe(false);
       expect(reconciled.ops.filter(o => o.type === "DeleteEdge")).toEqual([]);
     });
 
@@ -473,7 +476,7 @@ describe("sweepOrphanNodes (IN-20 same-hash sweep)", () => {
   const node = (nid: string, over: Record<string, unknown> = {}): GraphNode => ({
     id: nid, kind: "function", name: nid, attrs: {}, provenance: { sourceUri: "src/example.ts" }, ...over,
   }) as unknown as GraphNode;
-  const fileWith = (ops: GraphPatchPayload["ops"], uri = "src/example.ts") => {
+  const fileWith = (ops: OpFixture[], uri = "src/example.ts") => {
     const patch = patchWith(ops);
     return { patch: { ...patch, source: { ...patch.source, uri } }, previousPatchIds: [`old@${uri}`] };
   };

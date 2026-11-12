@@ -22,7 +22,7 @@ import { readBackendHealth } from "./upgrade.js";
 import { renderWarning } from "../ui.js";
 import { describeUnavailableGrammars } from "../grammar-status.js";
 import type { IxClient } from "../../client/api.js";
-import { formatOption } from "../options.js";
+import { choiceOption, formatOption } from "../options.js";
 import { DEFAULT_FORMAT_CHOICES } from "../default-format.js";
 
 // Hard wall-clock budget for a single `ix map`. Past this, the shared deadline
@@ -405,7 +405,12 @@ export function registerMapCommand(program: Command): void {
     .option("--min-confidence <n>", "Only show regions above this confidence threshold (0-1)", "0")
     .option("--max-items <n>", "Max items to show per section in text output (default: 10)", "10")
     .option("--all-items", "Show all items in each section (overrides --max-items)")
-    .option("--sort <mode>", "Sort mode for text output (importance|confidence|size|alpha)", "importance")
+    .addOption(choiceOption(
+      "--sort <mode>",
+      "Sort mode for text output (importance|confidence|size|alpha)",
+      ["importance", "confidence", "size", "alpha"],
+      "importance",
+    ))
     .option("--graph", "Render the hierarchy as a graph/tree view (default)")
     .option("--list", "Render the ranked list view instead of the default graph/tree view")
     .option("--full", "Force full local map, bypassing automatic safety limits (advanced/testing)")

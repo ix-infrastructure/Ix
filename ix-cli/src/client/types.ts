@@ -1,5 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import type * as GraphSchema from "./graph-schema.js";
+
 export interface CommitResult {
   newRev: number;
   status: "Ok" | "Idempotent" | "BaseRevMismatch";
@@ -258,10 +260,18 @@ export interface PatchSource {
   workspaceId?: string;
 }
 
-export interface PatchOp {
-  type: string;
-  [key: string]: unknown;
-}
+// The op shapes are defined once, in graph-schema.ts (a copy of
+// core-ingestion/src/schema.ts). Each is named here so docs/api/openapi.yaml's
+// schemas have a counterpart in this file (scripts/check-api-parity.mjs).
+export type NodeKind = GraphSchema.NodeKind;
+export type EdgePredicate = GraphSchema.EdgePredicate;
+export type PatchOp = GraphSchema.PatchOp;
+export type UpsertNodeOp = GraphSchema.UpsertNodeOp;
+export type UpsertEdgeOp = GraphSchema.UpsertEdgeOp;
+export type DeleteNodeOp = GraphSchema.DeleteNodeOp;
+export type DeleteEdgeOp = GraphSchema.DeleteEdgeOp;
+export type AssertClaimOp = GraphSchema.AssertClaimOp;
+export type RetractClaimOp = GraphSchema.RetractClaimOp;
 
 export interface GraphPatchPayload {
   patchId: string;
