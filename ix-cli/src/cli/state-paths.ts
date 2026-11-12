@@ -127,6 +127,18 @@ export function autoMapStampPath(projectRoot: string): string {
 }
 
 /**
+ * Path to the marker that an `ix map` of one project root through a remote
+ * (cloud) backend succeeded, which `ix map --auto` accepts as "mapped before"
+ * for a root whose cloud ingest left no local ingest baseline (see
+ * `auto-map.ts`). In the `ingest` group: what clears the local baseline
+ * clears this too.
+ */
+export function autoMapCloudMarkPath(projectRoot: string): string {
+  const key = rootKey(projectRoot);
+  return join(ixHome(), `auto_map_cloud_${key}.json`);
+}
+
+/**
  * Which per-root state files are cleared together.
  *
  *   - `ingest`: describes the source graph; cleared by reset, workspace
@@ -161,6 +173,7 @@ export const WORKSPACE_STATE_FILES: readonly WorkspaceStateFile[] = [
   { name: "ingest_orphans", owner: "ingest-baseline.ts", group: "ingest", path: ingestOrphanSweepPath },
   { name: "ingest_symbols", owner: "ingest-symbols.ts", group: "ingest", path: ingestSymbolsPath },
   { name: "ingest_symbols.journal", owner: "ingest-symbols.ts", group: "ingest", path: ingestSymbolsJournalPath },
+  { name: "auto_map_cloud", owner: "auto-map.ts", group: "ingest", path: autoMapCloudMarkPath },
   { name: "map_baseline", owner: "map-baseline.ts", group: "map", path: mapBaselinePath },
   { name: "map_result", owner: "map-result-cache.ts", group: "map", path: mapResultCachePath },
   { name: "map_stale", owner: "map-freshness.ts", group: "map", path: mapStalePath },

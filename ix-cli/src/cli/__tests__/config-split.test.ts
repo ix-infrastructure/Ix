@@ -82,7 +82,7 @@ describe("cli/config.ts split (#943)", () => {
     const config = await import("../config.js");
     expect(Object.keys(config).sort()).toEqual([
       "ConfigLockError", "ConfigParseError", "DEFAULT_ENDPOINT", "absoluteFromSourceUri",
-      "autoMapStampPath", "canonicalWorkspacePath", "clearIngestMtimeCache", "clearLocalToken", "clearMapBaseline",
+      "autoMapCloudMarkPath", "autoMapStampPath", "canonicalWorkspacePath", "clearIngestMtimeCache", "clearLocalToken", "clearMapBaseline",
       "clearMapResultCache", "clearStitchScopeCache", "createClient", "ensureLocalToken",
       "findWorkspaceForCwd", "getDefaultWorkspace", "getEndpoint", "getLocalToken", "gitRootFor",
       "ingestMtimeCachePath", "ingestOrphanSweepPath", "ingestRebuildPath", "ingestSymbolsJournalPath",

@@ -9,7 +9,8 @@ import { createServer } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  autoMapDebounceMs, autoMapInvocation, autoMapTrailInvocation, autoMapTrailMs, claimAutoMapWindow, explainAutoMap, runAutoMap,
+  autoMapDebounceMs, autoMapInvocation, autoMapTrailInvocation, autoMapTrailMs, claimAutoMapWindow, explainAutoMap, recordCloudMap,
+  retireStaleLock, runAutoMap,
   DEFAULT_AUTO_MAP_DEBOUNCE_MS, type AutoMapDeps,
 } from "../auto-map.js";
 import { autoMapStampPath } from "../state-paths.js";
@@ -35,7 +36,7 @@ function deps(over: AutoMapDeps = {}): AutoMapDeps {
     now: () => 1_000_000,
     homeDir: () => path.join(scratch, "home"),
     isMapped: () => true,
-    remoteSkip: async () => false,
+    cloudReady: async () => false,
     backendUp: async () => true,
     startMap: (root) => { started.push(root); },
     startTrail: (root, delayMs, env) => { trails.push({ root, delayMs, env }); },
@@ -97,11 +98,34 @@ describe("runAutoMap: the rules", () => {
 
   it("skips against a remote backend unless IX_AUTO_MAP_CLOUD=1", async () => {
     registerRemoteRunner({ runIngestion: async () => {}, isReady: async () => true });
-    const real = deps({ remoteSkip: undefined });
+    const real = deps({ cloudReady: undefined });
     expect((await runAutoMap(repo, real)).rule).toBe("remote");
     expect(started).toEqual([]);
     process.env.IX_AUTO_MAP_CLOUD = "1";
     expect((await runAutoMap(repo, real)).rule).toBe("started");
+  });
+
+  it("with IX_AUTO_MAP_CLOUD=1, maps a root mapped only in the cloud, without asking the local backend", async () => {
+    // Only a cloud backend: nothing listens on the configured local endpoint,
+    // and the cloud ingest left no local ingest baseline.
+    registerRemoteRunner({ runIngestion: async () => {}, isReady: async () => true });
+    process.env.IX_AUTO_MAP_CLOUD = "1";
+    const server = createServer();
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    const { port } = server.address() as { port: number };
+    await new Promise<void>((done) => server.close(() => done()));
+    process.env.IX_ENDPOINT = `http://127.0.0.1:${port}`;
+    const real = deps({ cloudReady: undefined, isMapped: undefined, backendUp: undefined });
+    expect(await runAutoMap(repo, real)).toMatchObject({ rule: "unmapped", root: repo });
+    recordCloudMap(repo);
+    expect(await runAutoMap(repo, real)).toMatchObject({ rule: "started", root: repo });
+    expect(started).toEqual([repo]);
+  });
+
+  it("does not take a cloud map as a local one: a local backend needs the ingest baseline", async () => {
+    recordCloudMap(repo);
+    expect(await runAutoMap(repo, deps({ isMapped: undefined }))).toMatchObject({ rule: "unmapped", root: repo });
+    expect(started).toEqual([]);
   });
 
   it("skips when the backend is down, and does not ask again within the window", async () => {
@@ -257,6 +281,27 @@ describe("claimAutoMapWindow", () => {
     expect(claimAutoMapWindow(repo, 30_000, Date.now())).toEqual({ claim: "claimed" });
   });
 
+  it("does not remove a fresh lock another caller took after this one judged the old lock stale", () => {
+    // A and B both saw a dead holder's stale lock; A removed it and C took a
+    // fresh one. B's removal must leave C's lock in place.
+    const lock = `${autoMapStampPath(repo)}.lock`;
+    fs.mkdirSync(path.dirname(lock), { recursive: true });
+    fs.writeFileSync(lock, "C");
+    const ino = fs.statSync(lock).ino;
+    retireStaleLock(lock, Date.now());
+    expect(fs.readFileSync(lock, "utf-8")).toBe("C");
+    expect(fs.statSync(lock).ino).toBe(ino);
+    expect(fs.readdirSync(path.dirname(lock)).filter((n) => n.startsWith(path.basename(lock)))).toEqual([path.basename(lock)]);
+    expect(claimAutoMapWindow(repo, 30_000, Date.now())).toEqual({ claim: "busy" });
+
+    // A stale one is removed, and nothing is left beside it.
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(lock, old, old);
+    retireStaleLock(lock, Date.now());
+    expect(fs.readdirSync(path.dirname(lock)).filter((n) => n.startsWith(path.basename(lock)))).toEqual([]);
+    retireStaleLock(lock, Date.now()); // gone already: no throw
+  });
+
   it("does not let a stamp from a clock that went back hold the window longer than the window", () => {
     expect(claimAutoMapWindow(repo, 30_000, 10_000_000)).toEqual({ claim: "claimed" });
     expect(claimAutoMapWindow(repo, 30_000, 10_000_000 - 60_000)).toEqual({ claim: "claimed" });
@@ -314,10 +359,34 @@ describe("how the map starts", () => {
     expect(inv.args).toEqual(["/x/cli/main.js", "map", "--auto", repo]);
     expect(inv.options).toMatchObject({ cwd: repo, detached: true, stdio: "ignore", shell: false });
     expect(inv.options.env).toMatchObject({ KEEP: "1", IX_AUTO_MAP_TRAIL_MS: "20250" });
-    expect(autoMapTrailMs("20250")).toBe(20_250);
-    expect(autoMapTrailMs(undefined)).toBeUndefined();
-    expect(autoMapTrailMs("soon")).toBeUndefined();
-    expect(autoMapTrailMs("99999999")).toBe(600_000);
+    expect(autoMapTrailMs("20250", 30_000)).toBe(20_250);
+    expect(autoMapTrailMs(undefined, 30_000)).toBeUndefined();
+    expect(autoMapTrailMs("soon", 30_000)).toBeUndefined();
+    // Never past the end of the window it was scheduled for.
+    expect(autoMapTrailMs("99999999", 30_000)).toBe(30_250);
+  });
+
+  it("lets a trailing call outlast a window longer than ten minutes, so the window still gets its map", async () => {
+    const windowMs = 60 * 60_000;
+    const env = { IX_AUTO_MAP_DEBOUNCE_MS: String(windowMs) };
+    let now = 1_000_000;
+    const d = deps({ now: () => now, env });
+    expect((await runAutoMap(repo, d)).rule).toBe("started");
+    now += 1_000;
+    expect((await runAutoMap(repo, d)).rule).toBe("debounced");
+    expect(trails).toHaveLength(1);
+    const delayMs = trails[0].delayMs;
+    expect(delayMs).toBe(windowMs - 1_000 + 250);
+
+    let waited = -1;
+    const trail = deps({
+      now: () => now + waited,
+      env: { ...env, IX_AUTO_MAP_TRAIL_MS: String(delayMs) },
+      sleep: async (ms) => { waited = ms; },
+    });
+    expect((await runAutoMap(repo, trail)).rule).toBe("started");
+    expect(waited).toBe(delayMs);
+    expect(started).toEqual([repo, repo]);
   });
 
   it("explains each outcome in one line", () => {

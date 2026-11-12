@@ -5,7 +5,8 @@ import * as path from "node:path";
 import { homedir } from "node:os";
 import { spawn, type SpawnOptions } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { autoMapStampPath } from "./state-paths.js";
+import { randomBytes } from "node:crypto";
+import { autoMapCloudMarkPath, autoMapStampPath } from "./state-paths.js";
 import { canonicalWorkspacePath } from "./path-containment.js";
 import { readState, writeStateAtomic } from "./workspace-state.js";
 
@@ -20,11 +21,13 @@ import { readState, writeStateAtomic } from "./workspace-state.js";
  *      git top level, so a package registered on its own inside a monorepo
  *      keeps its own root.
  *   2. That root must not be the home directory, or contain it.
- *   3. The root must have been mapped before (it has an ingest baseline, the
- *      same thing `ix status` reports as `graphCompleted`). An automatic map
- *      never maps a repository for the first time.
- *   4. The active backend must not be remote, unless IX_AUTO_MAP_CLOUD=1
+ *   3. The active backend must not be remote, unless IX_AUTO_MAP_CLOUD=1
  *      (`shouldSkipAutoMap`).
+ *   4. The root must have been mapped before: it has an ingest baseline (the
+ *      same thing `ix status` reports as `graphCompleted`), or, against a
+ *      remote backend, an `ix map` of it through the cloud succeeded
+ *      (`recordCloudMap`; a cloud ingest writes no local baseline). An
+ *      automatic map never maps a repository for the first time.
  *   5. No automatic map was started for the root within the debounce window
  *      (IX_AUTO_MAP_DEBOUNCE_MS, default 30 s), by any host: the stamp lives
  *      under IX_HOME and is claimed under a lock, so two hosts asking at once
@@ -35,7 +38,11 @@ import { readState, writeStateAtomic } from "./workspace-state.js";
  *      what a coalesced `ix map` does), and the first such call in a window
  *      schedules one trailing `ix map --auto` for the end of the window, so an
  *      edit (or the end of a turn) inside the window still reaches the graph.
- *   6. The backend must answer its health check.
+ *   6. A local backend must answer its health check. A remote one is not
+ *      probed here: `createClient()` points at the configured endpoint, which
+ *      need not be the cloud instance the map ingests into, and the map
+ *      checks the cloud itself when it runs (`RemoteRunner.runIngestion`).
+ *      The window above still bounds it to one map start per window.
  *
  * Then `ix map <root> --silent` starts detached, with IX_AUTO_MAP=1, and this
  * returns at once. Every outcome prints nothing and exits 0; `--explain` (or
@@ -66,11 +73,11 @@ export interface AutoMapDeps {
   homeDir?: () => string;
   /** The root a bare `ix map` in `dir` would map, or undefined outside any workspace or repository. */
   localRoot?: (dir: string) => string | undefined;
-  /** Whether `root` has been mapped before. */
-  isMapped?: (root: string) => boolean;
-  /** Whether an automatic map is skipped because the backend is remote. */
-  remoteSkip?: () => Promise<boolean>;
-  /** Whether the backend answers within `timeoutMs`. */
+  /** Whether `root` has been mapped before; `remote`: the active backend is remote. */
+  isMapped?: (root: string, remote: boolean) => boolean;
+  /** Whether the active backend is remote (`isCloudReady`). */
+  cloudReady?: () => Promise<boolean>;
+  /** Whether the local backend answers within `timeoutMs`. */
   backendUp?: (timeoutMs: number) => Promise<boolean>;
   /** Start the map for `root` and return without waiting for it. */
   startMap?: (root: string, env: NodeJS.ProcessEnv) => void | Promise<void>;
@@ -92,8 +99,6 @@ const STAMP_VERSION = 1;
 const TRAIL_ENV = "IX_AUTO_MAP_TRAIL_MS";
 /** Past the window's end, so the trailing call is not itself inside it. */
 const TRAIL_SLACK_MS = 250;
-/** A trailing call never waits longer than this, whatever its env says. */
-const TRAIL_MAX_MS = 10 * 60_000;
 
 interface AutoMapStamp {
   startedAt: number;
@@ -146,8 +151,8 @@ function containsHome(root: string, home: string): boolean {
  *
  * The lock is a file created with O_EXCL, held only for the read and write of
  * the stamp. One left behind by a process that died holding it is removed
- * once it is older than {@link CLAIM_LOCK_STALE_MS}; that call still answers
- * `busy`, and the next one claims.
+ * once it is older than {@link CLAIM_LOCK_STALE_MS} (`retireStaleLock`); that
+ * call still answers `busy`, and the next one claims.
  */
 export function claimAutoMapWindow(root: string, windowMs: number, now: number, allowTrail = true): WindowClaim {
   const stamp = autoMapStampPath(root);
@@ -159,7 +164,7 @@ export function claimAutoMapWindow(root: string, windowMs: number, now: number, 
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     try {
-      if (Date.now() - fs.statSync(lock).mtimeMs > CLAIM_LOCK_STALE_MS) fs.rmSync(lock, { force: true });
+      if (Date.now() - fs.statSync(lock).mtimeMs > CLAIM_LOCK_STALE_MS) retireStaleLock(lock, Date.now());
     } catch { /* gone already */ }
     return { claim: "busy" };
   }
@@ -177,6 +182,46 @@ export function claimAutoMapWindow(root: string, windowMs: number, now: number, 
     try { fs.closeSync(fd); } catch { /* best-effort */ }
     try { fs.rmSync(lock, { force: true }); } catch { /* best-effort */ }
   }
+}
+
+/**
+ * Remove the claim lock at `lock` if it is stale, without removing one a
+ * caller has just taken. The caller saw a stale lock, but another caller may
+ * have removed that one and a third taken a fresh one since: removing by path
+ * would delete the fresh one, and let two callers claim the window together.
+ * So the lock is first renamed to a name only this call uses, which no other
+ * caller can then touch, and judged again there. A fresh one is put back
+ * (unless yet another caller has taken the lock in that instant, which then
+ * holds it). Exported for tests.
+ */
+export function retireStaleLock(lock: string, now: number): void {
+  const grave = `${lock}.${process.pid}.${randomBytes(4).toString("hex")}`;
+  try { fs.renameSync(lock, grave); } catch { return; /* gone already */ }
+  try {
+    if (now - fs.statSync(grave).mtimeMs <= CLAIM_LOCK_STALE_MS) {
+      try { fs.linkSync(grave, lock); } catch { /* a newer lock is in place */ }
+    }
+  } finally {
+    try { fs.rmSync(grave, { force: true }); } catch { /* best-effort */ }
+  }
+}
+
+/**
+ * Record that an `ix map` of `root` through a remote (cloud) backend
+ * succeeded: what rule 4 accepts for a root mapped only in the cloud, whose
+ * ingest leaves no local baseline. Called by `ix map`; best-effort.
+ */
+export function recordCloudMap(root: string, now = Date.now()): void {
+  try {
+    writeStateAtomic(autoMapCloudMarkPath(root), STAMP_VERSION, { root: canonicalWorkspacePath(root), mappedAt: now });
+  } catch { /* best-effort: the next map writes it again */ }
+}
+
+function cloudMapped(root: string): boolean {
+  return readState(autoMapCloudMarkPath(root), {
+    version: STAMP_VERSION,
+    validate: (d) => (typeof d.mappedAt === "number" ? true : null),
+  }) === true;
 }
 
 /** The CLI entry beside this module: `main.js` when built, `main.ts` under tsx. */
@@ -253,19 +298,23 @@ async function defaultRequestRerun(root: string): Promise<boolean> {
   return true;
 }
 
-/** The wait a trailing call was started with, or undefined for an ordinary call. */
-export function autoMapTrailMs(raw: string | undefined): number | undefined {
+/**
+ * The wait a trailing call was started with, or undefined for an ordinary
+ * call. Never longer than the window it was scheduled for (`windowMs`, the
+ * same IX_AUTO_MAP_DEBOUNCE_MS the scheduling call read, as the env is
+ * inherited) plus the slack past its end, which is the longest wait
+ * `claimAutoMapWindow` hands out: a shorter cap would wake it inside the
+ * window, where it is debounced and that window gets no trailing map.
+ */
+export function autoMapTrailMs(raw: string | undefined, windowMs: number): number | undefined {
   const trimmed = raw?.trim();
   if (!trimmed || !/^\d+$/.test(trimmed)) return undefined;
-  return Math.min(Number.parseInt(trimmed, 10), TRAIL_MAX_MS);
+  return Math.min(Number.parseInt(trimmed, 10), windowMs + TRAIL_SLACK_MS);
 }
 
-async function defaultRemoteSkip(): Promise<boolean> {
-  const [{ isCloudReady }, { shouldSkipAutoMap }] = await Promise.all([
-    import("./remote.js"),
-    import("./commands/map.js"),
-  ]);
-  return shouldSkipAutoMap({ auto: true, cloudReady: await isCloudReady() });
+async function defaultCloudReady(): Promise<boolean> {
+  const { isCloudReady } = await import("./remote.js");
+  return isCloudReady();
 }
 
 /** The same health check `ix status` makes; a failure or a timeout is "down". */
@@ -287,7 +336,8 @@ async function defaultLocalRoot(dir: string): Promise<string | undefined> {
   return localRootFor(dir);
 }
 
-async function defaultIsMapped(root: string): Promise<boolean> {
+async function defaultIsMapped(root: string, remote: boolean): Promise<boolean> {
+  if (remote && cloudMapped(root)) return true;
   const { loadIngestBaseline } = await import("./ingest-baseline.js");
   return loadIngestBaseline(root) !== null;
 }
@@ -301,7 +351,8 @@ export async function runAutoMap(dirArg: string | undefined, deps: AutoMapDeps =
     // then decide like any other call -- except that it never schedules
     // another. If it finds a newer window, the map that opened it started
     // after the edit that scheduled this call, so that edit is covered.
-    const trailMs = autoMapTrailMs(trailRaw);
+    const windowMs = autoMapDebounceMs(env.IX_AUTO_MAP_DEBOUNCE_MS);
+    const trailMs = autoMapTrailMs(trailRaw, windowMs);
     const trailing = trailMs !== undefined;
     if (trailing) await (deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms))))(trailMs);
 
@@ -317,7 +368,6 @@ export async function runAutoMap(dirArg: string | undefined, deps: AutoMapDeps =
     const home = canonicalWorkspacePath((deps.homeDir ?? homedir)());
     if (containsHome(root, home)) return { rule: "home", root, detail: "the root is the home directory or contains it" };
 
-    const windowMs = autoMapDebounceMs(env.IX_AUTO_MAP_DEBOUNCE_MS);
     const now = (deps.now ?? Date.now)();
     const requestRerun = deps.requestRerun ?? defaultRequestRerun;
     const debounced = async (trailInMs?: number): Promise<AutoMapOutcome> => {
@@ -339,23 +389,26 @@ export async function runAutoMap(dirArg: string | undefined, deps: AutoMapDeps =
       return debounced();
     }
 
-    const mapped = deps.isMapped ? deps.isMapped(root) : await defaultIsMapped(root);
-    if (!mapped) return { rule: "unmapped", root, detail: "never mapped; run `ix map` there once" };
-
-    if (await (deps.remoteSkip ?? defaultRemoteSkip)()) {
+    // The same decision the map makes itself (`shouldSkipAutoMap`).
+    const remote = await (deps.cloudReady ?? defaultCloudReady)();
+    const { shouldSkipAutoMap } = await import("./commands/map.js");
+    if (shouldSkipAutoMap({ auto: true, cloudReady: remote })) {
       return { rule: "remote", root, detail: "the active backend is remote (IX_AUTO_MAP_CLOUD=1 allows it)" };
     }
+
+    const mapped = deps.isMapped ? deps.isMapped(root, remote) : await defaultIsMapped(root, remote);
+    if (!mapped) return { rule: "unmapped", root, detail: "never mapped; run `ix map` there once" };
 
     const claim = claimAutoMapWindow(root, windowMs, now, !trailing);
     if (claim.claim === "debounced") return debounced(claim.trailInMs);
     if (claim.claim === "busy") return { rule: "busy", root, detail: "another caller is starting a map for this root" };
 
-    if (!(await (deps.backendUp ?? defaultBackendUp)(BACKEND_CHECK_MS))) {
+    if (!remote && !(await (deps.backendUp ?? defaultBackendUp)(BACKEND_CHECK_MS))) {
       return { rule: "backend_down", root, detail: `the backend did not answer within ${BACKEND_CHECK_MS} ms` };
     }
 
     await (deps.startMap ?? spawnAutoMap)(root, env);
-    return { rule: "started", root };
+    return remote ? { rule: "started", root, detail: "the active backend is remote; the map checks it is reachable" } : { rule: "started", root };
   } catch (err) {
     return { rule: "error", root, detail: err instanceof Error ? err.message : String(err) };
   }

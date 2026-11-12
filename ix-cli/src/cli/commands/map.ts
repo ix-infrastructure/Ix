@@ -18,6 +18,7 @@ import { saveMapBaseline } from "../map-baseline.js";
 import { loadCachedMap, loadLastMap, resolveMapCacheSlot, saveCachedMap } from "../map-result-cache.js";
 import { clearMapStale, markMapStale, mapStaleNotice, readMapStale, type MapStaleState } from "../map-freshness.js";
 import { resolveMapRoot } from "../map-root.js";
+import { recordCloudMap } from "../auto-map.js";
 import { readBackendHealth } from "./upgrade.js";
 import { renderWarning } from "../ui.js";
 import { describeUnavailableGrammars } from "../grammar-status.js";
@@ -510,9 +511,13 @@ Advanced:
             home directory, the root was never mapped, the backend is remote
             (IX_AUTO_MAP_CLOUD=1 allows it), an automatic map of the root
             started within IX_AUTO_MAP_DEBOUNCE_MS (default 30000; shared by
-            every host, kept under IX_HOME), or the backend does not answer.
+            every host, kept under IX_HOME), or a local backend does not
+            answer (a remote one is checked by the map itself). A root
+            mapped only in the cloud counts as mapped once an \`ix map\` of
+            it through the cloud has succeeded on this machine.
             A call inside that window asks a running map for one more ingest,
-            and the first one schedules a trailing map for the window's end.
+            and the first one schedules a trailing map for the window's end
+            (a detached \`ix map --auto\` that waits until then).
             Prints nothing and exits 0 either way; --explain
             (or IX_HOOK_DEBUG=1) names the rule on stderr. Other flags are
             ignored.
@@ -1187,6 +1192,9 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
       process.exitCode = 1;
       return;
     }
+    // A cloud ingest leaves no local ingest baseline; this is what tells
+    // `ix map --auto` the root has been mapped before.
+    recordCloudMap(cwd);
   } else {
     try {
       await bootstrap(cwd, { adoptPathId: opts.pruneStaleWorkspace === true, quiet: silent || machineFormat });
