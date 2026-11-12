@@ -112,7 +112,12 @@ in `ci.yml`:
 Other workflows report on the PR as well. The PR title must be a conventional
 commit (`pr-title.yml`). The [security checks](#security-checks) also run.
 A change under `ix-cli/src/cli/` runs the advisory plugin contract check
-(`plugin-contract.yml`).
+(`plugin-contract.yml`): the commands, flags, json fields and MCP tool names
+the editor plugins use. Its scope and its ignore list are described at the top
+of `ix-cli/scripts/check-plugin-contract.mjs`. It also reads the MCP tool lists
+in `ix-cli/src/mcp/server.ts`, but a PR that only changes `ix-cli/src/mcp/`
+does not trigger it: there it runs nightly, or by hand with
+`npm run build && node scripts/check-plugin-contract.mjs --clone` in `ix-cli/`.
 
 ## Branch Naming
 

@@ -840,9 +840,9 @@ export function renderTextResultsLlm(slice: Slice<TextResult>, paging?: TextPagi
 export function formatTextResults(slice: Slice<TextResult>, format: string, paging?: TextPaging): void {
   const results = slice.rows;
   if (format === "json") {
-    // A raw array on purpose: the plugin runners parse it as one. Paging state
-    // stays out of it; a JSON caller's next offset is its offset plus the
-    // array's length.
+    // A bare array: its shape is published in contracts/fields.ts (`text`)
+    // and pinned by json-fields.test.ts. Paging state stays out of it; a JSON
+    // caller's next offset is its offset plus the array's length.
     const compact = results.map(r => ({
       ...r,
       path: relativePath(r.path) ?? r.path,

@@ -21,7 +21,13 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createIxMcpServer, IX_MCP_OSS_TOOL_NAMES, type IxRunner } from "../../mcp/server.js";
+import {
+  createIxMcpServer,
+  IX_MCP_JSON_RESULT_TOOLS,
+  IX_MCP_OSS_TOOL_NAMES,
+  IX_MCP_PRO_TOOL_NAMES,
+  type IxRunner,
+} from "../../mcp/server.js";
 import { registerOssCommands } from "../register/oss.js";
 
 type OssTool = (typeof IX_MCP_OSS_TOOL_NAMES)[number];
@@ -213,6 +219,45 @@ describe("MCP tool argv against the real command tree", () => {
       for (const args of cases) failures.push(...problems(tool, args, await callAndParse(client, runs, tool, args)));
     }
     expect(failures).toEqual([]);
+  });
+
+  it("runs --format json for exactly the OSS tools IX_MCP_JSON_RESULT_TOOLS names", async () => {
+    // scripts/check-plugin-contract.mjs reads the list to tell a tool whose
+    // result has JSON fields from one that returns `--format llm` records.
+    const { client, runs } = await connect();
+    const json = new Set<string>();
+    for (const [tool, cases] of Object.entries(CASES)) {
+      for (const args of cases) {
+        const ran = await callAndParse(client, runs, tool, args);
+        expect(ran.length, tool).toBeGreaterThan(0);
+        for (const run of ran) {
+          const format = run.args.find((a) => a.startsWith("--format="));
+          expect(["--format=json", "--format=llm"], `${tool}: ${run.args.join(" ")}`).toContain(format);
+          if (format === "--format=json") json.add(tool);
+        }
+      }
+    }
+    const oss = new Set<string>(IX_MCP_OSS_TOOL_NAMES);
+    expect([...json].sort()).toEqual(IX_MCP_JSON_RESULT_TOOLS.filter((tool) => oss.has(tool)).sort());
+  });
+
+  it("lists every Pro tool as JSON, as each one runs", async () => {
+    const formats = new Map<string, string | undefined>();
+    const runIx: IxRunner = async (args) => {
+      formats.set(args[0], args.find((a) => a.startsWith("--format=")));
+      return { ok: true, stdout: "{}", stderr: "" };
+    };
+    const server = createIxMcpServer({ version: "test", runIx, tools: "all", proAvailable: true });
+    const client = new Client({ name: "ix-mcp-json-tools-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    clients.push(client);
+    for (const tool of IX_MCP_PRO_TOOL_NAMES) {
+      await client.callTool({ name: tool, arguments: tool === "ix_decide" ? { title: "t", rationale: "r" } : {} });
+      expect(IX_MCP_JSON_RESULT_TOOLS).toContain(tool);
+    }
+    expect([...formats.values()]).toEqual(IX_MCP_PRO_TOOL_NAMES.map(() => "--format=json"));
   });
 
   it("accepts each numeric bound a tool schema allows", async () => {
