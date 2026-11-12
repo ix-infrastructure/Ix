@@ -43,3 +43,13 @@ const REPAIR_INVOCATIONS = new Set([
 export function isRepairInvocation(argv: readonly string[]): boolean {
   return REPAIR_INVOCATIONS.has(argv[2] ?? "");
 }
+
+/**
+ * True when `argv` (process.argv, whole) is `ix map --auto`: what an editor or
+ * agent hook runs after every edit, promised to print nothing and exit 0. An
+ * installed Pro that fails to initialize must not make it exit 1; with Pro
+ * broken the remote check cannot be trusted, so it maps nothing instead.
+ */
+export function isAutoMapInvocation(argv: readonly string[]): boolean {
+  return argv[2] === "map" && argv.slice(3).includes("--auto");
+}

@@ -677,7 +677,7 @@ Map the architectural hierarchy of a codebase.
 | `--remap` | — | off | Compute the map now, even from an automatic (hook) run that would defer it |
 | `--verbose` | — | off | Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit) |
 | `--silent` | — | off | Suppress all output except a one-line summary (useful for LLM hooks) |
-| `--auto` | — | off | Start an automatic (hook) map of the git root of [path] in the background, if the rules allow one now; prints nothing, exits 0 |
+| `--auto` | — | off | Start an automatic (hook) map of the workspace or git root of [path] in the background, if the rules allow one now; prints nothing, exits 0 |
 | `--explain` | — | off | With --auto: say on stderr which rule decided |
 | `--prune-stale-workspace` | — | off | Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest. Loopback endpoints only -- and loopback is the URL, not ownership: never use it through a tunnel or proxy to a shared backend |
 

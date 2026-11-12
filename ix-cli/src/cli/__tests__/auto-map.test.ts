@@ -9,7 +9,7 @@ import { createServer } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  autoMapDebounceMs, autoMapInvocation, claimAutoMapWindow, explainAutoMap, runAutoMap,
+  autoMapDebounceMs, autoMapInvocation, autoMapTrailInvocation, autoMapTrailMs, claimAutoMapWindow, explainAutoMap, runAutoMap,
   DEFAULT_AUTO_MAP_DEBOUNCE_MS, type AutoMapDeps,
 } from "../auto-map.js";
 import { autoMapStampPath } from "../state-paths.js";
@@ -19,6 +19,8 @@ import { registerRemoteRunner, type RemoteRunner } from "../remote.js";
 let scratch: string;
 let repo: string;
 let started: string[];
+let trails: Array<{ root: string; delayMs: number; env: NodeJS.ProcessEnv }>;
+let reruns: string[];
 let envBackup: NodeJS.ProcessEnv;
 
 function gitInit(dir: string): void {
@@ -36,6 +38,9 @@ function deps(over: AutoMapDeps = {}): AutoMapDeps {
     remoteSkip: async () => false,
     backendUp: async () => true,
     startMap: (root) => { started.push(root); },
+    startTrail: (root, delayMs, env) => { trails.push({ root, delayMs, env }); },
+    requestRerun: () => false,
+    sleep: async () => {},
     ...over,
   };
 }
@@ -49,6 +54,8 @@ beforeEach(() => {
   repo = path.join(scratch, "repo");
   gitInit(repo);
   started = [];
+  trails = [];
+  reruns = [];
 });
 
 afterEach(() => {
@@ -153,6 +160,83 @@ describe("runAutoMap: the rules", () => {
     expect(JSON.parse(fs.readFileSync(stamp, "utf-8"))).toMatchObject({ formatVersion: 1, root: repo, startedAt: 1_000_000 });
   });
 
+  it("does not drop an edit inside the window: it schedules one trailing map for the window's end", async () => {
+    let now = 1_000_000;
+    const d = deps({ now: () => now });
+    expect((await runAutoMap(repo, d)).rule).toBe("started");
+    now += 10_000;
+    const first = await runAutoMap(repo, d);
+    expect(first.rule).toBe("debounced");
+    expect(first.detail).toContain("a trailing map is due");
+    now += 5_000;
+    expect((await runAutoMap(repo, d)).rule).toBe("debounced");
+    expect(trails).toEqual([{ root: repo, delayMs: DEFAULT_AUTO_MAP_DEBOUNCE_MS - 10_000 + 250, env: {} }]);
+
+    // The trailing call: waits, then claims the next window and maps.
+    let waited = -1;
+    now = 1_000_000 + DEFAULT_AUTO_MAP_DEBOUNCE_MS + 250;
+    const trail = deps({ now: () => now, env: { IX_AUTO_MAP_TRAIL_MS: String(trails[0].delayMs) }, sleep: async (ms) => { waited = ms; } });
+    expect((await runAutoMap(repo, trail)).rule).toBe("started");
+    expect(waited).toBe(trails[0].delayMs);
+    expect(started).toEqual([repo, repo]);
+    expect(trails).toHaveLength(1);
+  });
+
+  it("asks a running map for one more ingest, as a coalesced `ix map` does", async () => {
+    const d = deps({ requestRerun: (root) => { reruns.push(root); return true; } });
+    expect((await runAutoMap(repo, d)).rule).toBe("started");
+    const out = await runAutoMap(repo, d);
+    expect(out.rule).toBe("debounced");
+    expect(out.detail).toContain("asked the running map for one more ingest");
+    // Also on the cheap path, once the trailing call is scheduled.
+    expect((await runAutoMap(repo, d)).rule).toBe("debounced");
+    expect(reruns).toEqual([repo, repo]);
+  });
+
+  it("asks only a map that holds the map lock, through the real single-flight marker", async () => {
+    const { acquireMapLock, takeMapRerun } = await import("../single-flight.js");
+    const d = deps({ requestRerun: undefined });
+    expect((await runAutoMap(repo, d)).rule).toBe("started");
+    expect((await runAutoMap(repo, d)).detail).not.toContain("one more ingest");
+    expect(takeMapRerun(repo)).toBe(false);
+    const lock = acquireMapLock(repo, "test map");
+    try {
+      expect((await runAutoMap(repo, d)).detail).toContain("one more ingest");
+      expect(takeMapRerun(repo)).toBe(true);
+    } finally { lock?.release(); }
+  });
+
+  it("does not read the ingest baseline for a call the stamp already answers", async () => {
+    let checked = 0;
+    const d = deps({ isMapped: () => { checked++; return true; } });
+    expect((await runAutoMap(repo, d)).rule).toBe("started");
+    expect((await runAutoMap(repo, d)).rule).toBe("debounced"); // schedules the trailing call
+    expect((await runAutoMap(repo, d)).rule).toBe("debounced");
+    expect((await runAutoMap(repo, d)).rule).toBe("debounced");
+    expect(checked).toBe(2);
+  });
+
+  it("maps a workspace registered inside a repository, not the repository, as a bare `ix map` would", async () => {
+    const pkg = path.join(repo, "packages", "web");
+    fs.mkdirSync(path.join(pkg, "src"), { recursive: true });
+    fs.mkdirSync(process.env.IX_HOME!, { recursive: true });
+    fs.writeFileSync(path.join(process.env.IX_HOME!, "config.yaml"), [
+      "endpoint: http://localhost:8090",
+      "workspaces:",
+      "  - workspace_id: ws-web",
+      "    workspace_name: web",
+      `    root_path: ${pkg}`,
+      "    default: false",
+      "",
+    ].join("\n"));
+    const real = deps({ isMapped: undefined });
+    saveIngestBaseline(pkg, new Map([[path.join(pkg, "src", "a.ts"), 1]]), 1);
+    expect(await runAutoMap(path.join(pkg, "src"), real)).toMatchObject({ rule: "started", root: pkg });
+    // Elsewhere in the repository: its git root, which was never mapped.
+    expect(await runAutoMap(repo, real)).toMatchObject({ rule: "unmapped", root: repo });
+    expect(started).toEqual([pkg]);
+  });
+
   it("answers error, not a throw, when starting the map fails", async () => {
     const out = await runAutoMap(repo, deps({ startMap: () => { throw new Error("spawn failed"); } }));
     expect(out).toMatchObject({ rule: "error", root: repo, detail: "spawn failed" });
@@ -164,18 +248,27 @@ describe("claimAutoMapWindow", () => {
     const lock = `${autoMapStampPath(repo)}.lock`;
     fs.mkdirSync(path.dirname(lock), { recursive: true });
     fs.writeFileSync(lock, "");
-    expect(claimAutoMapWindow(repo, 30_000, Date.now())).toBe("busy");
+    expect(claimAutoMapWindow(repo, 30_000, Date.now())).toEqual({ claim: "busy" });
     expect(fs.existsSync(lock)).toBe(true);
     const old = new Date(Date.now() - 60_000);
     fs.utimesSync(lock, old, old);
-    expect(claimAutoMapWindow(repo, 30_000, Date.now())).toBe("busy");
+    expect(claimAutoMapWindow(repo, 30_000, Date.now())).toEqual({ claim: "busy" });
     expect(fs.existsSync(lock)).toBe(false);
-    expect(claimAutoMapWindow(repo, 30_000, Date.now())).toBe("claimed");
+    expect(claimAutoMapWindow(repo, 30_000, Date.now())).toEqual({ claim: "claimed" });
   });
 
   it("does not let a stamp from a clock that went back hold the window longer than the window", () => {
-    expect(claimAutoMapWindow(repo, 30_000, 10_000_000)).toBe("claimed");
-    expect(claimAutoMapWindow(repo, 30_000, 10_000_000 - 60_000)).toBe("claimed");
+    expect(claimAutoMapWindow(repo, 30_000, 10_000_000)).toEqual({ claim: "claimed" });
+    expect(claimAutoMapWindow(repo, 30_000, 10_000_000 - 60_000)).toEqual({ claim: "claimed" });
+  });
+
+  it("hands the first call inside a window the trailing call, and no later one", () => {
+    expect(claimAutoMapWindow(repo, 30_000, 10_000_000)).toEqual({ claim: "claimed" });
+    expect(claimAutoMapWindow(repo, 30_000, 10_010_000)).toEqual({ claim: "debounced", trailInMs: 20_250 });
+    expect(claimAutoMapWindow(repo, 30_000, 10_020_000)).toEqual({ claim: "debounced" });
+    // A trailing call itself never schedules one.
+    expect(claimAutoMapWindow(repo, 30_000, 10_040_000)).toEqual({ claim: "claimed" });
+    expect(claimAutoMapWindow(repo, 30_000, 10_041_000, false)).toEqual({ claim: "debounced" });
   });
 
   it("lets exactly one of several processes asking at once claim the window", async () => {
@@ -188,7 +281,7 @@ describe("claimAutoMapWindow", () => {
       `const { claimAutoMapWindow } = await import(${JSON.stringify(mod)});`,
       `const fs = await import("node:fs");`,
       `while (!fs.existsSync(${JSON.stringify(go)})) await new Promise((r) => setTimeout(r, 2));`,
-      `process.stdout.write(claimAutoMapWindow(${JSON.stringify(repo)}, 30000, Date.now()));`,
+      `process.stdout.write(claimAutoMapWindow(${JSON.stringify(repo)}, 30000, Date.now()).claim);`,
     ].join("\n");
     const runs = Array.from({ length: 6 }, () => new Promise<string>((done, fail) => {
       const child = spawn(process.execPath, ["--import", TSX, "--input-type=module", "-e", script], {
@@ -214,6 +307,17 @@ describe("how the map starts", () => {
     expect(inv.args).toEqual(["/x/cli/main.js", "map", repo, "--silent"]);
     expect(inv.options).toMatchObject({ cwd: repo, detached: true, stdio: "ignore", shell: false });
     expect(inv.options.env).toMatchObject({ KEEP: "1", IX_AUTO_MAP: "1" });
+  });
+
+  it("starts the trailing call as a detached `ix map --auto <root>` that waits first", async () => {
+    const inv = await autoMapTrailInvocation(repo, 20_250, { KEEP: "1" }, "/x/cli/main.js", []);
+    expect(inv.args).toEqual(["/x/cli/main.js", "map", "--auto", repo]);
+    expect(inv.options).toMatchObject({ cwd: repo, detached: true, stdio: "ignore", shell: false });
+    expect(inv.options.env).toMatchObject({ KEEP: "1", IX_AUTO_MAP_TRAIL_MS: "20250" });
+    expect(autoMapTrailMs("20250")).toBe(20_250);
+    expect(autoMapTrailMs(undefined)).toBeUndefined();
+    expect(autoMapTrailMs("soon")).toBeUndefined();
+    expect(autoMapTrailMs("99999999")).toBe(600_000);
   });
 
   it("explains each outcome in one line", () => {
