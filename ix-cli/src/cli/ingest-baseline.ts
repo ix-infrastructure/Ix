@@ -12,19 +12,11 @@ interface SerializedIngestBaseline {
   lastIngestAt?: string;
   tracksMapBaseline?: boolean;
   extractor?: string;
-  ingestMode?: IngestMode;
   replayedFiles?: string[];
   pendingFiles?: string[];
   parseTimeouts?: string[];
   pythonPackageEntries?: string[];
 }
-
-/**
- * Which patches a run sends: `map` strips chunks, their edges and claims
- * (`ix map`), `full` sends them (`ix ingest`, `ix watch`). The two send
- * different ops for the same source, so each has its own patch id (Ix#965).
- */
-export type IngestMode = "map" | "full";
 
 export interface IngestBaseline {
   files: Map<string, number>;
@@ -49,12 +41,6 @@ export interface IngestBaseline {
    * any extractor, so it counts as a change. See `extractorChanged`.
    */
   extractor: string | null;
-  /**
-   * The mode of the last run that committed a file's patch: whose patch ids
-   * the files it sent carry. Absent on a baseline written before this was
-   * recorded; such a CLI sent both modes under the id `map` mode keeps.
-   */
-  ingestMode?: IngestMode;
   /**
    * Workspace-relative paths of changed files the last run sent and the
    * backend answered `Idempotent`: it already held that patch id and wrote
@@ -93,7 +79,7 @@ export interface IngestBaseline {
   pythonPackageEntries?: string[];
 }
 
-/** Per-file lists (and the run's mode) a baseline write records beside the mtimes. */
+/** Per-file lists a baseline write records beside the mtimes. */
 export interface BaselineFileNotes {
   /** See `IngestBaseline.replayedFiles`. */
   replayedFiles?: readonly string[];
@@ -103,8 +89,6 @@ export interface BaselineFileNotes {
   parseTimeouts?: readonly string[];
   /** See `IngestBaseline.pythonPackageEntries`. Not written when null or absent. */
   pythonPackageEntries?: readonly string[] | null;
-  /** See `IngestBaseline.ingestMode`. Not written when null or absent. */
-  ingestMode?: IngestMode | null;
 }
 
 const stringList = (value: unknown): string[] =>
@@ -155,7 +139,6 @@ export function loadIngestBaseline(projectRoot: string): IngestBaseline | null {
       lastIngestAt,
       tracksMapBaseline: data.tracksMapBaseline === true,
       extractor: typeof data.extractor === "string" ? data.extractor : null,
-      ...(data.ingestMode === "map" || data.ingestMode === "full" ? { ingestMode: data.ingestMode } : {}),
       replayedFiles: stringList(data.replayedFiles),
       pendingFiles: stringList(data.pendingFiles),
       parseTimeouts: stringList(data.parseTimeouts),
@@ -173,7 +156,7 @@ export function saveIngestBaseline(
   now: Date = new Date(),
   deletedFiles: Map<string, string[]> = new Map(),
   extractor?: string | null,
-  { replayedFiles = [], pendingFiles = [], parseTimeouts = [], pythonPackageEntries, ingestMode }: BaselineFileNotes = {},
+  { replayedFiles = [], pendingFiles = [], parseTimeouts = [], pythonPackageEntries }: BaselineFileNotes = {},
 ): void {
   try {
     // Keep the last good rev rather than writing a shape the read side will
@@ -197,7 +180,6 @@ export function saveIngestBaseline(
       // sets it, which is what ends the grandfathering for this workspace.
       tracksMapBaseline: true,
       ...(extractor ? { extractor } : {}),
-      ...(ingestMode ? { ingestMode } : {}),
       ...(replayedFiles.length > 0 ? { replayedFiles: [...replayedFiles].sort() } : {}),
       ...(pendingFiles.length > 0 ? { pendingFiles: [...new Set(pendingFiles)].sort() } : {}),
       ...(parseTimeouts.length > 0 ? { parseTimeouts: [...new Set(parseTimeouts)].sort() } : {}),

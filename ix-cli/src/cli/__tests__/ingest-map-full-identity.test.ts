@@ -6,8 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import { fullModePatchId, ingestFiles, patchForMode, withModeVariants } from "../commands/ingest.js";
-import { loadIngestBaseline, saveIngestBaseline } from "../ingest-baseline.js";
+import { fullModePatchId, ingestFiles, modeAlternatives, patchForMode } from "../commands/ingest.js";
 import { FakeBackend } from "./helpers/fake-backend.js";
 
 // Two parse workers, as in ingest-equivalence.test.ts.
@@ -22,7 +21,7 @@ vi.mock("node:os", async (importOriginal) => {
  * the same patch id, and the backend skips an id it already holds, so a
  * forced full ingest after `ix map` was answered `Idempotent` and the file
  * never got its chunks. Each mode now has its own id for the same source, and
- * the baseline records the mode that last wrote it.
+ * a reader looks for a stored patch under both, this run's mode first.
  */
 
 const ENV_KEYS = ["HOME", "USERPROFILE", "IX_ENDPOINT", "IX_LOCK_DIR", "IX_HOME", "IX_DEBUG"] as const;
@@ -150,7 +149,6 @@ describe("ix map and a full ingest write under different patch ids (Ix#965)", ()
       await world.run(target, "map");
       const mapIds = new Map(target.backend.lastPatchIds);
       expect(chunkNodes(target.backend.graphSignature().nodes)).toEqual([]);
-      expect(loadIngestBaseline(world.repo)?.ingestMode).toBe("map");
 
       await world.run(target, "full", true);
       const fullIds = new Map(target.backend.lastPatchIds);
@@ -158,14 +156,12 @@ describe("ix map and a full ingest write under different patch ids (Ix#965)", ()
       for (const [uri, id] of fullIds) expect(id, uri).not.toBe(mapIds.get(uri));
 
       expect(target.backend.graphSignature()).toEqual(freshFull);
-      expect(loadIngestBaseline(world.repo)?.ingestMode).toBe("full");
     }, 120_000);
 
     it(`${semantics}: a full ingest, then a forced map, sends map content under its own id`, async () => {
       const target = await world.backend(semantics);
       await world.run(target, "full");
       const fullIds = new Map(target.backend.lastPatchIds);
-      expect(loadIngestBaseline(world.repo)?.ingestMode).toBe("full");
 
       await world.run(target, "map", true);
       const mapIds = new Map(target.backend.lastPatchIds);
@@ -180,7 +176,6 @@ describe("ix map and a full ingest write under different patch ids (Ix#965)", ()
       const after = target.backend.graphSignature();
       expect(withoutChunks(after)).toEqual(withoutChunks(freshMap));
       expect(chunkNodes(after.nodes)).toEqual(chunkNodes(freshFull.nodes));
-      expect(loadIngestBaseline(world.repo)?.ingestMode).toBe("map");
     }, 120_000);
   }
 
@@ -252,6 +247,45 @@ describe("an edit finds the stored patch whichever mode wrote it (Ix#965)", () =
   }
 });
 
+/** `src/a.ts` one line lower and without `beta`: every chunk id it had changes. */
+const A_SHIFTED_WITHOUT_BETA = ["// shifted", A_WITHOUT_BETA].join("\n");
+
+describe("a full run reconciles against the full patch when both modes stored one (Ix#965)", () => {
+  const saved: Record<string, string | undefined> = {};
+  let world: World;
+
+  beforeAll(() => {
+    for (const key of ENV_KEYS) saved[key] = process.env[key];
+    delete process.env.IX_HOME;
+    delete process.env.IX_DEBUG;
+    world = new World();
+  });
+
+  afterAll(async () => {
+    await world?.stop();
+    for (const key of ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+
+  it("map, forced full, an ix map of another edit, then a full edit: the old chunks are gone", async () => {
+    const target = await world.backend("head");
+    await world.run(target, "map");
+    await world.run(target, "full", true);
+    // Both modes now hold a patch for src/a.ts at this hash; the map one has no chunks.
+    world.write("src/b.ts", `${SOURCES["src/b.ts"]}// edited\n`);
+    await world.run(target, "map");
+
+    world.write("src/a.ts", A_SHIFTED_WITHOUT_BETA);
+    await world.run(target, "full");
+    const fresh = await world.fresh("full");
+    const ofA = (nodes: string[]) => chunkNodes(nodes).filter((line) => ["alpha", "beta"].includes(line.split(" ")[2]!));
+    expect(ofA(fresh.nodes).map((line) => line.split(" ")[2])).toEqual(["alpha"]);
+    expect(ofA(target.backend.graphSignature().nodes)).toEqual(ofA(fresh.nodes));
+  }, 120_000);
+});
+
 describe("mode-specific patch ids", () => {
   const ID = "032b0445-6782-eea8-db9e-1b31a00080ff";
 
@@ -271,27 +305,8 @@ describe("mode-specific patch ids", () => {
     expect(patchForMode(patch, false)).toMatchObject({ patchId: fullModePatchId(ID), ops: patch.ops });
   });
 
-  it("pairs each candidate with its other-mode id, the preferred mode first", () => {
-    expect(withModeVariants(["a", "b"], false)).toEqual(["a", fullModePatchId("a"), "b", fullModePatchId("b")]);
-    expect(withModeVariants(["a", "b"], true)).toEqual([fullModePatchId("a"), "a", fullModePatchId("b"), "b"]);
-  });
-
-  it("the baseline round-trips the mode, and reads none from an older one", () => {
-    const home = realpathSync.native(mkdtempSync(join(tmpdir(), "ix-mode-baseline-")));
-    const before = process.env.HOME;
-    process.env.HOME = home;
-    try {
-      const root = join(home, "ws");
-      saveIngestBaseline(root, new Map([["a", 1]]), 1);
-      expect(loadIngestBaseline(root)?.ingestMode).toBeUndefined();
-      saveIngestBaseline(root, new Map([["a", 1]]), 1, undefined, undefined, undefined, { ingestMode: "full" });
-      expect(loadIngestBaseline(root)?.ingestMode).toBe("full");
-      saveIngestBaseline(root, new Map([["a", 1]]), 1, undefined, undefined, undefined, { ingestMode: "map" });
-      expect(loadIngestBaseline(root)?.ingestMode).toBe("map");
-    } finally {
-      if (before === undefined) delete process.env.HOME;
-      else process.env.HOME = before;
-      rmSync(home, { recursive: true, force: true });
-    }
+  it("pairs each candidate with its other-mode id, this run's mode first", () => {
+    expect(modeAlternatives(["a", "b"], true)).toEqual([["a", fullModePatchId("a")], ["b", fullModePatchId("b")]]);
+    expect(modeAlternatives(["a", "b"], false)).toEqual([[fullModePatchId("a"), "a"], [fullModePatchId("b"), "b"]]);
   });
 });
