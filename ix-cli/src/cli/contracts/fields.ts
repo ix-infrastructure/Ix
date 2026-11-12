@@ -19,11 +19,17 @@
  * the list does not have. Adding a field to a type therefore means adding it
  * here, in the same change.
  *
+ * Each list also carries what the command prints around or instead of its own
+ * answer (contracts/envelope.ts): the failure record any command can answer
+ * with (`error`, `message`, `dir`, `next`), and, for a command that takes
+ * several targets, the `{ targets: [...], summary }` grouping.
+ *
  * Only commands with a typed json contract are listed. A plugin read from any
  * other command is not checked yet.
  */
 
 import type { TextResult } from "../format.js";
+import type { ErrorRecordJson, MultiTargetJson } from "./envelope.js";
 import type { LocateJson, LocateMissJson, LocateStrictAmbiguityJson, LocateTextMatchesJson } from "./locate.js";
 import type { UnresolvedTargetJson } from "./miss.js";
 import type { ReadAmbiguityJson, ReadFailureJson, ReadJson } from "./read.js";
@@ -58,16 +64,20 @@ function fieldsOf<T>() {
 }
 
 /** Every shape `ix locate --format json` prints for one target (contracts/locate.ts). */
-type LocateOutput = LocateJson | LocateMissJson | LocateStrictAmbiguityJson | LocateTextMatchesJson;
+type LocateOne = LocateJson | LocateMissJson | LocateStrictAmbiguityJson | LocateTextMatchesJson;
+
+/** `ix locate a b` groups each target's answer (multi-target.ts). */
+type LocateOutput = LocateOne | ErrorRecordJson | MultiTargetJson<LocateOne>;
 
 /** Every shape `ix read --format json` prints (contracts/read.ts). */
-type ReadOutput = ReadJson | ReadAmbiguityJson | ReadFailureJson | UnresolvedTargetJson;
+type ReadOutput = ReadJson | ReadAmbiguityJson | ReadFailureJson | UnresolvedTargetJson | ErrorRecordJson;
 
 /**
  * `ix text --format json`: a bare array of matches, with no paging envelope.
  * The plugins parse the root as an array, so wrapping it is a breaking change.
+ * A failure is the one object it prints instead.
  */
-type TextOutput = TextResult[];
+type TextOutput = TextResult[] | ErrorRecordJson;
 
 const CANDIDATE = ["id", "name", "kind", "path", "line", "score", "rank", "container"] as const;
 const NAMED = ["id", "name", "kind", "path"] as const;
@@ -77,6 +87,22 @@ const DID_YOU_MEAN = ["name", "kind", "path", "line"] as const;
 /** `prefix` plus `prefix.<key>` for each key. */
 function under<P extends string, K extends string>(prefix: P, keys: readonly K[]): Array<P | `${P}.${K}`> {
   return [prefix, ...keys.map((k) => `${prefix}.${k}` as const)];
+}
+
+/** `prefix.<path>` for each path. */
+function nest<P extends string, K extends string>(prefix: P, paths: readonly K[]): Array<`${P}.${K}`> {
+  return paths.map((p) => `${prefix}.${p}` as const);
+}
+
+/** The failure record (envelope.ts) any command can print instead of its answer. */
+const ERROR_RECORD = ["error", "message", "dir", "next"] as const;
+
+/** The multi-target grouping (envelope.ts) around `answer`, one command's own paths. */
+function multiTarget<K extends string>(answer: readonly K[]) {
+  return [
+    "targets", "targets[]", ...nest("targets[]", ["target", "exitCode", ...ERROR_RECORD, ...answer]),
+    ...under("summary", ["total", "ok", "ambiguous", "notFound", "notMapped", "failed"]),
+  ] as const;
 }
 
 const NOTICE = [
@@ -93,27 +119,30 @@ const MISS = [
   "graph", "graph.*",
 ] as const;
 
+/** What `ix locate` prints for one target. */
+const LOCATE_ONE = [
+  ...MISS,
+  ...under("resolvedTarget", NAMED),
+  "resolutionMode",
+  "lineRange", "lineRange.start", "lineRange.end",
+  ...under("container", ["kind", "name", "id"]),
+  "systemPath", ...under("systemPath[]", ["name", "kind"]),
+  "hasMapData", "stale", "map_stale",
+  "regions_as_of", "regions_as_of.map_rev", "regions_as_of.file_count",
+  "diagnostics", ...under("diagnostics[]", DIAGNOSTIC),
+  "resolutionNotices", ...NOTICE,
+  "code",
+  "candidates", ...under("candidates[]", CANDIDATE),
+  "total", "truncated",
+  "note", "target", "detail", "shown",
+  "textMatches", ...under("textMatches[]", ["path", "line", "snippet"]),
+] as const;
+
 /** Field paths per command, keyed by the command's name as typed after `ix`. */
 export const JSON_FIELDS: Readonly<Record<string, readonly string[]>> = {
-  locate: fieldsOf<LocateOutput>()([
-    ...MISS,
-    ...under("resolvedTarget", NAMED),
-    "resolutionMode",
-    "lineRange", "lineRange.start", "lineRange.end",
-    ...under("container", ["kind", "name", "id"]),
-    "systemPath", ...under("systemPath[]", ["name", "kind"]),
-    "hasMapData", "stale", "map_stale",
-    "regions_as_of", "regions_as_of.map_rev", "regions_as_of.file_count",
-    "diagnostics", ...under("diagnostics[]", DIAGNOSTIC),
-    "resolutionNotices", ...NOTICE,
-    "code",
-    "candidates", ...under("candidates[]", CANDIDATE),
-    "total", "truncated",
-    "note", "target", "detail", "shown",
-    "textMatches", ...under("textMatches[]", ["path", "line", "snippet"]),
-  ]),
+  locate: fieldsOf<LocateOutput>()([...LOCATE_ONE, ...ERROR_RECORD, ...multiTarget(LOCATE_ONE)]),
   read: fieldsOf<ReadOutput>()([
-    ...MISS,
+    ...MISS, ...ERROR_RECORD,
     "targetType", "path", "lineStart", "lineEnd", "content", "symbol", "kind", "stale", "warning",
     "truncated", "totalLines", "spanEnd", "next", "resolutionMode",
     "resolutionNotices", ...NOTICE,
@@ -122,6 +151,7 @@ export const JSON_FIELDS: Readonly<Record<string, readonly string[]>> = {
   ]),
   text: fieldsOf<TextOutput>()([
     ...under("[]", ["path", "line_start", "line_end", "snippet", "engine", "score", "language", "symbol_hint"]),
+    ...ERROR_RECORD,
   ]),
 };
 

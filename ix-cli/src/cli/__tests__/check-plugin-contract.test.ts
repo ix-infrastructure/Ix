@@ -22,7 +22,7 @@ const contract = (await import("../../../scripts/check-plugin-contract.mjs")) as
   fieldReads: (text: string, file: string, commands: Set<string>) => Array<{ command: string; path: string; line: number }>;
   checkField: (command: string, path: string, fields: FieldSurface) => string | null;
   mcpReferences: (text: string, ext?: string) => McpReference[];
-  checkMcp: (ref: McpReference, mcp: FieldSurface["mcp"]) => string | null;
+  checkMcp: (ref: McpReference, mcp: FieldSurface["mcp"], helpers?: Set<string>) => string | null;
 };
 type FieldSurface = {
   accepts: (command: string, path: string) => boolean | undefined;

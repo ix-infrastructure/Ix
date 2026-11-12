@@ -40,12 +40,19 @@
  *    is not seen, and a command with no list in fields.ts is not checked.
  *
  * 3. MCP names (the text files): a code span naming an `ix_…` tool must name
- *    one `ix mcp` serves (src/mcp/server.ts, both tiers). A code span that is
- *    a JSON path (`a.b`, `a[0]`, `.a`) after a tool in the same Markdown
- *    section (up to a heading or an `ix …` command span) fails when that tool returns `--format llm` records, which have
- *    no fields to read: everything not in IX_MCP_JSON_RESULT_TOOLS. A plain
- *    name (`ok`, `risk_level`) is not checked: it reads the same as a symbol
- *    name in an example.
+ *    one `ix mcp` serves (src/mcp/server.ts, both tiers). An `ix_…` name the
+ *    plugin defines itself is a helper, not a tool: a shell, Python or JS
+ *    function (`ix_lib() {`, `def ix_lib`), a file or directory (`ix_lib.sh`),
+ *    and any `ix_<cmd>_json` wrapper. A code span that
+ *    is a JSON path (`a.b`, `a[0]`, `.a`) after a tool in the same Markdown
+ *    section (up to a heading or an `ix …` command span) fails when that tool
+ *    returns `--format llm` records, which have no fields to read: everything
+ *    not in IX_MCP_JSON_RESULT_TOOLS. Not checked, because they read the same
+ *    as a symbol name or a URL in an example: a plain name (`ok`,
+ *    `risk_level`); a dotted name given as an argument, with `on`, `for`,
+ *    `with`, `named`, `like`, `e.g.`, `symbol` and the like just before it
+ *    (`ix_callers` on `auth.verify_token`, or `client.query`); and a host name
+ *    (`docs.example.com`).
  *
  * Changelogs and dated plans or logs are skipped: they quote old forms on
  * purpose.
@@ -569,6 +576,12 @@ function chainPath(rest, python) {
 /** File extensions: a dotted token ending in one is a file name, not a field. */
 const FILE_EXT = /\.(?:[cm]?[jt]sx?|py|md|mdc|json|ya?ml|toml|sh|bash|go|rs|java|kt|rb|php|c|h|cpp|cs|scala|txt|lock|cfg|ini|env|html|css|sql|xml)$/;
 
+/** Words that, just before a dotted code span, make it a tool's argument (a qualified symbol name), not a read. */
+const ARGUMENT_BEFORE = /\b(?:on|for|with|named|called|like|e\.g\.|i\.e\.|such as|symbol|function|method|class|module|argument|arg|target|pass|passing|query)[\s:,]*$/i;
+
+/** A host name: `docs.example.com`. */
+const HOST_NAME = /\.(?:com|org|net|io|dev|ai|app|co|edu|gov|sh)$/;
+
 /**
  * MCP tool names and the fields text says to read from their results:
  * `[{ tool, line, snippet }]` for a tool named in a code span, and
@@ -599,8 +612,15 @@ export function mcpReferences(text, ext = ".md") {
     if (inFence) return;
     if (/^\s{0,3}#{1,6}\s/.test(raw)) tool = null;
     const snippet = raw.trim().slice(0, 100);
+    let after = 0;
+    let argument = false;
     for (const m of raw.matchAll(/`([^`]+)`/g)) {
       const span = m[1].trim();
+      const before = raw.slice(after, m.index);
+      after = m.index + m[0].length;
+      // The next item of a list of arguments: `on `a.b`, `c.d` or `e.f``.
+      const listed = argument && /^\s*(?:,|,?\s*(?:or|and))\s*$/.test(before);
+      argument = false;
       const named = /^(ix_[a-z][a-z0-9_]*)(?=$|[\s(])/.exec(span);
       if (named) {
         tool = named[1];
@@ -610,6 +630,9 @@ export function mcpReferences(text, ext = ".md") {
       // An `ix …` command: what follows is about the CLI's output, not a tool's.
       if (/^ix\s/.test(span)) { tool = null; continue; }
       if (!tool || /^ix/.test(span) || FILE_EXT.test(span)) continue;
+      const plain = /^[a-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(span);
+      if (plain && (listed || ARGUMENT_BEFORE.test(before))) { argument = true; continue; }
+      if (plain && HOST_NAME.test(span)) continue;
       const dotted = /^[a-z_][A-Za-z0-9_]*(?:\??\.[A-Za-z_][A-Za-z0-9_]*|\[\d*\])+$/.test(span);
       const jq = /^\.[A-Za-z_][A-Za-z0-9_]*(?:\??\.[A-Za-z_][A-Za-z0-9_]*|\[\d*\])*$/.test(span);
       if (dotted || jq) found.push({ tool, path: span.replace(/^\./, ""), line: i + 1, snippet });
@@ -618,9 +641,34 @@ export function mcpReferences(text, ext = ".md") {
   return found;
 }
 
-/** What is wrong with one MCP reference, or null. */
-export function checkMcp(ref, mcp) {
-  if (ref.path === undefined) return mcp.tools.has(ref.tool) ? null : `unknown MCP tool "${ref.tool}"`;
+/**
+ * The `ix_…` names a plugin defines itself, from one of its files: functions
+ * (shell `ix_x() {` or `function ix_x`, Python `def ix_x`, JS `function ix_x`
+ * or `const ix_x =`) and the file's own path segments (`ix_lib.sh`, `ix_lib/`).
+ */
+export function definedHelpers(text, file) {
+  const names = new Set();
+  for (const segment of file.split(/[\\/]/)) {
+    const named = /^(ix_[a-z0-9_]+)(?:\.[^/]*)?$/i.exec(segment);
+    if (named) names.add(named[1]);
+  }
+  const definition = /(?:^|[\s;{(])(?:(?:function|def)\s+(ix_[a-z0-9_]+)\b|(?:const|let|var)\s+(ix_[a-z0-9_]+)\s*=|(ix_[a-z0-9_]+)\s*\(\s*\)\s*\{)/gm;
+  for (const m of text.matchAll(definition)) names.add(m[1] ?? m[2] ?? m[3]);
+  return names;
+}
+
+/** An `ix_<cmd>_json` wrapper: the shell form shellInvocations reads as `ix <cmd> --format json`. */
+const JSON_WRAPPER = /^ix_[a-z]+_json$/;
+
+/**
+ * What is wrong with one MCP reference, or null. `helpers` are the `ix_…`
+ * names the plugin defines itself (definedHelpers): naming one is not naming a tool.
+ */
+export function checkMcp(ref, mcp, helpers = new Set()) {
+  if (ref.path === undefined) {
+    if (mcp.tools.has(ref.tool) || helpers.has(ref.tool) || JSON_WRAPPER.test(ref.tool)) return null;
+    return `unknown MCP tool "${ref.tool}"`;
+  }
   if (!mcp.tools.has(ref.tool) || mcp.jsonResults.has(ref.tool)) return null;
   return `"${ref.tool}" returns \`--format llm\` records, not JSON: it has no field "${ref.path}"`;
 }
@@ -659,6 +707,13 @@ async function main(argv) {
   for (const repo of PLUGINS) {
     const root = join(dir, repo);
     try { statSync(root); } catch { console.error(`missing ${root}`); return 2; }
+    // The plugin's own ix_… helpers, so its docs may name them.
+    const helpers = new Set();
+    for (const file of walk(root)) {
+      const ext = extname(file);
+      const text = CODE_EXT.has(ext) || SHELL_EXT.has(ext) ? readFileSync(file, "utf8") : "";
+      for (const name of definedHelpers(text, relative(root, file))) helpers.add(name);
+    }
     for (const file of walk(root)) {
       const ext = extname(file);
       if (!CODE_EXT.has(ext) && !TEXT_EXT.has(ext) && !SHELL_EXT.has(ext)) continue;
@@ -689,7 +744,7 @@ async function main(argv) {
       if (TEXT_EXT.has(ext)) {
         for (const ref of mcpReferences(text, ext)) {
           counts.mcp++;
-          report(ref.line, ref.snippet, checkMcp(ref, fields.mcp));
+          report(ref.line, ref.snippet, checkMcp(ref, fields.mcp, helpers));
         }
       }
     }

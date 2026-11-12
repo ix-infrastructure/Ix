@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { describe, expect, it } from "vitest";
-import { check, checkField, checkMcp, fieldReads, jsonInvocations, mcpReferences, textInvocations } from "./check-plugin-contract.mjs";
+import { check, checkField, checkMcp, definedHelpers, fieldReads, jsonInvocations, mcpReferences, textInvocations } from "./check-plugin-contract.mjs";
 
 const surface = new Map([
   ["map", { flags: new Set(["--remap", "--silent"]), subcommands: new Set() }],
@@ -204,6 +204,36 @@ describe("MCP tool and result names in skill text", () => {
     expect(fieldReads("x=$(prefix_text foo)\njq '.bogus' <<<\"$x\"", "a.sh", commands)).toEqual([]);
     expect(fieldReads("x=$(ix_text_json foo)\njq '.[0].path' <<<\"$x\"", "a.sh", commands))
       .toMatchObject([{ command: "text", path: "[].path" }]);
+  });
+
+  it("does not take the plugin's own ix_ helpers for MCP tools", () => {
+    const helpers = new Set([
+      ...definedHelpers("ix_lib() {\n  :\n}\nfunction ix_run { :; }\n", "hooks/common.sh"),
+      ...definedHelpers("def ix_fetch(x):\n    pass\n", "ix_tools/client.py"),
+    ]);
+    expect([...helpers].sort()).toEqual(["ix_fetch", "ix_lib", "ix_run", "ix_tools"]);
+    const text = "The hook defines `ix_locate_json`, `ix_lib`, `ix_run`, `ix_fetch` and `ix_tools`. `ix_query` is not a tool.";
+    expect(mcpReferences(text).map((ref) => checkMcp(ref, fields.mcp, helpers)).filter(Boolean))
+      .toEqual(['unknown MCP tool "ix_query"']);
+    // Without the plugin's definitions only the json wrapper form is known.
+    expect(mcpReferences(text).map((ref) => checkMcp(ref, fields.mcp)).filter(Boolean)).toEqual([
+      'unknown MCP tool "ix_lib"', 'unknown MCP tool "ix_run"', 'unknown MCP tool "ix_fetch"',
+      'unknown MCP tool "ix_tools"', 'unknown MCP tool "ix_query"',
+    ]);
+  });
+
+  it("does not take a qualified symbol name given as an argument, or a host name, for a read", () => {
+    const text = [
+      "## Callers",
+      "Use `ix_locate` on `auth.verify_token`, `api.get` or `client.query`. Docs: `docs.example.com`.",
+      "Pass a symbol like `pkg.mod.fn` to `ix_explain`, e.g. `db.connect`.",
+      "Then read `traversal.nodes_visited` and `.facts.calleeCount`, or `data.plans`.",
+    ].join("\n");
+    expect(mcpReferences(text).map((ref) => checkMcp(ref, fields.mcp)).filter(Boolean)).toEqual([
+      '"ix_explain" returns `--format llm` records, not JSON: it has no field "traversal.nodes_visited"',
+      '"ix_explain" returns `--format llm` records, not JSON: it has no field "facts.calleeCount"',
+      '"ix_explain" returns `--format llm` records, not JSON: it has no field "data.plans"',
+    ]);
   });
 
   it("reads tool references from JSON prompt strings too", () => {

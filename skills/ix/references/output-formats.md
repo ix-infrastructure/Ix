@@ -75,8 +75,11 @@ about a fifth of the payload. `--pretty` forces the indented shape anywhere.
 The shapes are TypeScript types in `ix-cli/src/cli/contracts/`, and a test pins
 the keys each one prints. Covered so far: the shared miss records, `ix locate`,
 `ix read` and `ix text` (a bare array of matches, no envelope). Their field
-paths are also published as data (`contracts/fields.ts`), and the plugin
-contract check fails a plugin that reads a field not listed there. The other
+paths are also published as data (`contracts/fields.ts`), together with the
+failure record (`error`, `message`, `dir`, `next`) and, for `ix locate a b`, the
+`{ targets: [{ target, exitCode, ... }], summary }` grouping
+(`contracts/envelope.ts`). The plugin contract check fails a plugin that reads
+a field not listed there. The other
 commands' json is not typed yet; the rule applies to it all the same.
 
 **Misses share one envelope.** A target that resolves to nothing, or to several

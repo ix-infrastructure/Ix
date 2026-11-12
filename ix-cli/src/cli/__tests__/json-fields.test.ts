@@ -8,6 +8,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTextCommand } from "../commands/text.js";
 import { acceptsField, JSON_FIELDS } from "../contracts/fields.js";
+import { emitErrorRecord } from "../errors.js";
 import { formatTextResults, sliceRanked, type TextResult } from "../format.js";
 import { fieldPaths } from "./helpers/field-paths.js";
 
@@ -46,7 +47,7 @@ describe("ix text --format json", () => {
       expect(body).toHaveLength(slice.rows.length);
       expect(unpublished("text", body)).toEqual([]);
     }
-    expect(fieldPaths([full]).sort()).toEqual([...JSON_FIELDS.text].sort());
+    expect(fieldPaths([full]).sort()).toEqual(JSON_FIELDS.text.filter((p) => p.startsWith("[]")).sort());
   });
 
   it.skipIf(!hasRipgrep)("the real command prints the same shape", async () => {
@@ -66,6 +67,17 @@ describe("ix text --format json", () => {
   });
 });
 
+describe("the failure record (contracts/envelope.ts)", () => {
+  it("every path emitErrorRecord prints is published for every listed command", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    emitErrorRecord("workspace_not_mapped", "not mapped", "run ix map", [["dir", "/w"]], "json");
+    const body = JSON.parse(log.mock.calls.map((call) => call.join(" ")).join("\n"));
+    log.mockRestore();
+    expect(fieldPaths(body).sort()).toEqual(["dir", "error", "message", "next"]);
+    for (const command of Object.keys(JSON_FIELDS)) expect(unpublished(command, body)).toEqual([]);
+  });
+});
+
 describe("acceptsField", () => {
   it("accepts listed paths, open records and nothing else", () => {
     expect(acceptsField("locate", "resolvedTarget.name")).toBe(true);
@@ -75,6 +87,13 @@ describe("acceptsField", () => {
     expect(acceptsField("locate", "graphs.status")).toBe(false);
     expect(acceptsField("text", "[].path")).toBe(true);
     expect(acceptsField("text", "results")).toBe(false);
+    expect(acceptsField("text", "error")).toBe(true);
+    expect(acceptsField("locate", "next")).toBe(true);
+    expect(acceptsField("locate", "summary")).toBe(true);
+    expect(acceptsField("locate", "summary.notFound")).toBe(true);
+    expect(acceptsField("locate", "targets[].resolvedTarget.path")).toBe(true);
+    expect(acceptsField("locate", "targets[].exitCode")).toBe(true);
+    expect(acceptsField("locate", "targets[].confidence")).toBe(false);
   });
 
   it("knows nothing about a command with no published list", () => {
