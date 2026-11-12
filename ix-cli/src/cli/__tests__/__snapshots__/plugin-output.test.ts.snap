@@ -183,7 +183,7 @@ exports[`ix impact: plugin-facing output > --format json > ambiguous target (def
 "$ ix impact draw --format json
 exit: 0
 --- stdout
-{"resolvedTarget":{"kind":"function","name":"draw"},"depth":1,"riskSummary":"Low risk — localized impact with limited propagation.","riskLevel":"low","riskCategory":"localized","atRiskBehavior":["Limited to immediate callers"],"summary":{"callers":0,"callees":1},"calleeList":[{"kind":"function","name":"paint","path":"src/app.ts","lineStart":7,"lineEnd":9}],"resolutionNotices":[{"code":"ambiguous_target","target":"draw","message":"\\"draw\\" matches 2 candidates; using draw (src/app.ts).","chosen":{"id":"00000005-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/app.ts"},"candidates":[{"id":"00000005-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/app.ts","line":3,"score":-1,"rank":1},{"id":"00000004-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/geometry.ts","line":5,"score":-1,"rank":2}],"total":2}]}
+{"resolvedTarget":{"kind":"function","name":"draw"},"depth":1,"riskSummary":"Low risk — localized impact with limited propagation.","riskLevel":"low","riskCategory":"localized","atRiskBehavior":["Limited to immediate callers"],"summary":{"callers":0,"callees":1,"dependents":0},"calleeList":[{"kind":"function","name":"paint","path":"src/app.ts","lineStart":7,"lineEnd":9}],"resolutionNotices":[{"code":"ambiguous_target","target":"draw","message":"\\"draw\\" matches 2 candidates; using draw (src/app.ts).","chosen":{"id":"00000005-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/app.ts"},"candidates":[{"id":"00000005-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/app.ts","line":3,"score":-1,"rank":1},{"id":"00000004-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/geometry.ts","line":5,"score":-1,"rank":2}],"total":2}]}
 
 --- stderr
 
@@ -201,7 +201,7 @@ exports[`ix impact: plugin-facing output > --format json > resolved target 1`] =
 "$ ix impact paint --format json
 exit: 0
 --- stdout
-{"resolvedTarget":{"kind":"function","name":"paint"},"depth":1,"riskSummary":"Low risk — localized impact with limited propagation.","riskLevel":"low","riskCategory":"localized","atRiskBehavior":["Limited to immediate callers"],"summary":{"callers":1,"callees":1},"callerList":[{"kind":"function","name":"draw","path":"src/app.ts","lineStart":3,"lineEnd":5}],"calleeList":[{"kind":"function","name":"draw","path":"src/geometry.ts","lineStart":5,"lineEnd":7}]}
+{"resolvedTarget":{"kind":"function","name":"paint"},"depth":1,"riskSummary":"Low risk — localized impact with limited propagation.","riskLevel":"low","riskCategory":"localized","atRiskBehavior":["Limited to immediate callers"],"summary":{"callers":1,"callees":1,"dependents":1},"callerList":[{"kind":"function","name":"draw","path":"src/app.ts","lineStart":3,"lineEnd":5}],"calleeList":[{"kind":"function","name":"draw","path":"src/geometry.ts","lineStart":5,"lineEnd":7}]}
 
 --- stderr
 "
@@ -243,7 +243,7 @@ candidate n=2 name=draw kind=function path=src/geometry.ts id=00000004
 hint text="Use --pick <n> or --path to choose another."
 impact target=draw kind=function risk=low category=localized summary="Low risk — localized impact with limited propagation."
 behavior text="Limited to immediate callers"
-counts callers=0 callees=1 shown_callers=0 shown_callees=1
+counts callers=0 callees=1 shown_callers=0 shown_callees=1 dependents_total=0
 callee name=paint kind=function path=src/app.ts lines=7-9
 
 --- stderr
@@ -268,7 +268,7 @@ exit: 0
 --- stdout
 impact target=paint kind=function risk=low category=localized summary="Low risk — localized impact with limited propagation."
 behavior text="Limited to immediate callers"
-counts callers=1 callees=1 shown_callers=1 shown_callees=1
+counts callers=1 callees=1 shown_callers=1 shown_callees=1 dependents_total=1
 caller name=draw kind=function path=src/app.ts lines=3-5
 callee name=draw kind=function path=src/geometry.ts lines=5-7
 

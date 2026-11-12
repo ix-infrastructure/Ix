@@ -430,8 +430,12 @@ async function lookUpContainer(client: IxClient, containerId: string): Promise<E
   }
 }
 
-/** The target's callees by name, one entity read each, in edge order. */
-function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRef[]> {
+/**
+ * The target's callees by name, one entity read each, in edge order. A callee
+ * with no usable name, or one that cannot be read, is listed unresolved with a
+ * text-search suggestion. `ix explain` and `collectFacts` both use this one.
+ */
+export function resolveCallList(client: Pick<IxClient, "entity">, calleeEdges: any[]): Promise<EntityRef[]> {
   return Promise.all(
     calleeEdges.map(async (e: any): Promise<EntityRef> => {
       try {

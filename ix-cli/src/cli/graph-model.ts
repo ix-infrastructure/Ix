@@ -10,6 +10,10 @@
  * kinds a patch writes (`NODE_KINDS`, client/graph-schema.ts) plus the kinds
  * read here that no patch writes (`READ_ONLY_KINDS`). A kind in neither list
  * does not compile.
+ *
+ * This module stays pure (no client, process or output): resolve/score.ts
+ * loads it. The one lookup of a file's graph node is `findFileNode` in
+ * file-node.ts.
  */
 
 import type { NodeKind } from "../client/graph-schema.js";
