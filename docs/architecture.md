@@ -113,6 +113,13 @@ The rules of this seam:
   The editor plugins and `ix mcp` act on them. Read
   [Exit codes](../CONTRIBUTING.md#exit-codes) and
   [`--format llm`](llm-format.md) before changing either.
+- **Output goes through `ix-cli/src/cli/output/`.** `output/json.ts` prints
+  json payloads (`printJson`, `captureJson`, `--pretty`, resolution
+  notices); `output/slice.ts` cuts lists to `--limit`/`--offset` and words the
+  truncation hints; `output/emit.ts` holds `Renderer<T>` and `emit`, which picks
+  the form for `--format`. One command's renderer lives in
+  `ix-cli/src/cli/render/<command>.ts`. `format.ts` only re-exports the names
+  that moved out of it, for the modules that still import them from there.
 
 ## Ingest: from a file to graph patches
 
