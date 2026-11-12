@@ -471,6 +471,8 @@ export function registerMapCommand(program: Command): void {
     .option("--remap", "Compute the map now, even from an automatic (hook) run that would defer it")
     .option("--verbose", "Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit)")
     .option("--silent", "Suppress all output except a one-line summary (useful for LLM hooks)")
+    .option("--auto", "Start an automatic (hook) map of the git root of [path] in the background, if the rules allow one now; prints nothing, exits 0")
+    .option("--explain", "With --auto: say on stderr which rule decided")
     .option("--prune-stale-workspace", "Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest. Loopback endpoints only -- and loopback is the URL, not ownership: never use it through a tunnel or proxy to a shared backend")
     .addHelpText(
       "after",
@@ -500,6 +502,17 @@ Advanced:
             from them and starts a background refresh. IX_MAP_EAGER=1 makes
             automatic runs compute too, as before; IX_MAP_BACKGROUND_REFRESH=0
             stops region views starting one.
+  --auto    What an editor or agent hook runs after an edit or at the end of
+            a turn. Starts \`ix map <root> --silent\` (IX_AUTO_MAP=1) detached
+            and returns at once, for the git root of [path] (default: cwd),
+            unless a rule says not to: not a git repository, the root is or
+            contains the home directory, the root was never mapped, the
+            backend is remote (IX_AUTO_MAP_CLOUD=1 allows it), an automatic
+            map of the root started within IX_AUTO_MAP_DEBOUNCE_MS (default
+            30000; shared by every host, kept under IX_HOME), or the backend
+            does not answer. Prints nothing and exits 0 either way; --explain
+            (or IX_HOOK_DEBUG=1) names the rule on stderr. Other flags are
+            ignored.
   --prune-stale-workspace
             A workspace registered with a workspace_id other than the one its
             path derives keeps that id (it may be pinned on purpose, e.g. a
@@ -518,6 +531,7 @@ Examples:
   ix map --format json
   ix map --silent
   ix map --remap
+  ix map --auto .
   ix map --level 2
   ix map --min-confidence 0.5
   ix map --max-items 10
@@ -529,7 +543,12 @@ Examples:
   ix map . --full --verbose
   ix map --prune-stale-workspace`
     )
-    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remap?: boolean; verbose?: boolean; silent?: boolean; pruneStaleWorkspace?: boolean }) => {
+    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remap?: boolean; verbose?: boolean; silent?: boolean; pruneStaleWorkspace?: boolean; auto?: boolean; explain?: boolean }) => {
+      if (opts.auto) {
+        const { runAutoMapCommand } = await import("../auto-map.js");
+        await runAutoMapCommand(pathArg, { explain: opts.explain });
+        return;
+      }
       const held: HeldMap = {};
       try {
         await runMapCommand(pathArg, opts, held);

@@ -115,6 +115,18 @@ export function mapRefreshOutcomePath(projectRoot: string): string {
 }
 
 /**
+ * Path to the debounce stamp of `ix map --auto` for one project root: when an
+ * automatic map was last started for it, by any host (see `auto-map.ts`).
+ * Kept by reset and a failed hierarchy build: it expires on its own, and
+ * clearing it after a failed map would let every edit start the failing map
+ * again.
+ */
+export function autoMapStampPath(projectRoot: string): string {
+  const key = rootKey(projectRoot);
+  return join(ixHome(), `auto_map_${key}.json`);
+}
+
+/**
  * Which per-root state files are cleared together.
  *
  *   - `ingest`: describes the source graph; cleared by reset, workspace
@@ -122,7 +134,8 @@ export function mapRefreshOutcomePath(projectRoot: string): string {
  *     map group.
  *   - `map`: describes the architecture hierarchy built from it; cleared on
  *     its own when a hierarchy build fails (`clearMapBaseline`).
- *   - `kept`: survives both, on purpose (see `verifyRecordPath`).
+ *   - `kept`: survives both, on purpose (see `verifyRecordPath` and
+ *     `autoMapStampPath`).
  */
 export type WorkspaceStateGroup = "ingest" | "map" | "kept";
 
@@ -153,6 +166,7 @@ export const WORKSPACE_STATE_FILES: readonly WorkspaceStateFile[] = [
   { name: "map_stale", owner: "map-freshness.ts", group: "map", path: mapStalePath },
   { name: "map_refresh", owner: "map-freshness.ts", group: "map", path: mapRefreshOutcomePath },
   { name: "verify", owner: "verify.ts", group: "kept", path: verifyRecordPath },
+  { name: "auto_map", owner: "auto-map.ts", group: "kept", path: autoMapStampPath },
 ];
 
 function clearGroup(projectRoot: string, group: WorkspaceStateGroup): void {
