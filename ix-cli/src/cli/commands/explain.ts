@@ -4,9 +4,9 @@ import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import { formatExplain, relativePath, printJson, type ExplainResult, type EntityRef, type Diagnostic } from "../format.js";
-import { resolveFileOrReport, isRawId, activeReadScope } from "../resolve.js";
+import { resolveFileOrReport, activeReadScope } from "../resolve.js";
 import { isFileStale } from "../stale.js";
-import { collectFacts, unresolvedCallNames, unresolvedCallsOf } from "../explain/facts.js";
+import { collectFacts, resolveCallList, unresolvedCallNames, unresolvedCallsOf } from "../explain/facts.js";
 import { inferRole } from "../explain/role-inference.js";
 import { inferImportance } from "../explain/importance.js";
 import { renderExplanation } from "../explain/render.js";
@@ -177,38 +177,7 @@ async function rawExplain(
   const diagnostics: Diagnostic[] = [];
   let callList: EntityRef[] | undefined;
   if (calleeEdges.length > 0 && calleeEdges.length <= 20) {
-    const refs = await Promise.all(
-      calleeEdges.map(async (e: any): Promise<EntityRef> => {
-        try {
-          const callee = await client.entity(e.dst);
-          const calleeNode = callee.node as any;
-          const name = calleeNode.name || calleeNode.attrs?.name || "";
-          if (!name || isRawId(name)) {
-            return {
-              name: name || e.dst,
-              kind: calleeNode.kind,
-              resolved: false,
-              suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
-            };
-          }
-          return {
-            name,
-            kind: calleeNode.kind,
-            id: e.dst,
-            resolved: true,
-            path: relativePath(calleeNode.provenance?.source_uri ?? calleeNode.provenance?.sourceUri),
-            suggestedCommand: forMcp() ? toolCall("ix_explain", { symbol: name }) : `ix explain "${name}"`,
-          };
-        } catch {
-          return {
-            name: e.dst,
-            resolved: false,
-            diagnostic: "unresolved_call_target",
-            suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
-          } as EntityRef;
-        }
-      })
-    );
+    const refs = await resolveCallList(client, calleeEdges);
     callList = refs;
     const unresolvedCount = refs.filter(r => !r.resolved).length;
     if (unresolvedCount > 0) {

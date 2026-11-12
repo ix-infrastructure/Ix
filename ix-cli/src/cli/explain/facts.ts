@@ -432,40 +432,51 @@ async function lookUpContainer(client: IxClient, containerId: string): Promise<E
   }
 }
 
-/** The target's callees by name, one entity read each, in edge order. */
-function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRef[]> {
-  return Promise.all(
-    calleeEdges.map(async (e: any): Promise<EntityRef> => {
-      try {
-        const callee = await client.entity(e.dst);
-        const calleeNode = callee.node as any;
-        const name = calleeNode.name || calleeNode.attrs?.name || "";
-        if (!name || isRawId(name)) {
-          return {
-            name: name || e.dst,
-            kind: calleeNode.kind,
-            resolved: false,
-            suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
-          };
-        }
-        return {
-          name,
-          kind: calleeNode.kind,
-          id: e.dst,
-          resolved: true,
-          path: relativePath(calleeNode.provenance?.source_uri ?? calleeNode.provenance?.sourceUri),
-          suggestedCommand: forMcp() ? toolCall("ix_explain", { symbol: name }) : `ix explain "${name}"`,
-        };
-      } catch {
-        return {
-          name: e.dst,
-          resolved: false,
-          diagnostic: "unresolved_call_target",
-          suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
-        } as EntityRef;
+/** The target's callees by name, in edge order (callers cap this at 20). */
+export async function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRef[]> {
+  if (calleeEdges.length === 0) return [];
+  // Only the node is needed. Dangling edges are normal on older graphs; the
+  // batch's missing ids must not turn into one failing entity request each.
+  const result = await client.nodes([...new Set<string>(calleeEdges.map((e) => e.dst))], "full")
+    .catch(async (err: unknown) => {
+      // Backends before /nodes can return the same neighbours in one expand.
+      // Never fall back to probing the individual (possibly missing) ids.
+      if (err instanceof Error && /^(404|405):/.test(err.message)) {
+        return client.expand(calleeEdges[0].src, { direction: "out", predicates: ["CALLS"] })
+          .catch(() => ({ nodes: [] }));
       }
-    }),
-  );
+      return { nodes: [] };
+    });
+  const nodes = new Map(result.nodes.map((node) => [node.id, node]));
+  return calleeEdges.map((e: any): EntityRef => {
+    try {
+      const calleeNode = nodes.get(e.dst) as any;
+      const name = calleeNode.name || calleeNode.attrs?.name || "";
+      if (!name || isRawId(name)) {
+        return {
+          name: name || e.dst,
+          kind: calleeNode.kind,
+          resolved: false,
+          suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
+        };
+      }
+      return {
+        name,
+        kind: calleeNode.kind,
+        id: e.dst,
+        resolved: true,
+        path: relativePath(calleeNode.provenance?.source_uri ?? calleeNode.provenance?.sourceUri),
+        suggestedCommand: forMcp() ? toolCall("ix_explain", { symbol: name }) : `ix explain "${name}"`,
+      };
+    } catch {
+      return {
+        name: e.dst,
+        resolved: false,
+        diagnostic: "unresolved_call_target",
+        suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
+      } as EntityRef;
+    }
+  });
 }
 
 /**

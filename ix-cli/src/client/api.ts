@@ -81,7 +81,7 @@ function hasCode(err: unknown, codes: ReadonlySet<string>): boolean {
  */
 const SHARED_READ_PREFIXES = [
   "/v1/expand", "/v1/degree", "/v1/search", "/v1/context", "/v1/list",
-  "/v1/entity/", "/v1/provenance/", "/v1/resolve-prefix/",
+  "/v1/entity/", "/v1/provenance/", "/v1/resolve-prefix/", "/v1/nodes",
 ];
 
 function isSharedRead(path: string): boolean {
@@ -976,7 +976,10 @@ export class IxClient {
       }
     }
     const body = this.memo && isSharedRead(path)
-      ? await this.memo.run(`${method} ${path} ${payload}`, fetchBody)
+      ? await this.memo.run(`${method} ${path} ${payload}`, fetchBody,
+        // A query client lives for one command. Repeated dangling references
+        // cannot become live during that read, so keep their misses too.
+        (err) => path.startsWith("/v1/entity/") && err instanceof Error && err.message.startsWith("404:"))
       : await fetchBody();
     return parseOrThrowWithStatus<T>(body);
   }

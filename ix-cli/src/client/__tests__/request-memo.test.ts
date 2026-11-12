@@ -57,6 +57,33 @@ const expandReply = (request: Seen) => {
 };
 
 describe("IxClient shareReads", () => {
+  it("keeps entity 404s only for the query command that observed them", async () => {
+    const b = await backend(() => ({ status: 404, body: "entity not found" }));
+    const client = new IxClient(b.endpoint, undefined, QUERY_CLIENT_OPTIONS);
+    await expect(client.entity("missing")).rejects.toThrow("404:");
+    await expect(client.entity("missing")).rejects.toThrow("404:");
+    expect(b.seen).toHaveLength(1);
+    const nextCommand = new IxClient(b.endpoint, undefined, QUERY_CLIENT_OPTIONS);
+    await expect(nextCommand.entity("missing")).rejects.toThrow("404:");
+    expect(b.seen).toHaveLength(2);
+  });
+
+  it("does not retain entity 404s on long-lived clients or cache other failures", async () => {
+    const b = await backend(() => ({ status: 404, body: "entity not found" }));
+    const client = new IxClient(b.endpoint);
+    await expect(client.entity("missing")).rejects.toThrow("404:");
+    await expect(client.entity("missing")).rejects.toThrow("404:");
+    expect(b.seen).toHaveLength(2);
+
+    for (const status of [401, 403, 500, 503]) {
+      const unhealthy = await backend(() => ({ status, body: "unavailable" }));
+      const query = new IxClient(unhealthy.endpoint, undefined, QUERY_CLIENT_OPTIONS);
+      await expect(query.entity("id")).rejects.toThrow(`${status}:`);
+      await expect(query.entity("id")).rejects.toThrow(`${status}:`);
+      expect(unhealthy.seen).toHaveLength(2);
+    }
+  });
+
   it("sends an identical read once, however many callers ask", async () => {
     const b = await backend(expandReply, 20);
     const client = new IxClient(b.endpoint, undefined, { shareReads: true });
