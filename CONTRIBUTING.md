@@ -42,6 +42,10 @@ This is a quick check that the build works. It is not everything CI runs: see
 
 ## Development Workflow
 
+For a map of the code — the two packages, how commands are registered, how a
+file becomes graph patches, and the rules that hold it together — read
+[docs/architecture.md](docs/architecture.md) first.
+
 1. Create a branch from `main`
 2. Make your changes
 3. Run the checks in [Before you open a PR](#before-you-open-a-pr)
