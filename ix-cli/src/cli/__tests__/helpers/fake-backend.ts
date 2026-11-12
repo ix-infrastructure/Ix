@@ -42,6 +42,7 @@ export class FakeBackend {
   readonly unknownPaths: string[] = [];
 
   private server: Server | undefined;
+  private endpoint: string | undefined;
   private rev = 0;
 
   /** Patch-source substrings this backend refuses, whatever else is healthy. */
@@ -182,6 +183,12 @@ export class FakeBackend {
    * `nodeOpCount`), no ops -- instead of with its ops.
    */
   bulkManifests = false;
+  /**
+   * Answer `POST /v1/list` with this status instead of rows, as a backend that
+   * lacks the route (404) or fails the read (500) does. Unset, it is served
+   * from the stored graph (needs `semantics`).
+   */
+  failList: number | undefined = undefined;
   private readonly hashes = new Map<string, { workspaceId: string | null; uri: string; hash: string }>();
 
   /**
@@ -214,7 +221,9 @@ export class FakeBackend {
    * report none, as a pre-#157 backend does. `null` reports none in any mode.
    */
   releaseVersion: string | null | undefined = undefined;
-  private readonly nodes = new Map<string, { kind: unknown; name: unknown; attrs?: unknown; uri?: string; hash?: string; extractor?: string; live: boolean }>();
+  private readonly nodes = new Map<string, {
+    kind: unknown; name: unknown; attrs?: unknown; uri?: string; hash?: string; extractor?: string; workspaceId?: string; live: boolean;
+  }>();
   private readonly edges = new Map<string, {
     src: unknown; dst: unknown; predicate: unknown; attrs?: unknown; workspaceId: string; uri: string; live: boolean;
   }>();
@@ -299,7 +308,7 @@ export class FakeBackend {
       const id = String(op.id);
       if (op.type === "UpsertNode") {
         // As the bulk route does, every upsert takes the patch's provenance.
-        this.nodes.set(id, { kind: op.kind, name: op.name, attrs: op.attrs, uri, hash: patch.source?.sourceHash, extractor: patch.source?.extractor, live: true });
+        this.nodes.set(id, { kind: op.kind, name: op.name, attrs: op.attrs, uri, hash: patch.source?.sourceHash, extractor: patch.source?.extractor, workspaceId, live: true });
       }
       else if (op.type === "UpsertEdge") {
         this.edges.set(id, { src: op.src, dst: op.dst, predicate: op.predicate, attrs: op.attrs, workspaceId, uri, live: true });
@@ -407,7 +416,14 @@ export class FakeBackend {
       this.server!.once("error", reject);
       this.server!.listen(0, "127.0.0.1", resolve);
     });
-    return `http://127.0.0.1:${(this.server!.address() as AddressInfo).port}`;
+    this.endpoint = `http://127.0.0.1:${(this.server!.address() as AddressInfo).port}`;
+    return this.endpoint;
+  }
+
+  /** The base URL `start()` returned, for `IX_ENDPOINT`. */
+  get url(): string {
+    if (this.endpoint === undefined) throw new Error("FakeBackend.url read before start()");
+    return this.endpoint;
   }
 
   async stop(): Promise<void> {
@@ -671,6 +687,35 @@ export class FakeBackend {
         .filter(([, e]) => e.live && (e.src === id || e.dst === id))
         .map(([edgeId, e]) => ({ id: edgeId, predicate: e.predicate, provenance: { sourceUri: e.uri } }));
       return send(200, { node: { id, kind: node.kind, name: node.name, attrs: node.attrs ?? {} }, edges });
+    }
+    // The two reads `ix verify` and `ix stats` make, answered from the stored
+    // graph. Only with `semantics`: without it nothing is stored, and an empty
+    // answer would read as "the graph is empty" rather than "not implemented".
+    if (this.semantics !== undefined && path === "/v1/list") {
+      if (this.failList !== undefined) return send(this.failList, { error: `${this.failList}: list failed` });
+      let q: { kind?: string; limit?: number; scope?: string; workspaceId?: string } = {};
+      try { q = JSON.parse(body || "{}"); } catch { /* none */ }
+      const rows = [...this.nodes]
+        .filter(([, n]) => n.live && n.kind === q.kind)
+        // The real backend's `scope` is a substring of the source URI.
+        .filter(([, n]) => q.scope === undefined || (n.uri ?? "").includes(q.scope))
+        .filter(([, n]) => q.workspaceId === undefined || n.workspaceId === q.workspaceId)
+        .map(([id, n]) => ({
+          id, kind: n.kind, name: n.name, attrs: n.attrs ?? {},
+          provenance: { sourceUri: n.uri ?? "", sourceHash: n.hash, extractor: n.extractor },
+        }));
+      return send(200, q.limit !== undefined ? rows.slice(0, q.limit) : rows);
+    }
+    if (this.semantics !== undefined && path === "/v1/stats") {
+      const ws = new URL(url, "http://x").searchParams.get("workspace_id");
+      const counts = (kinds: unknown[]) => {
+        const by = new Map<string, number>();
+        for (const k of kinds) by.set(String(k), (by.get(String(k)) ?? 0) + 1);
+        return { total: kinds.length, byKind: [...by].map(([kind, count]) => ({ kind, count })) };
+      };
+      const nodes = [...this.nodes.values()].filter((n) => n.live && (ws === null || n.workspaceId === ws));
+      const edges = [...this.edges.values()].filter((e) => e.live && (ws === null || e.workspaceId === ws));
+      return send(200, { nodes: counts(nodes.map((n) => n.kind)), edges: counts(edges.map((e) => e.predicate)) });
     }
     if (path === "/v1/stitch") {
       this.requests.push({ path, patches: 0 });
