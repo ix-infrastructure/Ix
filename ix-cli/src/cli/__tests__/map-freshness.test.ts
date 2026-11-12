@@ -129,7 +129,7 @@ class FakeBackend {
       const ops = this.patches.get(decodeURIComponent(path.slice("/v1/patches/".length)));
       return ops ? send(200, { data: { ops } }) : send(404, { error: "Patch not found" });
     }
-    if (path.startsWith("/v1/entity/")) return send(200, { node: { kind: "function" }, edges: [] });
+    if (path.startsWith("/v1/entity/")) return send(200, { node: { id: decodeURIComponent(path.slice("/v1/entity/".length)), kind: "function" }, edges: [] });
     if (path.startsWith("/v1/stitch/system/")) return send(200, { systemId: null });
     if (path === "/v1/stitch") return send(200, { stitched: 0, systemId: null, edges: [] });
     if (path === "/v1/map") {

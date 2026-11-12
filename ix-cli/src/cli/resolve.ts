@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import chalk from "chalk";
 import type { IxClient } from "../client/api.js";
+import type { GraphNode } from "../client/types.js";
 import { stderr } from "./stderr.js";
 import { applyRoleFilter } from "./role-filter.js";
 import { detectSystem } from "./system.js";
@@ -629,12 +630,12 @@ export async function withContainers(client: IxClient, result: ResolveResult): P
   const owners = new Map<string, Set<string>>();
   for (const answer of answers) {
     if (!answer || !Array.isArray(answer.nodes) || !Array.isArray(answer.edges)) continue;
-    const byId = new Map(answer.nodes.map((n: any) => [String(n?.id), n]));
+    const byId = new Map(answer.nodes.map((n) => [n.id, n] as const));
     for (const e of answer.edges) {
       if (e?.predicate !== "CONTAINS" || !ids.has(String(e.dst))) continue;
       const parent = byId.get(String(e.src));
       const name = parent?.name || parent?.attrs?.name;
-      if (!name || String(parent.kind ?? "").toLowerCase() === "file") continue;
+      if (!name || String(parent?.kind ?? "").toLowerCase() === "file") continue;
       const set = owners.get(String(e.dst)) ?? new Set<string>();
       set.add(String(name));
       owners.set(String(e.dst), set);
@@ -768,7 +769,7 @@ async function rankFileOrEntity(
 ): Promise<ResolveResult> {
   // 1. Raw UUID
   if (isRawId(target)) {
-    let n: any;
+    let n: GraphNode | undefined;
     try {
       n = (await client.entity(target))?.node;
     } catch (err) {
@@ -797,7 +798,7 @@ async function rankFileOrEntity(
     try {
       const fullId = await client.resolvePrefix(target);
       const details = await client.entity(fullId);
-      const n = details.node as any;
+      const n = details.node;
       return {
         resolved: true,
         entity: {
@@ -971,11 +972,11 @@ async function membersOf(
   cls: { id: string; path?: string },
   memberName: string,
 ): Promise<{ found: Candidate[]; truncated: boolean }> {
-  const named = (n: any) => n && String(n.id) !== cls.id && (n.name || n.attrs?.name) === memberName;
-  let children: any[] | null;
+  const named = (n: GraphNode) => n && n.id !== cls.id && (n.name || n.attrs?.name) === memberName;
+  let children: GraphNode[] | null;
   try {
     const expanded = await client.expand(cls.id, { direction: "out", predicates: ["CONTAINS"] });
-    children = Array.isArray(expanded?.nodes) ? expanded.nodes.filter((n: any) => String(n?.id) !== cls.id) : null;
+    children = Array.isArray(expanded?.nodes) ? expanded.nodes.filter((n) => n?.id !== cls.id) : null;
   } catch {
     children = null;
   }
@@ -988,7 +989,7 @@ async function membersOf(
   const limit = 50;
   const nodes = await client.search(memberName, { limit, nameOnly: true, workspaceId, systemId, scope: cls.path });
   const found = nodes
-    .filter((n: any) => named(n) && nodePath(n) === classFile)
+    .filter((n) => named(n) && nodePath(n) === classFile)
     .map(candidateOf);
   return { found, truncated: nodes.length >= limit };
 }

@@ -11,21 +11,10 @@ import { formatOption, MAX_WAIT_SECONDS, parseWaitSecondsOption } from "../optio
 import { currentCaller } from "../next-step.js";
 import { canRenderProgress } from "../stderr.js";
 
-export interface SmellCandidate {
-  file_id: string;
-  file: string;
-  smell: string;
-  confidence: number;
-  signals: Record<string, unknown>;
-  inference_version: string;
-}
-
-export interface SmellReport {
-  rev: number;
-  run_at: string;
-  count: number;
-  candidates: SmellCandidate[];
-}
+// The `/v1/smells` response types live with the client; exported from here as
+// well, where they were first defined.
+import type { SmellCandidate, SmellReport } from "../../client/types.js";
+export type { SmellCandidate, SmellReport };
 
 /** Default cap on text and llm output. JSON is uncapped unless --limit is given. */
 const DEFAULT_LIMIT = 50;
