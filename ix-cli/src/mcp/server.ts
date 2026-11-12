@@ -12,6 +12,7 @@ import { z } from "zod";
 import { isReadablePath, resolveWorkspaceRoot } from "../cli/config.js";
 import { resolveIngestRootWithSource } from "../cli/map-root.js";
 import { BUNDLE_SCHEMA } from "../cli/context-bundle-schema.js";
+import { PRECISE_CONTEXT_SCHEMA } from "../cli/precise-context.js";
 
 import {
   createProtocolStdout,
@@ -336,7 +337,7 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   registerTool(
     ctx,
     "ix_context",
-    "Use first on an issue, a task, or an unfamiliar symbol or file (target=<name or path>, or issue=<text>). Returns ranked evidence (definition, members, callers, importers, related files, recent commits), each row path:lines, then next calls. Not for a literal string: use Grep.",
+    "Use first on a target or issue. Returns up to 8 spans with reason/confidence and path:lines; cursor pages more. For a literal string use Grep.",
     {
       target: z.string().min(1).optional(),
       issue: z.string().min(1).max(200_000).optional().describe("issue or task text, instead of target"),
@@ -347,6 +348,9 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       max_entities: z.number().int().min(1).max(500).optional(),
       max_relationships: z.number().int().min(1).max(1000).optional(),
       max_evidence: z.number().int().min(1).max(200).optional(),
+      limit: z.number().int().min(1).max(50).optional(),
+      cursor: z.string().optional(),
+      full: z.boolean().optional().describe("legacy bundle/rows"),
       max_tokens: z.number().int().min(500).max(200_000).optional().describe("default 3000"),
       max_chars: z
         .number()
@@ -358,7 +362,7 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       structured: z
         .boolean()
         .optional()
-        .describe("JSON bundle as structuredContent, not records"),
+        .describe("JSON as structuredContent, not records"),
     },
     async (input) => {
       const hasTarget = typeof input.target === "string";
@@ -380,6 +384,9 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       if (typeof input.max_relationships === "number")
         options.push(`--max-relationships=${numberArg(input, "max_relationships")}`);
       if (typeof input.max_evidence === "number") options.push(`--max-evidence=${numberArg(input, "max_evidence")}`);
+      if (typeof input.limit === "number") options.push(`--limit=${numberArg(input, "limit")}`);
+      if (typeof input.cursor === "string") options.push(`--cursor=${stringArg(input, "cursor")}`);
+      if (input.full === true) options.push("--full");
       if (typeof input.max_tokens === "number") options.push(`--max-tokens=${numberArg(input, "max_tokens")}`);
       if (typeof input.max_chars === "number") options.push(`--max-chars=${numberArg(input, "max_chars")}`);
       const run = (argv: IxArgv) =>
@@ -993,8 +1000,8 @@ function declaresOutputSchema(tool: string): boolean {
 
 /**
  * Run a command in JSON format and surface the parsed result as MCP
- * `structuredContent` alongside the text payload. The context bundle carries
- * its own versioned schema (`ix-context-bundle/1`), so the structured copy is
+ * `structuredContent` alongside the text payload. Compact context and the
+ * explicit full bundle carry versioned schemas, so the structured copy is
  * stable across releases; when the output does not parse into a usable object
  * we omit structured content and keep the text result authoritative rather
  * than throwing. The copy leaves out `generatedAt`, the bundle's one per-call
@@ -1025,7 +1032,7 @@ async function runJsonStructured(
   // (text-matches.ts): useful to read, but not the bundle, so it goes back as
   // text marked as an error — the failure signal a structured caller keys on —
   // never as structuredContent posing as one.
-  if (parsed.schema !== BUNDLE_SCHEMA) return textResult(text, true);
+  if (parsed.schema !== BUNDLE_SCHEMA && parsed.schema !== PRECISE_CONTEXT_SCHEMA) return textResult(text, true);
   const { generatedAt: _perCall, ...stable } = parsed;
   return {
     content: [{ type: "text", text: JSON.stringify(stable) }],

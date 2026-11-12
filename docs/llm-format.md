@@ -721,7 +721,17 @@ contains method=12 field=4
 item name=parseFile kind=method
 ```
 
-`ix context <target>`:
+`ix context <target>` defaults to compact code items (`ix-context/1`):
+
+```text
+target name=Widget classification=current
+context schema=ix-context/1 returned=1 eligible=1 below_confidence=2 missing_span=1 confidence_floor=0.55 remaining=0
+item name=render span=src/widget.ts:12-40 reason="defined in the target: Widget" confidence=0.7 stale=false
+```
+
+Every `item` has an exact span, a short selection reason and a numeric heuristic confidence. Items are ordered by confidence, with stable ties. The default page has at most 8 items, each spanning at most 120 lines. Below-floor and unlocated candidates are counted separately. When `remaining` is positive, `cursor` and a `next` record explain how to repeat the same query with `--cursor` (MCP: `cursor`); `--limit` / MCP `limit` sets 1–50 items per page. Candidate changes expire a cursor. Upstream bundle-budget cuts are reported separately and require a larger source pool, not another cursor. JSON uses the same items under `items[]`, with `lineStart`, `lineEnd`, `path`, `span`, `reason` and `confidence`; its `selection` object carries counts and the cursor. JSON/LLM issue and lean issue output use this contract too. `--full` opts into the original bundle/row contract, as do saved/output artifacts. Text output is unchanged.
+
+`ix context <target> --full`:
 
 ```
 context target=Widget target_kind=class target_path=src/widget.ts stale=false classification=current entities=2 relationships=1 claims=1 decisions=0 conflicts=0 intents=0 evidence=7 truncated_entities=0 truncated_relationships=0 truncated_evidence=0 truncated_chars=0

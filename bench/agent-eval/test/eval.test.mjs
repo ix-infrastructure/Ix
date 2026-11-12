@@ -14,6 +14,7 @@ import { markdown, summarize } from '../stats.mjs';
 import { dryConfig, resolveConfigPaths, runBenchmark } from '../run.mjs';
 import { execute } from '../process.mjs';
 import { checkResolution, evaluationError } from '../evaluation.mjs';
+import { contextPrecision, contextPrecisionComparison } from '../precision.mjs';
 import { armEnvironment, shellQuote } from '../isolation.mjs';
 import { assertMapped, checkLoginShells, checkTaskIsolation, codexSkillListed, integrationFiles } from '../provision.mjs';
 import { CLAUDE_IX_MCP_RULE, HOOK_SCRIPT, MCP_SERVER, PLUGIN_NAME, isHookProcess, nativeArgs } from '../integration.mjs';
@@ -32,6 +33,25 @@ const smoke = join(root, 'smoke.json');
 const rows = Array.from({ length: 60 }, (_, i) => ({ instance_id: `fixture__repo-${i}`, repo: `fixture/repo-${i % 6}`, base_commit: sha256(`fixture-${i}`).slice(0, 40), problem_statement: `Synthetic export fixture ${i}`, patch: 'HIDDEN GOLD', test_patch: 'HIDDEN TESTS' }));
 const integrationTest = (name, fn) => test(name, { skip: process.platform === 'win32' || process.env.AGENT_EVAL_PORTABLE_ONLY === '1' }, fn);
 const ndjson = (events) => events.map((e) => JSON.stringify(e)).join('\n');
+
+test('context precision counts each returned item against gold or subsequent overlapping reads', () => {
+  const items = [
+    { path: 'src/a.ts', lineStart: 10, lineEnd: 20 },
+    { path: 'src/b.ts', lineStart: 30, lineEnd: 40 },
+    { path: 'src/b.ts', lineStart: 100, lineEnd: 110 },
+    { path: 'src/c.ts', lineStart: 1, lineEnd: 5 },
+  ];
+  assert.deepEqual(contextPrecision(items, { goldPaths: ['src/a.ts'], subsequentReads: [
+    { path: 'src/b.ts', lineStart: 35, lineEnd: 36 },
+    { path: 'src/c.ts', lineStart: 6, lineEnd: 8 },
+  ] }), { items_returned: 4, items_acted_on: 2, precision: 0.5, file_recall_at_5: 1 });
+  assert.equal(contextPrecision(items, { subsequentReads: [{ path: 'src/b.ts' }] }).items_acted_on, 2);
+  assert.equal(contextPrecision([]).precision, null);
+  const comparison = contextPrecisionComparison(['src/a.ts', 'src/b.ts'], items.slice(0, 1), ['src/a.ts']);
+  assert.equal(comparison.before.precision, 0.5);
+  assert.equal(comparison.after.precision, 1);
+  assert.equal(comparison.before.file_recall_at_5, comparison.after.file_recall_at_5);
+});
 
 test('manifest importer pins 50 tasks, covers 5 repos, and is stable across input ordering', () => {
   const text = JSON.stringify(rows), manifest = importVerified(text);

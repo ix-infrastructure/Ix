@@ -14,7 +14,7 @@ import type {
 } from "../../client/types.js";
 import type { EntityFacts } from "../explain/facts.js";
 import {
-  buildBundle, bundleFormat, bundleLlmLines, clampBudgets, llmNextByCut, llmNextLines, renderBundle, sanitizeId,
+  buildBundle, bundleFormat, bundleLlmLines, clampBudgets, llmNextByCut, llmNextLines, renderFullBundle as renderBundle, sanitizeId,
   textEvidenceLines,
 } from "../commands/context.js";
 

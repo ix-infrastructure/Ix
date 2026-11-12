@@ -256,6 +256,7 @@ describe("mode-flag coverage does not drift from the command", () => {
    * on its own, with every mode, and with `--save`/`--out`.
    */
   const CONTEXT_ISSUE_SHAPE_FLAGS = ["lean"];
+  const CONTEXT_OUTPUT_FLAGS = ["full", "limit", "cursor"];
 
   function registeredAttributes(register: (p: Command) => void, name: string): string[] {
     const program = new Command();
@@ -268,7 +269,7 @@ describe("mode-flag coverage does not drift from the command", () => {
   it("classifies every option ix context registers", () => {
     expect(registeredAttributes(registerContextCommand, "context")).toEqual(
       [...CONTEXT_MODE_FLAGS, ...CONTEXT_BUILD_FLAGS, ...CONTEXT_UNIVERSAL_FLAGS, ...CONTEXT_TARGET_FLAGS,
-        ...CONTEXT_ISSUE_SHAPE_FLAGS].sort(),
+        ...CONTEXT_ISSUE_SHAPE_FLAGS, ...CONTEXT_OUTPUT_FLAGS].sort(),
     );
   });
 

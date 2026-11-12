@@ -22,7 +22,7 @@ import {
   loadInvestigation,
   mergeDiffOptions,
   parseRequestedBudgets,
-  renderBundle,
+  renderFullBundle as renderBundle,
   renderInvestigationDiff,
   renderSavedInvestigation,
   saveInvestigation,
