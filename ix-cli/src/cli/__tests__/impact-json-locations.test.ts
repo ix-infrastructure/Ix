@@ -4,7 +4,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { Command } from "commander";
 import chalk from "chalk";
 
-import { registerImpactCommand, impactRowJson, distinctDependents } from "../commands/impact.js";
+import { registerImpactCommand, impactRowJson, distinctDependents, nestedInside } from "../commands/impact.js";
 import { BASELINE } from "./impact-json-locations.baseline.js";
 
 /**
@@ -338,6 +338,41 @@ describe("summary.dependents", () => {
     const out = await json("file");
     expect(out.summary.memberLevelCallers).toBe(5);
     expect(out.summary.dependents).toBe(3);
+  });
+
+  it("file target: a method nested in a member class is not a dependent", async () => {
+    // `Session.refresh` is CONTAINed by the class, not the file, so it is not
+    // one of the file's members; it still lives in src/auth.ts.
+    const refresh = { id: "m2-refresh", kind: "method", name: "refresh", attrs: { path: "src/auth.ts", line_start: 30, line_end: 40 } };
+    expand.mockImplementation(async (id: string, opts: { direction: string; predicates: string[] }) =>
+      id === "m1" && opts.predicates.includes("CALLS")
+        ? { nodes: [boot, httpHandle, refresh], edges: [] }
+        : id === "t-file" && opts.direction === "in" && opts.predicates.includes("CALLS")
+          ? { nodes: [boot, httpHandle, refresh], edges: [] }
+          : graphExpand(id, opts));
+    const out = await json("file");
+    expect(out.summary.memberLevelCallers).toBe(4);
+    expect(out.summary.dependents).toBe(3);
+  });
+
+  it("file target with no outside users: dependents is 0", async () => {
+    const refresh = { id: "m2-refresh", kind: "method", name: "refresh", attrs: { path: "src/auth.ts", line_start: 30, line_end: 40 } };
+    expand.mockImplementation(async (id: string, opts: { direction: string; predicates: string[] }) =>
+      opts.predicates.includes("IMPORTS") ? { nodes: [], edges: [] }
+        : (id === "m1" || id === "m2") && opts.predicates.includes("CALLS") ? { nodes: [refresh], edges: [] }
+          : id === "t-file" && opts.direction === "in" && opts.predicates.includes("CALLS") ? { nodes: [refresh], edges: [] }
+            : graphExpand(id, opts));
+    expect((await json("file")).summary.dependents).toBe(0);
+  });
+
+  it("nestedInside: same file for a file target, within a member's lines otherwise", () => {
+    const at = (id: string, path: string | undefined, a?: number, b?: number) =>
+      ({ id, kind: "method", attrs: { path, line_start: a, line_end: b } });
+    const inner = at("inner", "src/s.ts", 10, 50);
+    const nodes = [at("in", "src/s.ts", 20, 30), at("other-file", "src/t.ts", 20, 30), at("same-file-outside", "src/s.ts", 60, 70), at("no-path", undefined, 20, 30), { id: "bare" }];
+    expect(nestedInside({ kind: "file", path: "src/s.ts" }, [], [nodes])).toEqual(["in", "same-file-outside"]);
+    expect(nestedInside({ kind: "class", path: "src/s.ts" }, [inner], [nodes])).toEqual(["in"]);
+    expect(nestedInside({ kind: "class", path: undefined }, [inner], [nodes])).toEqual([]);
   });
 
   it("leaf target: distinct callers, the target itself left out", async () => {

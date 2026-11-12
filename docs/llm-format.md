@@ -736,8 +736,13 @@ which overlap:
 - a container target (`class`, `module`, `file`, `object`, `trait`, `interface`): the union of its
   importers (`IMPORTS`, to `--depth`), its direct dependents (`CALLS`/`REFERENCES`, to `--depth`)
   and the direct callers of its members (`CALLS`/`REFERENCES`, the first 20 members, as
-  `memberLevelCallers` reads them), each entity once. The target and its own direct members are
-  not counted, so members calling each other add nothing.
+  `memberLevelCallers` reads them), each entity once. The target, its own direct members and
+  what is nested deeper inside it are not counted, so code inside the target calling other code
+  inside it adds nothing. "Nested deeper" is read from locations: for a `file` target, any entity
+  in that file; for another container, an entity in the target's file whose lines fall within one
+  of its members (a method of a nested class). An entity with no path or lines is counted.
+  With more than 20 members the member callers come from the first 20 only, so the count is a
+  lower bound: an entity that reaches the target only through member 21 or later is missed.
 
 Entities are matched by graph id. A file that imports the target and a function in that file
 that calls one of its members are two entities. The other counts stay as they were:

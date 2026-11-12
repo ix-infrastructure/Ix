@@ -143,7 +143,9 @@ two expands before that dedup.
 `summary.dependents` (llm: `dependents_total=` on the `counts` record) is the one
 "how many things depend on this" number: distinct entities that call or reference
 a leaf target, or that import, call or reference a container or call one of its
-members, each counted once, the target and its own members left out. Use it
+members, each counted once, the target and what is inside it left out. For a
+container with more than 20 members it is a lower bound (member callers are read
+from the first 20 members only). Use it
 rather than adding or taking the max of the other counts, which overlap. The
 definition is in `docs/llm-format.md` ("Dependents: the one count").
 
