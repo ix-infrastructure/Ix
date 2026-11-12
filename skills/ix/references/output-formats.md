@@ -140,6 +140,13 @@ one reached over `CALLS`/`REFERENCES` (a node reached both ways is an
 `importer`). `summary.directImporters` and `summary.directDependents` count the
 two expands before that dedup.
 
+`summary.dependents` (llm: `dependents_total=` on the `counts` record) is the one
+"how many things depend on this" number: distinct entities that call or reference
+a leaf target, or that import, call or reference a container or call one of its
+members, each counted once, the target and its own members left out. Use it
+rather than adding or taking the max of the other counts, which overlap. The
+definition is in `docs/llm-format.md` ("Dependents: the one count").
+
 `--limit` cuts `topImpactedMembers` and the `llm` caller/callee rows only.
 `callerList`, `calleeList` and `dependentList` are never cut;
 `propagationBuckets[].members` lists the first five of each bucket's `count`.
