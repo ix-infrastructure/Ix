@@ -272,7 +272,7 @@ function densityNote(chunkDensity: number): string {
     return " High chunk density indicates thorough code coverage in the knowledge graph.";
   }
   if (chunkDensity < 2.0) {
-    return " Low chunk density - run 'ix ingest' to enable ix read / ix explain on this subsystem.";
+    return " Low chunk density - run 'ix map' to enable ix read / ix explain on this subsystem.";
   }
   return "";
 }

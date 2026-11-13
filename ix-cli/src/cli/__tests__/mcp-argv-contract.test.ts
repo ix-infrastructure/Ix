@@ -147,12 +147,6 @@ const CASES: Record<OssTool, Args[]> = {
   ix_stats: [{}],
   ix_subsystems: [{}],
   ix_history: [{ target: "config", path: "src", pick: 2 }],
-  ix_ingest: [
-    // `src` of this checkout: inside a git repository, so the server's own
-    // workspace confinement lets it through to the CLI.
-    { path: "src", since: "2026-01-01" },
-    { github: "owner/repo", limit: 10, since: "2026-01-01" },
-  ],
 };
 
 interface JsonSchemaProperty {

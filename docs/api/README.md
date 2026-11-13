@@ -149,11 +149,11 @@ decisions, intents, and the supporting subgraph.
 
 ### Ingestion & Mapping
 
-The CLI ingests without an ingest endpoint: `ix ingest` and `ix map` parse
+The CLI ingests without an ingest endpoint: `ix map` parses
 source locally and commit the resulting graph patches through
 [`POST /v1/patches/bulk` and `POST /v1/patch`](#patches--provenance).
 
-> The **CLI's** `ix ingest --format json` reports a `skipReasons` breakdown:
+> The **CLI's** ingest pipeline (behind `ix map`) reports a `skipReasons` breakdown:
 > `unchanged` counts only files skipped as *mtime- or hash-unchanged*,
 > `emptyFile` is a real count, and there is an extra `unparsed` bucket for
 > files the parse pool returned nothing for. A file whose parse ran past
@@ -298,8 +298,7 @@ re-stamps, so a cooldown shorter than the attempt it is protecting is expired
 when the next map looks at it. Values below the two-minute request cap are
 therefore only reliable on the paths that report back.
 
-A stitch that does not happen is reported as `stitchSkipped` in
-`ix ingest --format json`, as
+A stitch that does not happen is reported as
 `stitch_skipped` in `ix map --format json` and `--format llm`, and as a
 `stitch_skipped_rule=<rule>` token on `ix map --silent`, so an automated consumer can tell it
 apart from a clean run. It is not an error: it does not set a non-zero exit code
@@ -309,7 +308,7 @@ the same position a stitch that *failed* already left the graph in.
 The rule is machine-readable, and carried alongside the prose as
 `stitchSkippedRule` / `stitch_skipped_rule`: `in-flight`, `cooling` and
 `deadline` are the guard's, and **`incomplete`**, **`lost-parses`** and
-**`run-errors`** are `ix ingest`'s own gates — an incremental map that did not re-parse every file has
+**`run-errors`** are the ingest pipeline's own gates — an incremental map that did not re-parse every file has
 no complete registration to send, and a run with parse or commit errors would
 build one from an incomplete picture of the repo. Those two are by far the
 commonest, and they are reported for the same reason as the others: a consumer
@@ -348,7 +347,7 @@ Note that re-registration is not automatic on the next map, and was not before
 this change: the stitch is gated on every file having been parsed this run, so an
 incremental map that skips an mtime- or hash-unchanged file neither reaches it nor
 has the registration data to send, having only parsed what changed. A run that
-re-ingests every file (`ix ingest <root> --force`, a post-reset re-map) is what
+re-ingests every file (`ix map <root> --force`, a post-reset re-map) is what
 picks it back up.
 
 The gate counts files skipped **as unchanged**, plus parses lost to a **crashed

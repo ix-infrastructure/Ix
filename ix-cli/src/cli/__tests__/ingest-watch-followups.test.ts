@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { githubCommitFailure } from "../commands/ingest.js";
 import { canPollInstead } from "../commands/watch.js";
 
-describe("ix ingest --github after the base-rev retries", () => {
+describe("ix map --github after the base-rev retries", () => {
   it("is a failure when the last attempt still lost the race: nothing was written", () => {
     expect(githubCommitFailure({ status: "BaseRevMismatch" })).toMatch(/nothing was ingested/);
   });

@@ -143,7 +143,7 @@ function deduplicateUpsertEdges(ops: PatchOp[]): PatchOp[] {
 /**
  * Part of every patch id, and the backend skips a patch id it has already
  * applied. Bump it whenever the same source would now produce different nodes
- * or edges, or re-ingesting an unchanged file (`ix ingest --force`) yields the
+ * or edges, or re-ingesting an unchanged file (`ix map --force`) yields the
  * old id and the new output never lands -- 1.26: JS/TS calls resolve by scope,
  * not name alone, and helper-loaded / dist/ imports link to their sources.
  * 1.27: Python, Rust and PHP bare calls no longer resolve to another file's

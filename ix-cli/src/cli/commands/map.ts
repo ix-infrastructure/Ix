@@ -8,7 +8,7 @@ import { roundFloat, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
 import { assertStaleWorkspacePruneAllowed, bootstrap, resolveWorkspaceId } from "../bootstrap.js";
 import { configParseError, formatFetchError, renderStructuredError } from "../errors.js";
-import { ingestFiles, type IngestFilesSummary } from "./ingest.js";
+import { ingestFiles, ingestGitHub, type IngestFilesSummary } from "./ingest.js";
 import { detectSystem } from "../system.js";
 import { getRemoteRunner, isCloudReady } from "../remote.js";
 import { acquireMapLock, requestMapRerun, takeMapRerun } from "../single-flight.js";
@@ -272,7 +272,7 @@ export function describeDroppedFiles(
   const parts: string[] = [];
   if (parse > 0) parts.push(`${parse} ${parse === 1 ? "file" : "files"} failed to build a patch`);
   if (commit > 0) parts.push(`${commit} ${commit === 1 ? "patch" : "patches"} failed to commit`);
-  return `${parts.join(" and ")} — those files are absent from the graph. Re-run with 'ix ingest' to see the per-file errors.`;
+  return `${parts.join(" and ")} — those files are absent from the graph. Re-run with 'ix map --verbose' to see the per-file errors.`;
 }
 
 /**
@@ -418,6 +418,18 @@ export function registerMapCommand(program: Command): void {
     .option("--verbose", "Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit)")
     .option("--silent", "Suppress all output except a one-line summary (useful for LLM hooks)")
     .option("--prune-stale-workspace", "Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest. Loopback endpoints only -- and loopback is the URL, not ownership: never use it through a tunnel or proxy to a shared backend")
+    .option("--force", "Re-parse and re-send every file even if unchanged (useful after parser upgrades)")
+    .option("--lang <langs>", "Comma-separated languages to include (e.g. cpp,c or typescript). Aliases: c++=cpp, c#=csharp, py=python, ts=typescript, js=javascript")
+    .option(
+      "--exclude <glob>",
+      "Exclude paths matching this glob (repeatable; same syntax as .ixignore)",
+      (value: string, previous: string[] = []) => [...previous, value],
+      [] as string[],
+    )
+    .option("--github <owner/repo>", "Add issues, PRs and commits from a GitHub repository to the graph (does not map code)")
+    .option("--token <pat>", "GitHub personal access token (with --github)")
+    .option("--since <date>", "With --github: only fetch items updated after this date (ISO 8601; default 30 days ago)")
+    .option("--limit <n>", "With --github: max items per category", "50")
     .addHelpText(
       "after",
       `
@@ -459,6 +471,15 @@ Advanced:
             --exclude, stays recorded in config.yaml (pending_prune_of) and the
             next run with this flag retries it.
 
+  --force   Re-parse and re-send every file, even ones unchanged since the
+            last map. Use after a parser upgrade.
+  --lang, --exclude
+            Map only some files. A filtered run never deletes the files it
+            left out from the graph.
+  --github owner/repo
+            Add a GitHub repository's issues, PRs and commits to the graph
+            instead of mapping code. Takes --token, --since and --limit.
+
 Examples:
   ix map .
   ix map --format json
@@ -473,9 +494,22 @@ Examples:
   ix map --all-items
   ix map . --full
   ix map . --full --verbose
-  ix map --prune-stale-workspace`
+  ix map --prune-stale-workspace
+  ix map . --force
+  ix map ./rocksdb --lang cpp,c
+  ix map . --exclude 'vendor/**'
+  ix map --github owner/repo --since 2026-01-01 --limit 20`
     )
-    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remap?: boolean; verbose?: boolean; silent?: boolean; pruneStaleWorkspace?: boolean }) => {
+    .action(async (pathArg: string | undefined, opts: MapCommandOpts & { github?: string; token?: string; since?: string; limit: string }) => {
+      if (opts.github) {
+        if (pathArg || opts.pruneStaleWorkspace || opts.force || opts.lang || (opts.exclude ?? []).length > 0) {
+          console.error(chalk.red("Error:"), "--github adds GitHub data; it does not take a path, --force, --lang, --exclude or --prune-stale-workspace.");
+          process.exitCode = 1;
+          return;
+        }
+        await ingestGitHub({ ...opts, format: opts.format === "silent" ? "json" : opts.format });
+        return;
+      }
       const held: HeldMap = {};
       try {
         await runMapCommand(pathArg, opts, held);
@@ -974,7 +1008,9 @@ function formatRegionLine(region: MapRegion, verbose: boolean, depth = 0): strin
 /** What a map that ran holds when it finishes: the workspace whose lock it took. */
 interface HeldMap { root?: string; local?: boolean }
 
-async function runMapCommand(pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remap?: boolean; verbose?: boolean; silent?: boolean; pruneStaleWorkspace?: boolean }, held: HeldMap): Promise<void> {
+type MapCommandOpts = { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remap?: boolean; verbose?: boolean; silent?: boolean; pruneStaleWorkspace?: boolean; force?: boolean; lang?: string; exclude?: string[] };
+
+async function runMapCommand(pathArg: string | undefined, opts: MapCommandOpts, held: HeldMap): Promise<void> {
   let cwd: string;
   try {
     cwd = resolveMapRoot(pathArg);
@@ -1098,6 +1134,11 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
       return;
     }
   }
+  if (cloudReady && (opts.force || opts.lang || (opts.exclude ?? []).length > 0)) {
+    emitError("--force, --lang and --exclude run against a local backend only; the active backend is remote. Nothing was changed.");
+    process.exitCode = 1;
+    return;
+  }
   if (cloudReady) {
     const runner = getRemoteRunner()!; // isCloudReady guarantees non-null
     try {
@@ -1133,6 +1174,9 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
         // that does not exist. --verbose is map's equivalent lever.
         debug: Boolean(opts.verbose),
         pruneStaleWorkspace: opts.pruneStaleWorkspace === true,
+        force: opts.force === true,
+        lang: opts.lang,
+        exclude: opts.exclude,
       });
     } catch (err: any) {
       emitError(formatFetchError(err));

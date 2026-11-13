@@ -137,7 +137,7 @@ const liveOrphans = new Set<Promise<void>>();
  * for symbols the agent had just watched itself ingest, until the host
  * restarted the server.
  */
-const SCOPE_CHANGING_COMMANDS = new Set(["map", "ingest"]);
+const SCOPE_CHANGING_COMMANDS = new Set(["map"]);
 
 /** The run a write belongs to: its own context first, else whoever holds the globals. */
 function resolveRun(): ActiveRun | null {

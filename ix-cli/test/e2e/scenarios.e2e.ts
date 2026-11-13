@@ -515,7 +515,7 @@ describe("an extractor upgrade over a real backend (IN-20)", () => {
       replaces: [],
       intent: "e2e: a previous extractor's output",
     }]);
-    ix(env, co, ["ingest", "--path", join(co.dir, file), "--force"]);
+    ix(env, co, ["map", co.dir, "--force", "--silent"]);
     expect((await client.nodes([ghost], "full")).nodes.map((n) => n.id)).toEqual([ghost]);
 
     // The baseline says the previous extractor: the next map is an extractor

@@ -104,21 +104,12 @@ surfaces (#575).
   first level is complete before the second begins. (The walk
   used to be depth-first, and could spend the whole cap down its first
   branch.) A walk the cap does not cut is the same tree it always was.
-- **`ix ingest <path>` writes to the workspace the path belongs to** -- the
-  registered workspace containing it, else its git repository -- and a file or
-  directory inside it refreshes just that part, leaving the rest of the
-  workspace alone. Only a directory in no workspace and no repository becomes
-  a workspace of its own (never the default); a loose file there is ingested
-  but registers nothing, so `ix read` cannot open its neighbours.
-- **`ix ingest <path>` coalesces with a running `ix map` or `ix ingest` of the
-  same workspace**, as `ix map` does: it does not run beside the holder, asks
-  it for one more pass, and exits 0 (or `IX_MAP_COALESCE_EXIT_CODE`). With
-  `--format json` it prints `{"coalesced": true, "workspace": <root>}`. The
-  holder runs the extra pass before it exits: `ix map` re-ingests the
-  workspace, and so does `ix ingest` once the workspace has a baseline
-  (otherwise it re-ingests only its own path).
-- **A registered `workspace_id` is never re-keyed on its own.** `ix map` and
-  `ix ingest` use the id `config.yaml` registers for a root, even when it differs
+- **`ix map` is the only way into the graph.** There is no `ix ingest`: its
+  flags moved to `ix map` (`--force`, `--lang`, `--exclude`, and `--github` with
+  `--token`, `--since` and `--limit`). A `--lang` or `--exclude` run never deletes
+  the files it left out. `--github` adds GitHub data and maps no code.
+- **A registered `workspace_id` is never re-keyed on its own.** `ix map` uses
+  the id `config.yaml` registers for a root, even when it differs
   from the id the root's absolute path derives (sha256 of `repo:<path>`, 8 hex
   chars) -- a team sharing one graph from clones at different paths, or a tool
   that keys on the id, pins it on purpose. The mismatch is one stderr warning
@@ -150,7 +141,7 @@ surfaces (#575).
     member's path-derived id, so a pinned id on the system root does not apply
     to them. A repo mapped both on its own (under a pinned id) and as a member of
     a system (under its path id) is therefore stored twice.
-- **`ix ingest` honours `--exclude <glob>` and a `.ixignore` at the workspace
+- **`ix map` honours `--exclude <glob>` and a `.ixignore` at the workspace
   root**, matched relative to that root. A deliberate subset of `.gitignore`: `#` comments, `*`, `?`, `**`, a
   leading `/` to anchor at the root, a trailing `/` for directories only, and a
   bare name matching at any depth. **No** `!` negation and no character
@@ -593,29 +584,6 @@ Show what the given entity imports.
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
 
-### `ix ingest [path]`
-
-Ingest source files or GitHub data into the knowledge graph.
-
-| Flag | Value | Default | Effect |
-|---|---|---|---|
-| `--path` | `<dir>` | — | Path to ingest (alternative to positional argument) |
-| `--no-recursive` | — | on | Do not recurse into subdirectories (recursive is on by default) |
-| `--github` | `<owner/repo>` | — | Ingest issues, PRs, and commits from a GitHub repository |
-| `--token` | `<pat>` | — | GitHub personal access token |
-| `--since` | `<date>` | — | Only fetch items updated after this date (ISO 8601) |
-| `--limit` | `<n>` | `50` | Max items per category (default 50) |
-| `--force` | — | off | Force re-ingest even if files are unchanged (useful after parser upgrades) |
-| `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
-| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
-| `--quiet` | — | off | Drop headers, section titles and advisory hints |
-| `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
-| `--root` | `<dir>` | — | Workspace root directory |
-| `--debug` | — | `false` | Show phase timing breakdown |
-| `--lang` | `<langs>` | — | Comma-separated languages to include (e.g. cpp,c or typescript). Aliases: c++=cpp, c#=csharp, py=python, ts=typescript, js=javascript |
-| `--exclude` | `<glob>` | — | Exclude paths matching this glob (repeatable; same syntax as `.ixignore`) |
-| `--prune-stale-workspace` | — | off | Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest. Loopback endpoints only -- and loopback is the URL, not ownership: never use it through a tunnel or proxy to a shared backend |
-
 ### `ix init`
 
 (deprecated) Initialize Ix — use ix map . instead.
@@ -687,6 +655,13 @@ Map the architectural hierarchy of a codebase.
 | `--verbose` | — | off | Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit) |
 | `--silent` | — | off | Suppress all output except a one-line summary (useful for LLM hooks) |
 | `--prune-stale-workspace` | — | off | Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest. Loopback endpoints only -- and loopback is the URL, not ownership: never use it through a tunnel or proxy to a shared backend |
+| `--force` | — | off | Re-parse and re-send every file even if unchanged (useful after parser upgrades) |
+| `--lang` | `<langs>` | — | Comma-separated languages to include (e.g. cpp,c or typescript). Aliases: c++=cpp, c#=csharp, py=python, ts=typescript, js=javascript |
+| `--exclude` | `<glob>` | — | Exclude paths matching this glob (repeatable; same syntax as `.ixignore`) |
+| `--github` | `<owner/repo>` | — | Add issues, PRs and commits from a GitHub repository to the graph (does not map code) |
+| `--token` | `<pat>` | — | GitHub personal access token (with --github) |
+| `--since` | `<date>` | — | With --github: only fetch items updated after this date (ISO 8601; default 30 days ago) |
+| `--limit` | `<n>` | `50` | With --github: max items per category |
 
 ### `ix mcp`
 

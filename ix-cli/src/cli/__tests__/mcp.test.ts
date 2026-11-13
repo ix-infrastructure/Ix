@@ -95,8 +95,9 @@ describe("ix mcp", () => {
     // callers/callees/depends and of overview), and ix_status (gemini's name
     // for ix_health). ix_decide here is the Pro decision recorder; the
     // openclaw/opencode `ix-decide` pre-edit verdict is a different tool and
-    // is not served (#998, mcp-plugin-consolidation.test.ts).
-    for (const tool of ["ix_decide", "ix_ingest", "ix_health", "ix_locate", "ix_impact"]) {
+    // is not served (#998, mcp-plugin-consolidation.test.ts). ix_ingest was
+    // removed with `ix ingest`: ix_map is the one way in.
+    for (const tool of ["ix_decide", "ix_health", "ix_locate", "ix_impact"]) {
       expect(names).toContain(tool);
     }
   });
@@ -472,62 +473,6 @@ describe("ix mcp", () => {
     expect(parsed.candidates).toEqual([stale.candidates[0]]);
     expect(parsed).toMatchObject({ count: 1, shown: 1, truncated: true, stale: true, computed_rev: null });
     expect(parsed.diagnostics).toEqual(stale.diagnostics);
-  });
-
-  it("maps ix_ingest onto the github form the plugins used", async () => {
-    const calls: string[][] = [];
-    const client = await connect(async (args) => {
-      calls.push(args);
-      return { ok: true, stdout: "{}", stderr: "" };
-    });
-
-    await client.callTool({
-      name: "ix_ingest",
-      arguments: { github: "owner/repo", since: "2026-01-01", limit: 25 },
-    });
-
-    expect(calls).toEqual([
-      ["ingest", "--github=owner/repo", "--since=2026-01-01", "--limit=25", "--format=json"],
-    ]);
-  });
-
-  it("rejects simultaneous ix_ingest path and github sources before running the CLI", async () => {
-    const calls: string[][] = [];
-    const client = await connect(async (args) => {
-      calls.push(args);
-      return { ok: true, stdout: "{}", stderr: "" };
-    });
-
-    const result = (await client.callTool({
-      name: "ix_ingest",
-      arguments: { path: "src", github: "owner/repo" },
-    })) as CallToolResult;
-
-    expect(calls).toEqual([]);
-    expect(result.isError).toBe(true);
-    expect(result.structuredContent).toBeUndefined();
-    expect(result.content).toEqual([
-      {
-        type: "text",
-        text: JSON.stringify({
-          error: "path and github are mutually exclusive; provide only one",
-          tool: "ix_ingest",
-        }),
-      },
-    ]);
-  });
-
-  it("does not pass --limit when ingesting a local path", async () => {
-    const calls: string[][] = [];
-    const client = await connect(async (args) => {
-      calls.push(args);
-      return { ok: true, stdout: "{}", stderr: "" };
-    });
-
-    await client.callTool({ name: "ix_ingest", arguments: { path: "src" } });
-
-    // --limit is a GitHub paging cap; on a path ingest it is meaningless.
-    expect(calls).toEqual([["ingest", "--format=json", "--", "src"]]);
   });
 
   it("puts positional values behind -- so a leading dash is not read as a flag", async () => {

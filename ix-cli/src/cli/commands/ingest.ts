@@ -5,8 +5,6 @@ import * as fs from 'node:fs';
 import * as crypto from 'node:crypto';
 import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import type { Command } from 'commander';
-import { formatOption } from '../options.js';
 import { ParsePool } from './parse-pool.js';
 // import { ResolveWorker } from './resolve-pool.js';
 import chalk from 'chalk';
@@ -15,8 +13,6 @@ import { combineSignals, currentRunSignal } from '../../client/run-signal.js';
 import type { GraphNode, GraphPatchPayload, PatchOp, UpsertNodeOp } from '../../client/types.js';
 import { canonicalWorkspacePath, getEndpoint, isPathInside, loadWorkspaces, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
 import { resolveIngestRootWithSource } from '../map-root.js';
-import { acquireMapLock, requestMapRerun, takeMapRerun } from '../single-flight.js';
-import { applyRequestedMapCoalesceExitCode } from './map.js';
 import {
   canonicalizeDiscoveredFilePath, discoverSourceFiles, emptyDiscoveryCounts, isSupportedSourceFile,
 } from '../file-discovery.js';
@@ -228,7 +224,7 @@ export function dedupeDiscoveredFilePaths(
  * `git ls-files` reports a committed symlink as an ordinary entry and the
  * `statSync` behind it describes the *target*, so `src/notes.ts` ->
  * `~/.ssh/id_rsa` is discovered, read, parsed into the graph and sent to the
- * configured endpoint. `ix ingest --github owner/repo` runs this over
+ * configured endpoint. `ix map --github owner/repo` runs this over
  * repositories nobody has read, which makes repository contents attacker input.
  *
  * (`walkFiles` is not the hole — readdir Dirents describe the link itself, so
@@ -1491,138 +1487,6 @@ function renderProgressLine(phase: string, current: number, total: number): stri
   return `  ${phase.padEnd(8)}  ${bar}  ${pctStr}  ${count}`.padEnd(PROG_LINE_WIDTH);
 }
 
-// ---------------------------------------------------------------------------
-// Command registration
-// ---------------------------------------------------------------------------
-
-type PathIngestOpts = Parameters<typeof ingestFiles>[1];
-
-/**
- * The workspace root `target` ingests into, or undefined when it cannot be
- * resolved. `looseFile`: the target is a file in no workspace and no
- * repository, which is never registered (see ingestFiles).
- */
-function ingestLockRoot(target: string, explicitRoot?: string): { root: string; looseFile: boolean } | undefined {
-  try {
-    const resolved = nodePath.resolve(target);
-    const isDirectory = fs.statSync(resolved).isDirectory();
-    const { root, source } = resolveIngestRootWithSource(resolved, isDirectory, explicitRoot);
-    return { root, looseFile: source === 'loose' && !isDirectory };
-  } catch {
-    // `ingestFiles` reports a missing or unreadable path itself.
-    return undefined;
-  }
-}
-
-/**
- * `ix ingest <path>`, single-flight per workspace under the lock `ix map`
- * holds. Two ingests (or an ingest and a map) over one workspace race on the
- * mtime baseline: the second to finish overwrites what the first recorded.
- *
- * A run that finds the lock held coalesces the way `ix map` does: it asks the
- * holder for one more pass (`requestMapRerun`) and exits 0, unless
- * IX_MAP_COALESCE_EXIT_CODE asks for another code. It used to exit 1, which
- * editor hooks and MCP clients that ingest after every edit reported as a
- * failed ingest. The holder takes the request before it lets go: `ix map`
- * re-ingests the workspace, and so does a holding `ix ingest` when the
- * workspace has a baseline -- an incremental pass, so it costs a stat per
- * file. Without a baseline that pass would be a first ingest of the whole
- * workspace, so it re-ingests only its own path then.
- */
-export async function ingestPathSingleFlight(target: string, opts: PathIngestOpts): Promise<void> {
-  const lockRoot = ingestLockRoot(target, opts.root);
-  if (lockRoot === undefined) {
-    await ingestFiles(target, opts);
-    return;
-  }
-  const { root, looseFile } = lockRoot;
-  const lock = acquireMapLock(root, `ix ingest ${root}`);
-  if (lock === null && opts.pruneStaleWorkspace) {
-    // The holder would not prune: coalescing would drop the request silently.
-    throw new Error('Another ix map or ix ingest is running for this workspace; run --prune-stale-workspace again once it finishes.');
-  }
-  if (lock === null) {
-    requestMapRerun(root);
-    if (opts.format === 'json') {
-      // A JSON consumer gets an object, not an empty stdout it cannot parse.
-      printJson({ coalesced: true, workspace: root });
-    } else {
-      process.stderr.write(chalk.dim('  Another ix map or ix ingest is running for this workspace; it will pick up this change before it exits.\n'));
-    }
-    applyRequestedMapCoalesceExitCode();
-    return;
-  }
-  // Holding the lock: a request left before now is covered by this run, which
-  // has not read the tree yet.
-  takeMapRerun(root);
-  try {
-    await ingestFiles(target, opts);
-    if (takeMapRerun(root)) {
-      // One pass at most, as in `ix map`. The waiting run's own flags are not
-      // known here, so this is a plain incremental pass.
-      const rerunTarget = loadIngestBaseline(root) !== null ? root : target;
-      try {
-        // The rerun may widen a loose file to its whole directory; that must
-        // not register the directory the file's own ingest would not have.
-        await ingestFiles(rerunTarget, {
-          recursive: true, format: 'json', printSummary: false, suppressOutput: true, root: opts.root,
-          neverRegister: looseFile,
-        });
-      } catch (err: any) {
-        if (opts.format !== 'json') {
-          process.stderr.write(chalk.dim(`  Re-run for an ingest that waited on this one failed: ${err?.message ?? err}\n`));
-        }
-      }
-    }
-  } finally {
-    lock.release();
-  }
-}
-
-export function registerIngestCommand(program: Command): void {
-  program
-    .command('ingest [path]')
-    .description('Ingest source files or GitHub data into the knowledge graph')
-    .option('--path <dir>', 'Path to ingest (alternative to positional argument)')
-    .option('--no-recursive', 'Do not recurse into subdirectories (recursive is on by default)')
-    .option('--github <owner/repo>', 'Ingest issues, PRs, and commits from a GitHub repository')
-    .option('--token <pat>', 'GitHub personal access token')
-    .option('--since <date>', 'Only fetch items updated after this date (ISO 8601)')
-    .option('--limit <n>', 'Max items per category (default 50)', '50')
-    .option('--force', 'Force re-ingest even if files are unchanged (useful after parser upgrades)')
-    .addOption(formatOption())
-    .option('--root <dir>', 'Workspace root directory')
-    .option('--debug', 'Show phase timing breakdown', false)
-    .option('--prune-stale-workspace', "Re-key a workspace whose registered id is not its path-derived id, and delete the old id's graph after a clean ingest. Loopback endpoints only -- and loopback is the URL, not ownership: never use it through a tunnel or proxy to a shared backend")
-    .option('--lang <langs>', 'Comma-separated languages to include (e.g. cpp,c or typescript). Aliases: c++=cpp, c#=csharp, py=python, ts=typescript, js=javascript')
-    .option(
-      '--exclude <glob>',
-      'Exclude paths matching this glob (repeatable; same syntax as .ixignore)',
-      (value: string, previous: string[] = []) => [...previous, value],
-      [] as string[],
-    )
-    .addHelpText('after', '\nExamples:\n  ix ingest ./src\n  ix ingest --path ./src --force\n  ix ingest --path ./rocksdb --lang cpp,c\n  ix ingest --github owner/repo\n  ix ingest --github owner/repo --since 2026-01-01 --limit 20 --format json\n  ix ingest --github owner/repo --token ghp_xxxx\n\nA path inside a mapped workspace (or a git repo) refreshes just that part of it, under that\nworkspace; a directory outside every workspace and repo becomes a workspace of its own (never the\ndefault). A loose file outside them is ingested but registers nothing, so ix read cannot open its neighbours.')
-    .action(async (positionalPath: string | undefined, opts: {
-      path?: string; recursive?: boolean; force?: boolean; github?: string; token?: string;
-      since?: string; limit: string; format: string; root?: string; debug?: boolean; lang?: string;
-      exclude?: string[]; pruneStaleWorkspace?: boolean;
-    }) => {
-      const effectivePath = positionalPath ?? opts.path;
-      if (opts.github && opts.pruneStaleWorkspace) {
-        console.error('Error: --prune-stale-workspace applies to a path ingest, not --github.');
-        process.exit(1);
-      }
-      if (opts.github) {
-        await ingestGitHub(opts);
-      } else if (effectivePath) {
-        await ingestPathSingleFlight(effectivePath, opts);
-      } else {
-        console.error('Error: provide a <path> or use --github <owner/repo>');
-        process.exit(1);
-      }
-    });
-}
-
 export type CommitOutcome =
   | { kind: "ok" }
   | { kind: "warn"; message: string }
@@ -1659,7 +1523,7 @@ export interface IngestFilesSummary {
    * How many of `patchesApplied` the backend answered `Idempotent` — it had
    * already recorded that patch id, so the commit wrote nothing.
    *
-   * Normally uninteresting: `ix ingest --force` re-submits every file (and a
+   * Normally uninteresting: `ix map --force` re-submits every file (and a
    * lost or blank local baseline has the same effect against a backend that
    * still holds the patch records), so a repo whose graph is already correct
    * legitimately deduplicates everything. Note `ix map --full` is NOT such a
@@ -1930,17 +1794,17 @@ export function describeStitchSkipped(
   // recovers the case where it was not.
   const recover =
     rule === "deadline"
-      ? " Raise IX_MAP_DEADLINE_MS or map a smaller path, then re-register with `ix ingest <root> --force`."
+      ? " Raise IX_MAP_DEADLINE_MS or map a smaller path, then re-register with `ix map <root> --force`."
       : rule === "in-flight"
-        ? " Re-run once that finishes; if the cross-repo edges still look stale, `ix ingest <root> --force`."
+        ? " Re-run once that finishes; if the cross-repo edges still look stale, `ix map <root> --force`."
         : rule === "lost-parses"
           // Nothing "clears" here, and this rule fires ON a --force run, so the
           // cooling remedy told the user to wait for a condition that does not
           // exist and then re-run the command they had just run.
-          ? " Re-run `ix ingest <root> --force`; if it keeps happening, the crash is reproducible and IX_PARSE_DEBUG=1 will show it."
+          ? " Re-run `ix map <root> --force`; if it keeps happening, the crash is reproducible and IX_PARSE_DEBUG=1 will show it."
           : rule === "run-errors"
-            ? " Fix the errors above and re-run `ix ingest <root> --force`."
-            : " Recover with `ix ingest <root> --force` once it clears.";
+            ? " Fix the errors above and re-run `ix map <root> --force`."
+            : " Recover with `ix map <root> --force` once it clears.";
   const head = `Note: Cross-workspace stitch not started — ${reason}.${recover}`;
   if (!verbose) return head;
 
@@ -1953,22 +1817,22 @@ export function describeStitchSkipped(
     rule === "in-flight"
       ? "That run may be registering a different workspace, in which case this one was not " +
         "registered; re-run once it has finished, or force a full re-ingest " +
-        "(`ix ingest <root> --force`) if the cross-repo edges still look stale."
+        "(`ix map <root> --force`) if the cross-repo edges still look stale."
       : rule === "lost-parses"
         ? "A parse worker crashed, so this run never saw some files and its registration would be " +
           "missing them. Nothing is running on the backend and nothing needs to clear: re-run " +
-          "`ix ingest <root> --force`, and if it recurs the crash is reproducible -- IX_PARSE_DEBUG=1 " +
+          "`ix map <root> --force`, and if it recurs the crash is reproducible -- IX_PARSE_DEBUG=1 " +
           "will show what the parser choked on."
         : rule === "run-errors"
           ? "The parse or commit errors above mean this run has an incomplete picture of the repo, so " +
             "registering from it would overwrite a good registration with a worse one. Fix those and " +
-            "re-run `ix ingest <root> --force`."
+            "re-run `ix map <root> --force`."
         : rule === "deadline"
         ? "Nothing was sent, so nothing is running -- but nothing was registered either, and a longer " +
           "budget does not fix that on its own: the next map is incremental and never reaches the stitch " +
-          "block. Raise IX_MAP_DEADLINE_MS or map a smaller path, then `ix ingest <root> --force`."
+          "block. Raise IX_MAP_DEADLINE_MS or map a smaller path, then `ix map <root> --force`."
         : "Once the cooldown expires and the backend is healthy, re-register with a run that re-ingests " +
-          "every file (`ix ingest <root> --force`) — an incremental map that skips unchanged files does not " +
+          "every file (`ix map <root> --force`) — an incremental map that skips unchanged files does not " +
           "re-attempt the stitch.";
   return `${head} Source patches were committed; cross-repository edges are unchanged since the last successful stitch. ${remedy}`;
 }
@@ -2195,7 +2059,7 @@ const STALE_KEEP_REASON: Record<StaleWorkspaceKeepReason, string> = {
 
 export async function ingestFiles(
   path: string,
-  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; exclude?: string[]; deadlineSignal?: AbortSignal; neverRegister?: boolean; pruneStaleWorkspace?: boolean }
+  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; exclude?: string[]; deadlineSignal?: AbortSignal; pruneStaleWorkspace?: boolean }
 ): Promise<IngestFilesSummary> {
   // Under `ix mcp` the tool call's deadline is this run's deadline too. The
   // client would see it anyway (createClient combines it), but the commit loop,
@@ -2263,8 +2127,7 @@ export async function ingestFiles(
   const { root: workspaceRoot, source: rootSource } = resolveIngestRootWithSource(resolvedPath, targetIsDirectory, opts.root);
   // A file in no workspace and no repository is ingested under its directory's
   // id but never registered: that would make the whole directory readable.
-  // `neverRegister`: a coalesced rerun on behalf of such a file ingest.
-  const registerAfterCommit = opts.neverRegister !== true && !(rootSource === 'loose' && !targetIsDirectory);
+  const registerAfterCommit = !(rootSource === 'loose' && !targetIsDirectory);
   // A new workspace is only registered once a commit lands (below, before the
   // summary): see workspaceStateFor.
   const {
@@ -2590,7 +2453,7 @@ export async function ingestFiles(
    * that does not vary between runs, so the collected set is complete and
    * correct without them -- and their presence in the count was silently
    * disqualifying repos from ever stitching. A single empty `__init__.py` was
-   * enough, `--force` or not, which made `ix ingest <root> --force` -- the
+   * enough, `--force` or not, which made `ix map <root> --force` -- the
    * remedy this command prints when it refuses a stitch -- a promise it could
    * not keep: the run would print nothing, exit 0, and leave the cross-repo
    * edges stale.
@@ -5596,7 +5459,7 @@ export async function loadExistingHashes(
 /**
  * Whether a GitHub ingest's commit landed. `retryOnBaseRevRace` returns the
  * last result, and a `BaseRevMismatch` after the retries means the backend
- * wrote nothing -- which `ix ingest --github` reported as a summary and exit 0.
+ * wrote nothing -- which `ix map --github` reported as a summary and exit 0.
  */
 export function githubCommitFailure(result: { status?: string }): string | undefined {
   if (result.status !== COMMIT_STATUS_BASE_REV_MISMATCH) return undefined;
@@ -5614,7 +5477,7 @@ export function githubPatchId(repo: { owner: string; repo: string }, ops: unknow
   return deterministicId(`github://${repo.owner}/${repo.repo}:${sha256(Buffer.from(JSON.stringify(ops)))}`);
 }
 
-async function ingestGitHub(opts: {
+export async function ingestGitHub(opts: {
   github?: string; token?: string; since?: string;
   limit: string; format: string;
 }): Promise<void> {

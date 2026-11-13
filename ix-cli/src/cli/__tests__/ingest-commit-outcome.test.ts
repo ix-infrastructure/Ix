@@ -329,7 +329,7 @@ describe("describeStitchSkipped", () => {
     // form.
     const msg = describeStitchSkipped(cooling, "cooling");
     expect(msg.length).toBeLessThan(260);
-    expect(msg).toContain("ix ingest <root> --force");
+    expect(msg).toContain("ix map <root> --force");
     expect(msg).not.toContain("Source patches were committed");
   });
 
@@ -360,7 +360,7 @@ describe("describeStitchSkipped", () => {
   it("gives the remedy under --verbose, and picks it by RULE", () => {
     const cool = describeStitchSkipped(cooling, "cooling", true);
     expect(cool).toContain("Once the cooldown expires");
-    expect(cool).toContain("ix ingest <root> --force");
+    expect(cool).toContain("ix map <root> --force");
     expect(cool).toContain("Source patches were committed");
 
     const busy = describeStitchSkipped(contended, "in-flight", true);

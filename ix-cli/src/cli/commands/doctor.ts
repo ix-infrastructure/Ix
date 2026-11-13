@@ -210,7 +210,7 @@ export function checkNestedWorkspaces(
     ok: false,
     warn: true,
     detail:
-      `${stray.length} workspace(s) registered inside another, most likely left by \`ix ingest <path>\` ` +
+      `${stray.length} workspace(s) registered inside another, most likely left by an older \`ix ingest <path>\` ` +
       `on a path below a mapped workspace, which older versions registered as a workspace of its own:\n  ` +
       lines.join("\n  "),
   };
