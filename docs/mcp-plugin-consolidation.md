@@ -53,7 +53,8 @@ The deliberate exclusions:
 - **`ix_docs_tool`** — a composite over `ix_overview`, which is served.
 
 `ix_neighbors` is served. It is one tool for callers, callees, imports,
-importers and overrides. The four single-relation tools stay in the full
+importers and overrides. The single-relation tools (`ix_callers`,
+`ix_callees`, `ix_imported_by`, `ix_imports`, `ix_overrides`) stay in the full
 catalog for `--tools=all`; the default session advertises `ix_neighbors` in
 their place. See [Toolsets](mcp.md#toolsets).
 

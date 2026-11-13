@@ -95,8 +95,9 @@ advertised with either set.
 `ix_callers`, `ix_callees`, `ix_imported_by`, `ix_imports`, `ix_overrides`,
 `ix_depends`, `ix_trace`, `ix_explain`, `ix_rank`, `ix_inventory`,
 `ix_smells`, `ix_stats`, `ix_subsystems`, `ix_history` and `ix_ingest`.
-The four `ix_callers` / `ix_callees` / `ix_imported_by` / `ix_imports` tools
-are the single-relation forms `ix_neighbors` stands in for on the core set.
+`ix_callers`, `ix_callees`, `ix_imported_by`, `ix_imports` and
+`ix_overrides` are the single-relation forms `ix_neighbors` stands in for on
+the core set.
 
 The server command for that catalog is `ix mcp --tools=all`. A client that
 launches `ix mcp` gets the five core tools.

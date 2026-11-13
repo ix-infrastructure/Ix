@@ -62,10 +62,10 @@ flags.
 and `ix_explain`, which were in the default set before, plus the rest of the OSS catalog (`ix_map`,
 `ix_diff`, `ix_callers`, `ix_callees`, `ix_imported_by`, `ix_imports`, `ix_overrides`, `ix_depends`,
 `ix_trace`, `ix_rank`, `ix_inventory`, `ix_smells`, `ix_stats`, `ix_subsystems`, `ix_history` and
-`ix_ingest`). The server command for that catalog is `ix mcp --tools=all`.
+`ix_ingest`).
 
 `ix mcp install` writes the bare command `ix mcp` and has no toolset option, so it cannot record
-`--tools=all`. Register that command by hand, or edit the client's config so the arguments are `mcp` and
+`--tools=all`. Register the server by hand instead, or edit the client's config so the arguments are `mcp` and
 `--tools=all`.
 
 ## Repair a moved launcher

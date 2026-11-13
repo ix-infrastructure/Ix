@@ -35,9 +35,9 @@ export type { IxRunner } from "./runner.js";
  * deliberate drops: `ix_query`, the deprecated command the CLI docs tell
  * agents not to use, and `ix_docs_tool`, a convenience composite of
  * `ix_overview`. `ix_neighbors` is served — one tool for callers, callees,
- * imports, importers and overrides. The four single-relation tools
- * (`ix_callers`, `ix_callees`, `ix_imported_by`, `ix_imports`) stay in this
- * catalog; `--tools=core` advertises `ix_neighbors` in their place.
+ * imports, importers and overrides. The single-relation tools
+ * (`ix_callers`, `ix_callees`, `ix_imported_by`, `ix_imports`, `ix_overrides`)
+ * stay in this catalog; `--tools=core` advertises `ix_neighbors` in their place.
  * `ix_status` is Gemini's name for `ix_health`.
  */
 export const IX_MCP_OSS_TOOL_NAMES = [
