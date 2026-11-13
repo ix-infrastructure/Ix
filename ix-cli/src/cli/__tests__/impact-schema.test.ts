@@ -1,17 +1,10 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { Command } from "commander";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
-import { registerImpactCommand } from "../commands/impact.js";
-import { resetGraphHealthMemo } from "../graph-health.js";
 import { inferRiskSemantics, humanizeLabel, type ImpactFacts } from "../impact/risk-semantics.js";
-import { resetReadScope } from "../resolve.js";
-import { workspaceIdForPath } from "../system.js";
-import { FakeBackend } from "./helpers/fake-backend.js";
+import { FakeBackend, type ReadGraph } from "./helpers/fake-backend.js";
+import { runCommand } from "./helpers/run-command.js";
 
 /**
  * JSON shape of `ix impact`, taken from the command's stdout.
@@ -37,102 +30,62 @@ const CONTAINER_SUMMARY_KEYS = [
   "directImporters",
   "directDependents",
   "memberLevelCallers",
+  "dependents",
 ];
 
-const LEAF_SUMMARY_KEYS = ["callers", "callees"];
+const LEAF_SUMMARY_KEYS = ["callers", "callees", "dependents"];
+
+/**
+ * A mapped graph: a system and a subsystem holding `Session` and
+ * `verify_token`, and a call chain boot -> Session.login -> verify_token.
+ *
+ *   src/session.ts  CONTAINS  Session (class)  CONTAINS  login (method)
+ *   src/auth.ts     verify_token (function)
+ *   src/app.ts      boot (function)
+ *   boot CALLS login, login CALLS verify_token
+ */
+const IMPACT_GRAPH: ReadGraph = {
+  nodes: [
+    { id: "sys", kind: "system", name: "CLI", uri: "ix:map" },
+    { id: "sub", kind: "subsystem", name: "Cli / Client", uri: "ix:map" },
+    { id: "file-session", kind: "file", name: "session.ts", uri: "src/session.ts" },
+    { id: "cls-session", kind: "class", name: "Session", uri: "src/session.ts", attrs: { line_start: 1, line_end: 40 } },
+    { id: "m-login", kind: "method", name: "login", uri: "src/session.ts", attrs: { line_start: 10, line_end: 20 } },
+    { id: "fn-verify", kind: "function", name: "verify_token", uri: "src/auth.ts", attrs: { line_start: 3, line_end: 9 } },
+    { id: "fn-boot", kind: "function", name: "boot", uri: "src/app.ts" },
+  ],
+  edges: [
+    { id: "r1", src: "sys", dst: "sub", predicate: "IN_REGION" },
+    { id: "r2", src: "sub", dst: "cls-session", predicate: "IN_REGION" },
+    { id: "r3", src: "sub", dst: "fn-verify", predicate: "IN_REGION" },
+    { id: "c1", src: "file-session", dst: "cls-session", predicate: "CONTAINS" },
+    { id: "c2", src: "cls-session", dst: "m-login", predicate: "CONTAINS" },
+    { id: "k1", src: "fn-boot", dst: "m-login", predicate: "CALLS" },
+    { id: "k2", src: "m-login", dst: "fn-verify", predicate: "CALLS" },
+  ],
+  files: {},
+};
 
 describe("ix impact --format json", () => {
-  let backend: FakeBackend | undefined;
-  let home = "";
-  let repo = "";
-  let savedCwd = process.cwd();
-  const savedEnv: Record<string, string | undefined> = {};
+  const backend = new FakeBackend();
+  backend.readGraph = IMPACT_GRAPH;
 
   beforeAll(async () => {
-    savedCwd = process.cwd();
-    home = realpathSync.native(mkdtempSync(join(tmpdir(), "ix-impact-schema-home-")));
-    repo = realpathSync.native(mkdtempSync(join(tmpdir(), "ix-impact-schema-repo-")));
-    for (const key of ["HOME", "USERPROFILE", "IX_HOME", "IX_ENDPOINT", "IX_TOKEN"]) {
-      savedEnv[key] = process.env[key];
-    }
-    process.env.HOME = home;
-    process.env.USERPROFILE = home;
-    process.env.IX_HOME = join(home, ".ix");
-    delete process.env.IX_TOKEN;
-    backend = new FakeBackend({ semantics: "head" });
-    const endpoint = await backend.start();
-    process.env.IX_ENDPOINT = endpoint;
-    const workspaceId = workspaceIdForPath(repo);
-    mkdirSync(process.env.IX_HOME, { recursive: true });
-    writeFileSync(join(process.env.IX_HOME, "config.yaml"), [
-      `endpoint: ${endpoint}`,
-      "format: text",
-      "workspaces:",
-      `  - workspace_id: "${workspaceId}"`,
-      "    workspace_name: repo",
-      `    root_path: ${JSON.stringify(repo)}`,
-      "    default: true",
-      "",
-    ].join("\n"));
-    process.chdir(repo);
-    resetReadScope();
-    resetGraphHealthMemo();
-    await commit(workspaceId, "ix:map", [
-      node("sys", "system", "CLI"),
-      node("sub", "subsystem", "Cli / Client"),
-      edge("r1", "sys", "sub", "IN_REGION"),
-      edge("r2", "sub", "cls-session", "IN_REGION"),
-      edge("r3", "sub", "fn-verify", "IN_REGION"),
-    ]);
-    await commit(workspaceId, "src/session.ts", [
-      node("file-session", "file", "session.ts"),
-      node("cls-session", "class", "Session", { line_start: 1, line_end: 40 }),
-      node("m-login", "method", "login", { line_start: 10, line_end: 20 }),
-      edge("c1", "file-session", "cls-session", "CONTAINS"),
-      edge("c2", "cls-session", "m-login", "CONTAINS"),
-    ]);
-    await commit(workspaceId, "src/auth.ts", [
-      node("fn-verify", "function", "verify_token", { line_start: 3, line_end: 9 }),
-    ]);
-    await commit(workspaceId, "src/app.ts", [
-      node("fn-boot", "function", "boot"),
-      edge("k1", "fn-boot", "m-login", "CALLS"),
-      edge("k2", "m-login", "fn-verify", "CALLS"),
-    ]);
+    await backend.start();
   });
-
   afterAll(async () => {
-    process.chdir(savedCwd);
-    await backend?.stop();
-    if (home) rmSync(home, { recursive: true, force: true });
-    if (repo) rmSync(repo, { recursive: true, force: true });
-    for (const [key, value] of Object.entries(savedEnv)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-    resetReadScope();
-    resetGraphHealthMemo();
+    await backend.stop();
+  });
+  afterEach(() => {
+    expect(backend.unknownPaths, "endpoints the fake does not implement").toEqual([]);
+    backend.unknownPaths.length = 0;
+    backend.reads.length = 0;
   });
 
   async function impact(target: string): Promise<Record<string, any>> {
-    const program = new Command().name("ix").exitOverride();
-    registerImpactCommand(program);
-    const stdout: string[] = [];
-    const log = vi.spyOn(console, "log").mockImplementation((...parts) => { stdout.push(parts.map(String).join(" ")); });
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const before = process.exitCode;
-    process.exitCode = undefined;
-    try {
-      await program.parseAsync(["impact", target, "--format", "json"], { from: "user" });
-    } finally {
-      process.exitCode = before;
-      log.mockRestore();
-      error.mockRestore();
-      write.mockRestore();
-    }
-    expect(backend!.unknownPaths, "endpoints the fake does not implement").toEqual([]);
-    return JSON.parse(stdout.join("\n"));
+    const run = await runCommand(["impact", target, "--format", "json"], { backend });
+    expect(run.exitCode, run.stderr).toBe(0);
+    return JSON.parse(run.stdout);
   }
 
   it("container target carries the risk fields and the member summary", async () => {
@@ -151,7 +104,9 @@ describe("ix impact --format json", () => {
     expect(Array.isArray(out.atRiskBehavior)).toBe(true);
     // Zero counts stay. Callers and callees belong to the leaf summary.
     expect(Object.keys(out.summary).sort()).toEqual([...CONTAINER_SUMMARY_KEYS].sort());
-    expect(out.summary).toEqual({ members: 1, directImporters: 0, directDependents: 0, memberLevelCallers: 1 });
+    expect(out.summary).toEqual({
+      members: 1, directImporters: 0, directDependents: 0, memberLevelCallers: 1, dependents: 1,
+    });
     expect(out.topImpactedMembers).toEqual([
       expect.objectContaining({ name: "login", kind: "method", callerCount: 1 }),
     ]);
@@ -172,7 +127,7 @@ describe("ix impact --format json", () => {
     expect(Array.isArray(out.atRiskBehavior)).toBe(true);
     // A callee count of zero is still present. Member counts are not.
     expect(Object.keys(out.summary).sort()).toEqual([...LEAF_SUMMARY_KEYS].sort());
-    expect(out.summary).toEqual({ callers: 1, callees: 0 });
+    expect(out.summary).toEqual({ callers: 1, callees: 0, dependents: 1 });
     expect(out.callerList).toEqual([
       expect.objectContaining({ kind: "method", name: "login" }),
     ]);
@@ -181,28 +136,6 @@ describe("ix impact --format json", () => {
     expect(out).not.toHaveProperty("diagnostics");
   });
 });
-
-function node(id: string, kind: string, name: string, attrs?: Record<string, number>): Record<string, unknown> {
-  return { type: "UpsertNode", id, kind, name, ...(attrs ? { attrs } : {}) };
-}
-
-function edge(id: string, src: string, dst: string, predicate: string): Record<string, unknown> {
-  return { type: "UpsertEdge", id, src, dst, predicate };
-}
-
-async function commit(workspaceId: string, uri: string, ops: Array<Record<string, unknown>>): Promise<void> {
-  const endpoint = process.env.IX_ENDPOINT;
-  const res = await fetch(`${endpoint}/v1/patch`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      patchId: `p-${uri}`,
-      source: { uri, sourceHash: "h", workspaceId, extractor: "test" },
-      ops,
-    }),
-  });
-  if (!res.ok) throw new Error(await res.text());
-}
 
 // ── Risk semantics inference ────────────────────────────────────────────────
 

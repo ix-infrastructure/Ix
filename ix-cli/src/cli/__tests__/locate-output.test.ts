@@ -1,17 +1,10 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { Command } from "commander";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
-import { registerLocateCommand } from "../commands/locate.js";
-import { resetGraphHealthMemo } from "../graph-health.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
-import { resetReadScope } from "../resolve.js";
-import { workspaceIdForPath } from "../system.js";
-import { FakeBackend } from "./helpers/fake-backend.js";
+import { FakeBackend, type ReadGraph } from "./helpers/fake-backend.js";
+import { runCommand } from "./helpers/run-command.js";
 
 /**
  * JSON shape of `ix locate`, taken from the command's stdout.
@@ -31,121 +24,60 @@ const IMPACT_KEYS = [
   "atRiskBehavior", "behaviorAtRisk", "mostAffectedHint", "nextStep",
 ];
 
+/**
+ * A mapped graph: a system and a subsystem holding src/auth.ts and
+ * `verify_token`, which sits in class `Session` in that file; and `crop`,
+ * defined once in each of two files, so the name is ambiguous.
+ *
+ *   src/auth.ts  CONTAINS  Session (class)  CONTAINS  verify_token (function)
+ *   src/a.py     CONTAINS  crop (function)
+ *   src/b.py     CONTAINS  crop (function)
+ */
+const LOCATE_GRAPH: ReadGraph = {
+  nodes: [
+    { id: "sys", kind: "system", name: "CLI", uri: "ix:map" },
+    { id: "sub", kind: "subsystem", name: "Cli / Client", uri: "ix:map" },
+    { id: "cls-session", kind: "class", name: "Session", uri: "src/session.ts" },
+    { id: "file-auth", kind: "file", name: "auth.ts", uri: "src/auth.ts" },
+    { id: "fn-verify", kind: "function", name: "verify_token", uri: "src/auth.ts", attrs: { line_start: 12, line_end: 20 } },
+    { id: "file-a", kind: "file", name: "a.py", uri: "src/a.py" },
+    { id: "crop-a", kind: "function", name: "crop", uri: "src/a.py", attrs: { line_start: 1, line_end: 4 } },
+    { id: "file-b", kind: "file", name: "b.py", uri: "src/b.py" },
+    { id: "crop-b", kind: "function", name: "crop", uri: "src/b.py", attrs: { line_start: 8, line_end: 12 } },
+  ],
+  edges: [
+    { id: "r1", src: "sys", dst: "sub", predicate: "IN_REGION" },
+    { id: "r2", src: "sub", dst: "file-auth", predicate: "IN_REGION" },
+    { id: "r3", src: "sub", dst: "fn-verify", predicate: "IN_REGION" },
+    { id: "c1", src: "file-auth", dst: "cls-session", predicate: "CONTAINS" },
+    { id: "c2", src: "cls-session", dst: "fn-verify", predicate: "CONTAINS" },
+    { id: "ca", src: "file-a", dst: "crop-a", predicate: "CONTAINS" },
+    { id: "cb", src: "file-b", dst: "crop-b", predicate: "CONTAINS" },
+  ],
+  files: {},
+};
+
 describe("ix locate --format json", () => {
-  let backend: FakeBackend | undefined;
-  let home = "";
-  let repo = "";
-  let savedCwd = process.cwd();
-  const savedEnv: Record<string, string | undefined> = {};
+  const backend = new FakeBackend();
+  backend.readGraph = LOCATE_GRAPH;
 
   beforeAll(async () => {
-    savedCwd = process.cwd();
-    home = realpathSync.native(mkdtempSync(join(tmpdir(), "ix-locate-out-home-")));
-    repo = realpathSync.native(mkdtempSync(join(tmpdir(), "ix-locate-out-repo-")));
-    for (const key of ["HOME", "USERPROFILE", "IX_HOME", "IX_ENDPOINT", "IX_TOKEN", "IX_STRICT_TARGETS"]) {
-      savedEnv[key] = process.env[key];
-    }
-    process.env.HOME = home;
-    process.env.USERPROFILE = home;
-    process.env.IX_HOME = join(home, ".ix");
-    delete process.env.IX_TOKEN;
-    delete process.env.IX_STRICT_TARGETS;
-    backend = new FakeBackend({ semantics: "head" });
-    const endpoint = await backend.start();
-    process.env.IX_ENDPOINT = endpoint;
-    const workspaceId = workspaceIdForPath(repo);
-    mkdirSync(process.env.IX_HOME, { recursive: true });
-    writeFileSync(join(process.env.IX_HOME, "config.yaml"), [
-      `endpoint: ${endpoint}`,
-      "format: text",
-      "workspaces:",
-      `  - workspace_id: "${workspaceId}"`,
-      "    workspace_name: repo",
-      `    root_path: ${JSON.stringify(repo)}`,
-      "    default: true",
-      "",
-    ].join("\n"));
-    process.chdir(repo);
-    resetReadScope();
-    resetGraphHealthMemo();
-
-    const commit = async (uri: string, ops: Array<Record<string, unknown>>): Promise<void> => {
-      const res = await fetch(`${endpoint}/v1/patch`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          patchId: `p-${uri}`,
-          source: { uri, sourceHash: "h", workspaceId, extractor: "test" },
-          ops,
-        }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-    };
-    const node = (id: string, kind: string, name: string, attrs?: Record<string, number>) =>
-      ({ type: "UpsertNode", id, kind, name, ...(attrs ? { attrs } : {}) });
-    const edge = (id: string, src: string, dst: string, predicate: string) =>
-      ({ type: "UpsertEdge", id, src, dst, predicate });
-
-    await commit("ix:map", [
-      node("sys", "system", "CLI"),
-      node("sub", "subsystem", "Cli / Client"),
-      edge("r1", "sys", "sub", "IN_REGION"),
-      edge("r2", "sub", "file-auth", "IN_REGION"),
-      edge("r3", "sub", "fn-verify", "IN_REGION"),
-    ]);
-    await commit("src/session.ts", [
-      node("cls-session", "class", "Session"),
-    ]);
-    await commit("src/auth.ts", [
-      node("file-auth", "file", "auth.ts"),
-      node("fn-verify", "function", "verify_token", { line_start: 12, line_end: 20 }),
-      edge("c1", "file-auth", "cls-session", "CONTAINS"),
-      edge("c2", "cls-session", "fn-verify", "CONTAINS"),
-    ]);
-    await commit("src/a.py", [
-      node("file-a", "file", "a.py"),
-      node("crop-a", "function", "crop", { line_start: 1, line_end: 4 }),
-      edge("ca", "file-a", "crop-a", "CONTAINS"),
-    ]);
-    await commit("src/b.py", [
-      node("file-b", "file", "b.py"),
-      node("crop-b", "function", "crop", { line_start: 8, line_end: 12 }),
-      edge("cb", "file-b", "crop-b", "CONTAINS"),
-    ]);
+    await backend.start();
   });
-
   afterAll(async () => {
-    process.chdir(savedCwd);
-    await backend?.stop();
-    if (home) rmSync(home, { recursive: true, force: true });
-    if (repo) rmSync(repo, { recursive: true, force: true });
-    for (const [key, value] of Object.entries(savedEnv)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-    resetReadScope();
-    resetGraphHealthMemo();
+    await backend.stop();
+  });
+  afterEach(() => {
+    expect(backend.unknownPaths, "endpoints the fake does not implement").toEqual([]);
+    backend.unknownPaths.length = 0;
+    backend.reads.length = 0;
   });
 
-  async function locate(args: string[]): Promise<Record<string, any>> {
-    const program = new Command().name("ix").exitOverride();
-    registerLocateCommand(program);
-    const stdout: string[] = [];
-    const log = vi.spyOn(console, "log").mockImplementation((...parts) => { stdout.push(parts.map(String).join(" ")); });
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const before = process.exitCode;
-    process.exitCode = undefined;
-    try {
-      await program.parseAsync(["locate", ...args], { from: "user" });
-    } finally {
-      process.exitCode = before;
-      log.mockRestore();
-      error.mockRestore();
-      write.mockRestore();
-    }
-    expect(backend!.unknownPaths, "endpoints the fake does not implement").toEqual([]);
-    return JSON.parse(stdout.join("\n"));
+  /** Run `ix locate <args>`, check its exit code (0 found, 2 ambiguous under --strict, 3 not found), parse stdout. */
+  async function locate(args: string[], exitCode = 0): Promise<Record<string, any>> {
+    const run = await runCommand(["locate", ...args], { backend });
+    expect(run.exitCode, run.stderr).toBe(exitCode);
+    return JSON.parse(run.stdout);
   }
 
   describe("symbol target", () => {
@@ -184,7 +116,7 @@ describe("ix locate --format json", () => {
 
   describe("ambiguous target", () => {
     it("lists the candidates and does not say the symbol is missing", async () => {
-      const out = await locate(["crop", "--strict", "--format", "json"]);
+      const out = await locate(["crop", "--strict", "--format", "json"], 2);
       for (const key of AMBIGUOUS_KEYS) expect(out).toHaveProperty(key);
       expect(out.code).toBe("ambiguous_target");
       expect(out.resolutionMode).toBe("ambiguous");
@@ -200,7 +132,7 @@ describe("ix locate --format json", () => {
 
   describe("miss", () => {
     it("a name the graph does not have is a null target with a diagnostic", async () => {
-      const out = await locate(["no_such_symbol_zz", "--no-suggest", "--format", "json"]);
+      const out = await locate(["no_such_symbol_zz", "--no-suggest", "--format", "json"], 3);
       expect(out.resolvedTarget).toBeNull();
       expect(out.resolutionMode).toBe("none");
       expect(out.systemPath).toBeNull();
@@ -213,7 +145,7 @@ describe("ix locate --format json", () => {
     it("symbol, file and ambiguous records omit callers, dependents, members and risk", async () => {
       const symbol = await locate(["verify_token", "--format", "json"]);
       const file = await locate(["src/auth.ts", "--format", "json"]);
-      const ambiguous = await locate(["crop", "--strict", "--format", "json"]);
+      const ambiguous = await locate(["crop", "--strict", "--format", "json"], 2);
       const keys = [...Object.keys(symbol), ...Object.keys(file), ...Object.keys(ambiguous)];
       for (const key of IMPACT_KEYS) expect(keys).not.toContain(key);
     });
