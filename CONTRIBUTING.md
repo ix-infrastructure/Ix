@@ -72,7 +72,7 @@ npm run build                                  # also builds core-ingestion; doc
 npm run test:unit
 npm run smoke                                  # parser smoke test
 node scripts/check-api-parity.mjs              # docs/api matches the HTTP client
-node scripts/check-doc-parity.mjs              # registered flags match the flag reference
+node scripts/check-doc-parity.mjs              # registered flags match the flag reference; workflow skills name real commands, tools, fields
 cd ..
 
 cd core-ingestion                              # installed and built by the ix-cli build above

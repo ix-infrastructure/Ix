@@ -266,7 +266,7 @@ nothing published. Versions in the repository are not bumped by hand.
 | Parser tests | `core-ingestion/src/__tests__/` | `cd core-ingestion && npm test` | `test` |
 | End-to-end, against a real backend, and the performance gate | `ix-cli/test/e2e/`, `ix-cli/scripts/perf-gate.mjs` | see [the e2e README](../ix-cli/test/e2e/README.md) | `e2e` |
 | API reference parity | `ix-cli/scripts/check-api-parity.mjs` | `node scripts/check-api-parity.mjs` | `api-parity` |
-| Flag reference parity (reads the built `dist/`) | `ix-cli/scripts/check-doc-parity.mjs` | `node scripts/check-doc-parity.mjs` | `doc-parity` |
+| Flag reference and workflow-skill parity (reads the built `dist/`) | `ix-cli/scripts/check-doc-parity.mjs` | `node scripts/check-doc-parity.mjs` | `doc-parity` |
 | Markdown links | `ix-cli/scripts/check-links.mjs` | `node ix-cli/scripts/check-links.mjs` | `links` |
 | Docs site build, and links in the built site | `docs-site/` | `cd docs-site && npm run build` | `docs-site` |
 | Skill and MCP installers | `scripts/install-skill.sh`, `ix mcp install` | — | `harness-install-smoke`, `harness-install-smoke-windows` |
