@@ -1,5 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { couplingLines, targetCoupling } from "../coupling-output.js";
 import type { Command } from "commander";
 import chalk from "chalk";
 import { renderSection, renderKeyValue, renderNote, renderResolvedHeader, renderWarning, colorizeKind } from "../ui.js";
@@ -367,6 +368,7 @@ async function containerImpact(
   mapState: MapStaleState = {},
 ): Promise<void> {
   const isJson = format === "json";
+  const coupling = targetCoupling(target, limit);
   const diagnostics: string[] = [];
 
   const [containsResult, importersResult, dependentsResult, systemPath, decisionsResult, tasksResult, bugsResult] = await Promise.all([
@@ -479,6 +481,7 @@ async function containerImpact(
     printJson(
       stripNulls({
         resolvedTarget: { kind: target.kind, name: target.name },
+        coupling,
         graph,
         ...mapStaleJson(mapState),
         depth,
@@ -518,6 +521,7 @@ async function containerImpact(
       // With the answer, not before it (mapStaleLlm).
       ...mapStaleLlm(mapState),
       ...impactHeaderLlm(target, risk, systemPathMapped),
+      ...couplingLines(coupling, "llm"),
       llmLine("counts", [
         ["members", members.length],
         ["importers", directImporters.length],
@@ -557,6 +561,7 @@ async function containerImpact(
 
     // 6. Decisions / Tasks / Bugs
     renderDecisionsTasksBugs(decisions, tasks, bugs);
+    for (const line of couplingLines(coupling, "text")) console.log(line);
 
     if (diagnostics.length > 0) {
       renderNote(`Diagnostics: ${diagnostics.join("; ")}`);
@@ -633,6 +638,7 @@ async function leafImpact(
   mapState: MapStaleState = {},
 ): Promise<void> {
   const isJson = format === "json";
+  const coupling = targetCoupling(target, limit);
   const [callersResult, calleesResult, systemPath, decisionsResult, tasksResult, bugsResult] = await Promise.all([
     client.expand(target.id, { direction: "in", predicates: ["CALLS", "REFERENCES"], hops: depth }),
     client.expand(target.id, { direction: "out", predicates: ["CALLS", "REFERENCES"] }),
@@ -689,6 +695,7 @@ async function leafImpact(
     printJson(
       stripNulls({
         resolvedTarget: { kind: target.kind, name: target.name },
+        coupling,
         graph,
         ...mapStaleJson(mapState),
         depth,
@@ -723,6 +730,7 @@ async function leafImpact(
       // With the answer, not before it (mapStaleLlm).
       ...mapStaleLlm(mapState),
       ...impactHeaderLlm(target, risk, systemPathMapped),
+      ...couplingLines(coupling, "llm"),
       llmLine("counts", [
         ["callers", callerSlice.total],
         ["callees", calleeSlice.total],
@@ -768,5 +776,6 @@ async function leafImpact(
 
     // 7. Decisions / Tasks / Bugs
     renderDecisionsTasksBugs(decisions, tasks, bugs);
+    for (const line of couplingLines(coupling, "text")) console.log(line);
   }
 }

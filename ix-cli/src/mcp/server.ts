@@ -43,6 +43,7 @@ export const IX_MCP_OSS_TOOL_NAMES = [
   // a symbol it already knew, and had no way to find the first symbol.
   "ix_search",
   "ix_text",
+  "ix_coupled",
   "ix_impact",
   "ix_map",
   "ix_overview",
@@ -136,6 +137,7 @@ const TOOL_ANNOTATIONS: Record<(typeof IX_MCP_TOOL_NAMES)[number], ToolAnnotatio
   ix_search: { ...READ_ONLY, title: "Find definitions by name" },
   ix_text: { ...READ_ONLY, title: "Ranked text search" },
   ix_impact: { ...READ_ONLY, title: "Change impact" },
+  ix_coupled: { ...READ_ONLY, title: "Changes together" },
   ix_map: { ...WRITE, title: "Re-map the workspace" },
   ix_overview: { ...READ_ONLY, title: "Structural overview" },
   // Not "graph-bounded": `ix read` resolves an exact file path before it
@@ -456,6 +458,14 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       if (typeof input.offset === "number") options.push(`--offset=${numberArg(input, "offset")}`);
       return runFormatted(runIx, "ix_text", ix("text", [stringArg(input, "pattern")], options));
     },
+  );
+  registerTool(
+    ctx,
+    "ix_coupled",
+    "Find files or symbols that usually change together, with support, directed confidence and recent fix commit metadata. Requires git history mined by ix map. Available with --tools=all.",
+    { target: z.string().min(1), kind: SYMBOL_TOOL_INPUT.kind, path: SYMBOL_TOOL_INPUT.path,
+      pick: SYMBOL_TOOL_INPUT.pick, limit: z.number().int().min(1).max(20).optional() },
+    async (input) => runFormatted(runIx, "ix_coupled", ix("coupled", [stringArg(input, "target")], symbolOptions(input))),
   );
   registerTool(
     ctx,

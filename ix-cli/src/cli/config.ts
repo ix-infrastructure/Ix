@@ -206,6 +206,8 @@ export function clearIngestMtimeCache(projectRoot: string): void {
   try { rmSync(ingestRebuildPath(projectRoot), { force: true }); } catch { /* non-critical */ }
   try { rmSync(ingestOrphanSweepPath(projectRoot), { force: true }); } catch { /* non-critical */ }
   try { rmSync(ingestSymbolsPath(projectRoot), { force: true }); } catch { /* non-critical */ }
+  try { rmSync(`${ingestSymbolsPath(projectRoot)}.history`, { force: true }); } catch { /* non-critical */ }
+  try { rmSync(`${ingestSymbolsPath(projectRoot)}.history.pending`, { force: true }); } catch { /* non-critical */ }
   try { rmSync(ingestSymbolsJournalPath(projectRoot), { force: true }); } catch { /* non-critical */ }
   clearMapBaseline(projectRoot);
 }

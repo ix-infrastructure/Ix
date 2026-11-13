@@ -48,6 +48,7 @@ export const OSS_COMMAND_TABLE: Readonly<Record<string, () => Promise<RegisterCo
   depends: async () => (await import("../commands/depends.js")).registerDependsCommand,
   read: async () => (await import("../commands/read.js")).registerReadCommand,
   inventory: async () => (await import("../commands/inventory.js")).registerInventoryCommand,
+  coupled: async () => (await import("../commands/coupled.js")).registerCoupledCommand,
   impact: async () => (await import("../commands/impact.js")).registerImpactCommand,
   rank: async () => (await import("../commands/rank.js")).registerRankCommand,
   overview: async () => (await import("../commands/overview.js")).registerOverviewCommand,

@@ -7,6 +7,7 @@ import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import type { Command } from 'commander';
 import { ParsePool } from './parse-pool.js';
+import { ingestHistory } from '../ingest-history.js';
 // import { ResolveWorker } from './resolve-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
@@ -1593,6 +1594,7 @@ export function registerIngestCommand(program: Command): void {
     .option('--since <date>', 'Only fetch items updated after this date (ISO 8601)')
     .option('--limit <n>', 'Max items per category (default 50)', '50')
     .option('--force', 'Force re-ingest even if files are unchanged (useful after parser upgrades)')
+    .option('--no-git-history', 'Skip bounded git co-change and recent-fix mining')
     .option('--format <fmt>', 'Output format (text|json|llm)', 'text')
     .option('--root <dir>', 'Workspace root directory')
     .option('--debug', 'Show phase timing breakdown', false)
@@ -1656,6 +1658,8 @@ export function describeParseTimeouts(files: readonly string[], sample = 5): str
 
 /** Minimal local-ingest facts needed by commands that continue after ingestion. */
 export interface IngestFilesSummary {
+  gitHistory?: Awaited<ReturnType<typeof ingestHistory>>;
+  gitHistoryWarning?: string;
   filesDiscovered: number;
   patchesApplied: number;
   /**
@@ -2190,7 +2194,7 @@ const STALE_KEEP_REASON: Record<StaleWorkspaceKeepReason, string> = {
 
 export async function ingestFiles(
   path: string,
-  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; exclude?: string[]; deadlineSignal?: AbortSignal; neverRegister?: boolean; pruneStaleWorkspace?: boolean }
+  opts: { recursive?: boolean; force?: boolean; format: string; root?: string; debug?: boolean; printSummary?: boolean; suppressOutput?: boolean; lang?: string; mapMode?: boolean; exclude?: string[]; deadlineSignal?: AbortSignal; neverRegister?: boolean; pruneStaleWorkspace?: boolean; gitHistory?: boolean }
 ): Promise<IngestFilesSummary> {
   // Under `ix mcp` the tool call's deadline is this run's deadline too. The
   // client would see it anyway (createClient combines it), but the commit loop,
@@ -2204,6 +2208,8 @@ export async function ingestFiles(
   // Before anything is re-keyed: the prune is local-only.
   if (pruneStaleWorkspace) assertStaleWorkspacePruneAllowed(getEndpoint());
   const trueStart = performance.now();
+  let gitHistory: IngestFilesSummary['gitHistory'];
+  let gitHistoryWarning: string | undefined;
 
   const [
     { parseFile, resolveEdges },
@@ -5002,6 +5008,22 @@ export async function ingestFiles(
       }
       saveIngestSymbols(projectRoot, currentExtractor, table, symbolTableChanges);
     }
+    // A system parent spans independent git repositories and node namespaces.
+    // History belongs to each repository's own full ingest, never the parent.
+    if (runClean && opts.gitHistory !== false && process.env.IX_GIT_HISTORY !== '0' && !scopedRun && !systemId) {
+      try {
+        const known = new Map([...symbolTable()].map(([path, entry]) =>
+          [path, new Set((entry.summary.qkeys as Array<[string, string]> | undefined)?.map(([, key]) => key) ?? [])]));
+        gitHistory = await ingestHistory({ root: projectRoot, workspaceId, known, parseFile,
+          forceGraph: dbResetDetected || opts.force === true,
+          fileNodeId, symbolNodeId, signal: opts.deadlineSignal,
+          commit: (patch, signal) => createClient({ endpoint: client.endpoint, deadlineSignal: signal }).commitPatch(patch) });
+        if (gitHistory?.rev !== undefined) latestRev = advanceRev(latestRev, gitHistory.rev);
+      } catch (err) {
+        gitHistoryWarning = `Git history not updated; next ingest will retry: ${err instanceof Error ? err.message : String(err)}`;
+        if (!opts.suppressOutput || debug) process.stderr.write(`  ${gitHistoryWarning}\n`);
+      }
+    }
     if (rebuildProgress !== null) {
       // Finished: the baseline now records the new extractor. Otherwise keep
       // what landed, so the next run resumes from here.
@@ -5287,6 +5309,8 @@ export async function ingestFiles(
     graphStartedEmpty === true
   );
   const summary: IngestFilesSummary = {
+    gitHistory,
+    gitHistoryWarning,
     filesDiscovered,
     patchesApplied,
     idempotentPatches,
@@ -5318,6 +5342,8 @@ export async function ingestFiles(
       patchesApplied === 0 &&
       !deletionsFound &&
       !stitchSent &&
+      gitHistory?.graphChanged !== true &&
+      gitHistoryWarning === undefined &&
       parseErrors + crashedParses() === 0 &&
       commitErrors === 0 &&
       stitchErrors === 0,
@@ -5386,6 +5412,8 @@ export async function ingestFiles(
   if (opts.format === 'json') {
     printJson({
       filesProcessed: filesDiscovered,
+      gitHistory,
+      gitHistoryWarning,
       ...(filesExcluded > 0 ? { filesExcluded } : {}),
       filesChanged,
       patchesApplied,

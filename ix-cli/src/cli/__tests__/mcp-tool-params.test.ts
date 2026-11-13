@@ -34,6 +34,12 @@ function recorder(stdout = "ok") {
 }
 
 describe("resolving an ambiguous symbol over MCP", () => {
+  it("forwards the coupling target, disambiguation and partner cap", async () => {
+    const { calls, runIx } = recorder();
+    const client = await connect(runIx);
+    await client.callTool({ name: "ix_coupled", arguments: { target: "parseFile", kind: "function", path: "src/parser.ts", pick: 2, limit: 5 } });
+    expect(calls).toEqual([["coupled", "--kind=function", "--path=src/parser.ts", "--pick=2", "--limit=5", "--format=llm", "--", "parseFile"]]);
+  });
   it("forwards --kind, --path, --pick and --limit on an edge tool", async () => {
     // Without these there was no second call that could get past "Ambiguous
     // symbol": the CLI's own disambiguation flags were unreachable over MCP,

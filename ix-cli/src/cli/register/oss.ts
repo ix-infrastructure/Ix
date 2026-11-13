@@ -22,6 +22,7 @@ import { registerDoctorCommand } from "../commands/doctor.js";
 import { registerDependsCommand } from "../commands/depends.js";
 import { registerReadCommand } from "../commands/read.js";
 import { registerInventoryCommand } from "../commands/inventory.js";
+import { registerCoupledCommand } from "../commands/coupled.js";
 import { registerImpactCommand } from "../commands/impact.js";
 import { registerRankCommand } from "../commands/rank.js";
 import { registerOverviewCommand } from "../commands/overview.js";
@@ -79,6 +80,7 @@ export function registerOssCommands(program: Command): void {
   registerReadCommand(program);
   registerInventoryCommand(program);
   registerImpactCommand(program);
+  registerCoupledCommand(program);
   registerRankCommand(program);
   registerOverviewCommand(program);
   registerWatchCommand(program);

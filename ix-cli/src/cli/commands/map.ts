@@ -446,6 +446,7 @@ export function registerMapCommand(program: Command): void {
     .option("--sort <mode>", "Sort mode for text output (importance|confidence|size|alpha)", "importance")
     .option("--graph", "Render the hierarchy as a graph/tree view (default)")
     .option("--list", "Render the ranked list view instead of the default graph/tree view")
+    .option("--no-git-history", "Skip bounded git co-change and recent-fix mining")
     .option("--full", "Force full local map, bypassing automatic safety limits (advanced/testing)")
     .option("--remap", "Compute the map now, even from an automatic (hook) run that would defer it")
     .option("--verbose", "Show raw confidence/crosscut scores and signals, plus per-file ingest diagnostics (including why a patch failed to commit)")
@@ -508,7 +509,7 @@ Examples:
   ix map . --full --verbose
   ix map --prune-stale-workspace`
     )
-    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remap?: boolean; verbose?: boolean; silent?: boolean; pruneStaleWorkspace?: boolean }) => {
+    .action(async (pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remap?: boolean; verbose?: boolean; silent?: boolean; pruneStaleWorkspace?: boolean; gitHistory?: boolean }) => {
       const held: HeldMap = {};
       try {
         await runMapCommand(pathArg, opts, held);
@@ -1007,7 +1008,7 @@ function formatRegionLine(region: MapRegion, verbose: boolean, depth = 0): strin
 /** What a map that ran holds when it finishes: the workspace whose lock it took. */
 interface HeldMap { root?: string; local?: boolean }
 
-async function runMapCommand(pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remap?: boolean; verbose?: boolean; silent?: boolean; pruneStaleWorkspace?: boolean }, held: HeldMap): Promise<void> {
+async function runMapCommand(pathArg: string | undefined, opts: { format: string; level?: string; minConfidence: string; maxItems: string; allItems?: boolean; sort: string; graph?: boolean; list?: boolean; full?: boolean; remap?: boolean; verbose?: boolean; silent?: boolean; pruneStaleWorkspace?: boolean; gitHistory?: boolean }, held: HeldMap): Promise<void> {
   let cwd: string;
   try {
     cwd = resolveMapRoot(pathArg);
@@ -1166,6 +1167,7 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
         // that does not exist. --verbose is map's equivalent lever.
         debug: Boolean(opts.verbose),
         pruneStaleWorkspace: opts.pruneStaleWorkspace === true,
+        gitHistory: opts.gitHistory,
       });
     } catch (err: any) {
       emitError(formatFetchError(err));
@@ -1369,7 +1371,7 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
  * marked stale, so the next region view refreshes the hierarchy (CL-13);
  * it used to be left stale with nothing to say so.
  */
-export async function rerunIfRequested(root: string, local: boolean, opts: { silent?: boolean; format: string }): Promise<void> {
+export async function rerunIfRequested(root: string, local: boolean, opts: { silent?: boolean; format: string; gitHistory?: boolean }): Promise<void> {
   if (!local || !takeMapRerun(root)) return;
   try {
     const summary = await ingestFiles(root, {
@@ -1381,6 +1383,7 @@ export async function rerunIfRequested(root: string, local: boolean, opts: { sil
       // Bounded like the run it follows: its own budget, since the first
       // run's may be all but spent.
       deadlineSignal: mapDeadlineSignal(),
+      gitHistory: opts.gitHistory,
     });
     if (!summary.graphUnchanged) markMapStale(root);
   } catch (err: any) {
