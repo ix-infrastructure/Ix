@@ -4,6 +4,10 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { existsSync } from "node:fs";
 import { loadConfig, updateConfig, type WorkspaceConfig } from "../config.js";
+import { createClient } from '../../client/factory.js';
+import { activeReadScope, ensureReadScope } from '../resolve.js';
+import { lookupConfig } from '../config-lookup.js';
+import { printJson } from '../format.js';
 import {
   BUILT_IN_DEFAULT_FORMAT,
   DEFAULT_FORMAT_CHOICES,
@@ -54,7 +58,21 @@ export function staleWorkspaces(workspaces: readonly WorkspaceConfig[], exists: 
 export function registerConfigCommand(program: Command): void {
   const config = program
     .command("config")
-    .description("Show or update Ix configuration");
+    .description("Find config keys, env vars, flags and routes; manage Ix settings")
+    .argument('[query]', 'Config key, env var, flag or METHOD /route to locate')
+    .enablePositionalOptions()
+    .allowUnknownOption()
+    .option('--format <format>', 'Output format: text or json', 'text')
+    .action(async (query: string | undefined, opts: { format?: string }) => {
+      if (!query) { config.help(); return; }
+      await emitConfigLookup(query, opts);
+    });
+
+  config.command('lookup <query>')
+    .description('Locate a binding (also accepts names reserved by settings subcommands)')
+    .allowUnknownOption()
+    .option('--format <format>', 'Output format: text or json', 'text')
+    .action(emitConfigLookup);
 
   config
     .command("show")
@@ -156,6 +174,19 @@ export function registerConfigCommand(program: Command): void {
       // graphs went with the entries.
       if (removed.length > 0) console.log(chalk.dim("  Their graphs stay in the backend."));
     });
+}
+
+async function emitConfigLookup(query: string, opts: { format?: string }, command?: Command): Promise<void> {
+  const client = createClient({ query: true });
+  await ensureReadScope(client);
+  const result = await lookupConfig(client, query, activeReadScope());
+  // Commander can consume a child option at the parent before dispatching lookup.
+  const format = command?.getOptionValueSource('format') === 'default' && command.parent?.getOptionValueSource('format') === 'cli'
+    ? command.parent.opts().format : opts.format;
+  if (format === 'json') { printJson(result); return; }
+  if (!result.matches.length) console.log(`No binding found for ${query}. Run ix map to refresh the graph.`);
+  for (const match of result.matches) console.log(`${match.kind} ${match.key} ${match.role} ${match.symbol} ${match.path}:${match.line}${match.defaultValue !== undefined ? ` default=${JSON.stringify(match.defaultValue)}` : ''}`);
+  if (result.truncated) console.log('Search page filled; additional matching files may be omitted.');
 }
 
 /**

@@ -155,6 +155,8 @@ import { classifyFileRole } from './role-classifier.js';
 import type { RoleClassification } from './role-classifier.js';
 import { callReceiver, collectReceiverFacts } from './receiver-types.js';
 import { summarySignature, type FileSummary } from './symbol-index.js';
+import { extractConfigBindings, configFileBindings, type ConfigBinding } from './config-bindings.js';
+export type { ConfigBinding, ConfigKind } from './config-bindings.js';
 export type { FileSummary } from './symbol-index.js';
 
 // ---------------------------------------------------------------------------
@@ -288,6 +290,7 @@ export interface FileParseResult {
   entities: ParsedEntity[];
   chunks: ParsedChunk[];
   relationships: ParsedRelationship[];
+  configBindings?: ConfigBinding[];
   importAliases?: Record<string, string>;
   /** Named/default import bindings (local → public symbol). */
   importBindings?: ImportBinding[];
@@ -2689,11 +2692,11 @@ export interface ParseFileOptions {
 export function parseFile(filePath: string, source: string, opts: ParseFileOptions = {}): FileParseResult | null {
   const language = detectLanguageForSource(filePath, source);
   if (!language) return null;
-  if (language === SupportedLanguages.YAML) return parseYamlFile(filePath, source);
+  if (language === SupportedLanguages.YAML) return configFileBindings(parseYamlFile(filePath, source), source);
   if (language === SupportedLanguages.Dockerfile) return parseDockerfileFile(filePath, source);
   if (language === SupportedLanguages.SQL) return parseSqlFile(filePath, source);
-  if (language === SupportedLanguages.JSON) return parseJsonFile(filePath, source);
-  if (language === SupportedLanguages.TOML) return parseTomlFile(filePath, source);
+  if (language === SupportedLanguages.JSON) return configFileBindings(parseJsonFile(filePath, source), source);
+  if (language === SupportedLanguages.TOML) return configFileBindings(parseTomlFile(filePath, source), source);
   if (language === SupportedLanguages.Markdown) return parseMarkdownFile(filePath, source);
   if (language === SupportedLanguages.LaTeX) return parseLatexFile(filePath, source);
   if (language === SupportedLanguages.Proto) return parseProtoFile(filePath, source);
@@ -3734,12 +3737,14 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     const tsGlobalTypes = isTsSource ? tsGlobalTypeNames(tree.rootNode) : [];
     const tsModule = isTsSource && isTsModule(tree.rootNode);
 
+    const configBindings = extractConfigBindings(tree.rootNode, language, entities, filePath, checkBudget);
     return {
       filePath,
       language,
       entities,
       chunks,
       relationships,
+      ...(configBindings.length ? { configBindings } : {}),
       importAliases: Object.keys(importAliases).length > 0 ? importAliases : undefined,
       importBindings: importBindings.length > 0 ? importBindings : undefined,
       exportPublicNames: exportPublicNames.length > 0 ? exportPublicNames : undefined,

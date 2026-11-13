@@ -76,6 +76,50 @@ export function symbolNodeId(workspaceId: string, filePath: string, qualifiedKey
   return makeIds(workspaceId).nodeId(filePath, qualifiedKey);
 }
 
+/** Compatibility nodes are searchable with the released backend's existing API. */
+function addConfigBindingOps(ops: PatchOp[], result: FileParseResult, workspaceId: string, options?: MultiRepoContext): PatchOp[] {
+  const { nodeId, edgeId } = makeIds(workspaceId);
+  const idPath = toMemberRelativePath(result.filePath, options);
+  const symbols = new Map(result.entities.map(e => [e.container ? `${e.container}.${e.name}` : e.name, e]));
+  const grouped = new Map<string, NonNullable<FileParseResult['configBindings']>>();
+  for (const fact of result.configBindings ?? []) {
+    if (!symbols.has(fact.symbol)) continue;
+    const key = `@config:${fact.kind}:${fact.key}`;
+    const list = grouped.get(key) ?? [];
+    list.push(fact);
+    grouped.set(key, list);
+  }
+  for (const [key, facts] of grouped) {
+    const fact = facts[0];
+    const id = nodeId(idPath, key);
+    const specialized = configKindsSupported(options);
+    ops.push({ type: 'UpsertNode', id, kind: specialized ? fact.kind : 'config_entry', name: fact.key, attrs: {
+      binding_kind: fact.kind,
+      line_start: fact.line, line_end: fact.line, language: result.language,
+      bindings: facts.map(f => ({ ...f, symbol_id: nodeId(idPath, f.symbol), symbol_kind: symbols.get(f.symbol)!.kind })),
+    } });
+    for (const f of facts) {
+      const predicate = f.kind === 'Route' ? 'HANDLES_ROUTE'
+        : f.kind === 'CliFlag' ? f.role === 'declaration' ? 'DECLARES_FLAG' : 'CONSUMES_FLAG'
+        : f.role === 'declaration' ? 'CONTAINS' : 'READS_CONFIG';
+      const src = nodeId(idPath, f.symbol);
+      ops.push({ type: 'UpsertEdge', id: edgeId(idPath, f.symbol, key, predicate), src, dst: id,
+        predicate: specialized ? predicate : 'REFERENCES', attrs: { binding_predicate: predicate },
+      });
+    }
+  }
+  return ops;
+}
+
+const CONFIG_NODE_KINDS = ['ConfigKey', 'EnvVar', 'CliFlag', 'Route'];
+function configKindsSupported(options?: MultiRepoContext): boolean {
+  return CONFIG_NODE_KINDS.every(kind => options?.configNodeKinds?.includes(kind));
+}
+
+function configExtractorProfile(options?: MultiRepoContext): string {
+  return configKindsSupported(options) ? `${extractorName()}#config` : extractorName();
+}
+
 // ---------------------------------------------------------------------------
 // Source type from file extension
 // ---------------------------------------------------------------------------
@@ -158,11 +202,11 @@ export function patchActor(): string {
 }
 
 export function extractorName(): string {
-  return `tree-sitter/1.30`;
+  return `tree-sitter/1.31`;
 }
 
 /** Previous extractor versions — their patches are superseded when re-ingesting. */
-export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.29', 'tree-sitter/1.28', 'tree-sitter/1.27', 'tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
+export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.30', 'tree-sitter/1.29', 'tree-sitter/1.28', 'tree-sitter/1.27', 'tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
 
 /** Patch ids that may own the active graph entities for a stored source hash. */
 export function sourcePatchIdCandidates(
@@ -174,6 +218,11 @@ export function sourcePatchIdCandidates(
   return [
     computePatchId(filePath, sourceHash, extractorName()),
     ...PREVIOUS_EXTRACTORS.map(extractor => computePatchId(filePath, sourceHash, extractor)),
+    // Configuration kind profiles began in 1.31. Probe both after a capability change.
+    ...[extractorName(), ...PREVIOUS_EXTRACTORS].filter(e => {
+      const [major, minor] = e.split('/')[1].split('.').map(Number);
+      return major > 1 || (major === 1 && minor >= 31);
+    }).map(e => computePatchId(filePath, sourceHash, `${e}#config`)),
     legacyPatchId(filePath, sourceHash),
   ];
 }
@@ -194,7 +243,7 @@ export function sourcePatchIdCandidates(
  * ingest (no multiRepo) is unchanged (idPath === filePath).
  */
 function toMemberRelativePath(filePath: string, multiRepo?: MultiRepoContext): string {
-  if (!multiRepo) return filePath;
+  if (!multiRepo || !(multiRepo.repoId || multiRepo.systemId || multiRepo.repoWorkspaceOf)) return filePath;
   const norm = filePath.replace(/\\/g, '/');
   const slash = norm.indexOf('/');
   return slash >= 0 ? norm.slice(slash + 1) : norm;
@@ -482,14 +531,18 @@ export function buildPatch(
 
   // patchId is deterministic: same file + same content + same extractor → same id.
   const extractor = extractorName();
-  const patchId = computePatchId(filePath, sourceHash, extractor);
+  const patchId = computePatchId(filePath, sourceHash, configExtractorProfile(multiRepo));
   // When re-ingesting with new extractor version, replace the old patch so the
   // server accepts the new ops rather than deduplicating on the old patchId.
   const previousPatchId = previousSourceHash
     ? computePatchId(filePath, previousSourceHash, extractor)
     : legacyPatchId(filePath, sourceHash);
   // Also supersede any patches created by previous extractor versions for the same file+content.
-  const replaces = [previousPatchId, ...PREVIOUS_EXTRACTORS.map(prev => computePatchId(filePath, sourceHash, prev))];
+  const replaces = [...new Set([
+    previousPatchId,
+    ...sourcePatchIdCandidates(filePath, sourceHash, workspaceId).filter(id => id !== computePatchId(filePath, sourceHash, configExtractorProfile(multiRepo))),
+    ...(previousSourceHash ? [computePatchId(filePath, previousSourceHash, `${extractor}#config`)] : []),
+  ])];
 
   return {
     patchId,
@@ -505,7 +558,7 @@ export function buildPatch(
       ...(multiRepo?.repoId ? { repoId: multiRepo.repoId } : {}),
     },
     baseRev: 0,
-    ops: deduplicateUpsertEdges(ops),
+    ops: deduplicateUpsertEdges(addConfigBindingOps(ops, result, workspaceId, multiRepo)),
     replaces,
     intent: `Parsed ${nodePath.basename(filePath)}`,
   };
@@ -525,6 +578,8 @@ export function buildPatch(
  * that repo's namespace via repoWorkspaceOf. Absent => single-repo, unchanged.
  */
 export interface MultiRepoContext {
+  /** Explicit supported node kinds from /v1/capabilities; absent on older backends. */
+  configNodeKinds?: string[];
   systemId?: string;
   repoId?: string;
   /** filePath (workspace-relative, repo-prefixed) -> that file's repo workspace_id. */
@@ -930,11 +985,16 @@ export function buildPatchWithResolution(
   }
 
   const extractor = extractorName();
-  const patchId = computePatchId(filePath, sourceHash, resolutionSalt ? `${extractor}#r${resolutionSalt}` : extractor);
+  const profile = configExtractorProfile(multiRepo);
+  const patchId = computePatchId(filePath, sourceHash, resolutionSalt ? `${profile}#r${resolutionSalt}` : profile);
   const previousPatchId = previousSourceHash
     ? computePatchId(filePath, previousSourceHash, extractor)
     : legacyPatchId(filePath, sourceHash);
-  const replaces = [previousPatchId, ...PREVIOUS_EXTRACTORS.map(prev => computePatchId(filePath, sourceHash, prev))];
+  const replaces = [...new Set([
+    previousPatchId,
+    ...sourcePatchIdCandidates(filePath, sourceHash, workspaceId).filter(id => id !== computePatchId(filePath, sourceHash, configExtractorProfile(multiRepo))),
+    ...(previousSourceHash ? [computePatchId(filePath, previousSourceHash, `${extractor}#config`)] : []),
+  ])];
 
   return {
     patchId,
@@ -950,7 +1010,7 @@ export function buildPatchWithResolution(
       ...(multiRepo?.repoId ? { repoId: multiRepo.repoId } : {}),
     },
     baseRev: 0,
-    ops: deduplicateUpsertEdges(ops),
+    ops: deduplicateUpsertEdges(addConfigBindingOps(ops, result, workspaceId, multiRepo)),
     replaces,
     intent: `Parsed ${nodePath.basename(filePath)}`,
   };

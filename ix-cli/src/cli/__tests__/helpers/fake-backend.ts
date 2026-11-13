@@ -588,6 +588,8 @@ export class FakeBackend {
       return;
     }
 
+    // An older backend may predate the capability endpoint altogether.
+    if (path === '/v1/capabilities') return send(404, {});
     if (path === "/v1/health") {
       this.healthRequests++;
       const release = this.releaseVersion !== undefined ? this.releaseVersion : this.semantics === "head" ? "1.0.34" : null;

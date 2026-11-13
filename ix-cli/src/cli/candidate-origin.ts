@@ -40,8 +40,8 @@ const NON_CODE_EXTENSIONS = new Set([
   ".html", ".htm", ".xml", ".svg", ".tex",
 ]);
 
-/** Kinds core-ingestion emits only for docs and config, never for code. */
-const NON_CODE_KINDS = new Set(["heading", "section", "config_entry", "config"]);
+/** Documentation and binding kinds, rather than code symbol definitions. */
+const NON_CODE_KINDS = new Set(["heading", "section", "config_entry", "config", "configkey", "envvar", "cliflag", "route"]);
 
 /**
  * Build output and other derived copies of source.

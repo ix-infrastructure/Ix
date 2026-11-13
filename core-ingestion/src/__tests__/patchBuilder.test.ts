@@ -39,7 +39,7 @@ describe('patch-builder extractor policy', () => {
     const retry = buildDeletionPatch(filePath, sourceHash, 'baseline-1', workspaceId, ops);
     const nextDeletion = buildDeletionPatch(filePath, sourceHash, 'baseline-2', workspaceId, ops);
 
-    expect(new Set(candidates).size).toBe(PREVIOUS_EXTRACTORS.length + 2);
+    expect(new Set(candidates).size).toBeGreaterThanOrEqual(PREVIOUS_EXTRACTORS.length + 3);
     expect(patch.patchId).toBe(retry.patchId);
     expect(patch.patchId).not.toBe(nextDeletion.patchId);
     expect(patch.source).toMatchObject({

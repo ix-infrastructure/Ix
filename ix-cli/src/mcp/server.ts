@@ -41,6 +41,7 @@ export const IX_MCP_OSS_TOOL_NAMES = [
   // `ix search` is the command every other one starts from, and it was the one
   // command with no tool at all — an agent over MCP could follow an edge from
   // a symbol it already knew, and had no way to find the first symbol.
+  "ix_config",
   "ix_search",
   "ix_text",
   "ix_impact",
@@ -134,6 +135,7 @@ const TOOL_ANNOTATIONS: Record<(typeof IX_MCP_TOOL_NAMES)[number], ToolAnnotatio
   ix_health: { ...READ_ONLY, title: "Graph health" },
   ix_locate: { ...READ_ONLY, title: "Locate a definition" },
   ix_search: { ...READ_ONLY, title: "Find definitions by name" },
+  ix_config: { ...READ_ONLY, title: 'Find config bindings' },
   ix_text: { ...READ_ONLY, title: "Ranked text search" },
   ix_impact: { ...READ_ONLY, title: "Change impact" },
   ix_map: { ...WRITE, title: "Re-map the workspace" },
@@ -188,6 +190,7 @@ const JSON_OBJECT_SCHEMA = z.object({}).passthrough();
  * this repository.
  */
 const TOOL_OUTPUT_SCHEMA: Partial<Record<(typeof IX_MCP_TOOL_NAMES)[number], z.ZodTypeAny>> = {
+  ix_config: JSON_OBJECT_SCHEMA,
   ix_map: JSON_OBJECT_SCHEMA,
   ix_ingest: JSON_OBJECT_SCHEMA,
   // `ix_smells` is not here any more, and neither is `ix_context`'s bundle
@@ -414,6 +417,14 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     async (input) =>
       runFormatted(runIx, "ix_locate", ix("locate", [stringArg(input, "symbol")], symbolOptions(input, { limit: false }))),
   );
+  registerTool(
+    ctx,
+    'ix_config',
+    'Locate declarations, reads and handlers for a config key, environment variable, CLI flag or HTTP route (e.g. GET /items/{id}). Includes literal defaults and source locations.',
+    { query: z.string().min(1).max(500) },
+    async (input) => runJson(runIx, 'ix_config', ix('config', [stringArg(input, 'query')], ['lookup'])),
+  );
+
   registerTool(
     ctx,
     "ix_search",
