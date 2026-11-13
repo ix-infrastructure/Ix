@@ -2316,8 +2316,10 @@ export async function ingestFiles(
     systemId,
     repoOf,
     fileWorkspaceId,
-    fileMultiRepo,
+    fileMultiRepo: identityMultiRepo,
   } = fileIdentity(workspaceRoot, workspaceId, detectedSystem?.systemId);
+  let configNodeKinds: string[] | undefined;
+  const fileMultiRepo = (path: string) => ({ ...identityMultiRepo(path), configNodeKinds });
   // The workspace_id a file's nodes are folded under (same value the patch builder
   // stamps on source.workspaceId) — used to scope the baseline hash lookup per file.
   const sourceWorkspaceIdOf = (absPath: string): string => fileWorkspaceId(toWorkspaceRelative(absPath));
@@ -2431,6 +2433,8 @@ export async function ingestFiles(
   // changed file (GET /v1/patches/:id) come after a parse that can take
   // minutes, past any read deadline counted from here.
   const client = createClient({ deadlineSignal: opts.deadlineSignal, longRunning: true });
+  const advertisedKinds = (await client.capabilities?.(2_000))?.nodeKinds;
+  configNodeKinds = Array.isArray(advertisedKinds) ? advertisedKinds.filter(kind => typeof kind === 'string') : undefined;
 
   // Schema-version check forces a clean re-ingest when the backend's graph
   // format has changed in a way that invalidates existing node IDs (e.g. the

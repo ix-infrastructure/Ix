@@ -117,6 +117,7 @@ class FakeBackend {
         ? { rev: this.rev, applied: patches.length, status: "Ok" }
         : { rev: this.rev, status: "Ok" });
     }
+    if (path === '/v1/capabilities') return send(404, {});
     if (path === "/v1/health") return send(200, { status: "ok", schema_version: 3, release_version: "1.0.30" });
     if (path === "/v1/revisions/current") return send(200, this.rev);
     if (path === "/v1/source-hashes") {

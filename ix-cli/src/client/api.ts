@@ -858,9 +858,9 @@ export class IxClient {
     return this.get("/v1/health", timeoutMs);
   }
 
-  async capabilities(): Promise<CapabilitiesResponse> {
+  async capabilities(timeoutMs?: number): Promise<CapabilitiesResponse> {
     try {
-      return await this.fetchCapabilities();
+      return await this.fetchCapabilities(timeoutMs);
     } catch (err) {
       // A refused token is not "an older backend": say so rather than guess.
       if (err instanceof LocalTokenRequiredError) throw err;
@@ -870,8 +870,8 @@ export class IxClient {
   }
 
   /** `/v1/capabilities`, with every failure thrown (for `ix doctor`). */
-  async fetchCapabilities(): Promise<CapabilitiesResponse> {
-    return this.get<CapabilitiesResponse>("/v1/capabilities");
+  async fetchCapabilities(timeoutMs?: number): Promise<CapabilitiesResponse> {
+    return this.get<CapabilitiesResponse>("/v1/capabilities", timeoutMs);
   }
 
   /** Whether this client sends a bearer token. */

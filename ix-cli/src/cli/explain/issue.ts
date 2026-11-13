@@ -6,6 +6,7 @@ import { posix } from "node:path";
 import { isTestPath } from "./related-files.js";
 import { resolveToken, type RepoAccess } from "./text-references.js";
 import type { CompanionSource } from "./issue-companions.js";
+import { bindingCandidates, BINDING_REASON, type BindingReason, type ConfigLookup } from '../config-lookup.js';
 
 /**
  * From an issue's text to the files its fix starts in, for
@@ -478,7 +479,7 @@ export interface SymbolHit {
   lineEnd?: number;
 }
 
-export type StartVia = "path in issue" | "identifier in issue" | "bm25 fallback";
+export type StartVia = "path in issue" | "identifier in issue" | "bm25 fallback" | BindingReason;
 
 // Ranking evidence stays off the wire, but survives chooseCentre's object spread.
 const PINNED_IDENTIFIER = Symbol("pinned issue identifier");
@@ -522,6 +523,7 @@ export interface PickDeps {
   files: string[];
   /** The symbol index: the search `ix search` runs. */
   search: (name: string) => Promise<SymbolHit[]>;
+  config?: (query: string) => Promise<ConfigLookup>;
   /**
    * How well a file matches the issue's text. Breaks a tie between two
    * definitions of one name -- `renderRow` in `table.ts` and in `grid.ts` --
@@ -580,6 +582,24 @@ export async function pickStartingPoints(
   }
 
   const score = deps.fileScore ?? (() => 0);
+  const bindingCache = new Map<string, ConfigLookup>();
+  if (deps.config) for (const candidate of bindingCandidates(text)) {
+    if (starts.length >= max) break;
+    const result = bindingCache.get(candidate.query) ?? await deps.config(candidate.query);
+    bindingCache.set(candidate.query, result);
+    const hits = result.matches.filter(hit => BINDING_REASON[hit.kind] === candidate.reason && source(hit.path))
+      .sort((a, b) => score(b.path) - score(a.path) || cmp(a.path, b.path) || a.line - b.line);
+    const pin = !result.truncated && new Set(hits.map(hit => hit.path)).size <= MAX_PINNED_DEFINITION_FILES;
+    for (const hit of hits) {
+      if (starts.length >= max) break;
+      if (taken(hit.path)) continue;
+      starts.push({ token: candidate.query, id: hit.symbolId, name: hit.symbol, kind: hit.symbolKind,
+        path: hit.path, lineStart: hit.line, via: candidate.reason,
+        ...(pin ? { [PINNED_IDENTIFIER]: true as const } : {}),
+      });
+    }
+  }
+
   for (const token of identifiers) {
     if (starts.length >= max) break;
     // Not caught: a backend that cannot answer is an error to report, not an
@@ -836,6 +856,7 @@ export async function planIssue(
   deps: {
     repo?: RepoAccess;
     search: PickDeps["search"];
+    config?: PickDeps['config'];
     /** BM25 over the source files; `bm25Rank` unless the caller has an index. */
     rank?: (repo: RepoAccess, files: string[], query: string) => Bm25Hit[];
   },
@@ -847,7 +868,7 @@ export async function planIssue(
   const bm25 = deps.repo ? rank(deps.repo, eligible!.paths, text) : [];
   const scores = new Map(bm25.map((h) => [h.path, h.score]));
   const { starts, unresolved } = await pickStartingPoints(text, {
-    files, search: deps.search, fileScore: (p) => scores.get(p) ?? 0, sourcePaths,
+    files, search: deps.search, config: deps.config, fileScore: (p) => scores.get(p) ?? 0, sourcePaths,
   });
   const top = starts.length > 0 ? undefined : bm25.find((h) => sourcePaths?.has(h.path) ?? true)?.path;
   if (!top) return { starts, unresolved, fallback: false, bm25, sourcePaths };
@@ -894,7 +915,7 @@ export function issueConfidence(plan: Pick<IssuePlan, "starts" | "fallback">): I
   if (plan.fallback) {
     return { confident: false, starts: [], reason: "no code name in the issue resolved to a definition" };
   }
-  const starts = plan.starts.filter((s) => !s.snippet && (s.via === "path in issue"
+  const starts = plan.starts.filter((s) => !s.snippet && (Object.values(BINDING_REASON).includes(s.via as BindingReason) || s.via === "path in issue"
     || (s.via === "identifier in issue" && !isGenericIdentifier(s.token))));
   if (starts.length === 0) {
     const names = plan.starts.map((s) => s.token);

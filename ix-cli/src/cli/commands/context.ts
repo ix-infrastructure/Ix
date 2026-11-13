@@ -41,6 +41,7 @@ import {
   type SymbolHit,
 } from "../explain/issue.js";
 import { addUsedIn } from "../explain/issue-used-in.js";
+import { lookupConfig } from '../config-lookup.js';
 import { collectIssueEntities, placeIssueMatches, rankIssueEntities, type IssueEntityRanking } from "../explain/issue-entities.js";
 import { symbolReadChecker } from "../symbol-read-check.js";
 import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/related-files.js";
@@ -1954,6 +1955,7 @@ async function planIssueWith(client: IxClient, text: string) {
     // only the files that differ from HEAD read again. The caller saves the
     // index after printing (saveBm25Index).
     rank: cachedBm25Ranker(root, { deferSave: true }),
+    config: (query) => lookupConfig(client, query, scope),
     search: async (name) =>
       (await client.search(name, { limit: ISSUE_SEARCH_LIMIT, nameOnly: true, ...scope })).map(symbolHit),
   });

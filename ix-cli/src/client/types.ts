@@ -241,6 +241,8 @@ export interface PatchCommitResult {
 }
 
 export interface CapabilitiesResponse {
+  /** Explicit graph node kinds accepted by the backend; absent on older releases. */
+  nodeKinds?: string[];
   // Optional because older backends pre-date this field — clients should
   // treat absence as "unknown" rather than "false" to stay compatible with
   // older deployments.
