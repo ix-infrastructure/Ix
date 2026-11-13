@@ -77,6 +77,7 @@ import {
   writeCommanderError,
 } from "../../errors.js";
 import { readConfiguredFormat, resetConfigMemo, saveConfig } from "../../config.js";
+import { getEndpoint } from "../../connection.js";
 import { resetReadScope } from "../../resolve.js";
 import { resetResolutionNotices } from "../../format.js";
 import { resetGraphHealthMemo } from "../../graph-health.js";
@@ -132,6 +133,15 @@ function resetCliMemos(): void {
   resetWorkspaceIdMemosForTests();
   setErrorFormat(undefined);
   setErrorFormatFallback(undefined);
+}
+
+/** run-cli.ts's safeEndpoint(): the endpoint as the run sees it, if config can be read. */
+function safeEndpoint(): string | undefined {
+  try {
+    return getEndpoint();
+  } catch {
+    return undefined;
+  }
 }
 
 function buildProgram(): Command {
@@ -235,8 +245,10 @@ export async function runCommand(argv: string[], opts: RunCommandOptions): Promi
         await runWithSignal(signal, () => program.parseAsync(argv, { from: "user" }));
       } catch (thrown) {
         if (thrown instanceof ExitSignal) throw thrown;
-        // run-cli.ts's boundary. It always ends in process.exit().
-        renderCliError(thrown, false, endpoint);
+        // run-cli.ts's boundary. It always ends in process.exit(). The
+        // endpoint is read now, as run-cli.ts's safeEndpoint() does, so an
+        // IX_ENDPOINT from opts.env is the one the error names.
+        renderCliError(thrown, false, safeEndpoint());
       }
     } catch (thrown) {
       if (!(thrown instanceof ExitSignal)) throw thrown;
