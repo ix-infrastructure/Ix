@@ -115,6 +115,30 @@ export function mapRefreshOutcomePath(projectRoot: string): string {
 }
 
 /**
+ * Path to the debounce stamp of `ix map --auto` for one project root: when an
+ * automatic map was last started for it, by any host (see `auto-map.ts`).
+ * Kept by reset and a failed hierarchy build: it expires on its own, and
+ * clearing it after a failed map would let every edit start the failing map
+ * again.
+ */
+export function autoMapStampPath(projectRoot: string): string {
+  const key = rootKey(projectRoot);
+  return join(ixHome(), `auto_map_${key}.json`);
+}
+
+/**
+ * Path to the marker that an `ix map` of one project root through a remote
+ * (cloud) backend succeeded, which `ix map --auto` accepts as "mapped before"
+ * for a root whose cloud ingest left no local ingest baseline (see
+ * `auto-map.ts`). In the `ingest` group: what clears the local baseline
+ * clears this too.
+ */
+export function autoMapCloudMarkPath(projectRoot: string): string {
+  const key = rootKey(projectRoot);
+  return join(ixHome(), `auto_map_cloud_${key}.json`);
+}
+
+/**
  * Which per-root state files are cleared together.
  *
  *   - `ingest`: describes the source graph; cleared by reset, workspace
@@ -122,7 +146,8 @@ export function mapRefreshOutcomePath(projectRoot: string): string {
  *     map group.
  *   - `map`: describes the architecture hierarchy built from it; cleared on
  *     its own when a hierarchy build fails (`clearMapBaseline`).
- *   - `kept`: survives both, on purpose (see `verifyRecordPath`).
+ *   - `kept`: survives both, on purpose (see `verifyRecordPath` and
+ *     `autoMapStampPath`).
  */
 export type WorkspaceStateGroup = "ingest" | "map" | "kept";
 
@@ -148,11 +173,13 @@ export const WORKSPACE_STATE_FILES: readonly WorkspaceStateFile[] = [
   { name: "ingest_orphans", owner: "ingest-baseline.ts", group: "ingest", path: ingestOrphanSweepPath },
   { name: "ingest_symbols", owner: "ingest-symbols.ts", group: "ingest", path: ingestSymbolsPath },
   { name: "ingest_symbols.journal", owner: "ingest-symbols.ts", group: "ingest", path: ingestSymbolsJournalPath },
+  { name: "auto_map_cloud", owner: "auto-map.ts", group: "ingest", path: autoMapCloudMarkPath },
   { name: "map_baseline", owner: "map-baseline.ts", group: "map", path: mapBaselinePath },
   { name: "map_result", owner: "map-result-cache.ts", group: "map", path: mapResultCachePath },
   { name: "map_stale", owner: "map-freshness.ts", group: "map", path: mapStalePath },
   { name: "map_refresh", owner: "map-freshness.ts", group: "map", path: mapRefreshOutcomePath },
   { name: "verify", owner: "verify.ts", group: "kept", path: verifyRecordPath },
+  { name: "auto_map", owner: "auto-map.ts", group: "kept", path: autoMapStampPath },
 ];
 
 function clearGroup(projectRoot: string, group: WorkspaceStateGroup): void {

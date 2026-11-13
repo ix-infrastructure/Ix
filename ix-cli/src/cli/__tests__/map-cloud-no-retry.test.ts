@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { httpError, IxClient } from "../../client/api.js";
 import { registerMapCommand } from "../commands/map.js";
 import { registerRemoteRunner, type RemoteIngestOptions } from "../remote.js";
+import { autoMapCloudMarkPath } from "../state-paths.js";
 
 describe("ix map on the cloud path", () => {
   let dir: string;
@@ -76,5 +77,23 @@ describe("ix map on the cloud path", () => {
     expect(bulk).not.toHaveBeenCalled();
     expect(single).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(1);
+    // A failed upload does not count as "mapped before" for `ix map --auto`.
+    expect(fs.existsSync(autoMapCloudMarkPath(root))).toBe(false);
+  });
+
+  it("records a cloud ingest that succeeded, which leaves no local ingest baseline, for `ix map --auto`", async () => {
+    const root = path.join(dir, "workspace");
+    fs.mkdirSync(root);
+    registerRemoteRunner({ isReady: async () => true, runIngestion: async () => {} });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const program = new Command();
+    registerMapCommand(program);
+    await program.parseAsync(["node", "ix", "map", root, "--silent"]);
+
+    expect(JSON.parse(fs.readFileSync(autoMapCloudMarkPath(root), "utf-8"))).toMatchObject({
+      formatVersion: 1, root: fs.realpathSync.native(root),
+    });
   });
 });

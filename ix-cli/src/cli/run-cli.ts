@@ -11,7 +11,7 @@ import { registerProStubs } from "./register/pro-stubs.js";
 import { planStartup, registerForPlan } from "./register/oss-table.js";
 import { tryLoadProCommands } from "./register/pro-loader.js";
 import { registerOssFallbacks } from "./register/oss-fallbacks.js";
-import { isRepairInvocation } from "./register/pro-failure.js";
+import { isAutoMapInvocation, isRepairInvocation } from "./register/pro-failure.js";
 import { buildHelpText } from "./help-text.js";
 import { stderrIsTerminal } from "./stderr.js";
 import {
@@ -111,6 +111,14 @@ const lazy = await registerForPlan(program, planStartup(process.argv.slice(2)));
   try {
     if (!isHook && !lazy) proLoaded = await tryLoadProCommands(program);
   } catch (err) {
+    if (isAutoMapInvocation(process.argv)) {
+      // Nothing on stdout, exit 0: a hook's promise. No map either -- without
+      // Pro the remote check cannot be trusted.
+      if (process.argv.includes("--explain") || process.env.IX_HOOK_DEBUG === "1") {
+        try { process.stderr.write("ix map --auto: skipped (error): Ix Pro is installed but failed to initialize\n"); } catch { /* best-effort */ }
+      }
+      process.exit(0);
+    }
     if (!isRepairInvocation(process.argv)) {
       renderCliError(err, debug, safeEndpoint()); // exits 1
     }

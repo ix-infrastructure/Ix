@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { isRepairInvocation } from "../register/pro-failure.js";
+import { isAutoMapInvocation, isRepairInvocation } from "../register/pro-failure.js";
 
 const argv = (...args: string[]) => ["/node", "/ix", ...args];
 
@@ -24,6 +24,22 @@ describe("repair invocations after an installed Pro fails to initialize", () => 
 
   it("reads the command, not a flag that happens to precede it", () => {
     expect(isRepairInvocation(argv("reset", "--help"))).toBe(false);
+  });
+});
+
+describe("ix map --auto after an installed Pro fails to initialize", () => {
+  // A hook runs it after every edit and is promised exit 0 and no output;
+  // run-cli exits 0 quietly for these instead of rendering the failure.
+  it("recognises ix map --auto wherever the flag sits", () => {
+    expect(isAutoMapInvocation(argv("map", "--auto"))).toBe(true);
+    expect(isAutoMapInvocation(argv("map", "/repo", "--auto", "--explain"))).toBe(true);
+  });
+
+  it("leaves a plain ix map, and --auto on another command, to the guard", () => {
+    expect(isAutoMapInvocation(argv("map"))).toBe(false);
+    expect(isAutoMapInvocation(argv("map", "/repo"))).toBe(false);
+    expect(isAutoMapInvocation(argv("ingest", "--auto"))).toBe(false);
+    expect(isAutoMapInvocation(argv("--auto", "map"))).toBe(false);
   });
 });
 
