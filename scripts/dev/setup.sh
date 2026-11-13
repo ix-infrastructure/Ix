@@ -14,9 +14,9 @@ set -euo pipefail
 #   ix mcp install
 #
 # Usage:
-#   ./setup.sh                     # Start backend + build CLI + install global ix command
-#   ./setup.sh --skip-backend      # Just build CLI + install global ix command
-#   ./setup.sh --skip-global-ix    # Skip installing global ix command
+#   ./scripts/dev/setup.sh                    # Start backend + build CLI + install global ix command
+#   ./scripts/dev/setup.sh --skip-backend     # Just build CLI + install global ix command
+#   ./scripts/dev/setup.sh --skip-global-ix   # Skip installing global ix command
 # ─────────────────────────────────────────────────────────────────────────────
 
 IX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -81,7 +81,7 @@ while [[ $# -gt 0 ]]; do
     --skip-backend) SKIP_BACKEND=true; shift ;;
     --skip-global-ix) SKIP_GLOBAL_IX=true; shift ;;
     -h|--help)
-      echo "Usage: ./setup.sh [OPTIONS]"
+      echo "Usage: ./scripts/dev/setup.sh [OPTIONS]"
       echo ""
       echo "Starts the Ix backend, builds the CLI, and installs an 'ix' command."
       echo ""
@@ -101,7 +101,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown option: $1"
-      echo "Run './setup.sh --help' for usage."
+      echo "Run './scripts/dev/setup.sh --help' for usage."
       exit 1
       ;;
   esac
