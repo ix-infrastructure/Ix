@@ -112,8 +112,11 @@ several names in one call: `ix locate a b c`, `ix callers a b c`.
 
 - **references/commands.md** — command routing tables, decomposition recipes,
   best practices, the do-not-use list. Before any command beyond the table above.
-- **references/flags.md** — every flag the CLI registers, per command, with
-  values and defaults. Before guessing whether a flag exists.
+- **`ix <command> --help`** prints one command's flags, values and defaults in
+  a few hundred tokens. Use it before guessing whether a flag exists.
+- **references/flags.md** has the same flags for every command at once (about
+  18,000 tokens), plus notes on flags that behave unexpectedly. Search the
+  skill's `references/flags.md` for the flag rather than loading it.
 - **references/output-formats.md** — the `llm|json|text` rules, what does not
   implement `llm`, and which commands are Pro-gated.
 - **references/troubleshooting.md** — prerequisites, `ix doctor`, backend health,
