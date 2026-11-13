@@ -12,7 +12,7 @@ import { ParsePool } from './parse-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
 import { combineSignals, currentRunSignal } from '../../client/run-signal.js';
-import type { GraphNode, GraphPatchPayload } from '../../client/types.js';
+import type { GraphNode, GraphPatchPayload, PatchOp, UpsertNodeOp } from '../../client/types.js';
 import { canonicalWorkspacePath, getEndpoint, isPathInside, loadWorkspaces, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
 import { resolveIngestRootWithSource } from '../map-root.js';
 import { acquireMapLock, requestMapRerun, takeMapRerun } from '../single-flight.js';
@@ -294,15 +294,14 @@ function isLikelyMinifiedSource(source: string): boolean {
  * `ix map` graph.
  */
 export function stripMapModeOps(patch: GraphPatchPayload): GraphPatchPayload {
-  const droppedNodes = new Set<unknown>(
-    patch.ops.filter(op => op.type === 'UpsertNode' && op['kind'] === 'chunk').map(op => op['id']),
-  );
+  const isChunk = (op: PatchOp): op is UpsertNodeOp => op.type === 'UpsertNode' && op.kind === 'chunk';
+  const droppedNodes = new Set<string>(patch.ops.filter(isChunk).map(op => op.id));
   return {
     ...patch,
     ops: patch.ops.filter(op => {
       if (op.type === 'AssertClaim' || op.type === 'RetractClaim') return false;
-      if (op.type === 'UpsertNode' && op['kind'] === 'chunk') return false;
-      if (op.type === 'UpsertEdge' && (droppedNodes.has(op['src']) || droppedNodes.has(op['dst']))) return false;
+      if (isChunk(op)) return false;
+      if (op.type === 'UpsertEdge' && (droppedNodes.has(op.src) || droppedNodes.has(op.dst))) return false;
       return true;
     }),
   };
@@ -620,9 +619,9 @@ export async function reconcileRemovedEntities(
   return {
     ...patch,
     ops: [
-      ...removedNodeIds.map(id => ({ type: 'DeleteNode', id })),
+      ...removedNodeIds.map((id): PatchOp => ({ type: 'DeleteNode', id })),
       ...nodeOps,
-      ...[...removedEdgeIds].map(id => ({ type: 'DeleteEdge', id })),
+      ...[...removedEdgeIds].map((id): PatchOp => ({ type: 'DeleteEdge', id })),
       ...edgeOps,
       ...otherOps,
     ],
@@ -4338,7 +4337,7 @@ export async function ingestFiles(
           sweepable.forEach((b, i) => {
             const ids = orphans[i]!;
             if (ids.length === 0) return;
-            b.patch = { ...b.patch, ops: [...ids.map(id => ({ type: 'DeleteNode', id })), ...b.patch.ops] };
+            b.patch = { ...b.patch, ops: [...ids.map((id): PatchOp => ({ type: 'DeleteNode', id })), ...b.patch.ops] };
             if (orphanRepair || writtenBefore.has(i)) {
               // The backend already holds this file's patch id: a repair runs
               // at the current extractor, and an extractor-change run may

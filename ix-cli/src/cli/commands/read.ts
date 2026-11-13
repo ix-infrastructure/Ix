@@ -18,6 +18,7 @@ import { formatOption, pathOption, pickOption } from "../options.js";
 import { disambiguationHint } from "../next-step.js";
 import { reportFailure, reportResolutionNotices, reportUnresolvedTarget } from "../ui.js";
 import type { ReadAmbiguityJson, ReadFailureJson, ReadJson } from "../contracts/read.js";
+import type { GraphKind } from "../graph-model.js";
 
 /** The answer before its path is made workspace-relative; see contracts/read.ts. */
 export type ReadResult = ReadJson;
@@ -736,7 +737,7 @@ async function trySymbolMatch(
   symbol: string,
   opts: { kind?: string; path?: string; pick?: number; format?: string }
 ): Promise<SymbolResult> {
-  const preferredKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method", "constant"];
+  const preferredKinds: GraphKind[] = ["file", "class", "object", "trait", "interface", "module", "function", "method", "constant"];
   const full = await resolveEntityFull(client, symbol, preferredKinds, opts);
 
   if (full.resolved) {

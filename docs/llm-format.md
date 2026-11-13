@@ -709,7 +709,7 @@ and limits a stale answer's candidates as it does a fresh one's, and ignores
 ```
 impact target=verify_token kind=function risk=high category=boundary summary="Auth check; 14 call sites at risk"
 behavior text="Token validation across the request pipeline"
-counts callers=14 callees=3 shown_callers=10 shown_callees=3
+counts callers=14 callees=3 shown_callers=10 shown_callees=3 dependents_total=14
 bucket region="Auth Layer" kind=subsystem count=9
 caller name=handleLogin kind=method path=src/auth/login.ts lines=20-48
 diagnostic code=results_truncated message="14 callers; showing 10. Raise --limit to see them, or page them with ix callers verify_token"
@@ -722,6 +722,33 @@ printed after the `--limit` cut (the two lists share one header, so `shown`/`tot
 In `--format json` the same rows (`callerList`, `calleeList`, bucket `members`) carry `path`,
 `lineStart` and `lineEnd`, and a container target's JSON adds `dependentList`, its located
 importers and dependents.
+
+For a container target the `counts` record is
+`counts members=<n> importers=<n> dependents=<n> member_callers=<n> dependents_total=<n>`;
+its `dependents=` is the `CALLS`/`REFERENCES` expand alone (`summary.directDependents`).
+
+**Dependents: the one count.** `dependents_total=` on the `counts` record, and
+`summary.dependents` in `--format json`, is how many distinct entities depend on the target. Read it instead of combining the other counts,
+which overlap:
+
+- a leaf target (function, method, ...): its callers (`CALLS`/`REFERENCES`, to `--depth`), each
+  entity once; the target calling itself is not counted;
+- a container target (`class`, `module`, `file`, `object`, `trait`, `interface`): the union of its
+  importers (`IMPORTS`, to `--depth`), its direct dependents (`CALLS`/`REFERENCES`, to `--depth`)
+  and the direct callers of its members (`CALLS`/`REFERENCES`, the first 20 members, as
+  `memberLevelCallers` reads them), each entity once. The target, its own direct members and
+  what is nested deeper inside it are not counted, so code inside the target calling other code
+  inside it adds nothing. "Nested deeper" is read from locations: for a `file` target, any entity
+  in that file; for another container, an entity in the target's file whose lines fall within one
+  of its members (a method of a nested class). An entity with no path or lines is counted.
+  With more than 20 members the member callers come from the first 20 only, so the count is a
+  lower bound: an entity that reaches the target only through member 21 or later is missed.
+
+Entities are matched by graph id. A file that imports the target and a function in that file
+that calls one of its members are two entities. The other counts stay as they were:
+`memberLevelCallers` adds every member's callers up (one function calling three members counts
+three times), and `directImporters`/`directDependents` are the two expands before any dedup.
+A member whose callers could not be read (a `diagnostics` entry) adds nothing.
 
 `ix overview <container>`:
 

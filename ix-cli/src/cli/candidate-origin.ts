@@ -24,6 +24,8 @@
  * still the answer.
  */
 
+import type { GraphKind, KindSet } from "./graph-model.js";
+
 type CandidateOrigin = "definition" | "import" | "non-code" | "generated";
 
 /** `attrs.language` values core-ingestion gives to markup, style and data files. */
@@ -41,7 +43,7 @@ const NON_CODE_EXTENSIONS = new Set([
 ]);
 
 /** Kinds core-ingestion emits only for docs and config, never for code. */
-const NON_CODE_KINDS = new Set(["heading", "section", "config_entry", "config"]);
+const NON_CODE_KINDS: KindSet = new Set<GraphKind>(["heading", "section", "config_entry", "config"]);
 
 /**
  * Build output and other derived copies of source.

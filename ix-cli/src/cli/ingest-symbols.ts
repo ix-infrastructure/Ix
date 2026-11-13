@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ingestSymbolsJournalPath, ingestSymbolsPath } from "./config.js";
+import { readStateFile, writeFileAtomic, writeStateAtomic } from "./workspace-state.js";
 
 /**
  * The symbol table an incremental `ix map` resolves against.
@@ -23,8 +24,10 @@ import { ingestSymbolsJournalPath, ingestSymbolsPath } from "./config.js";
  */
 
 /**
- * Bump when the stored shape or meaning changes; an older table is ignored,
- * not migrated. 2: the table may be extended by a journal (below), so a CLI
+ * The table's `formatVersion` (`workspace-state.ts`), also written as
+ * `version`, which is all a table from before `formatVersion` carries; such a
+ * table is read when it matches. Bump when the stored shape or meaning changes; an older table is
+ * ignored, not migrated. 2: the table may be extended by a journal (below), so a CLI
  * that reads the table alone would see a stale "before" for the run's
  * dependents step. 3: a summary's `sig` is now a hash of core-ingestion's
  * `summaryBindings`; a table holding the old hashes is rebuilt rather than
@@ -90,6 +93,10 @@ export function resolutionHash(ops: ReadonlyArray<{ type?: unknown; id?: unknown
 }
 
 interface SerializedSymbolTable {
+  /**
+   * The same number as `formatVersion`, still written so a CLI from before
+   * `formatVersion` existed keeps reading the table rather than rebuilding it.
+   */
   version: number;
   root: string;
   extractor: string;
@@ -193,16 +200,17 @@ export function loadIngestSymbols(projectRoot: string, extractor: string): Map<s
   const table = new Map<string, SymbolEntry>();
   let state: LoadedState = { tableBytes: 0, journalBytes: 0, journalIntact: false };
   try {
-    const text = fs.readFileSync(ingestSymbolsPath(projectRoot), "utf-8");
-    const data = JSON.parse(text) as SerializedSymbolTable;
+    const file = readStateFile(ingestSymbolsPath(projectRoot), TABLE_VERSION);
+    const data = file?.data as Partial<SerializedSymbolTable> | undefined;
     if (
-      data.version === TABLE_VERSION && data.root === projectRoot && data.extractor === extractor &&
+      file && data && (file.formatVersion === TABLE_VERSION || data.version === TABLE_VERSION) &&
+      data.root === projectRoot && data.extractor === extractor &&
       data.files && typeof data.files === "object"
     ) {
       for (const [rel, entry] of Object.entries(data.files)) {
         if (validEntry(entry)) table.set(rel, entry);
       }
-      state = { tableBytes: Buffer.byteLength(text), journalBytes: 0, journalIntact: false };
+      state = { tableBytes: file.bytes, journalBytes: 0, journalIntact: false };
       if (typeof data.gen === "string") {
         const journal = applyJournal(projectRoot, extractor, data.gen, table);
         state = { gen: data.gen, tableBytes: state.tableBytes, journalBytes: journal.bytes, journalIntact: journal.intact };
@@ -214,13 +222,6 @@ export function loadIngestSymbols(projectRoot: string, extractor: string): Map<s
   }
   loadedStates.set(table, state);
   return table;
-}
-
-/** Write `contents` to `target` via a temp file and a rename. */
-function writeAtomically(target: string, contents: string): void {
-  const tmp = `${target}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, contents);
-  fs.renameSync(tmp, target);
 }
 
 /**
@@ -257,7 +258,7 @@ export function saveIngestSymbols(
         if (state.journalBytes === 0) {
           const header: JournalHeader = { journal: JOURNAL_VERSION, root: projectRoot, extractor, gen: state.gen };
           const headerLine = JSON.stringify(header) + "\n";
-          writeAtomically(journalPath, headerLine + records);
+          writeFileAtomic(journalPath, headerLine + records);
           state.journalBytes = Buffer.byteLength(headerLine) + addBytes;
         } else {
           fs.appendFileSync(journalPath, records);
@@ -275,8 +276,7 @@ export function saveIngestSymbols(
       gen,
       files: Object.fromEntries(table),
     };
-    const text = JSON.stringify(data);
-    writeAtomically(target, text);
+    const text = writeStateAtomic(target, TABLE_VERSION, data);
     // After the table: a journal left behind names the old generation and is ignored.
     try { fs.rmSync(journalPath, { force: true }); } catch { /* ignored by gen */ }
     loadedStates.set(table, { gen, tableBytes: Buffer.byteLength(text), journalBytes: 0, journalIntact: true });

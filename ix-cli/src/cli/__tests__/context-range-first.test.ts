@@ -8,6 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { nextReads, renderBundle, renderedNextReads } from "../commands/context.js";
 import { readsOneSymbol, symbolReadChecker } from "../symbol-read-check.js";
+import { mcpCaller } from "../../mcp/hints.js";
+import { IX_MCP_CORE_TOOL_NAMES } from "../../mcp/server.js";
+import { withCaller } from "../next-step.js";
 
 // renderBundle vets each symbol read against the file on disk (symbolReadChecker).
 // The bundles here name files that do not exist, so the check is stubbed for
@@ -265,19 +268,13 @@ describe("renderBundle prints the stale flag on next rows", () => {
   // Maintainer decision: MCP callers get the stale flag too, additively. The
   // range call is unchanged; a stale read adds stale=true and the symbol form.
   it("adds stale and the re-anchored ix_read to the MCP read step, leaving cmd as it was", () => {
-    const prev = process.env.IX_CALLER;
-    process.env.IX_CALLER = "mcp";
-    try {
-      const next = captureLog(() => renderBundle(renderable(), "llm")).filter((l) => l.startsWith("next "));
-      const read = next.find((l) => l.includes("ix_read"))!;
-      expect(read).toBe(
-        'next cmd="ix_read symbol=src/c.ts:4-9" why="the top-ranked evidence" stale=true reanchor="ix_read symbol=parse path=src/c.ts"',
-      );
-      for (const line of next.filter((l) => !l.includes("ix_read"))) expect(line).not.toMatch(/stale|reanchor/);
-    } finally {
-      if (prev === undefined) delete process.env.IX_CALLER;
-      else process.env.IX_CALLER = prev;
-    }
+    const next = withCaller(mcpCaller(IX_MCP_CORE_TOOL_NAMES), () => captureLog(() => renderBundle(renderable(), "llm")))
+      .filter((l) => l.startsWith("next "));
+    const read = next.find((l) => l.includes("ix_read"))!;
+    expect(read).toBe(
+      'next cmd="ix_read symbol=src/c.ts:4-9" why="the top-ranked evidence" stale=true reanchor="ix_read symbol=parse path=src/c.ts"',
+    );
+    for (const line of next.filter((l) => !l.includes("ix_read"))) expect(line).not.toMatch(/stale|reanchor/);
   });
 
   it("ends a stale row with the note in text", () => {

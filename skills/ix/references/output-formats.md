@@ -73,9 +73,14 @@ about a fifth of the payload. `--pretty` forces the indented shape anywhere.
   deprecation period before the old field goes.
 
 The shapes are TypeScript types in `ix-cli/src/cli/contracts/`, and a test pins
-the keys each one prints. Covered so far: the shared miss records, `ix locate`
-and `ix read`. The other commands' json is not typed yet; the rule applies to
-it all the same.
+the keys each one prints. Covered so far: the shared miss records, `ix locate`,
+`ix read` and `ix text` (a bare array of matches, no envelope). Their field
+paths are also published as data (`contracts/fields.ts`), together with the
+failure record (`error`, `message`, `dir`, `next`) and, for `ix locate a b`, the
+`{ targets: [{ target, exitCode, ... }], summary }` grouping
+(`contracts/envelope.ts`). The plugin contract check fails a plugin that reads
+a field not listed there. The other
+commands' json is not typed yet; the rule applies to it all the same.
 
 **Misses share one envelope.** A target that resolves to nothing, or to several
 entities when nothing is answered, prints a string `error` slug and a
@@ -139,6 +144,15 @@ once, importers first: `{ kind, name, path?, lineStart?, lineEnd?, via }`, with
 one reached over `CALLS`/`REFERENCES` (a node reached both ways is an
 `importer`). `summary.directImporters` and `summary.directDependents` count the
 two expands before that dedup.
+
+`summary.dependents` (llm: `dependents_total=` on the `counts` record) is the one
+"how many things depend on this" number: distinct entities that call or reference
+a leaf target, or that import, call or reference a container or call one of its
+members, each counted once, the target and what is inside it left out. For a
+container with more than 20 members it is a lower bound (member callers are read
+from the first 20 members only). Use it
+rather than adding or taking the max of the other counts, which overlap. The
+definition is in `docs/llm-format.md` ("Dependents: the one count").
 
 `--limit` cuts `topImpactedMembers` and the `llm` caller/callee rows only.
 `callerList`, `calleeList` and `dependentList` are never cut;

@@ -8,24 +8,13 @@ import { resolveReadSystemId } from "../resolve.js";
 import { llmLine, llmError, type LlmValue } from "../llm.js";
 import { printJson, sliceRanked, truncationHint, type Slice } from "../format.js";
 import { formatOption, MAX_WAIT_SECONDS, parseWaitSecondsOption } from "../options.js";
-import { forMcp } from "../next-step.js";
+import { currentCaller } from "../next-step.js";
 import { canRenderProgress } from "../stderr.js";
 
-export interface SmellCandidate {
-  file_id: string;
-  file: string;
-  smell: string;
-  confidence: number;
-  signals: Record<string, unknown>;
-  inference_version: string;
-}
-
-export interface SmellReport {
-  rev: number;
-  run_at: string;
-  count: number;
-  candidates: SmellCandidate[];
-}
+// The `/v1/smells` response types live with the client; exported from here as
+// well, where they were first defined.
+import type { SmellCandidate, SmellReport } from "../../client/types.js";
+export type { SmellCandidate, SmellReport };
 
 /** Default cap on text and llm output. JSON is uncapped unless --limit is given. */
 const DEFAULT_LIMIT = 50;
@@ -95,7 +84,7 @@ export function selectSmells(report: SmellReport, limit: number, filterNonSource
 
 /**
  * The cap to apply: an explicit --limit wins (0 = all). Without one, text and
- * llm stop at DEFAULT_LIMIT and JSON returns everything, because MCP ix_smells
+ * llm stop at DEFAULT_LIMIT and JSON returns everything, because the MCP smells tool
  * and plugin fallbacks filter the JSON by path themselves.
  */
 function resolveLimit(raw: string | undefined, format: string): number {
@@ -116,13 +105,13 @@ const PROGRESS_EVERY_MS = 10_000;
 
 /**
  * The wait budget: --wait, then IX_SMELLS_WAIT (whole seconds, at most
- * `MAX_WAIT_SECONDS`), then the format's default. Under MCP the variable is
- * ignored: the ix_smells runner gives the command 30 s, and a wait inherited
- * from the server's environment must not outlast it and leave nothing.
+ * `MAX_WAIT_SECONDS`), then the format's default. Inside a host (`ix mcp`) the
+ * variable is ignored: the MCP smells tool gives the command 30 s, and a wait
+ * inherited from the server's environment must not outlast it and leave nothing.
  */
 function smellsWaitSeconds(format: string, wait?: number, env = process.env.IX_SMELLS_WAIT): number {
   if (wait !== undefined) return wait;
-  const raw = forMcp() ? undefined : env?.trim();
+  const raw = currentCaller().hosted ? undefined : env?.trim();
   // Matched, not parsed: `parseInt("15m")` is 15. A malformed value is ignored.
   if (raw && /^\d+$/.test(raw) && Number(raw) > 0 && Number.isSafeInteger(Number(raw))) {
     return Math.min(Number(raw), MAX_WAIT_SECONDS);
@@ -370,7 +359,7 @@ interface StaleAnswer {
  * text a "Stale:" line first.
  */
 function printSmellsReport(report: SmellReport, opts: { format: string; limit?: string }, stale?: StaleAnswer): void {
-  // Plain `--format json` is the raw contract MCP ix_smells and plugin
+  // Plain `--format json` is the raw contract the MCP smells tool and plugin
   // fallbacks path-filter themselves, so it neither caps nor drops rows
   // unless --limit is passed. An explicit `--limit 0` means everything,
   // so it drops nothing either, in every format.

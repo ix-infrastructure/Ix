@@ -55,11 +55,12 @@ import { activeReadScope, ensureReadScope, isRawId, resolveFileOrEntityFull, res
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
 import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure } from "../ui.js";
 import { printJson, relativePath, takeResolutionNotices } from "../format.js";
-import { forMcp, suggest, toolCall } from "../next-step.js";
+import { currentCaller, hint, type Hint } from "../next-step.js";
 import {
   assessTargetStructure, checkGraphHealth, graphHealthJson, isUnhealthy, worseHealth, type GraphHealth,
 } from "../graph-health.js";
 import { CONTAINER_KINDS } from "../graph-model.js";
+import { findFileNode } from "../file-node.js";
 
 /** The `--max-*` knobs that bound a bundle. */
 interface BudgetSnapshot {
@@ -1745,28 +1746,16 @@ async function collectHistory(
  * back to a synthetic id rather than dropping a file the graph has not seen.
  */
 async function fileNodeId(client: IxClient, path: string): Promise<string> {
-  return (await findFileNode(client, path)) ?? `file:${path}`;
+  return (await fileNodeIdOrUndefined(client, path)) ?? `file:${path}`;
 }
 
 /**
- * Search candidates for one file node. `scope` narrows the search to the path
- * on a backend that applies it (Ix-memory >= 1.0.31); an older one ignores it
- * and returns every file sharing the basename, so the limit has to reach past
- * a monorepo's `index.ts`, `__init__.py` or `mod.rs` -- at 10 a file ranked
- * eleventh among its namesakes had no node, and `--from-issue` discarded a path
- * the issue named for a BM25 guess. The headroom exists for backends that
- * ignore `scope`, so it can shrink once MIN_BACKEND_VERSION reaches 1.0.31
- * (`searchScope` in client/features.ts).
+ * A file's graph node id, or undefined when the graph has no node for it or
+ * the search failed. Exact paths only: the id is paired with this path.
  */
-const FILE_NODE_SEARCH_LIMIT = 200;
-
-/** A file's graph node id, or undefined when the graph has no node for it. */
-export async function findFileNode(client: IxClient, path: string): Promise<string | undefined> {
-  const name = path.split("/").pop()!;
-  const nodes = await client.search(name, {
-    kind: "file", nameOnly: true, limit: FILE_NODE_SEARCH_LIMIT, scope: path, ...activeReadScope(),
-  }).catch(() => []);
-  return nodes.find((n) => relativePath(n.provenance?.sourceUri) === path)?.id;
+async function fileNodeIdOrUndefined(client: IxClient, path: string): Promise<string | undefined> {
+  const node = await findFileNode(client, path, { scope: activeReadScope() }).catch(() => undefined);
+  return node?.id;
 }
 
 /** Search candidates fetched per name the issue mentions; only exact names are kept. */
@@ -1797,7 +1786,7 @@ async function buildIssueBundle(
   // A path start has no node yet, and the graph may not have one either: it
   // does not index every tracked file. chooseCentre walks BM25 for one it does.
   const { starts, centre, walked } = await chooseCentre(
-    plan.starts, plan.bm25, (path) => findFileNode(client, path), CENTRE_FALLBACK_TRIES, plan.sourcePaths);
+    plan.starts, plan.bm25, (path) => fileNodeIdOrUndefined(client, path), CENTRE_FALLBACK_TRIES, plan.sourcePaths);
   if (!centre) {
     reportFailure(
       "issue_unresolved",
@@ -2877,7 +2866,9 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
  * {@link llmNextByCut}.
  */
 export function llmNextLines(bundle: ContextBundle): string[] {
-  return forMcp()
+  // A reader with tools is sent to the graph's own questions; one at a shell
+  // gets the reads (see nextToolCalls for why they differ).
+  return currentCaller().style === "tool"
     ? nextToolCalls(bundle, onDiskSymbolCheck())
       .map((step) => llmLine("next", { cmd: step.cmd, why: step.why, stale: step.stale, reanchor: step.reanchor }))
     : renderedNextReads(bundle).map((row) => llmLine("next", { cmd: row.cmd, stale: row.stale || undefined }));
@@ -3117,58 +3108,47 @@ function summariseCut(dropped: EvidenceItem[]): Array<{ what: string; count: num
  * for anything and pays for everything.
  */
 function cutLever(bundle: ContextBundle, top: { what: string }): string {
-  if (forMcp()) return mcpCutLever(bundle, top);
-  const name = bundle.target.name;
-  const container = CONTAINER_KINDS.has(bundle.target.kind.toLowerCase());
-  switch (top.what) {
-    case "member":
-      return container
-        ? `run ix context on one of them, or raise --max-tokens`
-        : `ix contains ${name}, or raise --max-tokens`;
-    case "caller":
-      return `ix callers ${name}, or raise --max-tokens`;
-    case "dependent":
-      return `ix impact ${name}, or raise --max-tokens`;
-    case "import":
-      return `ix imports ${name}, or raise --max-tokens`;
-    case "call":
-      return `ix callees ${name}, or raise --max-tokens`;
-    case "relationship":
-      return `ix depends ${name}, or raise --max-tokens`;
-    case "claim":
-    case "conflict":
-      return `ix conflicts ${name}, or raise --max-tokens`;
-    default:
-      return `raise --max-tokens`;
-  }
-}
-
-/**
- * {@link cutLever} for an MCP caller: only core tools, and `max_tokens` for
- * the budget, since `ix_context` takes no flags. `ix contains`, `ix depends`
- * and `ix conflicts` have no core tool, so those cuts fall back to the nearest
- * one that does exist, or to the budget alone.
- */
-function mcpCutLever(bundle: ContextBundle, top: { what: string }): string {
+  const caller = currentCaller();
   const { name, path } = bundle.target;
   const container = CONTAINER_KINDS.has(bundle.target.kind.toLowerCase());
-  const pin = container ? {} : { path };
-  const budget = "raise max_tokens (default 3000)";
-  switch (top.what) {
-    case "member":
-      return container ? `call ix_context on one of them, or ${budget}` : budget;
-    case "caller":
-      return `${suggest.neighbors(name, "callers", pin)}, or ${budget}`;
-    case "dependent":
-    case "relationship":
-      return `${suggest.impact(name, pin)}, or ${budget}`;
-    case "import":
-      return `${suggest.neighbors(name, "imports", pin)}, or ${budget}`;
-    case "call":
-      return `${suggest.neighbors(name, "callees", pin)}, or ${budget}`;
-    default:
-      return budget;
+  // Pins the target's file over MCP; the CLI forms never carried a path.
+  const pin = container ? undefined : path;
+  const budget = `raise ${caller.lever("max_tokens") ?? "the token budget"}`;
+  if (top.what === "member" && container) {
+    const context = caller.command({ action: "context" });
+    if (!context) return budget;
+    return `${caller.style === "tool" ? "call" : "run"} ${context} on one of them, or ${budget}`;
   }
+  // The steps that get the cut back, in order of preference; the first the
+  // reader can run is named. `ix contains`, `ix depends` and `ix conflicts`
+  // have no core MCP tool, so a core session falls back to the nearest one
+  // that does exist, or to the budget alone.
+  const steps: Hint[] = (() => {
+    switch (top.what) {
+      case "member":
+        return [{ action: "contains", symbol: name }];
+      case "caller":
+        return [{ action: "neighbors", symbol: name, relation: "callers", path: pin }];
+      case "dependent":
+        return [{ action: "impact", target: name, path: pin }];
+      case "import":
+        return [{ action: "neighbors", symbol: name, relation: "imports", path: pin }];
+      case "call":
+        return [{ action: "neighbors", symbol: name, relation: "callees", path: pin }];
+      case "relationship":
+        return [{ action: "depends", symbol: name }, { action: "impact", target: name, path: pin }];
+      case "claim":
+      case "conflict":
+        return [{ action: "conflicts", symbol: name }];
+      default:
+        return [];
+    }
+  })();
+  for (const step of steps) {
+    const command = caller.command(step);
+    if (command !== undefined) return `${command}, or ${budget}`;
+  }
+  return budget;
 }
 
 /** One sentence naming what was cut and the cheapest way to get it back. */
@@ -3379,13 +3359,14 @@ export const NEXT_READ_MAX_LINES = 120;
  * the target's own range comes last, capped so a 558-line class does not turn
  * into a 558-line suggestion.
  *
- * Every call names core tools only, and pins the target's file with `path=` so
- * an ambiguous name resolves to the entity this bundle was built for.
+ * Every step names a tool the session was offered (a step it was not is left
+ * out), and pins the target's file with `path=` so an ambiguous name resolves
+ * to the entity this bundle was built for.
  *
  * The read step carries `stale: true` when its file changed since the last
  * ingest (its range is from the last ingest), and then, if the symbol re-anchors
- * safely (the same checks as {@link nextReads}), `reanchor`: an `ix_read
- * symbol=<name> path=<file>` call that lands on where the name is now.
+ * safely (the same checks as {@link nextReads}), `reanchor`: a symbol read
+ * pinned to the file, which lands on where the name is now.
  */
 export function nextToolCalls(
   bundle: ContextBundle,
@@ -3396,14 +3377,15 @@ export function nextToolCalls(
   const isFile = kind.toLowerCase() === "file";
   // A file resolves by its path; a symbol by name, pinned to its file.
   const symbol = isFile ? (path ?? name) : name;
-  const pin = isFile ? {} : { path };
+  const pin = isFile ? undefined : path;
+  const push = (step: Hint, why: string): void => {
+    const cmd = hint(step);
+    if (cmd !== undefined) steps.push({ cmd, why });
+  };
 
-  steps.push(
-    isFile
-      ? { cmd: suggest.neighbors(symbol, "imported_by", pin), why: "every file that imports this one" }
-      : { cmd: suggest.neighbors(symbol, "callers", pin), why: "every call site across files, from the graph rather than a name match" },
-  );
-  steps.push({ cmd: suggest.impact(symbol, pin), why: "what a change here reaches, before you edit it" });
+  if (isFile) push({ action: "neighbors", symbol, relation: "imported_by", path: pin }, "every file that imports this one");
+  else push({ action: "neighbors", symbol, relation: "callers", path: pin }, "every call site across files, from the graph rather than a name match");
+  push({ action: "impact", target: symbol, path: pin }, "what a change here reaches, before you edit it");
 
   const readItem = bundle.evidence.find(
     (item) => item.location?.path && item.location.lineStart !== undefined && item.location.lineEnd !== undefined,
@@ -3411,17 +3393,21 @@ export function nextToolCalls(
   const read = readItem?.location;
   if (readItem && read?.lineStart !== undefined && read.lineEnd !== undefined) {
     const end = Math.min(read.lineEnd, read.lineStart + NEXT_READ_MAX_LINES - 1);
-    // Additive: the range call is unchanged; a stale file adds `stale` and,
-    // where the name re-anchors safely, the symbol form beside it.
-    const { stale, symbol } = rowFreshness(bundle)(readItem, read.path, symbolRead);
-    steps.push({
-      cmd: toolCall("ix_read", { symbol: `${read.path}:${read.lineStart}-${end}` }),
-      why: end < read.lineEnd
-        ? `first ${NEXT_READ_MAX_LINES} of ${read.lineEnd - read.lineStart + 1} lines of the top-ranked evidence`
-        : "the top-ranked evidence",
-      ...(stale ? { stale: true as const } : {}),
-      ...(symbol ? { reanchor: toolCall("ix_read", { symbol, path: read.path }) } : {}),
-    });
+    const cmd = hint({ action: "read", target: `${read.path}:${read.lineStart}-${end}` });
+    if (cmd !== undefined) {
+      // Additive: the range call is unchanged; a stale file adds `stale` and,
+      // where the name re-anchors safely, the symbol form beside it.
+      const { stale, symbol } = rowFreshness(bundle)(readItem, read.path, symbolRead);
+      const reanchor = symbol ? hint({ action: "read", target: symbol, path: read.path }) : undefined;
+      steps.push({
+        cmd,
+        why: end < read.lineEnd
+          ? `first ${NEXT_READ_MAX_LINES} of ${read.lineEnd - read.lineStart + 1} lines of the top-ranked evidence`
+          : "the top-ranked evidence",
+        ...(stale ? { stale: true as const } : {}),
+        ...(reanchor ? { reanchor } : {}),
+      });
+    }
   }
   return steps;
 }

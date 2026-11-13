@@ -114,35 +114,78 @@ export function mapRefreshOutcomePath(projectRoot: string): string {
   return join(ixHome(), `map_refresh_${key}.json`);
 }
 
+/**
+ * Which per-root state files are cleared together.
+ *
+ *   - `ingest`: describes the source graph; cleared by reset, workspace
+ *     migration and a forced re-ingest (`clearIngestMtimeCache`), with the
+ *     map group.
+ *   - `map`: describes the architecture hierarchy built from it; cleared on
+ *     its own when a hierarchy build fails (`clearMapBaseline`).
+ *   - `kept`: survives both, on purpose (see `verifyRecordPath`).
+ */
+export type WorkspaceStateGroup = "ingest" | "map" | "kept";
+
+export interface WorkspaceStateFile {
+  /** A short name, for tests and messages. */
+  name: string;
+  /** The module that reads and writes it. */
+  owner: string;
+  group: WorkspaceStateGroup;
+  path: (projectRoot: string) => string;
+}
+
+/**
+ * Every per-project-root state file under IX_HOME. A new one goes here, or
+ * the registry test fails; its group decides what clears it. Each is written
+ * with `writeStateAtomic` and carries a `formatVersion` (`workspace-state.ts`),
+ * except the symbol journal, which is appended to and versioned by its header
+ * line.
+ */
+export const WORKSPACE_STATE_FILES: readonly WorkspaceStateFile[] = [
+  { name: "ingest_mtimes", owner: "ingest-baseline.ts", group: "ingest", path: ingestMtimeCachePath },
+  { name: "ingest_rebuild", owner: "ingest-baseline.ts", group: "ingest", path: ingestRebuildPath },
+  { name: "ingest_orphans", owner: "ingest-baseline.ts", group: "ingest", path: ingestOrphanSweepPath },
+  { name: "ingest_symbols", owner: "ingest-symbols.ts", group: "ingest", path: ingestSymbolsPath },
+  { name: "ingest_symbols.journal", owner: "ingest-symbols.ts", group: "ingest", path: ingestSymbolsJournalPath },
+  { name: "map_baseline", owner: "map-baseline.ts", group: "map", path: mapBaselinePath },
+  { name: "map_result", owner: "map-result-cache.ts", group: "map", path: mapResultCachePath },
+  { name: "map_stale", owner: "map-freshness.ts", group: "map", path: mapStalePath },
+  { name: "map_refresh", owner: "map-freshness.ts", group: "map", path: mapRefreshOutcomePath },
+  { name: "verify", owner: "verify.ts", group: "kept", path: verifyRecordPath },
+];
+
+function clearGroup(projectRoot: string, group: WorkspaceStateGroup): void {
+  for (const file of WORKSPACE_STATE_FILES) {
+    if (file.group !== group) continue;
+    try { rmSync(file.path(projectRoot), { force: true }); } catch { /* non-critical */ }
+  }
+}
+
 /** Drop the cached `/v1/map` response, so the next map asks the backend. Best-effort. */
 export function clearMapResultCache(projectRoot: string): void {
   try { rmSync(mapResultCachePath(projectRoot), { force: true }); } catch { /* non-critical */ }
 }
 
 /**
- * Remove the architecture-map completion marker, and the cached map response
- * and the stale marker with it: whatever made the marker wrong makes the
- * cached hierarchy wrong too, and a map that is no longer recorded is not
- * merely deferred. Leaves the source ingest baseline alone. Best-effort.
+ * Remove every `map` state file: the architecture-map completion marker, and
+ * the cached map response, the stale marker and the refresh outcome with it:
+ * whatever made the marker wrong makes the cached hierarchy wrong too, and a
+ * map that is no longer recorded is not merely deferred. Leaves the source
+ * ingest baseline alone. Best-effort.
  */
 export function clearMapBaseline(projectRoot: string): void {
-  try { rmSync(mapBaselinePath(projectRoot), { force: true }); } catch { /* non-critical */ }
-  try { rmSync(mapStalePath(projectRoot), { force: true }); } catch { /* non-critical */ }
-  try { rmSync(mapRefreshOutcomePath(projectRoot), { force: true }); } catch { /* non-critical */ }
-  clearMapResultCache(projectRoot);
+  clearGroup(projectRoot, "map");
 }
 
 /**
- * Remove all local graph baselines so the next map re-ingests every file.
+ * Remove every `ingest` and `map` state file, so the next map re-ingests
+ * every file.
  *
  * Reset and workspace migration invalidate both the source graph and the
  * hierarchy. A failed hierarchy build clears only `clearMapBaseline` instead.
  */
 export function clearIngestMtimeCache(projectRoot: string): void {
-  try { rmSync(ingestMtimeCachePath(projectRoot), { force: true }); } catch { /* non-critical */ }
-  try { rmSync(ingestRebuildPath(projectRoot), { force: true }); } catch { /* non-critical */ }
-  try { rmSync(ingestOrphanSweepPath(projectRoot), { force: true }); } catch { /* non-critical */ }
-  try { rmSync(ingestSymbolsPath(projectRoot), { force: true }); } catch { /* non-critical */ }
-  try { rmSync(ingestSymbolsJournalPath(projectRoot), { force: true }); } catch { /* non-critical */ }
+  clearGroup(projectRoot, "ingest");
   clearMapBaseline(projectRoot);
 }
