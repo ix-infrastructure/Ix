@@ -58,7 +58,6 @@ describe("Pro stubs", () => {
     ["truth", ["truth", "add", "Support 100k file repos"]],
     ["truth", ["truth", "list", "--format", "json"]],
     ["goal", ["goal", "create", "Support GitHub", "--format", "json"]],
-    ["goals", ["goals", "--status", "active", "--format", "json"]],
     ["decide", ["decide", "Use X", "--rationale", "because", "--affects", "Entity"]],
     ["briefing", ["briefing", "--format", "json"]],
     ["decisions", ["decisions", "--topic", "ingestion", "--limit", "10"]],
@@ -107,31 +106,38 @@ describe("Pro stubs", () => {
   // singular is the failure this pins: the plural fell through to commander's
   // "unknown command" instead of the sentinel above, so an agent told to stop on
   // `requires Ix Pro.` saw an unrecognized error and had nothing to match.
-  //
-  // `goals` is NOT in that category and is only still stubbed by oversight:
-  // Ix-pro#103 deleted the command, #327 correctly dropped the stub, and #384
-  // re-added it on the stated premise that Pro registers a plural for *every*
-  // singular — which was already false. Do not use this row as evidence that
-  // `ix goals` exists; removing it is a pending follow-up.
   it.each([
     ["plan", "plans"],
     ["task", "tasks"],
-    ["goal", "goals"],
   ])("stubs both %s and %s", (singular, plural) => {
     for (const name of [singular, plural]) {
       expect(runStub([name]).err).toContain(`The '${name}' command requires Ix Pro.`);
     }
   });
 
-  // `bugs` is deliberately absent from the pairs above: @ix/pro collapsed it into
-  // `ix bug list` (Ix-pro#108), so there is no plural command left to stub. The
-  // singular stub has to cover the subcommand form instead — it swallows operands,
-  // so `bug list` still reaches the sentinel rather than "unknown command".
-  it("stubs the collapsed 'bug list' subcommand, not a 'bugs' command", () => {
+  // `goals` and `bugs` are retired: @ix/pro collapsed them into `ix goal list`
+  // (Ix-pro#103) and `ix bug list` (Ix-pro#108). They are PRO_RETIRED in
+  // register/pro-surface.ts (#932). The stub must not claim the retired name is a
+  // Pro command, but it still has to give the sentinel — for the command that
+  // does exist — so an agent typing the old name stops instead of retrying an
+  // "unknown command".
+  it.each([
+    ["goals", "goal"],
+    ["bugs", "bug"],
+  ])("answers retired %s with the sentinel for %s and the new form", (old, current) => {
+    const { err, exitCode } = runStub([old, "--status", "open"]);
+    expect(err).toContain(`The '${current}' command requires Ix Pro.`);
+    expect(err).toContain(`'ix ${old}' is now 'ix ${current} list'.`);
+    expect(err).not.toContain(`The '${old}' command`);
+    expect(exitCode).toBe(1);
+  });
+
+  // The singular stub covers the subcommand form: it swallows operands, so
+  // `bug list` still reaches the sentinel rather than "unknown command".
+  it("stubs the collapsed 'bug list' subcommand", () => {
     expect(runStub(["bug", "list", "--status", "open", "--format", "json"]).err).toContain(
       "The 'bug' command requires Ix Pro.",
     );
-    expect(runStub(["bugs"]).err).not.toContain("requires Ix Pro");
   });
 
   it("emits the message verbatim as CLAUDE.md quotes it", () => {

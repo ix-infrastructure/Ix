@@ -15,7 +15,7 @@ import { resolveFileOrReport, printResolved, type ResolvedEntity } from "../reso
 import { formatDiff, relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
 import { reportFailure } from "../ui.js";
-import { parsePickOption, STRICT_AMBIGUOUS_HELP } from "../options.js";
+import { formatOption, kindOption, pathOption, pickOption, STRICT_AMBIGUOUS_HELP, strictOption } from "../options.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 
 /**
@@ -490,11 +490,11 @@ export function registerDiffCommand(program: Command): void {
     .option("--limit <n>", "Max changes to return (default 100)")
     .option("--full", `Return all changes (up to the backend's maximum, ${DIFF_MAX_LIMIT})`)
     .option("--all", "Diff every workspace on the backend, not just this one")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_AMBIGUOUS_HELP)
+    .addOption(formatOption())
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(pickOption())
+    .addOption(strictOption(STRICT_AMBIGUOUS_HELP))
     .addHelpText("after", `\nExamples:
   ix diff 3 5
   ix diff 3 5 ix-cli/src/cli/commands/decide.ts

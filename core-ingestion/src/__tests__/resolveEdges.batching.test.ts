@@ -31,8 +31,6 @@ const key = (e: ResolvedEdge) =>
 function indexOf(results: FileParseResult[]) {
   return buildGlobalResolutionIndex(
     results.map((r) => r.filePath),
-    undefined,
-    undefined,
     new Map(results.map((r) => [r.filePath, summarizeParseResult(r)])),
   );
 }
@@ -156,8 +154,6 @@ describe('resolveEdges against a summarized index', () => {
   it('an index built from summaries alone resolves like one built with the paths too', () => {
     const summariesOnly = buildGlobalResolutionIndex(
       [],
-      undefined,
-      undefined,
       new Map(mixed.map((r) => [r.filePath, summarizeParseResult(r)])),
     );
     const whole = new Set(resolveEdges(mixed, undefined, indexOf(mixed)).map(key));

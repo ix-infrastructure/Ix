@@ -4,7 +4,8 @@ import type { EntityFacts } from "./facts.js";
 import type { RoleLabel } from "./role-inference.js";
 import type { HierarchySemantics } from "./hierarchy-semantics.js";
 import type { ImportanceInference } from "./importance.js";
-import { suggest } from "../next-step.js";
+import { hint } from "../next-step.js";
+import type { GraphKind, KindSet } from "../graph-model.js";
 
 export interface SystemMeaning {
   archetype: "foundation" | "boundary" | "flow" | "general";
@@ -14,7 +15,7 @@ export interface SystemMeaning {
   importanceNarrative?: string;
 }
 
-const FOUNDATION_KINDS = new Set(["enum", "interface", "type", "trait", "data_class"]);
+const FOUNDATION_KINDS: KindSet = new Set<GraphKind>(["enum", "interface", "type", "trait", "data_class"]);
 const BOUNDARY_ROLES = new Set<RoleLabel>(["api-client", "adapter"]);
 const FLOW_ROLES = new Set<RoleLabel>([
   "selection-helper", "resolution-helper", "scoring-helper",
@@ -83,7 +84,7 @@ function buildFoundationMeaning(facts: EntityFacts, sem: HierarchySemantics, imp
   let importanceNarrative: string | undefined;
   if (importance.level === "high") {
     const context = location ? `in the ${location}` : "across the system";
-    importanceNarrative = `This is a shared foundational type ${context}. Changes propagate to all importers — run \`${suggest.impact(facts.name)}\` before modifying.`;
+    importanceNarrative = `This is a shared foundational type ${context}. Changes propagate to all importers${impactStep(facts.name, " — run", "")}.`;
   }
 
   return { archetype: "foundation", identitySummary, responsibility, usageSummary, importanceNarrative };
@@ -122,4 +123,13 @@ export function inferSystemMeaning(
   }
 
   return null;
+}
+
+/**
+ * `<lead> \`ix impact X\` before modifying<end>`, or nothing when the reader
+ * cannot run the impact step.
+ */
+export function impactStep(name: string, lead: string, end = "."): string {
+  const step = hint({ action: "impact", target: name });
+  return step ? `${lead} \`${step}\` before modifying${end}` : "";
 }

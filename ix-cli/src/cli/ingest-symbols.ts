@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ingestSymbolsJournalPath, ingestSymbolsPath } from "./config.js";
+import { readStateFile, writeFileAtomic, writeStateAtomic } from "./workspace-state.js";
 
 /**
  * The symbol table an incremental `ix map` resolves against.
@@ -23,14 +24,22 @@ import { ingestSymbolsJournalPath, ingestSymbolsPath } from "./config.js";
  */
 
 /**
- * Bump when the stored shape or meaning changes; an older table is ignored,
- * not migrated. 2: the table may be extended by a journal (below), so a CLI
+ * The table's `formatVersion` (`workspace-state.ts`), also written as
+ * `version`, which is all a table from before `formatVersion` carries; such a
+ * table is read when it matches. Bump when the stored shape or meaning changes; an older table is
+ * ignored, not migrated. 2: the table may be extended by a journal (below), so a CLI
  * that reads the table alone would see a stale "before" for the run's
- * dependents step.
+ * dependents step. 3: a summary's `sig` is now a hash of core-ingestion's
+ * `summaryBindings`; a table holding the old hashes is rebuilt rather than
+ * mixed with new ones.
  */
-const TABLE_VERSION = 2;
+const TABLE_VERSION = 3;
 
-/** What core-ingestion's `FileSummary` looks like from here: opaque except for the path. */
+/**
+ * What core-ingestion's `FileSummary` looks like from here: opaque except for
+ * the path. What a summary means -- which names changed, which files depend on
+ * them -- is core-ingestion's (`symbol-index.ts`); this module only stores it.
+ */
 export interface StoredSummary {
   filePath: string;
   [key: string]: unknown;
@@ -84,6 +93,10 @@ export function resolutionHash(ops: ReadonlyArray<{ type?: unknown; id?: unknown
 }
 
 interface SerializedSymbolTable {
+  /**
+   * The same number as `formatVersion`, still written so a CLI from before
+   * `formatVersion` existed keeps reading the table rather than rebuilding it.
+   */
   version: number;
   root: string;
   extractor: string;
@@ -187,16 +200,17 @@ export function loadIngestSymbols(projectRoot: string, extractor: string): Map<s
   const table = new Map<string, SymbolEntry>();
   let state: LoadedState = { tableBytes: 0, journalBytes: 0, journalIntact: false };
   try {
-    const text = fs.readFileSync(ingestSymbolsPath(projectRoot), "utf-8");
-    const data = JSON.parse(text) as SerializedSymbolTable;
+    const file = readStateFile(ingestSymbolsPath(projectRoot), TABLE_VERSION);
+    const data = file?.data as Partial<SerializedSymbolTable> | undefined;
     if (
-      data.version === TABLE_VERSION && data.root === projectRoot && data.extractor === extractor &&
+      file && data && (file.formatVersion === TABLE_VERSION || data.version === TABLE_VERSION) &&
+      data.root === projectRoot && data.extractor === extractor &&
       data.files && typeof data.files === "object"
     ) {
       for (const [rel, entry] of Object.entries(data.files)) {
         if (validEntry(entry)) table.set(rel, entry);
       }
-      state = { tableBytes: Buffer.byteLength(text), journalBytes: 0, journalIntact: false };
+      state = { tableBytes: file.bytes, journalBytes: 0, journalIntact: false };
       if (typeof data.gen === "string") {
         const journal = applyJournal(projectRoot, extractor, data.gen, table);
         state = { gen: data.gen, tableBytes: state.tableBytes, journalBytes: journal.bytes, journalIntact: journal.intact };
@@ -208,13 +222,6 @@ export function loadIngestSymbols(projectRoot: string, extractor: string): Map<s
   }
   loadedStates.set(table, state);
   return table;
-}
-
-/** Write `contents` to `target` via a temp file and a rename. */
-function writeAtomically(target: string, contents: string): void {
-  const tmp = `${target}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, contents);
-  fs.renameSync(tmp, target);
 }
 
 /**
@@ -251,7 +258,7 @@ export function saveIngestSymbols(
         if (state.journalBytes === 0) {
           const header: JournalHeader = { journal: JOURNAL_VERSION, root: projectRoot, extractor, gen: state.gen };
           const headerLine = JSON.stringify(header) + "\n";
-          writeAtomically(journalPath, headerLine + records);
+          writeFileAtomic(journalPath, headerLine + records);
           state.journalBytes = Buffer.byteLength(headerLine) + addBytes;
         } else {
           fs.appendFileSync(journalPath, records);
@@ -269,8 +276,7 @@ export function saveIngestSymbols(
       gen,
       files: Object.fromEntries(table),
     };
-    const text = JSON.stringify(data);
-    writeAtomically(target, text);
+    const text = writeStateAtomic(target, TABLE_VERSION, data);
     // After the table: a journal left behind names the old generation and is ignored.
     try { fs.rmSync(journalPath, { force: true }); } catch { /* ignored by gen */ }
     loadedStates.set(table, { gen, tableBytes: Buffer.byteLength(text), journalBytes: 0, journalIntact: true });
@@ -298,211 +304,4 @@ function onDiskGen(target: string): string | undefined {
   } finally {
     if (fd !== undefined) try { fs.closeSync(fd); } catch { /* nothing to do */ }
   }
-}
-
-// ── Dependents (IN-11) ──────────────────────────────────────────────────
-// A file that did not change can still need re-sending: a call it makes may
-// now resolve somewhere else, or nowhere, because a name it uses was added,
-// renamed or removed in another file. The table knows what every file defines
-// and refers to, so the run can find those files without reading the rest.
-
-type SummaryFields = {
-  language?: string;
-  qkeys?: Array<[string, string]>;
-  exportPublicNames?: Array<[string, string]>;
-  phpTypes?: Array<[string, string]>;
-  receiverFactories?: Array<[string, string]>;
-  receiverHeritage?: Array<[string, string]>;
-  receiverPackage?: string;
-  importAliases?: Record<string, string>;
-  tsGlobalTypes?: string[];
-  refs?: string[];
-  imports?: Array<{ dstName?: string; importRaw?: string; importAliased?: boolean }>;
-  sig?: string;
-};
-
-/** The names other files can resolve to in a summary. */
-export function definedNames(summary: StoredSummary | undefined): Set<string> {
-  const names = new Set<string>();
-  if (!summary) return names;
-  const s = summary as SummaryFields;
-  for (const [name, qkey] of s.qkeys ?? []) { names.add(name); names.add(qkey); }
-  for (const [publicName] of s.exportPublicNames ?? []) names.add(publicName);
-  for (const [fqcn, typeName] of s.phpTypes ?? []) { names.add(fqcn); names.add(typeName); }
-  return names;
-}
-
-/**
- * What other files can bind to in a summary, as `key -> name`: one key per
- * entity name and qualified key, per `[public, local]` export pair and per PHP
- * type. The key carries what the name resolves to, so `export { a as foo }`
- * becoming `export { b as foo }` changes a key although no name came or went.
- */
-function bindings(summary: StoredSummary | undefined): Map<string, string[]> {
-  const out = new Map<string, string[]>();
-  if (!summary) return out;
-  const s = summary as SummaryFields;
-  for (const [name, qkey] of s.qkeys ?? []) out.set(`q\0${s.receiverPackage ?? ''}\0${name}\0${qkey}`, [name, qkey]);
-  for (const [publicName, local] of s.exportPublicNames ?? []) out.set(`e\0${publicName}\0${local}`, [publicName]);
-  for (const [fqcn, typeName] of s.phpTypes ?? []) out.set(`p\0${fqcn}\0${typeName}`, [fqcn, typeName]);
-  // A superclass and a factory's return type resolve through this file's
-  // imports (and Go import aliases), so they are part of the key.
-  const heritageImports = [...new Set((s.imports ?? []).map(i => i.dstName ?? ""))].sort().join("\0");
-  const aliases = Object.entries(s.importAliases ?? {}).map(([a, m]) => `${a}=${m}`).sort().join("\0");
-  // A Java method result (`URL.getUrl`) types a chained call, which names the
-  // method only (`x.getUrl().m()`): the method name counts too.
-  for (const [name, type] of s.receiverFactories ?? []) out.set(`f\0${name}\0${type}\0${heritageImports}\0\0${aliases}`, javaMember(s, name));
-  for (const [name, base] of s.receiverHeritage ?? []) out.set(`h\0${name}\0${base}\0${heritageImports}`, [name]);
-  // `export * as ns from './a'` is what an importer's `ns.Base` resolves through.
-  for (const [key, spec] of Object.entries(s.importAliases ?? {})) {
-    if (key.startsWith("export:")) out.set(`n\0${key}\0${spec}`, [key.slice("export:".length)]);
-  }
-  // A TypeScript global is what an unimported heritage base can name.
-  for (const name of s.tsGlobalTypes ?? []) out.set(`g\0${name}`, [name]);
-  return out;
-}
-
-/** `[Class.method, method]` for a Java method result, else `[name]`. */
-function javaMember(s: SummaryFields, name: string): string[] {
-  const dot = name.lastIndexOf(".");
-  return s.language === "java" && dot > 0 ? [name, name.slice(dot + 1)] : [name];
-}
-
-/**
- * Names whose binding differs before and after: defined in one but not the
- * other, or now pointing at something else. None when the signature is the same.
- */
-export function changedNames(before: StoredSummary | undefined, after: StoredSummary | undefined): Set<string> {
-  const b = before as SummaryFields | undefined;
-  const a = after as SummaryFields | undefined;
-  if (b?.sig !== undefined && b.sig === a?.sig) return new Set();
-  const was = bindings(before);
-  const now = bindings(after);
-  const out = new Set<string>();
-  for (const [key, names] of was) if (!now.has(key)) for (const n of names) out.add(n);
-  for (const [key, names] of now) if (!was.has(key)) for (const n of names) out.add(n);
-  return out;
-}
-
-/**
- * Whether a file's imports differ before and after. A file that re-exports
- * (`export { foo } from './x'`, a Python `__init__`) passes names through its
- * imports, which its signature does not cover: when they change, files that
- * import it may resolve differently, so it counts as a path that changed.
- */
-export function importsChanged(before: StoredSummary | undefined, after: StoredSummary | undefined): boolean {
-  if (!before || !after) return false;
-  const key = (s: StoredSummary) =>
-    JSON.stringify(((s as SummaryFields).imports ?? [])
-      // An aliased Python import resolves by full path only, so adding or
-      // dropping `as m` changes what it names. Unaliased keys stay as they were.
-      .map(i => `${i.dstName ?? ""}\0${i.importRaw ?? ""}${i.importAliased ? "\0aliased" : ""}`).sort());
-  return key(before) !== key(after);
-}
-
-/** The stem an import of `relPath` would name: `math` for `web/math.ts`, `web` for `web/index.ts`. */
-function importStem(relPath: string): string {
-  const posix = relPath.replace(/\\/g, "/");
-  const stem = path.posix.basename(posix).replace(/\.[^.]+$/, "");
-  if (stem === "index" || stem === "__init__" || stem === "mod") return path.posix.basename(path.posix.dirname(posix));
-  return stem;
-}
-
-const REF_SEPARATOR = /::|->|[.#\\]/;
-
-/** The segments of an import specifier: `./math.js` -> `math`, `js`; `pkg.util` -> `pkg`, `util`. */
-function importSegments(spec: string): string[] {
-  return spec.split(/[/\\.:]+/).filter(Boolean);
-}
-
-/**
- * Files in `table` that may resolve differently now: a name they refer to is in
- * `names` (also by its first or last segment, for `obj.method` and `Mod::f`), or
- * an import of theirs names the stem of a path in `paths` (a file that appeared,
- * went away, or changed what it imports), or it is a Python file with imports
- * below the directory of a `__init__.py` in `packageEntries` (one that appeared
- * or went away). Files in `exclude` -- the ones the
- * run already sent -- are left out. Over-matching costs a parse; the resolution hash then decides whether
- * anything is sent.
- */
-export function findDependents(
-  table: ReadonlyMap<string, SymbolEntry>,
-  names: ReadonlySet<string>,
-  paths: Iterable<string>,
-  exclude: ReadonlySet<string>,
-  packageEntries: Iterable<string> = [],
-): string[] {
-  const stems = new Set<string>();
-  for (const p of paths) {
-    const stem = importStem(p);
-    if (stem.length > 0 && stem !== ".") stems.add(stem);
-  }
-  // A `__init__.py` that came or went turns its directory into a package, or
-  // back into a plain folder. That changes what imports inside it can bind
-  // (`import helpers as h` in `tools/main.py` names `tools/helpers.py` only
-  // while `tools/` is not a package), whatever the import's name, so every
-  // Python file below it that imports anything is re-resolved.
-  const packageDirs: string[] = [];
-  for (const p of packageEntries) {
-    const posix = p.replace(/\\/g, "/");
-    if (path.posix.basename(posix) !== "__init__.py") continue;
-    const dir = path.posix.dirname(posix);
-    packageDirs.push(dir === "." ? "" : `${dir}/`);
-  }
-  if (names.size === 0 && stems.size === 0 && packageDirs.length === 0) return [];
-  // A changed superclass changes the members visible through every subclass,
-  // even when those subclass files were not edited (or were already sent).
-  // Likewise a changed type changes what every factory returning it gives a
-  // caller's receiver (a Scala `apply`, a Go `NewX`, a Java method result), so
-  // the factory counts too.
-  const inheritors = new Map<string, Set<string>>();
-  const dependsOn = (type: string, name: string) => {
-    for (const key of new Set([type, type.split(".").pop()!])) {
-      const children = inheritors.get(key) ?? new Set<string>();
-      children.add(name);
-      inheritors.set(key, children);
-    }
-  };
-  for (const entry of table.values()) {
-    const s = entry.summary as SummaryFields;
-    for (const [child, parent] of s.receiverHeritage ?? []) {
-      dependsOn(parent, child);
-      if (s.receiverPackage) dependsOn(parent, `${s.receiverPackage}.${child}`);
-    }
-    for (const [factory, type] of s.receiverFactories ?? []) if (type) for (const name of javaMember(s, factory)) dependsOn(type, name);
-  }
-  const affectedNames = new Set(names);
-  const pending = [...affectedNames];
-  for (let i = 0; i < pending.length; i++) {
-    for (const child of inheritors.get(pending[i]) ?? []) {
-      if (affectedNames.has(child)) continue;
-      affectedNames.add(child);
-      pending.push(child);
-    }
-  }
-  const out: string[] = [];
-  for (const [rel, entry] of table) {
-    if (exclude.has(rel)) continue;
-    const s = entry.summary as SummaryFields;
-    const byName = affectedNames.size > 0 && (s.refs ?? []).some(ref => {
-      if (affectedNames.has(ref)) return true;
-      // Most refs are plain names; splitting each costs more than the rest of the scan.
-      if (!REF_SEPARATOR.test(ref)) return false;
-      const parts = ref.split(/::|->|\.|#|\\/).filter(Boolean);
-      return parts.length > 1 && (affectedNames.has(parts[0]) || affectedNames.has(parts[parts.length - 1]));
-    });
-    // By path segment, not substring: an added `a.ts` must not match every
-    // import with an "a" in it.
-    const byImport = !byName && stems.size > 0 && (s.imports ?? []).some(imp => {
-      const spec = imp.importRaw ?? imp.dstName ?? "";
-      for (const stem of stems) {
-        if (spec.includes(stem) && importSegments(spec).includes(stem)) return true;
-      }
-      return false;
-    });
-    const byPackage = !byName && !byImport && packageDirs.length > 0 && s.language === "python" &&
-      (s.imports ?? []).length > 0 && packageDirs.some(dir => rel.replace(/\\/g, "/").startsWith(dir));
-    if (byName || byImport || byPackage) out.push(rel);
-  }
-  return out.sort();
 }

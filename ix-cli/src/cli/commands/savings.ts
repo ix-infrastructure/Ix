@@ -5,24 +5,8 @@ import chalk from "chalk";
 import { createClient } from "../../client/factory.js";
 import { llmLine, printLlmLines } from "../llm.js";
 import { printJson } from "../format.js";
-
-interface CommandBreakdown {
-  count: number;
-  saved: number;
-}
-
-interface SavingsData {
-  commandCount: number;
-  tokensSaved: number;
-  naiveTokens: number;
-  actualTokens: number;
-  byCommandType: Record<string, CommandBreakdown>;
-}
-
-interface SavingsResponse {
-  session: SavingsData;
-  lifetime: SavingsData;
-}
+import { choiceOption, formatOption } from "../options.js";
+import type { SavingsCommandBreakdown as CommandBreakdown, SavingsData, SavingsResponse } from "../../client/types.js";
 
 /**
  * `ix savings --format llm`.
@@ -140,8 +124,8 @@ export function registerSavingsCommand(program: Command): void {
     .command("savings")
     .description("Show token savings from Ix usage")
     .option("--detail", "Include per-command breakdown")
-    .option("--model <model>", "Pricing model (opus|sonnet|haiku|gpt-4o)", "opus")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text");
+    .addOption(choiceOption("--model <model>", "Pricing model (opus|sonnet|haiku|gpt-4o)", ["opus", "sonnet", "haiku", "gpt-4o"], "opus"))
+    .addOption(formatOption());
 
   cmd.action(async (opts: { detail?: boolean; model: string; format: string }) => {
     const client = createClient();

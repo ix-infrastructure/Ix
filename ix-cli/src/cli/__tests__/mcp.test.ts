@@ -93,7 +93,9 @@ describe("ix mcp", () => {
     // The union exposed by ix-codex/cursor/gemini/openclaw/opencode-plugin,
     // less ix_query (deprecated), ix_neighbors and ix_docs_tool (composites of
     // callers/callees/depends and of overview), and ix_status (gemini's name
-    // for ix_health).
+    // for ix_health). ix_decide here is the Pro decision recorder; the
+    // openclaw/opencode `ix-decide` pre-edit verdict is a different tool and
+    // is not served (#998, mcp-plugin-consolidation.test.ts).
     for (const tool of ["ix_decide", "ix_ingest", "ix_health", "ix_locate", "ix_impact"]) {
       expect(names).toContain(tool);
     }

@@ -28,7 +28,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
-    "knip": "knip",
+    "knip": "knip && knip --directory ../core-ingestion",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
     "dev": "node scripts/build-core-ingestion.mjs && tsx src/cli/main.ts"

@@ -1,5 +1,6 @@
 # Ix documentation
 
+- [Architecture](architecture.md) — how the code is put together: packages, command registration, ingest, the client, MCP, the backend contract, releases and tests
 - [HTTP API reference](api/) — the backend JSON API exposed on `http://localhost:8090`
 - [`--format llm` output convention](llm-format.md) — the machine-readable record stream
 - [`ix mcp`](mcp.md) — serving the graph tools over MCP, and registering AI clients

@@ -146,7 +146,7 @@ class FakeBackend {
     }
     // ...and asks after each node that patch wrote. A node with no edges is
     // simply deleted, which is all this fake needs.
-    if (path.startsWith("/v1/entity/")) return send(200, { node: { kind: "function" }, edges: [] });
+    if (path.startsWith("/v1/entity/")) return send(200, { node: { id: decodeURIComponent(path.slice("/v1/entity/".length)), kind: "function" }, edges: [] });
     if (path.startsWith("/v1/stitch/system/")) return send(200, { systemId: this.systemId });
     if (path === "/v1/stitch") return send(200, { stitched: 0, systemId: null, edges: [] });
     if (path === "/v1/map") {

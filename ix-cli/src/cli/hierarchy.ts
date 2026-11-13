@@ -2,11 +2,10 @@
 
 import type { IxClient } from "../client/api.js";
 import { rowLocation, stripNulls } from "./format.js";
+import { FILE_KINDS, REGION_KINDS } from "./graph-model.js";
+import { hint } from "./next-step.js";
 
 export type SystemPath = Array<{ name: string; kind: string; id?: string }>;
-
-const REGION_KINDS = new Set(["system", "subsystem", "module", "region"]);
-const FILE_KINDS = new Set(["file"]);
 
 /** Traverse IN_REGION edges upward to build the system-hierarchy path for a node. */
 export async function getSystemPath(client: IxClient, nodeId: string): Promise<SystemPath> {
@@ -34,6 +33,12 @@ export async function getSystemPath(client: IxClient, nodeId: string): Promise<S
 /** Format a system path as "A > B > C". */
 export function formatSystemPath(path: SystemPath): string {
   return path.map((n) => n.name).join(" > ");
+}
+
+/** The diagnostic for a target with no map data, with the re-map step when the reader can run it. */
+export function noSystemMap(): string {
+  const map = hint({ action: "map" });
+  return map ? `No system map. Run \`${map}\` to see hierarchy.` : "No system map.";
 }
 
 /** Returns true if the path contains at least one region/system node (i.e. map data exists). */

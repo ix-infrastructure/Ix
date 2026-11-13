@@ -53,8 +53,10 @@ import { fileIdentity } from "./system.js";
 import { normalizePathSeparators } from "./path-match.js";
 import { readBoundedBytes } from "./bounded-read.js";
 import { GRAPH_MAP_FIX, GRAPH_REBUILD_FIX } from "./graph-health.js";
+import { readState, writeStateAtomic } from "./workspace-state.js";
 import { isBackendUnreachable } from "./errors.js";
 import { loadIngestionModules } from "./commands/ingestion-loader.js";
+import type { GraphKind } from "./graph-model.js";
 
 export const DEFAULT_VERIFY_SAMPLE = 20;
 export const DEFAULT_VERIFY_SEED = 24;
@@ -65,7 +67,9 @@ export const VERIFY_LIST_LIMIT = 5000;
  * too (that list is what makes an extra node of any kind visible); these cover
  * a stats read that fails or lags.
  */
-export const VERIFY_DEFAULT_KINDS: readonly string[] = ["file", "function", "method", "class", "interface", "module", "constant", "variable", "trait", "enum", "type"];
+// Exported as `readonly string[]` (its public type); `satisfies` still makes a
+// kind that exists nowhere a compile error.
+export const VERIFY_DEFAULT_KINDS: readonly string[] = ["file", "function", "method", "class", "interface", "module", "constant", "variable", "trait", "enum", "type"] satisfies readonly GraphKind[];
 const VERIFY_CONCURRENCY = 4;
 /** Ingest skips files over this many bytes (`MAX_FILE_BYTES` in ingest.ts), so verify does too. */
 const VERIFY_MAX_FILE_BYTES = 1024 * 1024;
@@ -406,10 +410,13 @@ export function recordFromReport(report: VerifyReport): VerifyRecord {
   };
 }
 
+/** The record file's format version (see `workspace-state.ts`); none reads as 0, same rules. */
+const VERIFY_RECORD_VERSION = 1;
+
 /** The last verify for this root, or null. Never throws. */
 export function loadVerifyRecord(projectRoot: string): VerifyRecord | null {
-  try {
-    const data = JSON.parse(fs.readFileSync(verifyRecordPath(projectRoot), "utf-8")) as Partial<VerifyRecord>;
+  return readState(verifyRecordPath(projectRoot), { version: VERIFY_RECORD_VERSION, validate: (raw) => {
+    const data = raw as Partial<VerifyRecord>;
     if (typeof data.root !== "string" || typeof data.at !== "string") return null;
     // Canonical on both sides: `--root .`, a trailing slash or a symlinked
     // path names the same root as the canonical one `ix verify` saved.
@@ -428,9 +435,7 @@ export function loadVerifyRecord(projectRoot: string): VerifyRecord | null {
       divergedFiles: Array.isArray(data.divergedFiles) ? data.divergedFiles.filter((p): p is string => typeof p === "string") : [],
       fix: typeof data.fix === "string" ? data.fix : null,
     };
-  } catch {
-    return null;
-  }
+  } });
 }
 
 /**
@@ -445,16 +450,7 @@ export function verifyRecordOutdated(record: Pick<VerifyRecord, "lastIngestAt">,
 /** Best-effort, like the other per-root state files: a failed write costs a status line. */
 export function saveVerifyRecord(record: VerifyRecord): boolean {
   try {
-    const target = verifyRecordPath(record.root);
-    fs.mkdirSync(nodePath.dirname(target), { recursive: true });
-    const tmp = `${target}.${process.pid}.tmp`;
-    try {
-      fs.writeFileSync(tmp, JSON.stringify(record));
-      fs.renameSync(tmp, target);
-    } catch (err) {
-      fs.rmSync(tmp, { force: true });
-      throw err;
-    }
+    writeStateAtomic(verifyRecordPath(record.root), VERIFY_RECORD_VERSION, record);
     return true;
   } catch {
     return false;
