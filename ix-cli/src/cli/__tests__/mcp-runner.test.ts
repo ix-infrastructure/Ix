@@ -422,8 +422,7 @@ describe("in-process ix runner", () => {
       // `ix map` can stitch the repo into a System server-side; every later read
       // in the session would otherwise still scope to the pre-map workspace.
       await run(["map"]);
-      await run(["ingest"]);
-      expect(resetReadScope).toHaveBeenCalledTimes(2);
+      expect(resetReadScope).toHaveBeenCalledTimes(1);
     });
   });
 

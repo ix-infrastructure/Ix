@@ -41,10 +41,10 @@ again.
 | Compass shows "Compass not connected to a codebase" | The scoped workspace has no graph — run `ix map .` from the repo root, then reload the tab |
 | Slow or stale results | Re-run `ix map --silent` to refresh the graph |
 | `error code=workspace_not_mapped` | The directory is in no registered workspace. Graph reads no longer fall back to the `default: true` workspace (an unrelated repo) or to every workspace on the backend. Run `ix map` in the repo (the error names the root it would map), or run from inside a mapped one |
-| `graph status=degraded` / `classification=degraded` | The graph kept its nodes but lost its edges, so zero callers/members mean *unknown*, not none. Usually another checkout of the same repo was ingested into this backend later (Ix-memory#211). `ix map` and `ix ingest --force` do not repair it; `ix reset --workspace --yes --ingest` (this workspace only) does. It hollows the other checkout in turn until the backend fix ships |
+| `graph status=degraded` / `classification=degraded` | The graph kept its nodes but lost its edges, so zero callers/members mean *unknown*, not none. Usually another checkout of the same repo was ingested into this backend later (Ix-memory#211). `ix map` and `ix map --force` do not repair it; `ix reset --workspace --yes --ingest` (this workspace only) does. It hollows the other checkout in turn until the backend fix ships |
 | `verify graph=diverged` | Some files' stored nodes do not match a re-parse of the bytes on disk, though the graph claims those bytes: either the stored source hash equals the disk hash (nodes an earlier ingest left behind, or a lost write), or the last map could not apply the file (F-01: a revert the backend answered `Idempotent`; `ix status` shows it as `not_applied`, and verify gives `reason=replayed_not_applied`). `ix map` does not repair it; `ix reset --workspace --yes --ingest` (this workspace only) does. A file reported `state=stale` has a stored hash that is not the disk hash: usually an edit since the last map, which `ix map` fixes. If it is still stale after `ix map` (for example a revert the map did not record as not applied), rebuild as above. `ix verify` compares nodes only, not edges |
 | `verify graph=stale` | No sampled file diverged, but at least one changed since the last ingest, so the sample cannot vouch for the graph (it is not `clean`). Run `ix map`, then `ix verify` again. If the same files stay stale after a map, treat it as `graph=diverged` above |
-| Reads under one subdirectory find almost nothing, while the repo root answers | A stray workspace registered for that subdirectory, left by an older `ix ingest <subdir or file>`. `ix doctor` names it under "No stray nested workspaces" with the repair: `ix reset --workspace --yes` from inside it, then delete its entry from `config.yaml` |
+| Reads under one subdirectory find almost nothing, while the repo root answers | A stray workspace registered for that subdirectory, left by an older `ix ingest <subdir or file>` (removed; `ix map` is the only way in now). `ix doctor` names it under "No stray nested workspaces" with the repair: `ix reset --workspace --yes` from inside it, then delete its entry from `config.yaml` |
 | `Commits against <endpoint> kept failing` | Commits kept failing, so `ix map` gave up rather than sending one doomed request per file. Read the `Last error` line it prints — the CLI cannot tell the two causes apart, because the memory layer answers 500 for both. **A saturated database:** `ix doctor` still passes (it asks whether the backend is reachable and the graph consistent, and an ArangoDB too busy to begin a transaction is both), so check `docker stats` and `GET /_db/<db>/_api/query/current`, then re-map once it is idle. **Patches the backend will not accept:** the error names the patch or the field; re-map after fixing it, or `IX_COMMIT_FAILURE_LIMIT=0` to send the rest regardless. |
 
 ## Environment flags
@@ -62,13 +62,13 @@ again.
   another writer (a second `ix map` on the same backend) moved the graph
   revision under it (default 8). Only a commit that loses every retry is
   counted as failed and left for the next run.
-- `IX_PARSE_BUDGET_MS=N` — how long `ix map` / `ix ingest` may spend parsing
+- `IX_PARSE_BUDGET_MS=N` — how long `ix map` may spend parsing
   one file (default 10000). A file that runs past it is skipped and named in
   the summary (`parseTimeouts` in `--format json`). It is not recorded as
   ingested: every later run tries it again, and `ix status` warns about it by
   name (`parseTimeouts` in `--format json`, `parse_timeouts` in `--format llm`)
   until a run gets it in. `0` turns the budget off.
-- `IX_PARSE_WORKERS=N` — the most parse workers `ix map` / `ix ingest` starts
+- `IX_PARSE_WORKERS=N` — the most parse workers `ix map` starts
   (default 8, never more than the cores less one). Each loads every grammar,
   so a small edit starts one; raise it for a faster first map on a large machine.
 - `IX_LEGACY_EXIT_CODES=1` — exit `1` for every failure, as before the graph
@@ -78,7 +78,7 @@ again.
   symbol is not in the graph (at most 5 seconds per command, all misses together), to say whether the name is in a file that was
   never indexed, in an indexed file as something the parser does not extract,
   or nowhere at all.
-- `IX_PATCH_ACTOR=<actor>` — the `actor` on each graph patch `ix map` / `ix ingest`
+- `IX_PATCH_ACTOR=<actor>` — the `actor` on each graph patch `ix map`
   sends (default `ix/ingestion`; GitHub ingest uses `ix/github-ingest`). Set it
   empty (`IX_PATCH_ACTOR=`) for a backend that authenticates writers and stamps
   the verified principal itself; such a backend answers 403 `body actor ...

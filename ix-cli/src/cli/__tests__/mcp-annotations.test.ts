@@ -54,7 +54,7 @@ describe("ix mcp tool annotations", () => {
 
     // ix_decide is deliberately absent: it lives in @ix/pro, so its behavior
     // cannot be verified from here. See the Pro-tool case below.
-    for (const name of ["ix_map", "ix_smells", "ix_ingest"]) {
+    for (const name of ["ix_map", "ix_smells"]) {
       expect(byName.get(name)?.annotations?.destructiveHint, name).toBe(true);
       expect(byName.get(name)?.annotations?.readOnlyHint, name).toBe(false);
       expect(byName.get(name)?.annotations?.idempotentHint, name).toBe(false);
@@ -103,12 +103,13 @@ describe("ix mcp tool annotations", () => {
     }
   });
 
-  it("marks only GitHub ingestion as open-world", async () => {
+  it("marks no tool open-world", async () => {
     const client = await connect(async () => ({ ok: true, stdout: "ok", stderr: "" }), true);
     const byName = new Map((await client.listTools()).tools.map((entry) => [entry.name, entry]));
 
-    // ix_ingest is the one tool that reaches outside the host (GitHub API).
-    expect(byName.get("ix_ingest")?.annotations?.openWorldHint).toBe(true);
+    // ix_ingest, the one tool that reached GitHub, is gone; GitHub ingest is
+    // `ix map --github` on the CLI.
+    expect(byName.has("ix_ingest")).toBe(false);
     // Local graph reads, smell detection, and the local map refresh do not.
     expect(byName.get("ix_map")?.annotations?.openWorldHint).toBe(false);
     expect(byName.get("ix_smells")?.annotations?.openWorldHint).toBe(false);

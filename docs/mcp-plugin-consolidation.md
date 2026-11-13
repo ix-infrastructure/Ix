@@ -57,7 +57,9 @@ The deliberate exclusions:
 And `ix_status` is Gemini's name for what `ix mcp` calls `ix_health`; both run
 `ix status`.
 
-`ix_ingest` was a real gap and is now served. `ix_decide` is served too, but
+`ix_ingest` was served for a while and is gone again, with the `ix ingest`
+command: `ix_map` is the one way in, and GitHub ingest is `ix map --github` on
+the CLI. `ix_decide` is served, but
 it is the Pro decision recorder; whether that is what gemini's own `ix_decide`
 does has not been re-checked here, so compare its parameters before migrating
 that plugin. `ix_decide` is a write and needs Pro, so it is advertised only
@@ -77,10 +79,9 @@ verdict.
 - **Tool annotations.** Every advertised tool carries a `title`, and every tool
   implemented in this repository also carries `readOnlyHint`, `destructiveHint`,
   `idempotentHint` and `openWorldHint` so a client can present and route it
-  correctly. Graph reads are read-only and idempotent; `ix_map`, `ix_ingest`,
+  correctly. Graph reads are read-only and idempotent; `ix_map`
   and `ix_smells` in its default mode, which stores versioned claims, are
-  destructive because they mutate backend state; only `ix_ingest` is
-  open-world, because its GitHub form reaches an external API.
+  destructive because they mutate backend state; no tool is open-world.
 
   The Pro tools — `ix_briefing`, `ix_decisions`, `ix_decide` — carry a title and
   no behavioral hint, for the same reason they carry no `outputSchema`: they are
@@ -96,7 +97,7 @@ verdict.
   the runner, and what a tool can reach is bounded by the command it runs, not by
   what it is advertised as.
 
-- **Structured content.** `ix_map`, `ix_ingest` and `ix_smells` return their
+- **Structured content.** `ix_map` and `ix_smells` return their
   parsed JSON object as `structuredContent` (with an `outputSchema`) so agents
   receive typed values instead of a string to re-parse. The schema asserts only
   "an object": the real field shape is backend-defined and versioned, and

@@ -149,7 +149,7 @@ export function registerResetCommand(program: Command): void {
  * `/v1/reset/workspace`, then (with `--ingest`) map it again.
  *
  * This is the only repair for a hollowed graph (see graph-health.ts): `ix map`
- * skips unchanged files and `ix ingest --force` re-sends patches the backend
+ * skips unchanged files and `ix map --force` re-sends patches the backend
  * already recorded, so neither re-creates the lost edges. The backend clears
  * the workspace's patch idempotency keys with its data, which is what makes
  * the re-ingest real.

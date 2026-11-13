@@ -68,9 +68,8 @@ describe("the root help built from the manifest", () => {
   const EXPECTED_OSS_HELP = `ix — System Intelligence CLI
 
 Start:
-  map [path]            Map system
+  map [path]            Map system (add --github for GitHub data)
   watch                 Watch changes
-  ingest [path]         Ingest files or GitHub data
   config                Update config
 
 Understand:

@@ -65,21 +65,23 @@ These commands combine several graph queries into one bounded answer. Reach for 
 |---|---|---|
 | `ix map [path]` | Map a repository | `ix map .` |
 | `ix watch` | Re-map on every change | `ix watch` |
-| `ix ingest [path]` | Ingest files, or GitHub data | `ix ingest --github owner/repo --limit 50` |
+| `ix map --github owner/repo` | Add a repository's issues, PRs and commits | `ix map --github owner/repo --limit 50` |
 
-`ix ingest <path>` writes to the workspace the path belongs to: the registered workspace containing it, else its
-git repository. A file or directory inside that workspace refreshes just that part of it, and the rest of the
-workspace is left alone. A directory outside every workspace and repository becomes a workspace of its own (never
-the default). A loose file there is ingested but registers nothing, so `ix read` cannot open its neighbours.
+`ix map` is the one way to build or refresh the graph; there is no separate `ix ingest`. With no path it maps the
+registered workspace or git repository you are in. Each run is incremental: it re-parses only files that changed
+since the last one. `--force` re-parses and re-sends every file (after a parser upgrade, say).
 
-`ix ingest` honors `--exclude <glob>` and an `.ixignore` file at the workspace root. `.ixignore` supports a subset of
-`.gitignore` syntax: `#` comments, `*`, `?`, `**`, a leading `/` to anchor to the root, a trailing `/` for
-directories, and bare names that match at any depth. There is no `!` negation.
+`--lang <langs>` and `--exclude <glob>` map only some files, and a filtered run never deletes the files it left out.
+`ix map` also honors an `.ixignore` file at the workspace root. `.ixignore` supports a subset of `.gitignore`
+syntax: `#` comments, `*`, `?`, `**`, a leading `/` to anchor to the root, a trailing `/` for directories, and bare
+names that match at any depth. There is no `!` negation.
 
-`ix ingest <path>` and `ix map` take the same per-workspace lock. A run that finds it held does not run beside
-the holder: it asks the holder for one more pass, prints a note (or `{"coalesced": true, ...}` with
-`--format json`) and exits 0, or with `IX_MAP_COALESCE_EXIT_CODE` if that is set. The holder runs that pass
-before it exits: `ix map` re-ingests the workspace, and so does `ix ingest` when the workspace has been mapped.
+`--github owner/repo` adds GitHub data instead of mapping code; it takes `--token`, `--since` (default: 30 days
+ago) and `--limit` (per category, default 50).
+
+`ix map` takes a per-workspace lock. A run that finds it held does not run beside the holder: it asks the holder
+for one more pass, prints a note and exits 0, or with `IX_MAP_COALESCE_EXIT_CODE` if that is set. The holder
+re-ingests the workspace before it exits.
 
 ## Setup and health
 

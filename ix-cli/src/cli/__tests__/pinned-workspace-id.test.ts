@@ -27,9 +27,8 @@ import {
   staleWorkspaceCleanup,
   workspaceStateFor,
 } from "../bootstrap.js";
-import { registerIngestCommand } from "../commands/ingest.js";
 import { registerMapCommand } from "../commands/map.js";
-import { acquireMapLock } from "../single-flight.js";
+import { acquireMapLock, lockPathForTest } from "../single-flight.js";
 import { workspaceIdForPath } from "../system.js";
 import { loadWorkspaces, resetMalformedPruneWarningsForTests } from "../config.js";
 import { createClient } from "../../client/factory.js";
@@ -193,8 +192,11 @@ async function run(register: (p: Command) => void, args: string[]): Promise<Run>
   vi.restoreAllMocks();
   return { out: out.join("\n"), err: err.join("\n"), exitCode, fetches };
 }
-const runIngest = (args: string[]) => run(registerIngestCommand, ["ingest", ...args]);
-const runMap = (args: string[]) => run(registerMapCommand, ["map", ...args]);
+// `ix map` holds its lock until the process exits; a test runs several maps in
+// one process, so each run lets go of it the way exit would.
+const runMap = async (args: string[]) => {
+  try { return await run(registerMapCommand, ["map", ...args]); } finally { fs.rmSync(lockPathForTest(ws), { force: true }); }
+};
 
 describe("a pinned workspace_id is honoured", () => {
   it("keeps the pinned id for a clone at a different path, and warns once", () => {
@@ -245,9 +247,9 @@ describe("a pinned workspace_id is honoured", () => {
     }));
   });
 
-  it("ix ingest: a pinned id is neither re-keyed nor deleted after a clean ingest", async () => {
+  it("ix map: a pinned id is neither re-keyed nor deleted after a clean ingest", async () => {
     writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
-    const r = await runIngest([ws]);
+    const r = await runMap([ws]);
 
     expect(r.exitCode, r.err).toBe(0);
     expect(r.err).toContain(`Keeping ${PINNED}`);
@@ -259,17 +261,17 @@ describe("a pinned workspace_id is honoured", () => {
     expect(committed).not.toContain(workspaceIdForPath(ws));
   }, 60_000);
 
-  it("ix ingest --format json: no warning on stderr for a machine consumer", async () => {
+  it("ix map --format json: no warning on stderr for a machine consumer", async () => {
     writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
-    const r = await runIngest([ws, "--format", "json"]);
+    const r = await runMap([ws, "--format", "json"]);
     expect(r.exitCode, r.err).toBe(0);
     expect(r.err).not.toContain("Keeping");
     expect(deletes()).toEqual([]);
   }, 60_000);
 
-  it("ix ingest: an ordinary single-user workspace is unchanged -- no warning, no re-key, no delete", async () => {
+  it("ix map: an ordinary single-user workspace is unchanged -- no warning, no re-key, no delete", async () => {
     writeConfig(baseUrl, [{ id: workspaceIdForPath(ws), root: ws, name: "clone" }]);
-    const r = await runIngest([ws]);
+    const r = await runMap([ws]);
 
     expect(r.exitCode, r.err).toBe(0);
     expect(r.err).not.toContain("Keeping");
@@ -280,10 +282,10 @@ describe("a pinned workspace_id is honoured", () => {
   }, 60_000);
 });
 
-describe("ix ingest --prune-stale-workspace", () => {
+describe("ix map --prune-stale-workspace (ingest cases)", () => {
   it("re-keys and deletes the old id's graph on a loopback backend after a clean ingest", async () => {
     writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
-    const r = await runIngest([ws, "--format", "json", "--prune-stale-workspace"]);
+    const r = await runMap([ws, "--format", "json", "--prune-stale-workspace"]);
 
     expect(r.exitCode, r.err).toBe(0);
     expect(registeredIds()[ws]).toBe(workspaceIdForPath(ws));
@@ -297,7 +299,7 @@ describe("ix ingest --prune-stale-workspace", () => {
     for (const filter of [["--lang", "typescript"], ["--exclude", "b.py"]]) {
       writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
       resetWorkspaceIdMemosForTests();
-      const partial = await runIngest([ws, ...filter, "--prune-stale-workspace"]);
+      const partial = await runMap([ws, ...filter, "--prune-stale-workspace"]);
 
       expect(partial.exitCode, partial.err).toBe(0);
       expect(deletes()).toEqual([]);
@@ -306,7 +308,7 @@ describe("ix ingest --prune-stale-workspace", () => {
     }
 
     resetWorkspaceIdMemosForTests();
-    const full = await runIngest([ws, "--prune-stale-workspace"]);
+    const full = await runMap([ws, "--prune-stale-workspace"]);
     expect(full.exitCode, full.err).toBe(0);
     expect(deletedIds()).toEqual([PINNED]);
     expect(pendingFor(ws)).toBeUndefined();
@@ -315,7 +317,7 @@ describe("ix ingest --prune-stale-workspace", () => {
   it("after an unclean re-ingest keeps the old id recorded, and the next run deletes it", async () => {
     writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
     mode.failCommits = true;
-    const first = await runIngest([ws, "--prune-stale-workspace"]);
+    const first = await runMap([ws, "--prune-stale-workspace"]);
 
     expect(registeredIds()[ws]).toBe(workspaceIdForPath(ws));
     expect(deletes()).toEqual([]);
@@ -326,12 +328,12 @@ describe("ix ingest --prune-stale-workspace", () => {
     // Without the flag nothing is deleted, and the record survives.
     mode.failCommits = false;
     resetWorkspaceIdMemosForTests();
-    await runIngest([ws]);
+    await runMap([ws]);
     expect(deletes()).toEqual([]);
     expect(pendingFor(ws)).toHaveLength(1);
 
     resetWorkspaceIdMemosForTests();
-    const retry = await runIngest([ws, "--prune-stale-workspace"]);
+    const retry = await runMap([ws, "--prune-stale-workspace"]);
     expect(retry.exitCode, retry.err).toBe(0);
     expect(retry.err).toContain(`Retrying the deletion of previous workspace graph ${PINNED}`);
     expect(deletedIds()).toEqual([PINNED]);
@@ -341,20 +343,20 @@ describe("ix ingest --prune-stale-workspace", () => {
   it("a failed delete stays recorded and is retried", async () => {
     writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
     mode.reset = "fail";
-    const first = await runIngest([ws, "--prune-stale-workspace"]);
+    const first = await runMap([ws, "--prune-stale-workspace"]);
     expect(first.err).toContain(`Could not delete the previous workspace graph ${PINNED}`);
     expect(pendingFor(ws)).toHaveLength(1);
 
     mode.reset = "ok";
     resetWorkspaceIdMemosForTests();
-    await runIngest([ws, "--prune-stale-workspace"]);
+    await runMap([ws, "--prune-stale-workspace"]);
     expect(pendingFor(ws)).toBeUndefined();
   }, 60_000);
 
   it("does not follow a redirect on the delete", async () => {
     writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }]);
     mode.reset = "redirect";
-    const r = await runIngest([ws, "--prune-stale-workspace"]);
+    const r = await runMap([ws, "--prune-stale-workspace"]);
     expect(r.err).toContain(`Could not delete the previous workspace graph ${PINNED}`);
     expect(requests.filter((q) => q.url === "/redirected")).toEqual([]);
     expect(pendingFor(ws)).toHaveLength(1);
@@ -364,7 +366,7 @@ describe("ix ingest --prune-stale-workspace", () => {
     const other = path.join(t, "other");
     fs.mkdirSync(other);
     writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone" }, { id: PINNED, root: other, name: "other" }]);
-    const r = await runIngest([ws, "--format", "json", "--prune-stale-workspace"]);
+    const r = await runMap([ws, "--format", "json", "--prune-stale-workspace"]);
 
     expect(r.exitCode, r.err).toBe(0);
     expect(deletes()).toEqual([]);
@@ -378,7 +380,7 @@ describe("ix ingest --prune-stale-workspace", () => {
       id: workspaceIdForPath(ws), root: ws, name: "clone",
       extra: ["    pending_prune_of:", `      - workspace_id: "${PINNED}"`, `        endpoint: ${endpointA}`],
     }]);
-    const r = await runIngest([ws, "--prune-stale-workspace"]);
+    const r = await runMap([ws, "--prune-stale-workspace"]);
 
     expect(r.exitCode, r.err).toBe(0);
     expect(deletes()).toEqual([]);
@@ -389,7 +391,7 @@ describe("ix ingest --prune-stale-workspace", () => {
   it("refuses to re-key a root marked pinned: true, and keeps the marker", async () => {
     writeConfig(baseUrl, [{ id: PINNED, root: ws, name: "clone", pinned: true }]);
     const before = fs.readFileSync(configPath, "utf8");
-    const r = await runIngest([ws, "--prune-stale-workspace"]);
+    const r = await runMap([ws, "--prune-stale-workspace"]);
 
     expect(r.exitCode).toBe(1);
     expect(r.err).toContain('is marked "pinned: true"');
@@ -412,7 +414,7 @@ describe("ix ingest --prune-stale-workspace", () => {
     process.env.IX_ENDPOINT = "https://ix.example.com";
     writeConfig("https://ix.example.com", [{ id: PINNED, root: ws, name: "clone" }]);
     const before = fs.readFileSync(configPath, "utf8");
-    const r = await runIngest([ws, "--format", "json", "--prune-stale-workspace"]);
+    const r = await runMap([ws, "--format", "json", "--prune-stale-workspace"]);
 
     expect(r.exitCode).toBe(1);
     expect(r.err).toContain("only runs against a local (loopback) backend");
@@ -426,9 +428,9 @@ describe("ix ingest --prune-stale-workspace", () => {
     const lock = acquireMapLock(ws, "test holder");
     expect(lock).not.toBeNull();
     try {
-      const r = await runIngest([ws, "--prune-stale-workspace"]);
+      const r = await runMap([ws, "--prune-stale-workspace"]);
       expect(r.exitCode).toBe(1);
-      expect(r.err).toContain("run --prune-stale-workspace again once it finishes");
+      expect(r.err).toContain("run ix map --prune-stale-workspace again once it finishes");
       expect(registeredIds()[ws]).toBe(PINNED);
       expect(r.fetches).toBe(0);
     } finally {
@@ -437,9 +439,9 @@ describe("ix ingest --prune-stale-workspace", () => {
   });
 
   it("is rejected with --github rather than ignored", async () => {
-    const r = await runIngest(["--github", "owner/repo", "--prune-stale-workspace"]);
+    const r = await runMap(["--github", "owner/repo", "--prune-stale-workspace"]);
     expect(r.exitCode).toBe(1);
-    expect(r.err).toContain("--prune-stale-workspace applies to a path ingest, not --github");
+    expect(r.err).toContain("--github adds GitHub data; it does not take");
     expect(r.fetches).toBe(0);
   });
 });
@@ -597,7 +599,7 @@ describe("config.yaml markers", () => {
     vi.restoreAllMocks();
 
     // End to end: only the well-formed marker is acted on.
-    const r = await runIngest([ws, "--prune-stale-workspace"]);
+    const r = await runMap([ws, "--prune-stale-workspace"]);
     expect(r.exitCode, r.err).toBe(0);
     expect(deletedIds()).toEqual([PINNED]);
     expect(deletedIds()).not.toContain("undefined");

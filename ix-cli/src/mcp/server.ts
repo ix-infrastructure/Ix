@@ -5,12 +5,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { statSync } from "node:fs";
-import { isAbsolute, join, resolve as resolvePath } from "node:path";
+import { join } from "node:path";
 
 import { z } from "zod";
-import { isReadablePath, resolveWorkspaceRoot } from "../cli/config.js";
-import { resolveIngestRootWithSource } from "../cli/map-root.js";
 import { BUNDLE_SCHEMA } from "../cli/context-bundle-schema.js";
 import { PRO_MCP_TOOL_NAMES } from "../cli/register/pro-surface.js";
 
@@ -68,7 +65,6 @@ export const IX_MCP_OSS_TOOL_NAMES = [
   "ix_stats",
   "ix_subsystems",
   "ix_history",
-  "ix_ingest",
 ] as const;
 
 /**
@@ -110,14 +106,6 @@ const WRITE: ToolAnnotations = {
   destructiveHint: true,
   idempotentHint: false,
   openWorldHint: false,
-};
-
-/** Mutates backend state and reaches outside the host (GitHub): open-world. */
-const WRITE_OPEN_WORLD: ToolAnnotations = {
-  readOnlyHint: false,
-  destructiveHint: true,
-  idempotentHint: false,
-  openWorldHint: true,
 };
 
 /**
@@ -163,7 +151,6 @@ const TOOL_ANNOTATIONS: Record<(typeof IX_MCP_TOOL_NAMES)[number], ToolAnnotatio
   ix_stats: { ...READ_ONLY, title: "Graph statistics" },
   ix_subsystems: { ...READ_ONLY, title: "Subsystems" },
   ix_history: { ...READ_ONLY, title: "Patch history" },
-  ix_ingest: { ...WRITE_OPEN_WORLD, title: "Ingest a path or GitHub repo" },
   // Reads the graph and composes a bundle; the CLI's --save and --out, which are
   // the only parts of `ix context` that write anything, are not exposed here.
   ix_context: { ...READ_ONLY, title: "Context bundle" },
@@ -195,7 +182,6 @@ const JSON_OBJECT_SCHEMA = z.object({}).passthrough();
  */
 const TOOL_OUTPUT_SCHEMA: Partial<Record<(typeof IX_MCP_TOOL_NAMES)[number], z.ZodTypeAny>> = {
   ix_map: JSON_OBJECT_SCHEMA,
-  ix_ingest: JSON_OBJECT_SCHEMA,
   // `ix_smells` is not here any more, and neither is `ix_context`'s bundle
   // schema. An outputSchema is a promise that EVERY result carries structured
   // content, so a tool whose structured copy is opt-in cannot declare one.
@@ -219,7 +205,6 @@ export const IX_MCP_JSON_RESULT_TOOLS: readonly (typeof IX_MCP_TOOL_NAMES)[numbe
   "ix_context",
   "ix_map",
   "ix_smells",
-  "ix_ingest",
   ...IX_MCP_PRO_TOOL_NAMES,
 ];
 
@@ -711,67 +696,6 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     async (input) =>
       runFormatted(runIx, "ix_history", ix("history", [stringArg(input, "target")], chooseOptions(input))),
   );
-  registerTool(
-    ctx,
-    "ix_ingest",
-    "Add a path or a GitHub repo to the graph. A path inside a mapped workspace refreshes just that part of it. Slow; ix_map is the usual way in",
-    {
-      path: z.string().min(1).optional(),
-      github: z.string().min(1).optional().describe("owner/repo"),
-      limit: z.number().int().min(1).max(500).default(50),
-      since: z.string().min(1).optional().describe("ISO 8601 date"),
-    },
-    async (input) => {
-      if (typeof input.path === "string" && typeof input.github === "string") {
-        return textResult(
-          JSON.stringify({ error: "path and github are mutually exclusive; provide only one", tool: "ix_ingest" }),
-          true,
-        );
-      }
-      // Confined like ix_read. An ingested path's workspace becomes a root
-      // ix_read may open files from, so an unconfined path let a caller turn
-      // any directory into a readable one (ix_ingest, then ix_read).
-      // Resolved against the workspace root, as ingestFiles does, not cwd:
-      // from <ws>/a, "../outside/x" is <ws>/outside for cwd but outside for the CLI.
-      if (typeof input.path === "string") {
-        const abs = isAbsolute(input.path) ? input.path : resolvePath(resolveWorkspaceRoot(), input.path);
-        if (!isReadablePath(abs)) {
-          return textResult(
-            JSON.stringify({
-              error: "path_outside_workspace",
-              message: `Refusing to ingest a path outside the workspace: ${input.path}. Run ix map in that directory to make it a workspace.`,
-              tool: "ix_ingest",
-            }),
-            true,
-          );
-        }
-        // A path in no workspace and no repository would be ingested as a
-        // workspace of its own; over MCP that is refused. A path that does not
-        // exist falls through: the CLI reports it and registers nothing.
-        let isDir: boolean | undefined;
-        try { isDir = statSync(abs).isDirectory(); } catch { /* the CLI reports it */ }
-        if (isDir !== undefined && resolveIngestRootWithSource(abs, isDir).source === "loose") {
-          return textResult(
-            JSON.stringify({
-              error: "path_outside_workspace",
-              message: `Refusing to ingest ${input.path}: it is in no mapped workspace and no git repository. Run ix map in that directory to make it a workspace.`,
-              tool: "ix_ingest",
-            }),
-            true,
-          );
-        }
-      }
-      const options: string[] = [];
-      pushOption(options, "--github", input.github);
-      pushOption(options, "--since", input.since);
-      if (typeof input.github === "string") options.push(`--limit=${numberArg(input, "limit")}`);
-      const positionals = typeof input.path === "string" ? [input.path] : [];
-      // Ingestion walks the tree or pages a GitHub API, so it gets the same
-      // headroom as ix_map rather than the default read timeout.
-      return runJson(runIx, "ix_ingest", ix("ingest", positionals, options), 120_000);
-    },
-  );
-
   if (options.proAvailable) {
     registerTool(ctx, "ix_briefing", "Load the Ix Pro session briefing", {}, async () =>
       runJson(runIx, "ix_briefing", ix("briefing")),

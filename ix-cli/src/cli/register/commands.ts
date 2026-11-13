@@ -60,11 +60,6 @@ export const OSS_COMMANDS: readonly OssCommandEntry[] = [
     load: async () => (await import("../commands/query.js")).registerQueryCommand,
   },
   {
-    names: ["ingest"],
-    load: async () => (await import("../commands/ingest.js")).registerIngestCommand,
-    help: [{ usage: "ingest [path]", summary: "Ingest files or GitHub data" }],
-  },
-  {
     names: ["search"],
     load: async () => (await import("../commands/search.js")).registerSearchCommand,
     help: [{ usage: "search <term>", summary: "Search system" }],
@@ -196,7 +191,7 @@ export const OSS_COMMANDS: readonly OssCommandEntry[] = [
   {
     names: ["map"],
     load: async () => (await import("../commands/map.js")).registerMapCommand,
-    help: [{ usage: "map [path]", summary: "Map system" }],
+    help: [{ usage: "map [path]", summary: "Map system (add --github for GitHub data)" }],
   },
   {
     names: ["smells"],
@@ -281,7 +276,7 @@ export const OSS_COMMANDS: readonly OssCommandEntry[] = [
  * the same set of names, so a help line left out of every section fails CI.
  */
 export const ROOT_HELP_SECTIONS: readonly { readonly title: string; readonly commands: readonly string[] }[] = [
-  { title: "Start", commands: ["map", "watch", "ingest", "config"] },
+  { title: "Start", commands: ["map", "watch", "config"] },
   {
     title: "Understand",
     commands: ["context", "search", "text", "locate", "explain", "impact", "overview", "read", "around", "smells"],

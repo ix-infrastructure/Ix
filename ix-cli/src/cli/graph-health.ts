@@ -26,7 +26,7 @@ import type { GraphKind, KindSet } from "./graph-model.js";
  * checkout tombstones the CONTAINS / CALLS / IMPORTS edges of every other
  * checkout of the same repository on that backend. Node ids are namespaced by
  * workspace, so the other checkouts' nodes survive; their edges do not. A
- * plain `ix map` or `ix ingest --force` does not repair it: unchanged files are
+ * plain `ix map` or `ix map --force` does not repair it: unchanged files are
  * skipped, and forced patches carry the same ids as the recorded ones and are
  * replayed as already applied. Only deleting the workspace's data first makes
  * the re-ingest real -- hence {@link GRAPH_REBUILD_FIX}.

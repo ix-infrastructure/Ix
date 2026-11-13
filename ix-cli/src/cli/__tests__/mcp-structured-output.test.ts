@@ -146,7 +146,7 @@ describe("ix mcp structured output", () => {
     const client = await connect(async () => ({ ok: true, stdout: "{}", stderr: "" }));
     const byName = new Map((await client.listTools()).tools.map((tool) => [tool.name, tool]));
 
-    for (const name of ["ix_map", "ix_ingest"]) {
+    for (const name of ["ix_map"]) {
       expect(byName.get(name)?.outputSchema, name).toBeDefined();
     }
     // Tools whose `--format llm` output is human-oriented text have no stable

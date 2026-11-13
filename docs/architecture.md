@@ -123,9 +123,9 @@ The rules of this seam:
 
 ## Ingest: from a file to graph patches
 
-`ix map` (`ix-cli/src/cli/commands/map.ts`) and `ix ingest`
-(`ix-cli/src/cli/commands/ingest.ts`) both end in `ingestFiles()` in
-`ingest.ts`. In order, it:
+`ix map` (`ix-cli/src/cli/commands/map.ts`) is the one way into the graph. It
+calls `ingestFiles()` in `ix-cli/src/cli/commands/ingest.ts` (the ingest
+pipeline; there is no separate `ix ingest` command). In order, it:
 
 1. **Discovers files.** `ix-cli/src/cli/file-discovery.ts` is the one
    implementation used by map, ingest, watch and status: `git ls-files` in a

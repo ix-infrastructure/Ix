@@ -4,25 +4,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { execFileSync } from "node:child_process";
 import { Command } from "commander";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import { ensureWorkspaceIdState, workspaceStateFor } from "../bootstrap.js";
-import { registerIngestCommand } from "../commands/ingest.js";
+import { ingestFiles } from "../commands/ingest.js";
 import { registerReadCommand } from "../commands/read.js";
-import { createIxMcpServer, type IxRunner } from "../../mcp/server.js";
+import { createIxMcpServer } from "../../mcp/server.js";
 
 /**
- * Every registered workspace is a root `ix read` may open files from. `ix
- * ingest <path>` registered the path's workspace before it ingested anything,
+ * Every registered workspace is a root `ix read` may open files from. The
+ * ingest behind `ix map` (once `ix ingest <path>`) registered the path's
+ * workspace before it ingested anything,
  * so one failed ingest of a directory outside the workspace (backend down, or
  * a path nobody meant) made that directory readable for good:
  *
  *   ix read <outside>/secret.txt     -> path_outside_workspace
- *   ix ingest <outside>/x.json       -> commit fails, config.yaml gains <outside>
+ *   ingest <outside>/x.json          -> commit fails, config.yaml gains <outside>
  *   ix read <outside>/secret.txt     -> the secret
  */
 
@@ -96,7 +95,12 @@ async function run(register: (p: Command) => void, args: string[]): Promise<{ ou
   return { out: out.join("\n"), err: err.join("\n"), exitCode };
 }
 
-describe("ix ingest registers a workspace only once something was ingested", () => {
+/** Runs `ingestFiles` on one path, as the removed `ix ingest <path>` did. */
+const registerIngestFiles = (p: Command) => {
+  p.command("ingest-files <path>").action(async (target: string) => { await ingestFiles(target, { format: "text" }); });
+};
+
+describe("ingest registers a workspace only once something was ingested", () => {
   it("leaves config.yaml unchanged after a failed ingest, so reads stay confined", async () => {
     const before = fs.readFileSync(config, "utf8");
     const secret = path.join(outside, "secret.txt");
@@ -104,7 +108,7 @@ describe("ix ingest registers a workspace only once something was ingested", () 
     const first = await run(registerReadCommand, ["read", secret, "--root", ws, "--format", "json"]);
     expect(first.out).toContain("path_outside_workspace");
 
-    const ingest = await run(registerIngestCommand, ["ingest", path.join(outside, "x.json")]);
+    const ingest = await run(registerIngestFiles, ["ingest-files", path.join(outside, "x.json")]);
     // It got as far as the commit, which is where a registration made up
     // front would already be on disk. (An ingest that cannot load its parser
     // -- core-ingestion not built -- fails earlier and would prove nothing.)
@@ -137,77 +141,16 @@ describe("ix read refuses an outside path before looking at it", () => {
   });
 });
 
-describe("MCP ix_ingest is confined like ix_read", () => {
-  async function connect(runIx: IxRunner): Promise<Client> {
-    const server = createIxMcpServer({ version: "test", runIx, proAvailable: false, tools: "all" });
+describe("MCP has no ix_ingest", () => {
+  it("is not listed: ix_map is the one way in", async () => {
+    const server = createIxMcpServer({ version: "test", runIx: async () => ({ ok: true, stdout: "{}", stderr: "" }), proAvailable: false, tools: "all" });
     const client = new Client({ name: "ix-ingest-reg-test", version: "1.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
     await client.connect(clientTransport);
-    return client;
-  }
-
-  it("refuses a path outside the workspace without running the CLI", async () => {
-    const calls: string[][] = [];
-    const client = await connect(async (args) => { calls.push(args); return { ok: true, stdout: "{}", stderr: "" }; });
-    const result = (await client.callTool({ name: "ix_ingest", arguments: { path: path.join(outside, "x.json") } })) as CallToolResult;
-    expect(result.isError).toBe(true);
-    expect(JSON.stringify(result.content)).toContain("path_outside_workspace");
-    expect(calls).toEqual([]);
-    await client.close();
-  });
-
-  it("still ingests a path inside the workspace", async () => {
-    const calls: string[][] = [];
-    const client = await connect(async (args) => { calls.push(args); return { ok: true, stdout: "{}", stderr: "" }; });
-    await client.callTool({ name: "ix_ingest", arguments: { path: "a.ts" } });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("a.ts");
-    await client.close();
-  });
-
-  it("refuses a loose path that is readable only through the cwd fallback", async () => {
-    const loose = path.join(t, "loose");
-    fs.mkdirSync(loose);
-    fs.writeFileSync(path.join(loose, "x.json"), "{}\n");
-    fs.writeFileSync(config, fs.readFileSync(config, "utf8").replace("default: true", "default: false"));
-    process.chdir(loose);
-    const calls: string[][] = [];
-    const client = await connect(async (args) => { calls.push(args); return { ok: true, stdout: "{}", stderr: "" }; });
-    const result = (await client.callTool({ name: "ix_ingest", arguments: { path: "x.json" } })) as CallToolResult;
-    expect(result.isError).toBe(true);
-    expect(JSON.stringify(result.content)).toContain("path_outside_workspace");
-    expect(calls).toEqual([]);
-    await client.close();
-  });
-
-  it("resolves a relative path against the workspace root, as the CLI does", async () => {
-    fs.mkdirSync(path.join(ws, "a"));
-    fs.mkdirSync(path.join(ws, "outside"));
-    fs.writeFileSync(path.join(ws, "outside", "x.json"), "{}\n");
-    // <ws>/a/../outside is inside <ws> for cwd, but the CLI resolves "../outside/x.json"
-    // against the workspace root, i.e. to <t>/outside/x.json.
-    process.chdir(path.join(ws, "a"));
-    const calls: string[][] = [];
-    const client = await connect(async (args) => { calls.push(args); return { ok: true, stdout: "{}", stderr: "" }; });
-    const result = (await client.callTool({ name: "ix_ingest", arguments: { path: "../outside/x.json" } })) as CallToolResult;
-    expect(result.isError).toBe(true);
-    expect(JSON.stringify(result.content)).toContain("path_outside_workspace");
-    expect(calls).toEqual([]);
-    await client.close();
-  });
-
-  it("still ingests a path in the unregistered git repository cwd is in", async () => {
-    const repo = path.join(t, "repo");
-    fs.mkdirSync(repo);
-    execFileSync("git", ["init", "-q"], { cwd: repo });
-    fs.writeFileSync(path.join(repo, "r.ts"), "export const r = 1;\n");
-    process.chdir(repo);
-    const calls: string[][] = [];
-    const client = await connect(async (args) => { calls.push(args); return { ok: true, stdout: "{}", stderr: "" }; });
-    const result = (await client.callTool({ name: "ix_ingest", arguments: { path: "r.ts" } })) as CallToolResult;
-    expect(result.isError).not.toBe(true);
-    expect(calls).toHaveLength(1);
+    const { tools } = await client.listTools();
+    expect(tools.map((tool) => tool.name)).toContain("ix_map");
+    expect(tools.map((tool) => tool.name)).not.toContain("ix_ingest");
     await client.close();
   });
 });

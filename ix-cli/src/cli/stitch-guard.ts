@@ -374,7 +374,7 @@ function refuseForCooldown(cooldown: Cooldown, now: number): StitchAdmission {
     reason:
       `${how} and may still be running on the backend; ` +
       `stitches allowed again in ${formatMs(coolingUntil(cooldown) - now)}, ` +
-      `and \`ix ingest <root> --force\` is what re-registers ` +
+      `and \`ix map <root> --force\` is what re-registers ` +
       `(IX_STITCH_COOLDOWN_MS=0 disables)`,
   };
 }

@@ -256,9 +256,9 @@ async function callersOne(client: IxClient, symbol: string, opts: EdgeOpts, cmd:
   const result = { ...direct, nodes: merged.rows };
   const health = await healthDiagnostics(healthCheck);
   bannerOverRows(health, opts.format, result.nodes.length);
-  // `ix ingest --force` does not bring a hollowed graph's edges back; the
+  // `ix map --force` does not bring a hollowed graph's edges back; the
   // health check names what does.
-  const remedy = health.fix ?? "ix ingest --force --recursive .";
+  const remedy = health.fix ?? "ix map . --force";
 
   if (result.nodes.length === 0) {
     // Fallback to text search: pages of TEXT_FALLBACK_PAGE rows, --offset honoured.
