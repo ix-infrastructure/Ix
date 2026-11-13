@@ -6,6 +6,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendHookLog } from "./entry.js";
+import { hostAdapter, type HostAdapter } from "./host.js";
+import { parseObject, str } from "./hosts/fields.js";
 import { runHookMain, withDeadline } from "./io.js";
 import { canonicalPath, fingerprint, gitTopLevel, hookStateDir } from "./session.js";
 
@@ -89,40 +91,31 @@ export interface AutoMapDeps {
 }
 
 /**
- * Where each host puts the directory it works in. Field names only; a host
- * whose adapter (`host.ts`) grows a project-directory field can move there.
- * Codex and Gemini CLI send `cwd` as Claude Code does; Cursor sends the
- * workspace folders it has open as `workspace_roots`.
- */
-const HOST_PROJECT_FIELDS: Readonly<Record<string, { field: string; list?: boolean; envVar?: string }>> = {
-  claude: { field: "cwd", envVar: "CLAUDE_PROJECT_DIR" },
-  cursor: { field: "workspace_roots", list: true, envVar: "CURSOR_PROJECT_DIR" },
-  gemini: { field: "cwd", envVar: "GEMINI_PROJECT_DIR" },
-  codex: { field: "cwd" },
-};
-
-/**
  * The directories to map from, in order, deduplicated: `--root`; else the
- * absolute directories the host's payload names; else the host's project
- * variable; else `cwd`. A relative or non-string payload value is ignored: it
- * is not a statement about where the project is.
+ * absolute directories the host's payload names (its adapter's
+ * {@link HostAdapter.projectDirs}: Claude Code's and Gemini CLI's `cwd`,
+ * Cursor's `workspace_roots`); else the host's project variable
+ * ({@link HostAdapter.projectDirEnv}); else `cwd`. A host with no adapter
+ * (Codex, which sends `cwd` as Claude Code does) is read for `cwd` and has no
+ * project variable. A relative or non-string payload value is ignored: it is
+ * not a statement about where the project is.
  */
 export function autoMapProjectDirs(
   opts: AutoMapOptions, raw: string, env: NodeJS.ProcessEnv, cwd: string,
 ): string[] {
   if (opts.root) return [path.resolve(cwd, opts.root)];
-  const spec = Object.hasOwn(HOST_PROJECT_FIELDS, opts.host ?? "claude")
-    ? HOST_PROJECT_FIELDS[opts.host ?? "claude"]
-    : { field: "cwd" };
-  let payload: unknown;
-  try { payload = JSON.parse(raw); } catch { payload = undefined; }
-  const value = payload && typeof payload === "object" ? (payload as Record<string, unknown>)[spec.field] : undefined;
-  const candidates = spec.list ? (Array.isArray(value) ? value : []) : [value];
-  const dirs = candidates.filter((d): d is string => typeof d === "string" && d !== "" && path.isAbsolute(d));
+  const adapter = hostAdapter(opts.host ?? "claude");
+  const named = adapter ? adapterProjectDirs(adapter, raw) : [str(parseObject(raw)?.cwd)];
+  const dirs = named.filter((d): d is string => typeof d === "string" && d !== "" && path.isAbsolute(d));
   if (dirs.length > 0) return [...new Set(dirs)];
-  const fromEnv = spec.envVar ? env[spec.envVar] : undefined;
+  const fromEnv = adapter?.projectDirEnv ? env[adapter.projectDirEnv] : undefined;
   if (fromEnv && path.isAbsolute(fromEnv)) return [fromEnv];
   return [cwd];
+}
+
+function adapterProjectDirs(adapter: HostAdapter, raw: string): string[] {
+  const event = adapter.readEvent(raw);
+  return event ? adapter.projectDirs(event) : [];
 }
 
 /** IX_MAP_DEBOUNCE_SECONDS in ms: a whole number of seconds, 0 for none; anything else keeps 300 s. */
