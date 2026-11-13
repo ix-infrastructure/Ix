@@ -13,12 +13,12 @@ import type { GraphNode } from "../../client/types.js";
 import {
   buildBundle,
   clampBudgets,
-  findFileNode,
   registerContextCommand,
   saveInvestigation,
 } from "../commands/context.js";
 import type { ContextFacts } from "../explain/facts.js";
 import { extractCandidates, pickStartingPoints, readIssueText } from "../explain/issue.js";
+import { findFileNode } from "../file-node.js";
 
 /**
  * `ix context --from-issue` against the inputs real issues arrive as: a
@@ -99,12 +99,12 @@ describe("findFileNode among many files of one name", () => {
 
   it("finds the file on a backend that ignores scope, past the first ten namesakes", async () => {
     const { client: c } = client(false);
-    expect(await findFileNode(c, "pkg05/index.ts")).toBe("node:pkg05/index.ts");
+    expect((await findFileNode(c, "pkg05/index.ts", { scope: {} }))?.id).toBe("node:pkg05/index.ts");
   });
 
   it("narrows the search to the path on a backend that applies scope", async () => {
     const { client: c, search } = client(true);
-    expect(await findFileNode(c, "pkg25/index.ts")).toBe("node:pkg25/index.ts");
+    expect((await findFileNode(c, "pkg25/index.ts", { scope: {} }))?.id).toBe("node:pkg25/index.ts");
     expect(search.mock.calls[0]?.[1]).toMatchObject({ kind: "file", scope: "pkg25/index.ts" });
   });
 });
