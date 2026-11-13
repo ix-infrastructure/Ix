@@ -11,7 +11,7 @@ import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 
 import { absoluteFromSourceUri, isReadablePath, resolveWorkspaceRoot } from "../config.js";
-import { resolveFileOrReport, printResolved, type ResolvedEntity } from "../resolve.js";
+import { displayNameOf, resolveFileOrReport, printResolved, type ResolvedEntity } from "../resolve.js";
 import { formatDiff, relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
 import { reportFailure } from "../ui.js";
@@ -685,7 +685,7 @@ export function registerDiffCommand(program: Command): void {
                 },
               });
             } else {
-              const name = resolved.name ?? fileUri;
+              const name = displayNameOf(resolved) ?? fileUri;
               console.log(chalk.yellow(`${name} modified (${changeCount} textual changes — not captured by parser)`));
               console.log(chalk.dim("  Use --content to see full diff."));
             }

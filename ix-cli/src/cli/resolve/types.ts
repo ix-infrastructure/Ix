@@ -16,6 +16,11 @@ export interface ResolvedEntity {
   id: string;
   kind: string;
   name: string;
+  /**
+   * The target as the user qualified it (`Class.method`), for headers only.
+   * `name` stays the entity's own name: members are matched by it.
+   */
+  displayName?: string;
   path?: string;
   resolutionMode: ResolutionMode;
 }

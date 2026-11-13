@@ -17,7 +17,7 @@ type Node = { id: string; kind: string; name: string; attrs: Record<string, unkn
 const { graph, target, rgMatches } = vi.hoisted(() => ({
   graph: { value: new Map<string, unknown[]>(), calls: [] as string[] },
   target: { value: {} as Record<string, unknown> },
-  rgMatches: { value: [] as Array<[string, number, string]> },
+  rgMatches: { value: [] as Array<[string, number, string]>, args: [] as string[][] },
 }));
 
 vi.mock("../../client/factory.js", () => ({
@@ -45,7 +45,8 @@ vi.mock("../config.js", async (importOriginal) => ({
 }));
 vi.mock("node:child_process", async (importOriginal) => ({
   ...await importOriginal<typeof import("node:child_process")>(),
-  execFile: (_file: string, _args: string[], _opts: unknown, cb: (err: unknown, out: { stdout: string; stderr: string }) => void) => {
+  execFile: (_file: string, args: string[], _opts: unknown, cb: (err: unknown, out: { stdout: string; stderr: string }) => void) => {
+    rgMatches.args.push(args);
     const stdout = rgMatches.value.map(([path, line, text]) => JSON.stringify({
       type: "match", data: { path: { text: path }, line_number: line, lines: { text: `${text}\n` } },
     })).join("\n");
@@ -104,6 +105,7 @@ describe("ix callers dispatch rows (Java)", () => {
     graph.calls = [];
     target.value = IMPL;
     rgMatches.value = [];
+    rgMatches.args = [];
   });
   afterEach(() => vi.restoreAllMocks());
 
@@ -235,5 +237,31 @@ describe("ix callers output contract", () => {
       'diagnostic code=text_fallback_used message="No graph-backed CALLS/REFERENCES edges; showing text matches."',
       "ref path=src/b.ts line=3 snippet=getUrl();",
     ]);
+  });
+
+  it("a target given as TimeoutInvoker.getUrl is matched by getUrl and shown as it was given", async () => {
+    graph.value = javaGraph();
+    target.value = { ...IMPL, displayName: "TimeoutInvoker.getUrl" };
+    const l = await run(["--format", "llm"]);
+    expect(l.out[0]).toBe("callers target=TimeoutInvoker.getUrl shown=3 total=3 resolved=3");
+    const body = json((await run(["--format", "json"])).out);
+    expect(body.results.map((r: any) => [r.name, r.via])).toEqual([
+      ["invoke", undefined], ["wrap", "AbstractInvoker.getUrl"], ["select", "Invoker.getUrl"],
+    ]);
+    expect(body.resolvedTarget).toEqual({
+      id: IMPL.id, kind: "method", name: "TimeoutInvoker.getUrl", path: IMPL.path, resolutionMode: "exact",
+    });
+  });
+
+  it("the text fallback searches for the member's own name", async () => {
+    target.value = { ...IMPL, displayName: "TimeoutInvoker.getUrl" };
+    graph.value = new Map();
+    rgMatches.value = [["src/b.java", 3, "invoker.getUrl();"]];
+    const l = await run(["--format", "llm"]);
+    expect(rgMatches.args[0]).toEqual(["--json", "--max-count", "10", "-F", "-e", "getUrl", "--", "/ws"]);
+    expect(l.out[0]).toBe("callers target=TimeoutInvoker.getUrl source=text shown=1 total=1");
+    const body = json((await run(["--format", "json"])).out);
+    expect(body.resolvedTarget).toMatchObject({ id: IMPL.id, name: "TimeoutInvoker.getUrl" });
+    expect(Object.keys(body.resolvedTarget)).not.toContain("displayName");
   });
 });

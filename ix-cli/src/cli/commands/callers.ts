@@ -11,7 +11,7 @@ import { checkGraphHealth, graphHealthProse, isUnhealthy, type GraphHealth } fro
 import { formatOption, kindOption, pageLimitOption, noSuggestOption, pageOffsetOption, pagingValues, pathOption, pickOption, strictOption } from "../options.js";
 import { nextPageCommand } from "../paging.js";
 import { registerEdgeCommand } from "../edge-command.js";
-import { activeReadScope, candidatesCut, resolveTargetSetOrReport, printResolved, type TargetSet } from "../resolve.js";
+import { activeReadScope, candidatesCut, displayNameOf, resolveTargetSetOrReport, printResolved, shownTarget, type TargetSet } from "../resolve.js";
 import { emptyEdgeResultsJson } from "../text-matches.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
 import { runPerTarget } from "../multi-target.js";
@@ -314,7 +314,7 @@ async function callersOne(client: IxClient, symbol: string, opts: EdgeOpts, cmd:
       if (candidatesFound > 0) {
         if (opts.format === "llm") {
           console.log(llmLine("callers", [
-            ["target", target.name], ["source", "text"],
+            ["target", displayNameOf(target)], ["source", "text"],
             ["offset", offset > 0 ? offset : undefined],
             ["shown", textResults.length], ["total", candidatesFound],
           ]));
@@ -340,7 +340,7 @@ async function callersOne(client: IxClient, symbol: string, opts: EdgeOpts, cmd:
           printJson({
             results: textResults,
             resultSource: "text",
-            resolvedTarget: target,
+            resolvedTarget: shownTarget(target),
             summary: {
               candidatesFound,
               candidatesReturned: textResults.length,
@@ -377,11 +377,11 @@ async function callersOne(client: IxClient, symbol: string, opts: EdgeOpts, cmd:
     } catch { /* ripgrep not available or no matches */ }
 
     // Both graph and text empty (also the health-gated path: --offset does not apply).
-    formatEdgeResults(sliceEdgeResults([], limit), "callers", target.name, opts.format, target, "graph", health.diagnostics);
+    formatEdgeResults(sliceEdgeResults([], limit), "callers", displayNameOf(target), opts.format, target, "graph", health.diagnostics);
   } else {
     const slice = sliceEdgeResults(result.nodes, limit, offset, expandCapped(direct) || merged.capped);
     if (slice.nextOffset !== undefined) slice.next = nextPageCommand(cmd, [symbol], slice.nextOffset);
     const site = await edgeTargetFor(client, target, "callers");
-    formatEdgeResults({ ...slice, rows: withEdgeSites(slice.rows, "callers", site) }, "callers", target.name, opts.format, target, "graph", health.diagnostics);
+    formatEdgeResults({ ...slice, rows: withEdgeSites(slice.rows, "callers", site) }, "callers", displayNameOf(target), opts.format, target, "graph", health.diagnostics);
   }
 }

@@ -14,7 +14,7 @@ import {
   type TargetOptionValues,
 } from "./options.js";
 import { nextPageCommand } from "./paging.js";
-import { printResolved, resolveFileOrReport, resolveTargetSetOrReport, type TargetSet } from "./resolve.js";
+import { displayNameOf, printResolved, resolveFileOrReport, resolveTargetSetOrReport, type TargetSet } from "./resolve.js";
 import { emptyEdgeResultsJson } from "./text-matches.js";
 import { edgeTargetFor, withEdgeSites } from "./edge-sites.js";
 
@@ -114,5 +114,5 @@ async function runEdgeCommand(spec: EdgeCommandSpec, symbol: string, opts: EdgeC
   const rows = spec.withSites
     ? withEdgeSites(slice.rows, spec.name, await edgeTargetFor(client, target, spec.name))
     : slice.rows;
-  formatEdgeResults({ ...slice, rows }, spec.name, target.name, opts.format, target, "graph", diagnostics);
+  formatEdgeResults({ ...slice, rows }, spec.name, displayNameOf(target), opts.format, target, "graph", diagnostics);
 }
