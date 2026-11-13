@@ -6,7 +6,7 @@ import { createClient } from "../../client/factory.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { llmLine, llmError, type LlmValue } from "../llm.js";
-import { printJson, rowLocation, sliceRanked, truncationHint, type Slice } from "../format.js";
+import { printJson, relativePath, rowLocation, sliceRanked, truncationHint, type Slice } from "../format.js";
 import { formatOption, MAX_WAIT_SECONDS, parseWaitSecondsOption } from "../options.js";
 import { currentCaller } from "../next-step.js";
 import { canRenderProgress } from "../stderr.js";
@@ -86,11 +86,14 @@ export function selectSmells(report: SmellReport, limit: number, filterNonSource
 const NODES_PER_READ = 1000;
 
 /**
- * The candidates with each file's workspace-relative `path`, read from its
- * node in one batched read per 1000 files. The backend names a file by its
- * basename, which a path filter (MCP ix_smells) cannot match against a
- * directory. Best-effort: a backend without the batched read, or a file no
- * longer in the graph, leaves the candidate as it was.
+ * The candidates with each file's `path`, read from its node in one batched
+ * read per 1000 files. The backend names a file by its basename, which a path
+ * filter (MCP ix_smells) cannot match against a directory. The path is shown
+ * the way every other row shows one (relativePath): as stored when the graph
+ * stores it workspace-relative; an absolute one relative to the current
+ * directory when it is inside it, otherwise `~/...` or absolute.
+ * Best-effort: a backend without the batched read, or a file no longer in the
+ * graph, leaves the candidate as it was.
  */
 export async function withFilePaths(
   client: { nodes(ids: string[]): Promise<{ nodes: any[] }> },
@@ -102,7 +105,11 @@ export async function withFilePaths(
     try {
       const answer = await client.nodes(ids.slice(i, i + NODES_PER_READ));
       for (const node of answer?.nodes ?? []) {
-        const path = node?.path ?? rowLocation(node).path;
+        // Without `fields: "full"` the backend answers a summary row whose
+        // top-level `path` is the node's provenance.sourceUri (GraphNode, the
+        // client's declared type, has no such field). A whole node keeps it in
+        // provenance, which rowLocation reads.
+        const path = typeof node?.path === "string" ? relativePath(node.path) : rowLocation(node).path;
         if (typeof node?.id === "string" && typeof path === "string" && path !== "") paths.set(node.id, path);
       }
     } catch {

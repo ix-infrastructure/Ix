@@ -468,7 +468,10 @@ export interface SmellCandidate {
   file_id: string;
   /** The file's name as the backend reports it: a basename, so two files can share it. */
   file: string;
-  /** The file's workspace-relative path, read from its node (see withFilePaths). */
+  /**
+   * The file's path, read from its node (see withFilePaths): relative to the
+   * current directory when inside it, otherwise `~/...` or absolute.
+   */
   path?: string;
   smell: string;
   confidence: number;

@@ -893,9 +893,10 @@ Detect architecture smells in the codebase.
 | `--limit` | `<n>` | 50 (text/llm); all (json) | Max candidates, highest confidence first; 0 = all, unfiltered. Otherwise non-source orphan files (docs, templates, data) are dropped before the cut. With `--list`, caps the stored claims (all when omitted) |
 | `--wait` | `<seconds>` | 20 (json/llm); 300 (text) | How long to wait for a fresh analysis, at most 300 (the HTTP client stops waiting for an answer after 5 minutes). `IX_SMELLS_WAIT` (whole seconds, capped at 300; ignored under MCP) sets it too; the flag wins. Past it, or when the backend refuses to run analysis (403), the stored results are shown instead, marked stale (exit 0); with none stored, the error stands (exit 1). Text prints a progress line on stderr every 10 s when stderr is a terminal. `--wait 120` restores the 2-minute wait json/llm had before |
 
-`file` is a basename. `--format json` also gives each candidate's
-workspace-relative `path` when the backend can read the file's node; filter by
-directory on `path`, not on `file`.
+`file` is a basename. `--format json` also gives each candidate's `path` when
+the backend can read the file's node: relative to the current directory when
+the file is inside it, otherwise `~/...` or absolute. Filter by directory on
+`path` (a substring match), not on `file`.
 
 A stale answer is the stored claims shaped as a fresh run's output (`file`,
 `smell`, `confidence`, `signals` per candidate, plus the claim's `entity_id`),

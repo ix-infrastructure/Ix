@@ -666,11 +666,13 @@ were. Output stops at `--limit` (default 50, highest confidence first); when it
 cuts, a `diagnostic code=results_truncated` record follows the header.
 
 `file` is the file's name as the backend reports it, a basename that two files
-can share. `--format json` adds each candidate's workspace-relative `path`
-beside it, read from the file's node in one batched request; it is left out
-when the backend cannot serve that read or the file is no longer in the graph.
-The MCP tool `ix_smells` matches its `path` argument against `path`, and
-against `file` only when a candidate has no `path`.
+can share. `--format json` adds each candidate's `path` beside it, read from
+the file's node in one batched request; it is left out when the backend cannot
+serve that read or the file is no longer in the graph. `path` is written the
+way other rows write one: relative to the current directory when the file is
+inside it, otherwise `~/...` or absolute. The MCP tool `ix_smells` keeps the
+candidates whose `path` contains its `path` argument as a substring, and
+matches against `file` only when a candidate has no `path`.
 
 `ix smells` waits for a fresh analysis for 20 s in llm and json (`--wait
 <seconds>` or `IX_SMELLS_WAIT` changes it; text waits 5 minutes, which is

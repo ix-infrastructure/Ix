@@ -17,8 +17,8 @@ import { registerSmellsCommand, withFilePaths, type SmellCandidate, type SmellRe
 
 /**
  * The backend names a smell candidate's file by its basename. `--format json`
- * adds each file's workspace-relative `path`, read from its node, so a path
- * filter (MCP ix_smells) can match a directory.
+ * adds each file's `path`, read from its node, so a path filter (MCP
+ * ix_smells) can match a directory.
  */
 
 function cand(id: string, file: string, confidence: number): SmellCandidate {
@@ -33,10 +33,19 @@ const REPORT: SmellReport = {
   candidates: [cand("f1", "util.ts", 0.9), cand("f2", "util.ts", 0.8), cand("f3", "logger.ts", 0.7)],
 };
 
+/**
+ * `POST /v1/nodes` rows as the backend answers them without `fields: "full"`:
+ * a summary whose `path` is the node's provenance.sourceUri (Ix-memory
+ * BatchReadRoutes.summary), not a whole GraphNode.
+ */
+function summary(id: string, name: string, path: string) {
+  return { id, kind: "file", name, path, lineStart: null, lineEnd: null };
+}
+
 const NODES = [
-  { id: "f1", kind: "file", name: "util.ts", path: "app/util.ts" },
-  { id: "f2", kind: "file", name: "util.ts", path: "lib/util.ts" },
-  { id: "f3", kind: "file", name: "logger.ts", path: "lib/logger.ts" },
+  summary("f1", "util.ts", "app/util.ts"),
+  summary("f2", "util.ts", "lib/util.ts"),
+  summary("f3", "logger.ts", "lib/logger.ts"),
 ];
 
 /** `POST /v1/nodes` as the backend answers it: the live nodes among the ids asked for. */
@@ -83,12 +92,24 @@ describe("ix smells --format json carries each file's path", () => {
     expect(Object.keys(out)).toEqual(["rev", "run_at", "count", "shown", "truncated", "inference_version", "candidates"]);
   });
 
-  it("reads the path from provenance when the node carries no path of its own", async () => {
+  it("reads the path from provenance.sourceUri when given a whole node", async () => {
     fakeClient.nodes.mockResolvedValue({
-      nodes: [{ id: "f1", kind: "file", name: "util.ts", provenance: { sourceUri: "app/util.ts" } }],
+      nodes: [{ id: "f1", kind: "file", name: "util.ts", attrs: {}, provenance: { sourceUri: "app/util.ts" } }],
     });
     const out = JSON.parse(await run(["--format", "json"]));
     expect(out.candidates[0].path).toBe("app/util.ts");
+  });
+
+  it("shows an absolute stored path relative to the current directory when inside it", async () => {
+    fakeClient.nodes.mockResolvedValue({
+      nodes: [
+        summary("f1", "util.ts", `${process.cwd()}/app/util.ts`),
+        summary("f2", "util.ts", "/nowhere-ix-test/lib/util.ts"),
+      ],
+    });
+    const out = JSON.parse(await run(["--format", "json"]));
+    expect(out.candidates[0].path).toBe("app/util.ts");
+    expect(out.candidates[1].path).toBe("/nowhere-ix-test/lib/util.ts");
   });
 
   it("a file that is no longer in the graph keeps only its basename", async () => {
@@ -141,7 +162,7 @@ describe("withFilePaths", () => {
     const client = {
       nodes: async (ids: string[]) => {
         sizes.push(ids.length);
-        return { nodes: ids.map((id) => ({ id, path: `src/${id}/a.ts` })) };
+        return { nodes: ids.map((id) => summary(id, "a.ts", `src/${id}/a.ts`)) };
       },
     };
     const out = await withFilePaths(client, [...many, many[0]]);
@@ -156,7 +177,7 @@ describe("withFilePaths", () => {
     const client = {
       nodes: async (ids: string[]) => {
         if (call++ === 0) throw new Error("boom");
-        return { nodes: ids.map((id) => ({ id, path: `src/${id}/a.ts` })) };
+        return { nodes: ids.map((id) => summary(id, "a.ts", `src/${id}/a.ts`)) };
       },
     };
     const out = await withFilePaths(client, many);
