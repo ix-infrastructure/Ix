@@ -142,6 +142,15 @@ describe("ix context --from-issue bundle", () => {
     expect(parsed.data?.issue?.startingPoints.map((s) => [s.snippet, s.traceback])).toEqual([[true, undefined], [undefined, true]]);
   });
 
+  it("preserves error message and traceback frame reasons in saved bundles", () => {
+    const startingPoints: StartingPoint[] = [
+      { ...STARTS[0], via: "error message" },
+      { ...STARTS[1], via: "traceback frame", traceback: true },
+    ];
+    const b = build({ ...issue(), startingPoints });
+    expect(contextBundleSchema.parse(JSON.parse(JSON.stringify(b))).issue?.startingPoints).toEqual(b.issue?.startingPoints);
+  });
+
   it("puts the other starting points right after the target, and their neighbours in the bundle", () => {
     const b = build(issue());
     expect(b.entities[1]).toMatchObject({ id: "f-rank", path: "src/cli/commands/rank.ts" });

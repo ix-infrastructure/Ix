@@ -100,7 +100,7 @@ describe("strong issue starts", () => {
       files, search: async (token) => token === "ConfigurationError" ? [{ ...definition(token, files[2]), kind: "class" }] : [],
     });
     expect(starts.map((s) => [s.path, s.via])).toEqual([
-      ["src/app/settings.py", "path in issue"], ["src/app/errors.py", "identifier in issue"],
+      ["src/app/settings.py", "traceback frame"], ["src/app/errors.py", "identifier in issue"],
     ]);
     const ranked = rankIssueFiles({ starts, bm25: [
       ...noise.slice(0, 4).map((h, i) => ({ ...h, score: 50 - i })),

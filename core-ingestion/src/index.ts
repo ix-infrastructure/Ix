@@ -2,6 +2,10 @@
 
 import * as nodePath from 'node:path';
 import * as crypto from 'node:crypto';
+import { extractErrorSites } from './error-sites.js';
+import type { ErrorSite } from './error-sites.js';
+export { normalizeMessage, messageMatches } from './error-sites.js';
+export type { ErrorSite } from './error-sites.js';
 import { createRequire } from 'node:module';
 // @ts-ignore — tree-sitter has no bundled types
 import Parser from 'tree-sitter';
@@ -288,6 +292,7 @@ export interface FileParseResult {
   entities: ParsedEntity[];
   chunks: ParsedChunk[];
   relationships: ParsedRelationship[];
+  errorSites?: ErrorSite[];
   importAliases?: Record<string, string>;
   /** Named/default import bindings (local → public symbol). */
   importBindings?: ImportBinding[];
@@ -3733,6 +3738,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     }
     const tsGlobalTypes = isTsSource ? tsGlobalTypeNames(tree.rootNode) : [];
     const tsModule = isTsSource && isTsModule(tree.rootNode);
+    const errorSites = extractErrorSites(tree.rootNode, entities, language, checkBudget);
 
     return {
       filePath,
@@ -3740,6 +3746,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       entities,
       chunks,
       relationships,
+      ...(errorSites.length ? { errorSites } : {}),
       importAliases: Object.keys(importAliases).length > 0 ? importAliases : undefined,
       importBindings: importBindings.length > 0 ? importBindings : undefined,
       exportPublicNames: exportPublicNames.length > 0 ? exportPublicNames : undefined,

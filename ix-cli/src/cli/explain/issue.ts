@@ -1,5 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { buildIssueErrorIndex, type IssueErrorIndex, type ErrorSymbol } from "./issue-errors.js";
+import { parseTraceFrame, type TraceFrame } from "./traceback.js";
 import { readFileSync } from "node:fs";
 import { posix } from "node:path";
 
@@ -291,19 +293,25 @@ export interface IssueCandidates {
   snippetIdentifiers?: string[];
   /** Each traceback's frames, innermost first, separate from explicit paths. */
   tracebacks?: string[][];
+  tracebackFrames?: TraceFrame[][];
   /** Names in a traceback's exception type (`app.errors.ConfigurationError`). */
   exceptionIdentifiers?: string[];
 }
 
-function tracebackCandidates(text: string): { text: string; groups: string[][]; exceptions: string[] } {
+function tracebackCandidates(text: string): { text: string; groups: string[][]; frames: TraceFrame[][]; exceptions: string[] } {
   const groups: string[][] = [];
   // A Python trace's closing `pkg.errors.SerializationError: message` line
   // names what failed, even inside a fenced block.
   const exceptions: string[] = [];
-  let frames: string[] = [];
+  const frameGroups: TraceFrame[][] = [];
+  let frames: TraceFrame[] = [];
   let style = "";
   const flush = () => {
-    if (frames.length) groups.push(style === "python" ? frames.reverse() : frames);
+    if (frames.length) {
+      const ordered = style === "python" ? frames.reverse() : frames;
+      frameGroups.push(ordered);
+      groups.push(ordered.map(f => f.path));
+    }
     frames = [];
     style = "";
   };
@@ -320,17 +328,19 @@ function tracebackCandidates(text: string): { text: string; groups: string[][]; 
     afterFrame = false;
     if (blank) return style ? "" : line;
     if (/Traceback \(most recent call last\)/.test(line)) { flush(); return ""; }
-    const python = line.match(/^\s*File ["']([^"']+)["'], line \d+/);
-    const js = /^\s*at\s/.test(line) ? line.match(/(?:\(|\s)(?:file:\/\/(?:\/(?=[A-Za-z]:))?)?((?:[A-Za-z]:)?[^\s():]+):\d+(?::\d+)?\)?\s*$/) : null;
-    const frame = python?.[1] ?? js?.[1];
+    const frame = parseTraceFrame(line);
     if (frame) {
-      const nextStyle = python ? "python" : "js";
+      const nextStyle = frame.runtime;
       if (style && style !== nextStyle) flush();
       style = nextStyle;
-      afterFrame = !!python;
-      frames.push(frame.replaceAll("\\", "/"));
+      afterFrame = frame.runtime === "python";
+      frames.push(frame);
       return "";
     }
+    // Each goroutine is a separate stack and contributes its own frame start.
+    if (/^goroutine \d+ \[/.test(line)) { flush(); style = "go"; return ""; }
+    // Go function names precede their locations and are not issue identifiers.
+    if (style === "go" && /^\S.*\(.*\)$/.test(line)) return "";
     // A Python trace pasted without its indentation: the line right after a
     // frame is that frame's source, and a row of carets marks it. Neither
     // ends the trace; an exception line (`ValueError: boom`) still does.
@@ -349,7 +359,7 @@ function tracebackCandidates(text: string): { text: string; groups: string[][]; 
     return line;
   });
   flush();
-  return { text: lines.join("\n"), groups, exceptions };
+  return { text: lines.join("\n"), groups, frames: frameGroups, exceptions };
 }
 
 function runtimeFrame(path: string): boolean {
@@ -463,7 +473,7 @@ export function extractCandidates(text: string): IssueCandidates {
   return {
     paths, identifiers: [...identifiers, ...snippetIdentifiers].slice(0, MAX_CANDIDATES),
     ...(snippetIdentifiers.length ? { snippetIdentifiers } : {}),
-    ...(trace.groups.length ? { tracebacks: trace.groups } : {}),
+    ...(trace.groups.length ? { tracebacks: trace.groups, tracebackFrames: trace.frames } : {}),
     ...(exceptionIdentifiers.length ? { exceptionIdentifiers } : {}),
   };
 }
@@ -478,7 +488,7 @@ export interface SymbolHit {
   lineEnd?: number;
 }
 
-export type StartVia = "path in issue" | "identifier in issue" | "bm25 fallback";
+export type StartVia = "path in issue" | "identifier in issue" | "bm25 fallback" | "error message" | "traceback frame";
 
 // Ranking evidence stays off the wire, but survives chooseCentre's object spread.
 const PINNED_IDENTIFIER = Symbol("pinned issue identifier");
@@ -529,6 +539,7 @@ export interface PickDeps {
    */
   fileScore?: (path: string) => number;
   sourcePaths?: SourcePaths;
+  errorIndex?: IssueErrorIndex;
 }
 
 /**
@@ -541,7 +552,7 @@ export async function pickStartingPoints(
   deps: PickDeps,
   max = MAX_STARTS,
 ): Promise<{ starts: StartingPoint[]; unresolved: string[] }> {
-  const { paths, identifiers, snippetIdentifiers, tracebacks, exceptionIdentifiers } = extractCandidates(text);
+  const { paths, identifiers, snippetIdentifiers, tracebackFrames, exceptionIdentifiers } = extractCandidates(text);
   const starts: StartingPoint[] = [];
   const unresolved: string[] = [];
   const taken = (path: string) => starts.some((s) => s.path === path);
@@ -567,16 +578,40 @@ export async function pickStartingPoints(
     if (!taken(path)) starts.push({ token, name: posix.basename(path), kind: "file", path, via: "path in issue" });
   }
 
-  for (const frames of tracebacks ?? []) {
+  const fromSymbol = async (path: string, symbol: ErrorSymbol | undefined, line: number) => {
+    const file = { name: posix.basename(path), kind: "file", lineStart: line, lineEnd: line };
+    if (!symbol) return file;
+    const hits = (await deps.search(symbol.name)).filter(h => h.name === symbol.name && h.path === path
+      && h.kind === symbol.kind && (h.lineStart === undefined || h.lineStart === symbol.lineStart));
+    // A file-node fallback must not be labelled with a function's name/kind.
+    return hits.length === 1
+      ? { name: symbol.name, kind: symbol.kind, lineStart: symbol.lineStart, lineEnd: symbol.lineEnd, id: hits[0].id }
+      : file;
+  };
+  for (const frames of tracebackFrames ?? []) {
     if (starts.length >= max) return { starts, unresolved };
-    for (const token of frames) {
-      if (runtimeFrame(token)) { unresolved.push(token); continue; }
-      const path = resolveIssuePath(token, tracked, byBasename);
+    for (const frame of frames) {
+      const token = frame.path;
+      if (!Number.isSafeInteger(frame.line) || frame.line <= 0 || runtimeFrame(token)
+        || (frame.runtime === "jvm" && /^(?:java|javax|jdk|sun|scala)\//.test(frame.packagePath ?? ""))
+        || (frame.runtime === "go" && /(?:^|\/)(?:go\/src|pkg\/mod)\//.test(token))) { unresolved.push(token); continue; }
+      // JVM frames contain just a basename; their package can disambiguate it.
+      const packaged = frame.packagePath ? deps.files.filter(p => p.endsWith(`/${frame.packagePath}`) || p === frame.packagePath) : [];
+      const path = packaged.length === 1 ? packaged[0] : resolveIssuePath(token, tracked, byBasename);
       if (!path || !source(path)) { unresolved.push(token); continue; }
       // Even if another trace named this file, this traceback gets no second start.
-      if (!taken(path)) starts.push({ token, name: posix.basename(path), kind: "file", path, via: "path in issue", traceback: true });
+      if (!taken(path)) {
+        const symbol = deps.errorIndex?.enclosing(path, frame.line);
+        starts.push({ token: `${token}:${frame.line}`, ...await fromSymbol(path, symbol, frame.line), path,
+          via: "traceback frame", traceback: true });
+      }
       break;
     }
+  }
+  for (const site of (starts.length < max ? deps.errorIndex?.messages(text) : undefined) ?? []) {
+    if (starts.length >= max) break;
+    if (taken(site.path) || !source(site.path)) continue;
+    starts.push({ token: site.template, ...await fromSymbol(site.path, site.symbol, site.line), path: site.path, via: "error message" });
   }
 
   const score = deps.fileScore ?? (() => 0);
@@ -838,6 +873,8 @@ export async function planIssue(
     search: PickDeps["search"];
     /** BM25 over the source files; `bm25Rank` unless the caller has an index. */
     rank?: (repo: RepoAccess, files: string[], query: string) => Bm25Hit[];
+    /** false supports measuring the pre-index baseline on the same corpus. */
+    errorIndex?: IssueErrorIndex | false;
   },
 ): Promise<IssuePlan> {
   const files = deps.repo?.files() ?? [];
@@ -846,8 +883,10 @@ export async function planIssue(
   const rank = deps.rank ?? bm25Rank;
   const bm25 = deps.repo ? rank(deps.repo, eligible!.paths, text) : [];
   const scores = new Map(bm25.map((h) => [h.path, h.score]));
+  const errorIndex = deps.errorIndex === false ? undefined : deps.errorIndex
+    ?? (deps.repo ? await buildIssueErrorIndex(deps.repo, eligible!.paths) : undefined);
   const { starts, unresolved } = await pickStartingPoints(text, {
-    files, search: deps.search, fileScore: (p) => scores.get(p) ?? 0, sourcePaths,
+    errorIndex, files, search: deps.search, fileScore: (p) => scores.get(p) ?? 0, sourcePaths,
   });
   const top = starts.length > 0 ? undefined : bm25.find((h) => sourcePaths?.has(h.path) ?? true)?.path;
   if (!top) return { starts, unresolved, fallback: false, bm25, sourcePaths };
@@ -894,7 +933,7 @@ export function issueConfidence(plan: Pick<IssuePlan, "starts" | "fallback">): I
   if (plan.fallback) {
     return { confident: false, starts: [], reason: "no code name in the issue resolved to a definition" };
   }
-  const starts = plan.starts.filter((s) => !s.snippet && (s.via === "path in issue"
+  const starts = plan.starts.filter((s) => !s.snippet && (s.via === "path in issue" || s.via === "error message" || s.via === "traceback frame"
     || (s.via === "identifier in issue" && !isGenericIdentifier(s.token))));
   if (starts.length === 0) {
     const names = plan.starts.map((s) => s.token);
@@ -1045,7 +1084,7 @@ export function rankIssueFiles(
       const closeness = near?.weight ?? 0;
       const start = starts.get(path);
       const pin = start && !start.snippet && !start.traceback
-        ? start.via === "path in issue" ? 2 : start[PINNED_IDENTIFIER] ? 1 : 0
+        ? start.via === "path in issue" ? 2 : start.via === "error message" || start[PINNED_IDENTIFIER] ? 1 : 0
         : 0;
       const boost = start && !start.snippet ? best * START_BOOST : 0;
       const reason = [
@@ -1063,7 +1102,7 @@ export function rankIssueFiles(
   // unreserved file, rather than gaining precedence.
   const named = new Set(rows.filter((r) => {
     const start = starts.get(r.path);
-    return (r.pin > 0 || (start?.via === "path in issue" && !start.snippet)) && source(r.path);
+    return (r.pin > 0 || ((start?.via === "path in issue" || start?.via === "traceback frame") && !start.snippet)) && source(r.path);
   }).slice(0, limit).map((r) => r.path));
   let others = limit - named.size;
   for (const r of rows) {

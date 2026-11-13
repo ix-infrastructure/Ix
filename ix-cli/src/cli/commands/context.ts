@@ -1988,6 +1988,8 @@ function spanOf(s: StartingPoint): string {
 
 /** Why a start was trusted, in the words an agent reads. */
 function startWhy(s: StartingPoint): string {
+  if (s.via === "error message") return `error message matches \`${s.token}\``;
+  if (s.via === "traceback frame") return `traceback frame \`${s.token}\``;
   return s.via === "path in issue" ? "the issue names this file" : `the issue names \`${s.token}\``;
 }
 
