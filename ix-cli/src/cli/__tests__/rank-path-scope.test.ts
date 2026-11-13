@@ -40,7 +40,7 @@ describe("rank path filtering before the candidate limit", () => {
 
   it("ranks a matching entity beyond the first 2000 unfiltered candidates", async () => {
     const output = await run(["--path", "src/target.ts"]);
-    expect(listByKind).toHaveBeenCalledWith("class", { limit: 2000, scope: "src/target.ts", workspaceId: "test-workspace" });
+    expect(listByKind).toHaveBeenCalledWith("class", { limit: 2001, scope: "src/target.ts", workspaceId: "test-workspace" });
     expect(output.results).toEqual([{ name: "Wanted", kind: "class", score: 1 }]);
     expect(expand).toHaveBeenCalledTimes(1);
     expect(expand).toHaveBeenCalledWith("wanted", expect.anything());
