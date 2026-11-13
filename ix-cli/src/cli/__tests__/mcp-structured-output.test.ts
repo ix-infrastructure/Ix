@@ -184,7 +184,9 @@ describe("ix mcp structured output", () => {
     // each): they answer an ambiguous name for its top candidate and say
     // "Pass pick=<n> or path=…", which they must be able to take back. None
     // is in the core set.
-    expect(total).toBeLessThan(18_600);
+    // ix_coupled adds one read-only tool (~900 bytes) to --tools=all; the
+    // default core catalog and its separate budget stay unchanged.
+    expect(total).toBeLessThan(19_600);
   });
 
   it("attaches structuredContent only where an outputSchema was declared", async () => {

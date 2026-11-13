@@ -2,6 +2,7 @@
 
 import { execFile } from "node:child_process";
 import { posix } from "node:path";
+import { coupledFor, readCoupling } from "../git-coupling.js";
 
 import { combineSignals, currentRunSignal } from "../../client/run-signal.js";
 import { coChangedFiles, GIT_MAX_BUFFER, type CoChange, type GitRunner } from "./history.js";
@@ -30,6 +31,9 @@ export type CompanionHistory = (path: string, signal: AbortSignal) => Promise<Co
 
 /** Request-scoped history reader; cache results by repository, HEAD and target. */
 export function companionHistory(root: string): CompanionHistory {
+  const index = readCoupling(root);
+  if (index) return async (path, signal) => signal.aborted ? [] : coupledFor(index, { path }).partners
+    .map(p => ({ path: p.path, commits: p.support, score: p.confidence }));
   let head: Promise<string | undefined> | undefined;
   return async (path, signal) => {
     // A failed or timed-out git call reads as "no history": never cache that.
@@ -244,6 +248,7 @@ export async function expandIssueCompanions(
     .sort((a, b) => b.weight - a.weight || b.strength - a.strength || a.order - b.order || a.path.localeCompare(b.path))
     .slice(0, MAX_COMPANIONS)
     .map((c) => ({ path: c.path, score: top * 0.8 * c.weight,
-      reason: `companion (${c.source} of ${c.seed})`, companion: { source: c.source, seed: c.seed } }));
+      reason: c.source === "co-change" ? `changes together with ${c.seed}` : `companion (${c.source} of ${c.seed})`,
+      companion: { source: c.source, seed: c.seed } }));
   return [...primary.slice(0, limit), ...companions];
 }

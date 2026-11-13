@@ -37,6 +37,7 @@ const OSS_HELP = [
   `  inventory             List components`,
   `  rank                  Rank importance`,
   `  history <target>      Show history`,
+  `  coupled <target>      Files and symbols that change together`,
   `  diff <from> <to>      Compare changes`,
   `  patches               Recent patches`,
   `  conflicts             Detected conflicts`,
