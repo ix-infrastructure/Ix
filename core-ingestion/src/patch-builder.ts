@@ -158,11 +158,11 @@ export function patchActor(): string {
 }
 
 export function extractorName(): string {
-  return `tree-sitter/1.30`;
+  return `tree-sitter/1.31`;
 }
 
 /** Previous extractor versions — their patches are superseded when re-ingesting. */
-export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.29', 'tree-sitter/1.28', 'tree-sitter/1.27', 'tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
+export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.30', 'tree-sitter/1.29', 'tree-sitter/1.28', 'tree-sitter/1.27', 'tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
 
 /** Patch ids that may own the active graph entities for a stored source hash. */
 export function sourcePatchIdCandidates(
@@ -245,6 +245,57 @@ function unresolvedCallRecorder(knownNodeIds: ReadonlySet<string>, fileNodeId: s
 }
 
 // ---------------------------------------------------------------------------
+// Error types are file-scoped synthetic types. Message literals are constants
+// with searchable names, retained by both map mode and full ingestion.
+function appendErrorSites(ops: PatchOp[], result: FileParseResult, workspaceId: string, idPath: string): void {
+  if (!result.errorSites?.length) return;
+  const { nodeId, edgeId } = makeIds(workspaceId);
+  const types = new Map<string, string>();
+  const raises = new Map<string, PatchOp>();
+  const nodes = new Set(ops.filter(op => op.type === 'UpsertNode').map(op => op.id));
+  for (const site of result.errorSites ?? []) {
+    const owner = site.functionName
+      ? `${site.container ? `${site.container}.` : ''}${site.functionName}`
+      : result.entities.find(e => e.kind === 'file')?.name;
+    if (!owner) continue;
+    const src = nodeId(idPath, owner);
+    if (!nodes.has(src)) continue;
+    let dst = types.get(site.errorType);
+    if (!dst) {
+      dst = nodeId(idPath, `$error-type:${site.errorType}`);
+      types.set(site.errorType, dst);
+      ops.push({ type: 'UpsertNode', id: dst, kind: 'type', name: site.errorType,
+        attrs: { language: result.language, error_type: true } });
+      const file = result.entities.find(e => e.kind === 'file');
+      if (file) {
+        const fileId = nodeId(idPath, file.name);
+        ops.push({ type: 'UpsertEdge', id: edgeId(idPath, fileId, dst, 'CONTAINS'),
+          src: fileId, dst, predicate: 'CONTAINS', attrs: {} });
+      }
+    }
+    const id = edgeId(idPath, src, dst, 'RAISES');
+    const location = { line: site.line, ...(site.messageTemplate ? { message_template: site.messageTemplate } : {}) };
+    const existing = raises.get(id);
+    if (existing) (existing.attrs as { sites: unknown[] }).sites.push(location);
+    else {
+      const edge = { type: 'UpsertEdge', id, src, dst, predicate: 'RAISES', attrs: { sites: [location] } };
+      raises.set(id, edge);
+      ops.push(edge);
+    }
+    if (site.messageTemplate) {
+      const mid = nodeId(idPath, `$error-message:${site.line}:${site.errorType}:${site.messageTemplate}`);
+      if (nodes.has(mid)) continue;
+      nodes.add(mid);
+      ops.push({ type: 'UpsertNode', id: mid, kind: 'constant', name: site.messageTemplate,
+        attrs: { file_uri: result.filePath, language: result.language, error_message: true,
+          line_start: site.line, line_end: site.line, error_type: site.errorType,
+          enclosing_function: owner, message_template: site.messageTemplate } });
+      ops.push({ type: 'UpsertEdge', id: edgeId(idPath, src, mid, 'CONTAINS'),
+        src, dst: mid, predicate: 'CONTAINS', attrs: {} });
+    }
+  }
+}
+
 // Build a GraphPatchPayload from a FileParseResult
 // ---------------------------------------------------------------------------
 
@@ -479,6 +530,8 @@ export function buildPatch(
       confidence: null,
     });
   }
+
+  appendErrorSites(ops, result, workspaceId, idPath);
 
   // patchId is deterministic: same file + same content + same extractor → same id.
   const extractor = extractorName();
@@ -930,6 +983,7 @@ export function buildPatchWithResolution(
   }
 
   const extractor = extractorName();
+  appendErrorSites(ops, result, workspaceId, idPath);
   const patchId = computePatchId(filePath, sourceHash, resolutionSalt ? `${extractor}#r${resolutionSalt}` : extractor);
   const previousPatchId = previousSourceHash
     ? computePatchId(filePath, previousSourceHash, extractor)

@@ -13,13 +13,13 @@ export const REPOS = join(homedir(), ".cache", "ix-bench", "external", "repos");
 /** What `gitRepoAccess` reads at most (text-references MAX_SCAN_BYTES). */
 const MAX_READ_BYTES = 256 * 1024;
 
-export function bareRepo(repo) {
-  return join(REPOS, `${repo.replace("/", "__")}.git`);
+export function bareRepo(repo, root = REPOS) {
+  return join(root, `${repo.replace("/", "__")}.git`);
 }
 
 /** A RepoAccess over `commit`: every tracked file listed, source files readable. */
-export function loadCorpus(repo, commit) {
-  const cwd = bareRepo(repo);
+export function loadCorpus(repo, commit, root = REPOS) {
+  const cwd = bareRepo(repo, root);
   const listing = execFileSync("git", ["ls-tree", "-r", "-z", "--long", commit], {
     cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024,
   }).split("\0").filter(Boolean);
@@ -50,7 +50,8 @@ export function loadCorpus(repo, commit) {
   return {
     files: () => files,
     read: (path) => texts.get(path),
-    grep: () => [],
+    grep: (needle) => [...texts].flatMap(([path, text]) => text.split('\n')
+      .filter(line => line.includes(needle)).map(line => ({ path, line }))),
     texts,
   };
 }

@@ -41,8 +41,8 @@ describe("paths an issue names by URL or absolute path", () => {
     const { starts, unresolved } = await pickStartingPoints(text, { files, search: none });
     expect(starts.map((s) => [s.path, s.via])).toEqual([
       ["ix-cli/src/cli/commands/context.ts", "path in issue"],
-      ["src/utils/parse.py", "path in issue"],
-      ["main.go", "path in issue"],
+      ["src/utils/parse.py", "traceback frame"],
+      ["main.go", "traceback frame"],
     ]);
     expect(unresolved).toEqual([]);
   });

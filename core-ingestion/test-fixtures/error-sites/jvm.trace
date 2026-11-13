@@ -1,0 +1,3 @@
+Exception in thread "main" java.lang.IllegalArgumentException: Invalid record sample: missing field
+	at Failure.fail(Failure.java:3)
+	at Failure.main(Failure.java:5)

@@ -1,0 +1,14 @@
+panic: Invalid record sample: missing field
+
+goroutine 1 [running]:
+main.fail(...)
+	/reporter/project/src/goroutine-main.go:4
+main.main()
+	/reporter/project/src/goroutine-main.go:11 +0x70
+
+goroutine 18 [select (no cases)]:
+main.wait(...)
+	/reporter/project/src/goroutine-worker.go:5
+created by main.main in goroutine 1
+	/reporter/project/src/goroutine-main.go:9 +0x50
+exit status 2

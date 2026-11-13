@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/reporter/project/src/fail.py", line 4, in <module>
+    fail("sample")
+    ~~~~^^^^^^^^^^
+  File "/reporter/project/src/fail.py", line 2, in fail
+    raise ValueError(f"Invalid record {value}: missing field")
+ValueError: Invalid record sample: missing field
