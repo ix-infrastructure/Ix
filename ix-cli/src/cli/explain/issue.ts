@@ -6,6 +6,7 @@ import { posix } from "node:path";
 import { isTestPath } from "./related-files.js";
 import { resolveToken, type RepoAccess } from "./text-references.js";
 import type { CompanionSource } from "./issue-companions.js";
+import type { GraphKind, KindSet } from "../graph-model.js";
 
 /**
  * From an issue's text to the files its fix starts in, for
@@ -490,15 +491,15 @@ export interface StartingPoint {
 }
 
 /** Kinds a definition has, most navigable first. Anything else ranks after. */
-const DEFINITION_KINDS = [
+const DEFINITION_KINDS: readonly GraphKind[] = [
   "class", "interface", "trait", "struct", "enum", "type", "object", "function", "method",
   "constant", "variable", "property", "field",
 ];
 /** Never a definition: an import (located in the importer), a chunk, a file. */
-const NOT_DEFINITIONS = new Set(["module", "chunk", "file"]);
+const NOT_DEFINITIONS: KindSet = new Set<GraphKind>(["module", "chunk", "file"]);
 
 function kindRank(kind: string): number {
-  const i = DEFINITION_KINDS.indexOf(kind.toLowerCase());
+  const i = (DEFINITION_KINDS as readonly string[]).indexOf(kind.toLowerCase());
   return i === -1 ? DEFINITION_KINDS.length : i;
 }
 

@@ -15,7 +15,8 @@
 import type { NodeKind } from "../client/graph-schema.js";
 
 /**
- * Kinds the sets below name that no patch from this repo writes. The ingester
+ * Kinds the CLI's kind lists name (the sets below, and the few one-off lists
+ * other commands keep) that no patch from this repo writes. The ingester
  * (`core-ingestion` `DEFINITION_KIND_MAP`) folds struct, enum, record, union,
  * impl, type alias and annotation definitions into `class`, so these never
  * occur in a graph it built; they are listed so that a graph which does carry
@@ -33,6 +34,9 @@ export const READ_ONLY_KINDS = [
   "def", "fun", "constructor",
   // The map's architectural regions.
   "system", "subsystem", "region",
+  // Named by the one-off kind lists in other commands (type-walk, explain,
+  // graph-health, verify); no extractor here writes them.
+  "protocol", "data_class", "variable", "property", "field",
 ] as const;
 
 /** A kind the CLI knows: written by a patch, or read from a graph another writer built. */

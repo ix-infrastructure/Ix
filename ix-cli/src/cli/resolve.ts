@@ -23,7 +23,7 @@ import { isBackendUnreachable } from "./errors.js";
 import { findTargetCandidates, rowsInclude } from "./target-suggestions.js";
 import { isFileStemMatch } from "./candidate-origin.js";
 import { normalizeForPathMatch } from "./path-match.js";
-import { STRUCTURAL_KINDS } from "./graph-model.js";
+import { STRUCTURAL_KINDS, type GraphKind } from "./graph-model.js";
 import { hasDefinitionOf, looksTypeLikeSymbol } from "./resolve/score.js";
 import {
   AMBIGUOUS_HINT, allCandidatesOf, applyPick as pickAmong, buildAmbiguous, candidateOf, cmpStr,
@@ -848,7 +848,7 @@ async function rankFileOrEntity(
   // just sorts last among equal-scoring candidates. `constant` is here so a
   // module-level constant is not ranked behind every config entry and heading
   // that happens to share its name (Ix#679).
-  const allKinds = ["file", "class", "object", "trait", "interface", "module", "method", "function", "constant"];
+  const allKinds: GraphKind[] = ["file", "class", "object", "trait", "interface", "module", "method", "function", "constant"];
   if (scoped) {
     // `Class.method` / `Class#method`: a name stored with a dot (`os.path`)
     // resolves literally, so the qualified reading is tried only when the

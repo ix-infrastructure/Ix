@@ -10,7 +10,7 @@ import { getSystemPath } from "../hierarchy.js";
 import type { CommitRef } from "./history.js";
 import { isTestPath, type RelatedRef } from "./related-files.js";
 import { suggestedCommand } from "../next-step.js";
-import { TYPE_KINDS } from "../graph-model.js";
+import { TYPE_KINDS, type GraphKind, type KindSet } from "../graph-model.js";
 
 /** A related entity and where it is defined. */
 export interface EntityLocation {
@@ -211,7 +211,7 @@ const MEMBER_USE_CONCURRENCY = 6;
 const USE_PREDICATES = ["CALLS", "REFERENCES", "IMPORTS"];
 
 /** Kinds a reader navigates by. Everything else ranks after them. */
-const PRIMARY_MEMBER_KINDS = new Set([
+const PRIMARY_MEMBER_KINDS: KindSet = new Set<GraphKind>([
   "class", "interface", "function", "method", "type", "enum", "trait", "struct", "object", "module",
 ]);
 
