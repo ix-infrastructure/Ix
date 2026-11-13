@@ -42,9 +42,15 @@ describe("CLI start-up module graph", () => {
     // `main.ts` imports `run-cli.ts` unconditionally, after enabling the
     // compile cache, and `run-cli.ts` imports `register/oss.ts` (every command)
     // whenever it cannot register just the one being run -- a dynamic import,
-    // so it is named here. Together they are the largest start-up graph.
+    // so it is named here. `register/oss.ts` loads every module the command
+    // manifest names while it loads, through the manifest's dynamic imports,
+    // so those are named too. Together they are the largest start-up graph.
+    const manifest = join(SRC, "cli/register/commands.ts");
+    const commandModules = [...readFileSync(manifest, "utf-8").matchAll(/import\("([^"]+)"\)/g)]
+      .map((match) => resolve(dirname(manifest), match[1].replace(/\.js$/, ".ts")));
+    expect(commandModules.length).toBeGreaterThan(40);
     const { packages, modules } = startupPackages([
-      join(SRC, "cli/main.ts"), join(SRC, "cli/run-cli.ts"), join(SRC, "cli/register/oss.ts"),
+      join(SRC, "cli/main.ts"), join(SRC, "cli/run-cli.ts"), join(SRC, "cli/register/oss.ts"), ...commandModules,
     ]);
 
     // The walk really reached the command registry.

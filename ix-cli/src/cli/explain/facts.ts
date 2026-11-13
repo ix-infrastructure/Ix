@@ -9,7 +9,8 @@ import { buildDependencyTree } from "../commands/depends.js";
 import { getSystemPath } from "../hierarchy.js";
 import type { CommitRef } from "./history.js";
 import { isTestPath, type RelatedRef } from "./related-files.js";
-import { forMcp, toolCall } from "../next-step.js";
+import { suggestedCommand } from "../next-step.js";
+import { TYPE_KINDS, type GraphKind, type KindSet } from "../graph-model.js";
 
 /** A related entity and where it is defined. */
 export interface EntityLocation {
@@ -209,12 +210,8 @@ const MEMBER_USE_CAP = 50;
 const MEMBER_USE_CONCURRENCY = 6;
 const USE_PREDICATES = ["CALLS", "REFERENCES", "IMPORTS"];
 
-/** Kinds whose own members are worth one more hop: a class's methods are not
- * listed under its file. */
-const CONTAINER_KINDS = new Set(["class", "interface", "trait", "object", "struct", "enum"]);
-
 /** Kinds a reader navigates by. Everything else ranks after them. */
-const PRIMARY_MEMBER_KINDS = new Set([
+const PRIMARY_MEMBER_KINDS: KindSet = new Set<GraphKind>([
   "class", "interface", "function", "method", "type", "enum", "trait", "struct", "object", "module",
 ]);
 
@@ -291,7 +288,8 @@ async function collectNeighbourMembers(
       // `IxClient`, and `reset`, `resetCode` and `deleteWorkspace` -- three of
       // one task's four answers -- hang off that. One level down, for the
       // leading container only.
-      const container = direct.find(m => CONTAINER_KINDS.has(m.kind));
+      // Type kinds only: a file's nested module is not one more hop.
+      const container = direct.find(m => TYPE_KINDS.has(m.kind));
       let nested: EntityLocation[] = [];
       if (container) {
         try {
@@ -432,8 +430,12 @@ async function lookUpContainer(client: IxClient, containerId: string): Promise<E
   }
 }
 
-/** The target's callees by name, one entity read each, in edge order. */
-function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRef[]> {
+/**
+ * The target's callees by name, one entity read each, in edge order. A callee
+ * with no usable name, or one that cannot be read, is listed unresolved with a
+ * text-search suggestion. `ix explain` and `collectFacts` both use this one.
+ */
+export function resolveCallList(client: Pick<IxClient, "entity">, calleeEdges: any[]): Promise<EntityRef[]> {
   return Promise.all(
     calleeEdges.map(async (e: any): Promise<EntityRef> => {
       try {
@@ -445,7 +447,7 @@ function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRe
             name: name || e.dst,
             kind: calleeNode.kind,
             resolved: false,
-            suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
+            ...suggestedCommand({ action: "text", pattern: e.dst.slice(0, 8), quote: true }),
           };
         }
         return {
@@ -454,14 +456,14 @@ function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRe
           id: e.dst,
           resolved: true,
           path: relativePath(calleeNode.provenance?.source_uri ?? calleeNode.provenance?.sourceUri),
-          suggestedCommand: forMcp() ? toolCall("ix_explain", { symbol: name }) : `ix explain "${name}"`,
+          ...suggestedCommand({ action: "explain", symbol: name, quote: true }),
         };
       } catch {
         return {
           name: e.dst,
           resolved: false,
           diagnostic: "unresolved_call_target",
-          suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
+          ...suggestedCommand({ action: "text", pattern: e.dst.slice(0, 8), quote: true }),
         } as EntityRef;
       }
     }),

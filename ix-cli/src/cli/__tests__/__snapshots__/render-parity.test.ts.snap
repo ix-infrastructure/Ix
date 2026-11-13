@@ -1,0 +1,848 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatBugs 1`] = `
+"[
+  {
+    "id": "aaaaaaaabbbbbbbb",
+    "name": "Crash on empty",
+    "attrs": {
+      "status": "investigating",
+      "severity": "high"
+    }
+  },
+  {
+    "id": "dddd",
+    "attrs": {
+      "title": "Defaults"
+    }
+  }
+]"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatBugs 2`] = `"[]"`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatConflicts 1`] = `
+"[
+  {
+    "reason": "contradiction",
+    "recommendation": "pick one",
+    "claimA": "claimaaaaaaaaa",
+    "claimB": "claimbbbbbbbbb"
+  }
+]"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatConflicts 2`] = `"[]"`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatContext 1`] = `
+"{
+  "metadata": {
+    "query": "config",
+    "seedEntities": [
+      1,
+      2
+    ],
+    "hopsExpanded": 1,
+    "asOfRev": 12
+  },
+  "claims": [
+    {
+      "finalScore": 0.9,
+      "claim": {
+        "statement": "parses yaml"
+      }
+    },
+    {
+      "finalScore": 0.3
+    }
+  ],
+  "conflicts": [
+    {
+      "reason": "r",
+      "recommendation": "rec"
+    }
+  ],
+  "decisions": [
+    {
+      "title": "t",
+      "rationale": "why"
+    }
+  ],
+  "intents": [
+    {
+      "statement": "s",
+      "status": "open"
+    }
+  ]
+}"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatDecisions 1`] = `
+"[
+  {
+    "id": "aaaaaaaabbbbbbbb",
+    "name": "Use YAML",
+    "attrs": {
+      "rationale": "humans edit it"
+    }
+  },
+  {
+    "id": "cccc",
+    "attrs": {
+      "title": "No rationale"
+    }
+  }
+]"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatDecisions 2`] = `"[]"`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatDiff 1`] = `
+"{
+  "fromRev": 3,
+  "toRev": 9,
+  "changes": [
+    {
+      "changeType": "added",
+      "entityId": "e1e1e1e1e1",
+      "atToRev": {
+        "name": "Foo",
+        "kind": "class"
+      },
+      "summary": "new"
+    },
+    {
+      "changeType": "modified",
+      "entityId": "e2e2e2e2e2",
+      "atToRev": {
+        "attrs": {
+          "name": "bar"
+        },
+        "kind": "method"
+      }
+    },
+    {
+      "changeType": "removed",
+      "entityId": "e3e3e3e3e3",
+      "atFromRev": {
+        "name": "Baz",
+        "kind": "function"
+      }
+    },
+    {
+      "changeType": "added_or_modified",
+      "entityId": "e4e4e4e4e4",
+      "atToRev": {
+        "name": "Qux"
+      }
+    }
+  ]
+}"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatDiff 2`] = `
+"{
+  "fromRev": 1,
+  "toRev": 2,
+  "changes": []
+}"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatEdgeResults 1`] = `
+"{
+  "results": [
+    {
+      "name": "caller",
+      "kind": "function",
+      "id": "1111111122222222",
+      "path": "src/a.ts",
+      "lineStart": 10,
+      "lineEnd": 24,
+      "site": {
+        "path": "src/a.ts",
+        "line": 12,
+        "snippet": "callee()",
+        "also": [
+          14
+        ]
+      }
+    },
+    {
+      "kind": "function",
+      "resolved": false,
+      "rawId": "0a0a0a0a-1b1b-2c2c-3d3d-4e4e4e4e4e4e",
+      "diagnostic": "unresolved_call_target"
+    }
+  ],
+  "resultSource": "graph+text",
+  "resolvedTarget": {
+    "id": "9999999988888888",
+    "kind": "function",
+    "name": "callee",
+    "resolutionMode": "fuzzy"
+  },
+  "resolutionMode": "all",
+  "candidates": [
+    {
+      "n": 1,
+      "id": "9999999988888888",
+      "name": "callee",
+      "kind": "function",
+      "path": "src/z.ts"
+    }
+  ],
+  "diagnostics": [
+    {
+      "code": "text_fallback_used",
+      "message": "Some rows came from text search."
+    },
+    {
+      "code": "results_truncated",
+      "message": "3 callers; showing 2. next: ix callers callee --offset 2"
+    },
+    {
+      "code": "dangling_reference_filtered",
+      "message": "1 result(s) could not be resolved to named entities."
+    }
+  ],
+  "summary": {
+    "shown": 2,
+    "total": 3,
+    "resolved": 1,
+    "unresolved": 1,
+    "truncated": true,
+    "offset": 0,
+    "nextOffset": 2
+  }
+}"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatEdgeResults 2`] = `
+"{
+  "results": [],
+  "resultSource": "graph",
+  "diagnostics": [
+    {
+      "code": "no_edges",
+      "message": "No callees edges found for resolved entity."
+    }
+  ],
+  "summary": {
+    "shown": 0,
+    "total": 0,
+    "resolved": 0,
+    "unresolved": 0,
+    "truncated": false,
+    "offset": 0
+  }
+}"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatEdgeResults 3`] = `
+"{
+  "results": [],
+  "resultSource": "graph",
+  "diagnostics": [
+    {
+      "code": "offset_past_end",
+      "message": "3 callers; --offset 7 is past the end."
+    }
+  ],
+  "summary": {
+    "shown": 0,
+    "total": 3,
+    "resolved": 0,
+    "unresolved": 0,
+    "truncated": false,
+    "offset": 7
+  }
+}"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatEdgeResults 4`] = `
+"{
+  "results": [
+    {
+      "name": "caller",
+      "kind": "function",
+      "id": "1111111122222222",
+      "path": "src/a.ts",
+      "lineStart": 10,
+      "lineEnd": 24,
+      "site": {
+        "path": "src/a.ts",
+        "line": 12,
+        "snippet": "callee()",
+        "also": [
+          14
+        ]
+      }
+    },
+    {
+      "kind": "function",
+      "resolved": false,
+      "rawId": "0a0a0a0a-1b1b-2c2c-3d3d-4e4e4e4e4e4e",
+      "diagnostic": "unresolved_call_target"
+    },
+    {
+      "name": "viaSuper",
+      "kind": "method",
+      "id": "2222222233333333",
+      "path": "src/a.ts",
+      "lineStart": 10,
+      "lineEnd": 24,
+      "candidate": 1,
+      "via": "Base.run"
+    }
+  ],
+  "resultSource": "graph",
+  "diagnostics": [
+    {
+      "code": "results_truncated",
+      "message": "At least 3 imports (the server returns at most 1000 edges); showing 3, the end of what it returned. Narrow the target with --kind or --path to see the rest."
+    },
+    {
+      "code": "dangling_reference_filtered",
+      "message": "1 result(s) could not be resolved to named entities."
+    }
+  ],
+  "summary": {
+    "shown": 3,
+    "total": 3,
+    "resolved": 2,
+    "unresolved": 1,
+    "truncated": true,
+    "offset": 0,
+    "capped": true
+  }
+}"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatExplain 1`] = `
+"{
+  "resolvedTarget": {
+    "id": "1111111122222222",
+    "kind": "function",
+    "name": "parseConfig"
+  },
+  "result": {
+    "kind": "function",
+    "name": "parseConfig",
+    "id": "1111111122222222",
+    "file": "src/a.ts",
+    "chunkKind": "body",
+    "container": {
+      "kind": "module",
+      "name": "config"
+    },
+    "introducedRev": 4,
+    "calledBy": 2,
+    "calls": 3,
+    "contains": 0,
+    "historyLength": 5,
+    "signature": "parseConfig(raw: string): Config",
+    "docstring": "Parse it.",
+    "callList": [
+      {
+        "name": "readFile",
+        "resolved": true
+      },
+      {
+        "name": "mystery",
+        "resolved": false
+      }
+    ]
+  },
+  "diagnostics": [
+    {
+      "code": "stale_source",
+      "message": "Source changed since the last map."
+    }
+  ]
+}"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatExplain 2`] = `
+"{
+  "resolvedTarget": {
+    "id": "1111111122222222",
+    "kind": "function",
+    "name": "parseConfig"
+  },
+  "result": {
+    "kind": "function",
+    "name": "parseConfig",
+    "id": "1111111122222222",
+    "introducedRev": 4,
+    "calledBy": 2,
+    "calls": 3,
+    "contains": 0,
+    "historyLength": 5
+  }
+}"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatIntents 1`] = `
+"[
+  {
+    "id": "i1",
+    "attrs": {
+      "statement": "Ship it",
+      "status": "active",
+      "confidence": 0.9
+    }
+  },
+  {
+    "id": "i2",
+    "attrs": {
+      "statement": "Test it",
+      "status": "open",
+      "confidence": 0.4,
+      "parent_intent": "i1"
+    }
+  }
+]"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatIntents 2`] = `"[]"`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatLocateResults 1`] = `
+"[
+  {
+    "kind": "function",
+    "id": "1111111122222222",
+    "name": "parseConfig",
+    "file": "src/a.ts",
+    "line": 10,
+    "source": "graph"
+  },
+  {
+    "kind": "text",
+    "name": "parseConfig",
+    "source": "ripgrep"
+  }
+]"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatLocateResults 2`] = `"[]"`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatNodes 1`] = `
+"[
+  {
+    "id": "1111111122222222",
+    "kind": "function",
+    "name": "parseConfig",
+    "attrs": {
+      "name": "parseConfig",
+      "line_start": 10,
+      "line_end": 24
+    },
+    "provenance": {
+      "source_uri": "src/a.ts"
+    }
+  },
+  {
+    "id": "3333333344444444",
+    "kind": "decision",
+    "name": "Use YAML",
+    "attrs": {
+      "title": "Use YAML"
+    },
+    "provenance": {
+      "source_uri": "src/a.ts"
+    }
+  },
+  {
+    "id": "5555555566666666",
+    "kind": "file",
+    "name": "b.ts",
+    "attrs": {
+      "path": "src/b.ts"
+    }
+  }
+]"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatNodes 2`] = `"[]"`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatPatches 1`] = `
+"[
+  {
+    "rev": 7,
+    "patch_id": "0123456789ab",
+    "intent": "map",
+    "timestamp": "2026-01-01T00:00:00Z",
+    "source": "src/a.ts"
+  },
+  {
+    "rev": 8,
+    "patch_id": "fedcba987654",
+    "timestamp": "2026-01-02T00:00:00Z"
+  }
+]"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatPatches 2`] = `"[]"`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatTextResults 1`] = `
+"[
+  {
+    "path": "src/a.ts",
+    "line_start": 3,
+    "line_end": 3,
+    "snippet": "  const x = 1;  ",
+    "engine": "ripgrep",
+    "score": 1,
+    "language": "typescript",
+    "symbol_hint": "main"
+  },
+  {
+    "path": "src/b.ts",
+    "line_start": 9,
+    "line_end": 9,
+    "snippet": "x()",
+    "engine": "ripgrep",
+    "score": 0.5
+  }
+]"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatTextResults 2`] = `
+"[
+  {
+    "path": "src/c.ts",
+    "line_start": 1,
+    "line_end": 1,
+    "snippet": "x",
+    "engine": "ripgrep",
+    "score": 0.1
+  }
+]"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatTextResults 3`] = `"[]"`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format json > formatTextResults 4`] = `"[]"`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatBugs 1`] = `
+"  ◐ [2m[investigating] [22m [31mhigh    [39m [2maaaaaaaa[22m  [1mCrash on empty[22m
+  ○ [2m[open]          [22m [31mmedium  [39m [2mdddd[22m  [1mDefaults[22m"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatBugs 2`] = `"No bugs found."`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatConflicts 1`] = `
+"conflicts count=1
+conflict reason=contradiction recommendation="pick one" claim_a=claimaaaaaaaaa claim_b=claimbbbbbbbbb"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatConflicts 2`] = `"conflicts count=0"`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatContext 1`] = `
+"
+[1m[36m--- Ix Context: "config" ---[39m[22m
+[2mSeeds: 2 | Hops: 1 | Rev: 12[22m
+[1m[22m
+[1mClaims:[22m
+  [32m[90%][39m parses yaml
+  [31m[30%][39m unknown
+
+Conflicts (1):
+  [31m[1m![22m[39m r: rec
+
+Decisions (1):
+  [34m*[39m t: why
+
+Intents (1):
+  [35m>[39m s [open]
+"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatDecisions 1`] = `
+"  [34m*[39m [2maaaaaaaa[22m  [1mUse YAML[22m
+    [90mhumans edit it[39m
+  [34m*[39m [2mcccc[22m  [1mNo rationale[22m"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatDecisions 2`] = `"No decisions found."`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatDiff 1`] = `
+"diff from=3 to=9 changes=4
+change type=added kind=class name=Foo summary=new
+change type=modified kind=method name=bar
+change type=removed kind=function name=Baz
+change type=added_or_modified name=Qux"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatDiff 2`] = `"diff from=1 to=2 changes=0"`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatEdgeResults 1`] = `
+"callers target=callee shown=2 total=3 resolved=1 unresolved=1 source=graph+text candidates=1
+candidate n=1 name=callee kind=function path=src/z.ts id=99999999
+diagnostic code=results_truncated next_offset=2 message="3 callers; showing 2. next: ix callers callee --offset 2"
+diagnostic code=text_fallback_used message="Some rows came from text search."
+ref name=caller kind=function path=src/a.ts lines=10-24 site=src/a.ts:12 also=14 snippet=callee()
+ref kind=function id=0a0a0a0a resolved=false"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatEdgeResults 2`] = `
+"callees target=lonely shown=0 total=0 resolved=0
+diagnostic code=no_edges message="No callees edges found.""
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatEdgeResults 3`] = `
+"callers target=x offset=7 shown=0 total=3 resolved=0
+diagnostic code=offset_past_end message="3 callers; --offset 7 is past the end.""
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatEdgeResults 4`] = `
+"imports target=y shown=3 total=3 resolved=2 unresolved=1
+diagnostic code=results_truncated message="At least 3 imports (the server returns at most 1000 edges); showing 3, the end of what it returned. Narrow the target with --kind or --path to see the rest."
+ref name=caller kind=function path=src/a.ts lines=10-24 site=src/a.ts:12 also=14 snippet=callee()
+ref kind=function id=0a0a0a0a resolved=false
+ref name=viaSuper kind=method path=src/a.ts lines=10-24 candidate=1 via=Base.run"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatExplain 1`] = `
+"  [32mparseConfig(raw: string): Config[39m
+  [2m"Parse it."[22m
+  [2min[22m [36mmodule[39m config
+  [2mfile[22m src/a.ts
+  [2mchunk kind[22m body
+  [2mintroduced rev[22m 4
+  [2mcalled by[22m 2 methods
+  [2mcalls:[22m
+    readFile
+    [2mmystery (unresolved)[22m
+  [2mhistory[22m 5 patches
+  [2m[stale_source][22m Source changed since the last map."
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatExplain 2`] = `
+"  [36mfunction[39m [1mparseConfig[22m [2m11111111[22m
+  [2mintroduced rev[22m 4
+  [2mcalled by[22m 2 methods
+  [2mcalls[22m 3 methods
+  [2mhistory[22m 5 patches"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatIntents 1`] = `
+"  [35m>[39m Ship it [active] [32m(90%)[39m
+    [2m└─[22m Test it [open] [31m(40%)[39m"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatIntents 2`] = `"No intents found."`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatLocateResults 1`] = `
+"  [36mfunction[39m  [2m11111111[22m  [1mparseConfig[22m
+    [2msrc/a.ts[22m[36m:10[39m
+  [36mtext[39m  [1mparseConfig[22m"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatLocateResults 2`] = `"No matches found."`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatNodes 1`] = `
+"node kind=function id=11111111 name=parseConfig path=src/a.ts lines=10-24
+node kind=decision id=33333333 name="Use YAML" path=src/a.ts
+node kind=file id=55555555 name=b.ts path=src/b.ts"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatNodes 2`] = `""`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatPatches 1`] = `
+"patch rev=7 id=0123456789ab intent=map ts=2026-01-01T00:00:00Z source=src/a.ts
+patch rev=8 id=fedcba987654 ts=2026-01-02T00:00:00Z"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatPatches 2`] = `""`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatTextResults 1`] = `
+"text shown=2 scanned=3 truncated=true
+diagnostic code=results_truncated next_offset=2 message="3 matches scanned; showing 2. next: --offset 2"
+match path=src/a.ts line=3 symbol=main snippet="const x = 1;"
+match path=src/b.ts line=9 snippet=x()"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatTextResults 2`] = `
+"text offset=2 shown=1 scanned=3 truncated=true
+diagnostic code=results_truncated message="3 matches scanned; showing 3-3; the scan stops at 3. Narrow with --path or --language, or raise --limit."
+match path=src/c.ts line=1 snippet=x"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatTextResults 3`] = `
+"text offset=9 shown=0 scanned=3
+diagnostic code=offset_past_end message="3 matches scanned; --offset 9 is past the end.""
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format llm > formatTextResults 4`] = `"text shown=0 scanned=0"`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatBugs 1`] = `
+"  ◐ [2m[investigating] [22m [31mhigh    [39m [2maaaaaaaa[22m  [1mCrash on empty[22m
+  ○ [2m[open]          [22m [31mmedium  [39m [2mdddd[22m  [1mDefaults[22m"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatBugs 2`] = `"No bugs found."`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatConflicts 1`] = `
+"  [31m[1m![22m[39m contradiction
+    [33mpick one[39m
+    Claims: claimaaaaaaaaa vs claimbbbbbbbbb"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatConflicts 2`] = `"No conflicts detected."`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatContext 1`] = `
+"
+[1m[36m--- Ix Context: "config" ---[39m[22m
+[2mSeeds: 2 | Hops: 1 | Rev: 12[22m
+[1m[22m
+[1mClaims:[22m
+  [32m[90%][39m parses yaml
+  [31m[30%][39m unknown
+
+Conflicts (1):
+  [31m[1m![22m[39m r: rec
+
+Decisions (1):
+  [34m*[39m t: why
+
+Intents (1):
+  [35m>[39m s [open]
+"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatDecisions 1`] = `
+"  [34m*[39m [2maaaaaaaa[22m  [1mUse YAML[22m
+    [90mhumans edit it[39m
+  [34m*[39m [2mcccc[22m  [1mNo rationale[22m"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatDecisions 2`] = `"No decisions found."`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatDiff 1`] = `
+"[36m[1m[22m[39m
+[36m[1mDiff: rev 3 → 9[22m[39m
+[32m[1m[22m[39m
+[32m[1m  Added (1):[22m[39m
+    [32m+[39m [36mclass     [39m [1mFoo[22m[2m — new[22m
+[33m[1m[22m[39m
+[33m[1m  Modified (1):[22m[39m
+    [33m~[39m [36mmethod    [39m [1mbar[22m
+[31m[1m[22m[39m
+[31m[1m  Removed (1):[22m[39m
+    [31m-[39m [36mfunction  [39m [1mBaz[22m
+[33m[1m[22m[39m
+[33m[1m  Changed (1):[22m[39m
+    [33m~[39m [36munknown   [39m [1mQux[22m
+"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatDiff 2`] = `
+"[36m[1m[22m[39m
+[36m[1mDiff: rev 1 → 2[22m[39m
+[2m  No changes in this range.[22m"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatEdgeResults 1`] = `
+"[1mcallers[22m of [36mcallee[39m:
+[2mSource: graph+text[22m
+[2m  [1] function callee in src/z.ts[22m
+  [36mfunction  [39m  [2m11111111[22m  [1mcaller[22m  [2msrc/a.ts:10-24[22m
+      [2mat src/a.ts:12[22m  callee()
+  [36mfunction  [39m  [2m0a0a0a0a[22m  [2m(unresolved)[22m
+[2m  3 callers; showing 2. next: ix callers callee --offset 2[22m"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatEdgeResults 2`] = `"No callees found for "lonely"."`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatEdgeResults 3`] = `"3 callers; --offset 7 is past the end."`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatEdgeResults 4`] = `
+"[1mimports[22m of [36my[39m:
+  [36mfunction  [39m  [2m11111111[22m  [1mcaller[22m  [2msrc/a.ts:10-24[22m
+      [2mat src/a.ts:12[22m  callee()
+  [36mfunction  [39m  [2m0a0a0a0a[22m  [2m(unresolved)[22m
+  [36mmethod    [39m  [2m22222222[22m  [1mviaSuper[22m  [2msrc/a.ts:10-24[22m  [2m[1][22m  [2m(via Base.run)[22m
+[2m  At least 3 imports (the server returns at most 1000 edges); showing 3, the end of what it returned. Narrow the target with --kind or --path to see the rest.[22m"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatExplain 1`] = `
+"  [32mparseConfig(raw: string): Config[39m
+  [2m"Parse it."[22m
+  [2min[22m [36mmodule[39m config
+  [2mfile[22m src/a.ts
+  [2mchunk kind[22m body
+  [2mintroduced rev[22m 4
+  [2mcalled by[22m 2 methods
+  [2mcalls:[22m
+    readFile
+    [2mmystery (unresolved)[22m
+  [2mhistory[22m 5 patches
+  [2m[stale_source][22m Source changed since the last map."
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatExplain 2`] = `
+"  [36mfunction[39m [1mparseConfig[22m [2m11111111[22m
+  [2mintroduced rev[22m 4
+  [2mcalled by[22m 2 methods
+  [2mcalls[22m 3 methods
+  [2mhistory[22m 5 patches"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatIntents 1`] = `
+"  [35m>[39m Ship it [active] [32m(90%)[39m
+    [2m└─[22m Test it [open] [31m(40%)[39m"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatIntents 2`] = `"No intents found."`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatLocateResults 1`] = `
+"  [36mfunction[39m  [2m11111111[22m  [1mparseConfig[22m
+    [2msrc/a.ts[22m[36m:10[39m
+  [36mtext[39m  [1mparseConfig[22m"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatLocateResults 2`] = `"No matches found."`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatNodes 1`] = `
+"  [36mfunction  [39m  [2m11111111[22m  [1mparseConfig[22m  [2msrc/a.ts:10-24[22m
+  [34mdecision[39m  [2m33333333[22m  Use YAML
+  [36mfile      [39m  [2m55555555[22m  [1mb.ts[22m  [2msrc/b.ts[22m"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatNodes 2`] = `"No results found."`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatPatches 1`] = `
+"  rev [36m[1m7[22m[39m  [2m01234567[22m  [37mmap[39m
+  rev [36m[1m8[22m[39m  [2mfedcba98[22m  [2m(no intent)[22m"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatPatches 2`] = `"No patches found."`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatTextResults 1`] = `
+"  [35m[typescript][39m [2msrc/a.ts[22m[36m:3[39m  [33m(main)[39m const x = 1;
+  [2msrc/b.ts[22m[36m:9[39m  x()
+[2m  3 matches scanned; showing 2. next: --offset 2[22m"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatTextResults 2`] = `
+"  [2msrc/c.ts[22m[36m:1[39m  x
+[2m  3 matches scanned; showing 3-3; the scan stops at 3. Narrow with --path or --language, or raise --limit.[22m"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatTextResults 3`] = `"3 matches scanned; --offset 9 is past the end."`;
+
+exports[`render parity with the pre-split format.ts (#950) > --format text > formatTextResults 4`] = `"No text matches found."`;
+
+exports[`render parity with the pre-split format.ts (#950) > applies --fields to llm rows exactly as before 1`] = `
+"node path=src/a.ts name=parseConfig
+node path=src/a.ts name="Use YAML"
+node path=src/b.ts name=b.ts"
+`;
+
+exports[`render parity with the pre-split format.ts (#950) > applies --fields to llm rows exactly as before 2`] = `
+"callers target=callee shown=3 total=3 resolved=2 unresolved=1
+ref path=src/a.ts name=caller
+ref
+ref path=src/a.ts name=viaSuper candidate=1 via=Base.run"
+`;

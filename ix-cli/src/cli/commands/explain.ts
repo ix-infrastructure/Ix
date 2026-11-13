@@ -4,19 +4,19 @@ import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import { formatExplain, relativePath, printJson, type ExplainResult, type EntityRef, type Diagnostic } from "../format.js";
-import { resolveFileOrReport, isRawId, activeReadScope } from "../resolve.js";
+import { resolveFileOrReport, activeReadScope } from "../resolve.js";
 import { isFileStale } from "../stale.js";
-import { collectFacts, unresolvedCallNames, unresolvedCallsOf } from "../explain/facts.js";
+import { collectFacts, resolveCallList, unresolvedCallNames, unresolvedCallsOf } from "../explain/facts.js";
 import { inferRole } from "../explain/role-inference.js";
 import { inferImportance } from "../explain/importance.js";
 import { renderExplanation } from "../explain/render.js";
 import { renderExplainLlm, renderExplainRawLlm } from "../explain/llm.js";
 import { printLlmLines } from "../llm.js";
-import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
+import { formatOption, kindOption, noSuggestOption, pathOption, pickOption, strictOption } from "../options.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
 import { renderSection, renderWarning, renderNote } from "../ui.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm } from "../map-freshness.js";
-import { forMcp, toolCall } from "../next-step.js";
+import { hint, suggestedCommand } from "../next-step.js";
 import {
   assessTargetStructure, checkGraphHealth, graphHealthJson, graphHealthProse, isUnhealthy, worseHealth,
 } from "../graph-health.js";
@@ -25,12 +25,12 @@ export function registerExplainCommand(program: Command): void {
   program
     .command("explain <symbol>")
     .description("Explain an entity — infers role, importance, and structural context")
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--no-suggest", "Disable did-you-mean candidates on unresolved targets")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(noSuggestOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
+    .addOption(formatOption())
     .option("--raw", "Show raw metadata dump (legacy format)")
     .addHelpText("after", "\nExamples:\n  ix explain IngestionService\n  ix explain expand --path memory-layer\n  ix explain verify_token --kind function --format json\n  ix explain IxClient --raw\n" + EXIT_CODES_HELP)
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; strict?: boolean; suggest?: boolean; format: string; raw?: boolean }) => {
@@ -177,44 +177,13 @@ async function rawExplain(
   const diagnostics: Diagnostic[] = [];
   let callList: EntityRef[] | undefined;
   if (calleeEdges.length > 0 && calleeEdges.length <= 20) {
-    const refs = await Promise.all(
-      calleeEdges.map(async (e: any): Promise<EntityRef> => {
-        try {
-          const callee = await client.entity(e.dst);
-          const calleeNode = callee.node as any;
-          const name = calleeNode.name || calleeNode.attrs?.name || "";
-          if (!name || isRawId(name)) {
-            return {
-              name: name || e.dst,
-              kind: calleeNode.kind,
-              resolved: false,
-              suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
-            };
-          }
-          return {
-            name,
-            kind: calleeNode.kind,
-            id: e.dst,
-            resolved: true,
-            path: relativePath(calleeNode.provenance?.source_uri ?? calleeNode.provenance?.sourceUri),
-            suggestedCommand: forMcp() ? toolCall("ix_explain", { symbol: name }) : `ix explain "${name}"`,
-          };
-        } catch {
-          return {
-            name: e.dst,
-            resolved: false,
-            diagnostic: "unresolved_call_target",
-            suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
-          } as EntityRef;
-        }
-      })
-    );
+    const refs = await resolveCallList(client, calleeEdges);
     callList = refs;
     const unresolvedCount = refs.filter(r => !r.resolved).length;
     if (unresolvedCount > 0) {
       diagnostics.push({
         code: "unresolved_call_target",
-        message: `${unresolvedCount} callee(s) could not be resolved to named entities. Use ${forMcp() ? "ix_text" : "ix text"} to locate them.`,
+        message: `${unresolvedCount} callee(s) could not be resolved to named entities.${locateWith(hint({ action: "text" }))}`,
       });
     }
   }
@@ -229,7 +198,7 @@ async function rawExplain(
         ...unresolvedCalls.names.map((name): EntityRef => ({
           name,
           resolved: false,
-          suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: name }) : `ix text "${name}"`,
+          ...suggestedCommand({ action: "text", pattern: name, quote: true }),
         })),
       ];
     }
@@ -285,4 +254,9 @@ async function rawExplain(
     if (stale) renderWarning("Source has changed since last ingest. Run ix map to update.");
     formatExplain(result, "text");
   }
+}
+
+/** ` Use ix text to locate them.`, or nothing when the reader has no text search. */
+function locateWith(text: string | undefined): string {
+  return text ? ` Use ${text} to locate them.` : "";
 }

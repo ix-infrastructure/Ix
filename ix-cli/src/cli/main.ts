@@ -44,14 +44,15 @@ try {
   // A cache that cannot be opened only costs speed.
 }
 
-// Everything but one invocation goes straight to the CLI (`run-cli.ts`). The
-// exception is `ix hook claude-post-edit`, which an agent harness runs after
-// every hooked tool call -- every Bash command included -- and which almost
-// always has nothing to say. Loading the CLI's command tree costs ~140 ms
-// before a single line of it runs; the hook's "nothing changed" answer costs a
-// git call. So the hook is dispatched here, before that tree is loaded, and
-// loads the graph code itself only when there is an edit to report.
-// `--help` still goes through the CLI, where the command is documented.
+// Everything but the hooks goes straight to the CLI (`run-cli.ts`). An agent
+// harness runs `ix hook <subcommand>` on its own events -- claude-post-edit
+// after every hooked tool call, every Bash command included -- and a hook
+// almost always has nothing to say. Loading the CLI's command tree costs
+// ~140 ms before a single line of it runs; claude-post-edit's "nothing
+// changed" answer costs a git call. So every subcommand in the one list in
+// `hook/subcommands.ts` is dispatched here, before that tree is loaded, and
+// loads the code it needs itself. `--help`, `ix hook` alone and an unknown
+// subcommand still go through the CLI, where the commands are documented.
 const args = process.argv.slice(2);
 // `ix __map-refresh <root>` is the detached background map refresh a region
 // view starts (`map-freshness.ts`); it is not a command anyone types, so it
@@ -60,9 +61,20 @@ if (args[0] === "__map-refresh" && args[1] !== undefined) {
   const { runBackgroundMapRefresh } = await import("./map-freshness.js");
   try { await runBackgroundMapRefresh(args[1]); } catch { /* recorded where it could be */ }
   process.exit(0);
-} else if (args[0] === "hook" && args[1] === "claude-post-edit" && !args.some((a) => a === "-h" || a === "--help")) {
-  const { parseHookArgs, runHookProcess } = await import("./hook/entry.js");
-  await runHookProcess(parseHookArgs(args.slice(2)));
+} else if (args[0] === "hook" && args[1] !== undefined && !args.some((a) => a === "-h" || a === "--help")) {
+  const { hookSubcommand } = await import("./hook/subcommands.js");
+  const run = hookSubcommand(args[1]);
+  if (run) await run(args.slice(2));
+  else await import("./run-cli.js");
 } else {
+  // One command for `ix mcp`'s child-process runner: phrase its hints for the
+  // MCP session that asked, with the tools that session was offered.
+  if (process.env.IX_MCP_CHILD === "1") {
+    const [{ setProcessCaller }, { callerFromChildEnv }] = await Promise.all([
+      import("./next-step.js"),
+      import("../mcp/hints.js"),
+    ]);
+    setProcessCaller(callerFromChildEnv(process.env));
+  }
   await import("./run-cli.js");
 }

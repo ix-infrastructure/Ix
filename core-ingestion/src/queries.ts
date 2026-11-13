@@ -128,6 +128,13 @@ export const TYPESCRIPT_QUERIES = `
     object: (this) @_qualifier
     property: (property_identifier) @call.name)) @call
 
+; super.method(). Capture super as the qualifier so index.ts can substitute
+; the enclosing class's base.
+(call_expression
+  function: (member_expression
+    object: (super) @_qualifier
+    property: (property_identifier) @call.name)) @call
+
 ; Constructor calls: new Foo()
 (new_expression
   constructor: (identifier) @call.name) @call
@@ -319,6 +326,13 @@ export const JAVASCRIPT_QUERIES = `
     object: (this) @_qualifier
     property: (property_identifier) @call.name)) @call
 
+; super.method(). Capture super as the qualifier so index.ts can substitute
+; the enclosing class's base.
+(call_expression
+  function: (member_expression
+    object: (super) @_qualifier
+    property: (property_identifier) @call.name)) @call
+
 ; Constructor calls: new Foo()
 (new_expression
   constructor: (identifier) @call.name) @call
@@ -400,6 +414,15 @@ export const PYTHON_QUERIES = `
 (call
   function: (attribute
     object: (identifier) @_qualifier
+    attribute: (identifier) @call.name)) @call
+
+; super().method() and super(Cls, self).method(). Capture super as the
+; qualifier so index.ts can substitute the enclosing class's base.
+(call
+  function: (attribute
+    object: (call
+      function: (identifier) @_qualifier
+      (#eq? @_qualifier "super"))
     attribute: (identifier) @call.name)) @call
 
 ; Django ORM manager pattern: Model.objects.method(...)
@@ -1107,6 +1130,10 @@ export const RUST_QUERIES = `
 (call_expression function: (scoped_identifier
   path: (identifier) @_qualifier
   name: (identifier) @call.name)) @call
+; A call spelled with a longer path: crate::stats::report()
+(call_expression function: (scoped_identifier
+  path: (scoped_identifier) @_qualifier
+  name: (identifier) @call.name)) @call
 (call_expression function: (generic_function function: (identifier) @call.name)) @call
 
 ; Struct literal construction: User { name: value }
@@ -1222,6 +1249,7 @@ export const PHP_QUERIES = `
 
 ; Static call: Foo::bar() (php_only uses scoped_call_expression)
 (scoped_call_expression
+  scope: (_) @_qualifier
   name: (name) @call.name) @call
 
 ; Constructor call: new User()

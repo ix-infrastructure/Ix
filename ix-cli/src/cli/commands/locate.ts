@@ -8,7 +8,7 @@ import {
   resolveFileOrEntityFull, rankEntity, withContainers, printResolved, printAmbiguous,
   looksFileLike, isRawId, qualifiedSeparator, isFuzzyResult, withMissReason, withTargetCandidates,
   answerAmbiguous, fuzzyTextAnswer, textMatchesFor,
-  type ResolvedEntity, type ResolveResult, type Suggestion,
+  type AmbiguousResult, type ResolvedEntity, type ResolveResult, type Suggestion,
 } from "../resolve.js";
 import { textMatchesJson, textMatchesLlm, textMatchesText, type TextMatch, type TextMatchSource } from "../text-matches.js";
 import { EXIT_CODES_HELP, setOutcome } from "../outcome.js";
@@ -18,50 +18,28 @@ import { isFileStale } from "../stale.js";
 import { stderr } from "../stderr.js";
 import { relativePath, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
-import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
-import { getEffectiveSystemPath, hasMapData } from "../hierarchy.js";
+import { formatOption, kindOption, noSuggestOption, pickOption, strictOption } from "../options.js";
+import { getEffectiveSystemPath, hasMapData, noSystemMap } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { renderSection, renderKeyValue, renderNote, renderWarning, renderBreadcrumb, reportAmbiguousTarget, reportResolutionNotices } from "../ui.js";
-import { forMcp } from "../next-step.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
+import { CONTAINER_KINDS, FILE_KINDS, REGION_KINDS, type GraphKind } from "../graph-model.js";
+import { ambiguousTargetMessage, unresolvedTargetJson } from "../contracts/miss.js";
+import type { LocateJson, LocateMissJson, LocateStrictAmbiguityJson, LocateTextMatchesJson } from "../contracts/locate.js";
 
-const CONTAINER_KINDS = new Set(["class", "module", "file", "trait", "object", "interface"]);
-const FILE_KINDS = new Set(["file"]);
-
-// Region kinds whose names should be humanized in system path
-const REGION_KINDS = new Set(["system", "subsystem", "module", "region"]);
-
-interface LocateOutput {
-  resolvedTarget: { id: string; kind: string; name: string; path?: string } | null;
-  resolutionMode: string;
-  lineRange?: { start: number; end: number };
-  container?: { kind: string; name: string; id?: string };
-  systemPath: Array<{ name: string; kind: string }> | null;
-  hasMapData?: boolean;
-  stale?: boolean;
-  /** The map is deferred (CL-13): the system path is the last map's. */
-  map_stale?: true;
-  regions_as_of?: { map_rev: number; file_count: number };
-  diagnostics: string[];
-  /** A miss: the `unresolved_target` record fields every graph command's miss carries. */
-  error?: "unresolved_target";
-  message?: string;
-  reason?: string;
-  files?: string[];
-  suggestions?: Suggestion[];
-  didYouMean?: TargetCandidate[];
-}
+/** One target's answer or miss; contracts/locate.ts has every json shape. */
+type LocateOutput = LocateJson | LocateMissJson;
 
 export function registerLocateCommand(program: Command): void {
   program
     .command("locate <symbols...>")
     .description("Resolve symbols to their position in the codebase and system hierarchy")
-    .option("--kind <kind>", "Filter target entity by kind")
+    .addOption(kindOption())
     .option("--path <path>", "Restrict to results from files matching this path substring")
-    .option("--no-suggest", "Disable did-you-mean candidates on unresolved targets")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(noSuggestOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
+    .addOption(formatOption())
     .addHelpText("after", `\nExamples:
   ix locate IngestionService
   ix locate verify_token --kind function
@@ -142,18 +120,7 @@ async function locateOne(
       outputLocateText(symbol, guidance, rows, opts.format);
       return;
     }
-    const output: LocateOutput = {
-      resolvedTarget: null,
-      resolutionMode: "none",
-      systemPath: null,
-      diagnostics: ["No graph entity found."],
-      error: "unresolved_target",
-      message: reason?.message ?? `No graph entity found for "${symbol}".`,
-      ...(reason?.reason ? { reason: reason.reason } : {}),
-      ...(reason?.files?.length ? { files: reason.files } : {}),
-      ...(guidance?.suggestions?.length ? { suggestions: guidance.suggestions } : {}),
-      didYouMean: guidance?.didYouMean ?? [],
-    };
+    const output = locateMissJson(symbol, reason, guidance);
     outputLocate(output, symbol, opts.format, guidance?.retryCommand);
     // #539: a machine caller could not tell this from a successful command
     // that intentionally returned nothing. Exits 3, the not-found code
@@ -196,7 +163,7 @@ async function locateOne(
   }
 
   // Container context (parent for callables)
-  let container: LocateOutput["container"];
+  let container: LocateJson["container"];
   if (!isContainer && containsResult.nodes.length > 0) {
     const c = containsResult.nodes[0] as any;
     container = {
@@ -212,7 +179,7 @@ async function locateOne(
   // Diagnostic for missing map data
   const hasMap = hasMapData(systemPath);
   if (!hasMap) {
-    diagnostics.push(`No system map. Run ${forMcp() ? "ix_map" : "`ix map`"} to see hierarchy.`);
+    diagnostics.push(noSystemMap());
   }
 
   // Build system path: append resolved symbol for non-file targets
@@ -227,14 +194,14 @@ async function locateOne(
   // Make path repo-relative
   const displayPath = nodePath ? toRepoRelative(nodePath) : undefined;
 
-  const output: LocateOutput = {
+  const output: LocateJson = {
     resolvedTarget: {
       id: target.id,
       kind: target.kind,
       name: target.name,
       path: displayPath,
     },
-    resolutionMode: target.resolutionMode === "exact" ? undefined as any : target.resolutionMode,
+    resolutionMode: target.resolutionMode === "exact" ? undefined : target.resolutionMode,
     lineRange,
     container,
     systemPath: systemPathMapped,
@@ -270,7 +237,7 @@ async function resolveWithAmbiguity(
     result = await resolveFileOrEntityFull(client, symbol, { ...opts, format });
   } else {
     // Symbol resolution — use full result to detect ambiguity
-    const allKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method", "constant"];
+    const allKinds: GraphKind[] = ["file", "class", "object", "trait", "interface", "module", "function", "method", "constant"];
     const sep = qualifiedSeparator(symbol);
     result = await rankEntity(client, symbol, allKinds, { ...opts, format, ...(sep ? { silentMiss: true } : {}) });
     // `Class::method`, `Class.method` and `Class#method` are read as a qualified
@@ -302,20 +269,7 @@ async function resolveWithAmbiguity(
       return { target: null, ambiguous: false, answered: true };
     }
     if (format === "json") {
-      printJson({
-        // Locate's ambiguity was never an `error` record, and integrations that
-        // treat any string `error` as a failure would drop the candidates: the
-        // shared slug rides in `code` instead (the exit code is 2, outcome.ts).
-        code: "ambiguous_target",
-        message: `Ambiguous symbol "${symbol}".`,
-        resolvedTarget: null,
-        resolutionMode: "ambiguous",
-        candidates: result.result.candidates,
-        ...(result.result.total != null ? { total: result.result.total } : {}),
-        ...(result.result.truncated ? { truncated: true } : {}),
-        systemPath: null,
-        diagnostics: result.result.diagnostics ?? [],
-      });
+      printJson(locateStrictAmbiguityJson(symbol, result.result));
     } else if (format === "llm") {
       // The shared renderer: one record per candidate with kind, path and a
       // short id. This used to emit `candidates=1:config.ts,2:config.ts` --
@@ -328,6 +282,52 @@ async function resolveWithAmbiguity(
   }
 
   return { target: null, ambiguous: false, miss: result };
+}
+
+// ── json shapes (contracts/locate.ts) ───────────────────────────────────────
+
+/**
+ * A miss: locate's own body (shipped plugins read `diagnostics` from it) plus
+ * the `unresolved_target` envelope every other command's miss carries, so one
+ * parser reads them all.
+ */
+function locateMissJson(
+  symbol: string,
+  reason: { message?: string; reason?: string; files?: string[] } | undefined,
+  guidance: { suggestions?: Suggestion[]; didYouMean?: TargetCandidate[] } | undefined,
+): LocateMissJson {
+  return {
+    resolvedTarget: null,
+    resolutionMode: "none",
+    systemPath: null,
+    diagnostics: ["No graph entity found."],
+    ...unresolvedTargetJson(reason?.message ?? `No graph entity found for "${symbol}".`, {
+      reason: reason?.reason,
+      files: reason?.files,
+      suggestions: guidance?.suggestions,
+    }),
+    didYouMean: guidance?.didYouMean ?? [],
+  };
+}
+
+/**
+ * An ambiguity under --strict. Locate's ambiguity was never an `error` record,
+ * and integrations that treat any string `error` as a failure would drop the
+ * candidates: the shared slug rides in `code` instead (the exit code is 2,
+ * outcome.ts). A listed exception to the miss envelope (contracts/locate.ts).
+ */
+function locateStrictAmbiguityJson(symbol: string, result: AmbiguousResult): LocateStrictAmbiguityJson {
+  return {
+    code: "ambiguous_target",
+    message: ambiguousTargetMessage(symbol),
+    resolvedTarget: null,
+    resolutionMode: "ambiguous",
+    candidates: result.candidates,
+    ...(result.total != null ? { total: result.total } : {}),
+    ...(result.truncated ? { truncated: true as const } : {}),
+    systemPath: null,
+    diagnostics: result.diagnostics ?? [],
+  };
 }
 
 // ── Repo-relative path ──────────────────────────────────────────────────────
@@ -386,7 +386,8 @@ export function renderLocateLlm(output: LocateOutput, symbol: string, retryComma
  */
 function outputLocateText(symbol: string, miss: TextMatchSource, rows: TextMatch[], format: string): void {
   if (format === "json") {
-    printJson(textMatchesJson(symbol, miss, rows, { systemPath: null, diagnostics: [] }));
+    const out: LocateTextMatchesJson = textMatchesJson(symbol, miss, rows, { systemPath: null, diagnostics: [] as string[] });
+    printJson(out);
     return;
   }
   const lines = format === "llm" ? textMatchesLlm(symbol, miss, rows) : textMatchesText(symbol, miss, rows);
@@ -403,7 +404,7 @@ function outputLocate(output: LocateOutput, symbol: string, format: string, retr
     return;
   }
 
-  if (output.stale) renderWarning("Some results may be stale. Run ix map to update.");
+  if (output.resolvedTarget && output.stale) renderWarning("Some results may be stale. Run ix map to update.");
 
   if (!output.resolvedTarget) {
     stderr(`No graph entity found for "${symbol}".`);

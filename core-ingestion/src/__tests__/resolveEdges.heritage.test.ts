@@ -417,7 +417,7 @@ describe('EXTENDS resolution for TypeScript bases', () => {
       parseFile('/repo/src/widget.ts', 'export class W extends Base {}\n')!,
     ];
     const index = buildGlobalResolutionIndex(
-      parsed.map(r => r.filePath), undefined, undefined,
+      parsed.map(r => r.filePath),
       new Map(parsed.map(r => [r.filePath, summarizeParseResult(r)])),
     );
     expect(resolveEdges([parsed[1]], undefined, index)
@@ -474,7 +474,7 @@ describe('EXTENDS resolution for TypeScript bases', () => {
         const { tsModule: _m, tsGlobalTypes: _g, ...old } = summarizeParseResult(r);
         return [r.filePath, r.filePath === srcPath ? summarizeParseResult(r) : { ...old, sig: 'old' }];
       }));
-      const index = buildGlobalResolutionIndex(parsed.map(r => r.filePath), undefined, undefined, summaries);
+      const index = buildGlobalResolutionIndex(parsed.map(r => r.filePath), summaries);
       return resolveEdges(parsed.filter(r => r.filePath === srcPath), undefined, index)
         .filter(edge => edge.predicate === 'EXTENDS')
         .map(edge => `${edge.dstName} -> ${edge.dstFilePath}`);
@@ -615,5 +615,128 @@ describe('EXTENDS edges in the patch', () => {
       '/repo/src/base.js': 'export class Base {}\n',
       [widget]: "import { Base } from './base';\nexport const Widget = class extends Base {};\n",
     }, widget)).toEqual([`${id(widget, 'Widget')} -> ${id('/repo/src/base.js', 'Base')}`]);
+  });
+});
+
+describe('super calls', () => {
+  /** Every CALLS relationship parsed from `filePath`: `src -> dst`. */
+  function parsedCalls(filePath: string, source: string): string[] {
+    return parseFile(filePath, source)!.relationships
+      .filter(rel => rel.predicate === 'CALLS')
+      .map(rel => `${rel.srcName} -> ${rel.dstName}`);
+  }
+
+  /** Where each CALLS edge resolves: `src -> dstFile:dstKey`. */
+  function resolvedCalls(files: Record<string, string>): string[] {
+    const parsed = Object.entries(files).map(([filePath, source]) => parseFile(filePath, source)!);
+    return resolveEdges(parsed)
+      .filter(edge => edge.predicate === 'CALLS')
+      .map(edge => `${edge.srcName} -> ${edge.dstFilePath}:${edge.dstQualifiedKey}`)
+      .sort();
+  }
+
+  it('resolves a TypeScript super call to the base method', () => {
+    expect(resolvedCalls({
+      '/repo/src/base.ts': 'export class Base {\n  run() { return 1; }\n}\n',
+      '/repo/src/child.ts': [
+        "import { Base } from './base';",
+        'export class Child extends Base {',
+        '  run() { return super.run() + 1; }',
+        '}',
+        '',
+      ].join('\n'),
+    })).toEqual(['Child.run -> /repo/src/base.ts:Base.run']);
+  });
+
+  it('resolves a JavaScript super call to the base method', () => {
+    expect(resolvedCalls({
+      '/repo/src/base.js': 'export class Base {\n  run() { return 1; }\n}\n',
+      '/repo/src/child.js': [
+        "import { Base } from './base.js';",
+        'export class Child extends Base {',
+        '  run() { return super.run() + 1; }',
+        '}',
+        '',
+      ].join('\n'),
+    })).toEqual(['Child.run -> /repo/src/base.js:Base.run']);
+  });
+
+  it('resolves a Python super() call to the base method', () => {
+    expect(resolvedCalls({
+      '/repo/app/__init__.py': '',
+      '/repo/app/models.py': 'class Base:\n    def save(self):\n        pass\n',
+      '/repo/app/user.py': [
+        'from .models import Base',
+        '',
+        'class User(Base):',
+        '    def save(self):',
+        '        return super().save()',
+        '',
+        'class Legacy(Base):',
+        '    def save(self):',
+        '        return super(Legacy, self).save()',
+        '',
+      ].join('\n'),
+    })).toEqual([
+      'Legacy.save -> /repo/app/models.py:Base.save',
+      'User.save -> /repo/app/models.py:Base.save',
+    ]);
+  });
+
+  it('does not resolve a super call on an outside base to a same-named class in the repo', () => {
+    expect(resolvedCalls({
+      '/repo/src/vendor/component.ts': 'export class Component {\n  setState() { return 1; }\n}\n',
+      '/repo/src/widget.ts': [
+        "import { Component } from 'react';",
+        'export class Widget extends Component {',
+        '  setState() { return super.setState(); }',
+        '}',
+        '',
+      ].join('\n'),
+    })).toEqual([]);
+    expect(resolvedCalls({
+      '/repo/app/__init__.py': '',
+      '/repo/app/legacy/model.py': 'class Model:\n    def save(self):\n        pass\n',
+      '/repo/app/user.py': [
+        'from django.db.models import Model',
+        '',
+        'class User(Model):',
+        '    def save(self):',
+        '        return super().save()',
+        '',
+      ].join('\n'),
+    })).toEqual([]);
+  });
+
+  it('names a base in the same file', () => {
+    expect(parsedCalls('/repo/app/user.py', [
+      'class Base:',
+      '    def save(self):',
+      '        pass',
+      '',
+      'class User(Base):',
+      '    def save(self):',
+      '        return super().save()',
+      '',
+    ].join('\n'))).toEqual(['User.save -> save', 'User.save -> Base.save']);
+  });
+
+  it('keeps the bare name when the base is not a single plain name', () => {
+    expect(parsedCalls('/repo/app/user.py', [
+      'class User(Base, Mixin):',
+      '    def save(self):',
+      '        return super().save()',
+      '',
+      'class Admin(models.Base):',
+      '    def save(self):',
+      '        return super().save()',
+      '',
+    ].join('\n'))).toEqual(['User.save -> save', 'Admin.save -> save']);
+    expect(parsedCalls('/repo/src/plain.ts', [
+      'export class Plain {',
+      '  run() { return super.run(); }',
+      '}',
+      '',
+    ].join('\n'))).toEqual(['Plain.run -> run']);
   });
 });

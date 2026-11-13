@@ -8,6 +8,7 @@ import type { IxClient } from "../client/api.js";
 import { mapRefreshOutcomePath, mapStalePath } from "./config.js";
 import { loadIngestBaseline } from "./ingest-baseline.js";
 import { llmLine } from "./llm.js";
+import { readState, writeStateAtomic } from "./workspace-state.js";
 
 /**
  * The architecture map left for later (CL-13).
@@ -46,11 +47,16 @@ export interface MapStaleInfo {
 
 const isFiniteNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
+/**
+ * Format versions of the stale marker and the refresh outcome (see
+ * `workspace-state.ts`); a file with none reads as 0, with the same rules.
+ */
+const MAP_STALE_VERSION = 1;
+const MAP_REFRESH_VERSION = 1;
+
 /** The marker for `projectRoot`, or null when there is none. A malformed file reads as none. */
 export function readMapStale(projectRoot: string): MapStaleInfo | null {
-  try {
-    const data = JSON.parse(fs.readFileSync(mapStalePath(projectRoot), "utf-8")) as Record<string, unknown> | null;
-    if (data === null || typeof data !== "object") return null;
+  return readState(mapStalePath(projectRoot), { version: MAP_STALE_VERSION, validate: (data) => {
     if (!isFiniteNumber(data.since)) return null;
     if (data.ingestRev !== null && !isFiniteNumber(data.ingestRev)) return null;
     if (data.lastAttemptAt !== undefined && !isFiniteNumber(data.lastAttemptAt)) return null;
@@ -62,21 +68,15 @@ export function readMapStale(projectRoot: string): MapStaleInfo | null {
       info.regionsAsOf = { map_rev: asOf.map_rev, file_count: asOf.file_count };
     }
     return info;
-  } catch {
-    return null;
-  }
+  } });
 }
 
 function writeMapStale(projectRoot: string, info: MapStaleInfo): void {
-  const target = mapStalePath(projectRoot);
-  const tmp = `${target}.${process.pid}.tmp`;
   try {
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    // Via a temp file and rename, so a reader never sees half a file.
-    fs.writeFileSync(tmp, JSON.stringify(info));
-    fs.renameSync(tmp, target);
+    // Atomically, so a reader never sees half a file.
+    writeStateAtomic(mapStalePath(projectRoot), MAP_STALE_VERSION, info);
   } catch {
-    try { fs.rmSync(tmp, { force: true }); } catch { /* non-critical */ }
+    // Best-effort.
   }
 }
 
@@ -396,29 +396,21 @@ export interface MapRefreshOutcome {
 
 /** The last background refresh's outcome for `projectRoot`, or null. A malformed file reads as none. */
 export function readMapRefreshOutcome(projectRoot: string): MapRefreshOutcome | null {
-  try {
-    const data = JSON.parse(fs.readFileSync(mapRefreshOutcomePath(projectRoot), "utf-8")) as Record<string, unknown> | null;
-    if (data === null || typeof data !== "object") return null;
+  return readState(mapRefreshOutcomePath(projectRoot), { version: MAP_REFRESH_VERSION, validate: (data) => {
     if (!isFiniteNumber(data.startedAt) || !isFiniteNumber(data.pid)) return null;
     const out: MapRefreshOutcome = { startedAt: data.startedAt, pid: data.pid };
     if (isFiniteNumber(data.finishedAt)) out.finishedAt = data.finishedAt;
     if (typeof data.ok === "boolean") out.ok = data.ok;
     if (typeof data.reason === "string") out.reason = data.reason;
     return out;
-  } catch {
-    return null;
-  }
+  } });
 }
 
 function writeMapRefreshOutcome(projectRoot: string, outcome: MapRefreshOutcome): void {
-  const target = mapRefreshOutcomePath(projectRoot);
-  const tmp = `${target}.${process.pid}.tmp`;
   try {
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(tmp, JSON.stringify(outcome));
-    fs.renameSync(tmp, target);
+    writeStateAtomic(mapRefreshOutcomePath(projectRoot), MAP_REFRESH_VERSION, outcome);
   } catch {
-    try { fs.rmSync(tmp, { force: true }); } catch { /* non-critical */ }
+    // Best-effort.
   }
 }
 

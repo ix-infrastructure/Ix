@@ -19,7 +19,7 @@ import {
   type WorkspaceConfig,
 } from "../config.js";
 import { ixHome } from "../ix-home.js";
-import { isLocalEndpoint } from "../backend-version.js";
+import { isLoopbackEndpoint } from "../endpoint.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { assessGraphStats } from "../graph-health.js";
 import { llmLine, printLlmLines } from "../llm.js";
@@ -45,7 +45,11 @@ import { loadMapBaseline } from "../map-baseline.js";
 import { printJson } from "../format.js";
 import { runVerify, type VerifyReport } from "../verify.js";
 import { healthFromError } from "../database-probe.js";
+import { BACKEND_FEATURES, MIN_BACKEND_VERSION, backendBelowMinimum, missingFeatures } from "../../client/features.js";
+import type { GrammarStatus } from "../grammar-status.js";
+import { loadGrammarStatus } from "./ingestion-loader.js";
 import type { CapabilitiesResponse, HealthResponse } from "../../client/types.js";
+import { formatOption } from "../options.js";
 
 interface CheckResult {
   ok: boolean;
@@ -285,6 +289,31 @@ export async function assessDatabase(
   }
 }
 
+/**
+ * "Backend release supported": the release `/v1/health` reports, against
+ * `MIN_BACKEND_VERSION` (client/features.ts). Older is a warning, not a
+ * failure: the CLI still runs, with the fallbacks it carries. A backend that
+ * reports no release (one predating Ix-memory#157, or a local build) is not
+ * judged, since that proves nothing about its age.
+ */
+export function assessBackendRelease(health: HealthResponse | Error | null | undefined): CheckResult {
+  if (health instanceof Error) return { ok: true, detail: "backend unreachable (skipped)" };
+  const release = health?.release_version;
+  const below = backendBelowMinimum(release);
+  if (below === null) {
+    return { ok: true, detail: `not checked: the backend reports no release (this CLI supports ${MIN_BACKEND_VERSION} and later)` };
+  }
+  const lacking = missingFeatures(release).map((f) => BACKEND_FEATURES[f].label);
+  const without = lacking.length > 0 ? `; it lacks ${lacking.join(", ")}` : "";
+  if (below) {
+    return {
+      ok: false, warn: true,
+      detail: `backend ${release} is older than ${MIN_BACKEND_VERSION}, the oldest this CLI supports${without} — upgrade the backend`,
+    };
+  }
+  return { ok: true, detail: `${release} (this CLI supports ${MIN_BACKEND_VERSION} and later)${without}` };
+}
+
 /** What every other command does with a config.yaml that does not parse (#807). */
 const CONFIG_REFUSAL = "other ix commands refuse to run until it is fixed";
 
@@ -335,7 +364,7 @@ function doctorClient(): { endpoint: string; client: IxClient } {
     if (!isConfigParseError(e)) throw e;
     // createClient read the stored token from the file that does not parse.
     // Loopback only, as getLocalToken would have decided.
-    const token = isLocalEndpoint(endpoint) ? process.env.IX_TOKEN?.trim() : undefined;
+    const token = isLoopbackEndpoint(endpoint) ? process.env.IX_TOKEN?.trim() : undefined;
     // eslint-disable-next-line no-restricted-syntax -- the factory cannot build a client without config.yaml
     return { endpoint, client: new IxClient(endpoint, undefined, token ? { token } : {}) };
   }
@@ -423,6 +452,45 @@ export function checkRipgrep(run: () => string = () => execFileSync("rg", ["--ve
   }
 }
 
+/** The doctor check that lists language grammars (#967). */
+export const GRAMMAR_CHECK_NAME = "Language grammars loaded";
+
+/**
+ * "Language grammars loaded": which tree-sitter grammars this install can use.
+ *
+ * Never a failure or a warning. An optional grammar with no prebuild for this
+ * platform (tree-sitter-sas on Windows) cannot be fixed by the user, and a
+ * permanent warning on every such install would teach people to ignore the
+ * yellow line. What was missing was the information: a missing grammar's files
+ * went unparsed with no language named anywhere. So the detail names each one
+ * with its load error, and `grammarLines` lists every grammar under the check.
+ * A parser that will not load at all is "not checked", as in the verify check.
+ */
+export function assessGrammars(statuses: readonly GrammarStatus[]): CheckResult {
+  if (statuses.length === 0) return { ok: true, detail: "not checked: the parser reported no grammars" };
+  const missing = statuses.filter((s) => !s.loaded);
+  if (missing.length === 0) return { ok: true, detail: `all ${statuses.length} loaded` };
+  const named = missing.map((s) => `${s.language} (${s.reason ?? "unknown error"})`).join(", ");
+  return {
+    ok: true,
+    detail: `${statuses.length - missing.length} of ${statuses.length} loaded; unavailable: ${named} — ` +
+      `files in ${missing.length === 1 ? "that language are" : "those languages are"} not parsed`,
+  };
+}
+
+/** Text-mode lines under the grammar check: the loaded grammars, then each missing one with its reason. */
+export function grammarLines(statuses: readonly GrammarStatus[]): Array<{ loaded: boolean; text: string }> {
+  const loaded = statuses.filter((s) => s.loaded).map((s) => s.language);
+  const lines: Array<{ loaded: boolean; text: string }> = [];
+  if (loaded.length > 0) lines.push({ loaded: true, text: `loaded: ${loaded.join(", ")}` });
+  for (const s of statuses) {
+    if (s.loaded) continue;
+    const pkg = s.package ? ` (${s.package})` : "";
+    lines.push({ loaded: false, text: `unavailable: ${s.language}${pkg} — ${s.reason ?? "unknown error"}` });
+  }
+  return lines;
+}
+
 /**
  * "Graph matches a re-parse": the last line of defence for a graph whose
  * counts look fine and whose nodes do not (see `verify.ts`).
@@ -483,7 +551,7 @@ export function registerDoctorCommand(program: Command): void {
   program
     .command("doctor")
     .description("Check Ix system health — server, database, graph integrity")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .action(async (opts: { format: string }) => {
       const { endpoint, client } = doctorClient();
       // Asked of the file directly: with IX_ENDPOINT and IX_TOKEN set,
@@ -553,6 +621,8 @@ export function registerDoctorCommand(program: Command): void {
         throw e;
       }));
 
+      /** Filled by the grammar check below; `[]` until it runs or when it cannot. */
+      let grammars: GrammarStatus[] = [];
       const checks: Check[] = [
         {
           name: "Server reachable",
@@ -571,7 +641,7 @@ export function registerDoctorCommand(program: Command): void {
               // indistinguishable from "not started yet". Say what the stack
               // actually reported. Ix#614.
               const base = e.message ?? "unreachable";
-              const failure = isLocalEndpoint(endpoint) && dockerAvailable() ? diagnoseBackendStack() : null;
+              const failure = isLoopbackEndpoint(endpoint) && dockerAvailable() ? diagnoseBackendStack() : null;
               if (!failure) return { ok: false, detail: base };
               const parts = [`${base} — ${failure.service} is ${failure.state}`];
               if (failure.lastError) parts.push(`  last log: ${failure.lastError}`);
@@ -593,6 +663,16 @@ export function registerDoctorCommand(program: Command): void {
           },
         },
         {
+          name: "Backend release supported",
+          run: async () => {
+            try {
+              return assessBackendRelease(await health());
+            } catch (e) {
+              return assessBackendRelease(e instanceof Error ? e : new Error(String(e)));
+            }
+          },
+        },
+        {
           name: "Backend token",
           run: async () => {
             let caps: CapabilitiesResponse | Error;
@@ -601,7 +681,7 @@ export function registerDoctorCommand(program: Command): void {
             } catch (e) {
               caps = e instanceof Error ? e : new Error(String(e));
             }
-            return assessLocalAuth(caps, client.sendsToken === true, isLocalEndpoint(endpoint));
+            return assessLocalAuth(caps, client.sendsToken === true, isLoopbackEndpoint(endpoint));
           },
         },
         {
@@ -822,6 +902,17 @@ export function registerDoctorCommand(program: Command): void {
           ),
         },
         { name: "ripgrep on PATH", run: async () => checkRipgrep() },
+        {
+          name: GRAMMAR_CHECK_NAME,
+          run: async () => {
+            try {
+              grammars = await loadGrammarStatus();
+            } catch (e: any) {
+              return { ok: true, detail: `not checked: the parser did not load (${String(e?.message ?? e).split("\n")[0]})` };
+            }
+            return assessGrammars(grammars);
+          },
+        },
       );
 
       // Windows-only: a launcher pointing at a CLI the upgrade moved (Ix#385).
@@ -861,7 +952,9 @@ export function registerDoctorCommand(program: Command): void {
       }
 
       if (opts.format === "json") {
-        printJson({ healthy: !hasFailure, hasWarnings: hasWarning, checks: results });
+        // `grammars` is additive: every grammar and whether it loaded, with the
+        // load error for one that did not (#967). `[]` when not checked.
+        printJson({ healthy: !hasFailure, hasWarnings: hasWarning, checks: results, grammars });
         return;
       }
 
@@ -871,6 +964,11 @@ export function registerDoctorCommand(program: Command): void {
         const icon = r.ok ? chalk.green("✓") : r.warn ? chalk.yellow("!") : chalk.red("✗");
         const detail = chalk.dim(` — ${r.detail}`);
         console.log(`  ${icon} ${r.name}${detail}`);
+        if (r.name === GRAMMAR_CHECK_NAME) {
+          for (const line of grammarLines(grammars)) {
+            console.log(`      ${line.loaded ? chalk.dim(line.text) : chalk.yellow(line.text)}`);
+          }
+        }
       }
 
       console.log();

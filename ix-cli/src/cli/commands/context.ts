@@ -14,10 +14,12 @@ import {
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import type {
+  ConfidenceBreakdown,
   ConflictReport,
   DecisionReport,
   GraphNode,
   IntentReport,
+  ScoredClaim,
   StructuredContext,
 } from "../../client/types.js";
 import { resolveWorkspaceRoot } from "../config.js";
@@ -48,15 +50,17 @@ import { companionHistory, expandIssueCompanions } from "../explain/issue-compan
 import { collectTextReferences, gitRepoAccess, type RepoAccess, type TextSource } from "../explain/text-references.js";
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
-import { parseBudgetOption, parsePickOption, STRICT_TARGET_HELP, parseRevisionOption } from "../options.js";
+import { choiceOption, formatOption, kindOption, parseBudgetOption, parseRevisionOption, pathOption, pickOption, strictOption } from "../options.js";
 import { activeReadScope, ensureReadScope, isRawId, resolveFileOrEntityFull, resolveFileOrReport, type ResolutionNotice, type ResolvedEntity } from "../resolve.js";
 import { createStaleProbe, hasCompletedSourceGraphBaseline } from "../stale.js";
 import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailure } from "../ui.js";
 import { printJson, relativePath, takeResolutionNotices } from "../format.js";
-import { forMcp, suggest, toolCall } from "../next-step.js";
+import { currentCaller, hint, type Hint } from "../next-step.js";
 import {
   assessTargetStructure, checkGraphHealth, graphHealthJson, isUnhealthy, worseHealth, type GraphHealth,
 } from "../graph-health.js";
+import { CONTAINER_KINDS } from "../graph-model.js";
+import { findFileNode } from "../file-node.js";
 
 /** The `--max-*` knobs that bound a bundle. */
 interface BudgetSnapshot {
@@ -379,14 +383,13 @@ export function registerContextCommand(program: Command): void {
       "--lean",
       "With --from-issue: only the starting points Ix trusts and the next few files, or one line saying it trusts none",
     )
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
-    .option(
-      "--depth <depth>",
-      `Context-graph expansion depth (${CONTEXT_DEPTHS.join("|")})`,
-      parseContextDepthOption,
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
+    .addOption(
+      choiceOption("--depth <depth>", `Context-graph expansion depth (${CONTEXT_DEPTHS.join("|")})`, CONTEXT_DEPTHS)
+        .argParser(parseContextDepthOption),
     )
     .option("--as-of-rev <n>", "Historical context as of a graph revision", parseRevisionOption)
     // No Commander default on the --max-* flags, so `parseRequestedBudgets`
@@ -408,7 +411,7 @@ export function registerContextCommand(program: Command): void {
       `${budgetField("maxChars").help} (overrides --max-tokens; clamped to ${budgetField("maxChars").min}-${budgetField("maxChars").max})`,
       budgetParser("maxChars"),
     )
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .option("--out <path>", "Write the JSON bundle to this file instead of stdout")
     .option("--save <id>", "Persist the bundle as a resumable investigation state")
     .option("--resume <id>", "Render a saved investigation state without a backend")
@@ -1743,26 +1746,16 @@ async function collectHistory(
  * back to a synthetic id rather than dropping a file the graph has not seen.
  */
 async function fileNodeId(client: IxClient, path: string): Promise<string> {
-  return (await findFileNode(client, path)) ?? `file:${path}`;
+  return (await fileNodeIdOrUndefined(client, path)) ?? `file:${path}`;
 }
 
 /**
- * Search candidates for one file node. `scope` narrows the search to the path
- * on a backend that applies it (Ix-memory >= 1.0.31); an older one ignores it
- * and returns every file sharing the basename, so the limit has to reach past
- * a monorepo's `index.ts`, `__init__.py` or `mod.rs` -- at 10 a file ranked
- * eleventh among its namesakes had no node, and `--from-issue` discarded a path
- * the issue named for a BM25 guess.
+ * A file's graph node id, or undefined when the graph has no node for it or
+ * the search failed. Exact paths only: the id is paired with this path.
  */
-const FILE_NODE_SEARCH_LIMIT = 200;
-
-/** A file's graph node id, or undefined when the graph has no node for it. */
-export async function findFileNode(client: IxClient, path: string): Promise<string | undefined> {
-  const name = path.split("/").pop()!;
-  const nodes = await client.search(name, {
-    kind: "file", nameOnly: true, limit: FILE_NODE_SEARCH_LIMIT, scope: path, ...activeReadScope(),
-  }).catch(() => []);
-  return nodes.find((n) => relativePath(n.provenance?.sourceUri) === path)?.id;
+async function fileNodeIdOrUndefined(client: IxClient, path: string): Promise<string | undefined> {
+  const node = await findFileNode(client, path, { scope: activeReadScope() }).catch(() => undefined);
+  return node?.id;
 }
 
 /** Search candidates fetched per name the issue mentions; only exact names are kept. */
@@ -1793,9 +1786,9 @@ async function buildIssueBundle(
   // A path start has no node yet, and the graph may not have one either: it
   // does not index every tracked file. chooseCentre walks BM25 for one it does.
   const { starts, centre, walked } = await chooseCentre(
-    plan.starts, plan.bm25, (path) => findFileNode(client, path), CENTRE_FALLBACK_TRIES, plan.sourcePaths);
+    plan.starts, plan.bm25, (path) => fileNodeIdOrUndefined(client, path), CENTRE_FALLBACK_TRIES, plan.sourcePaths);
   if (!centre) {
-    issueFailure(
+    reportFailure(
       "issue_unresolved",
       starts.length === 0
         ? `Nothing the issue names resolved to a definition${plan.unresolved.length > 0 ? ` (tried ${plan.unresolved.slice(0, 5).join(", ")})` : ""}, and no tracked source file matched its text. Name a symbol or file and run ix context <target>.`
@@ -1925,7 +1918,7 @@ async function readIssueOrReport(arg: string, format: string | undefined): Promi
   try {
     text = await readIssueText(arg);
   } catch (error) {
-    issueFailure(
+    reportFailure(
       "issue_unreadable",
       `Cannot read the issue from ${arg === "-" ? "stdin" : `"${arg}"`}: ${(error as Error).message}`,
       format,
@@ -1933,7 +1926,7 @@ async function readIssueOrReport(arg: string, format: string | undefined): Promi
     return undefined;
   }
   if (!text.trim()) {
-    issueFailure("empty_issue", `The issue ${arg === "-" ? "on stdin" : `in "${arg}"`} is empty.`, format);
+    reportFailure("empty_issue", `The issue ${arg === "-" ? "on stdin" : `in "${arg}"`} is empty.`, format);
     return undefined;
   }
   return text;
@@ -2039,21 +2032,6 @@ export function renderLeanIssueLlm(view: LeanIssueView): string[] {
   }
   for (const f of view.alsoRanked) out.push(llmLine("ranked", [["path", f.path]]));
   return out;
-}
-
-/**
- * A `--from-issue` failure, readable by the format asked for. `reportFailure`
- * writes nothing to stdout under `--format json`, so a JSON caller got an empty
- * stdout and had to scrape stderr; this prints the record the other commands'
- * JSON failures use.
- */
-function issueFailure(code: string, message: string, format: string | undefined): void {
-  if (format === "json") {
-    printJson({ error: code, message });
-    process.exitCode = 1;
-    return;
-  }
-  reportFailure(code, message, format);
 }
 
 /** A secondary starting point's one-hop facts and related files. Best-effort. */
@@ -2515,6 +2493,36 @@ const TIER = { target: 0, issue: 1, structural: 2, claims: 3, relationships: 4, 
 const TIER_WIDTH = 1000;
 const tierScore = (tier: number, index = 0): number => tier * TIER_WIDTH + Math.min(index, TIER_WIDTH - 1);
 
+/** The six factors the backend multiplies into a claim's confidence. */
+const CONFIDENCE_FACTORS = [
+  "baseAuthority",
+  "verification",
+  "recency",
+  "corroboration",
+  "conflictPenalty",
+  "intentAlignment",
+] as const;
+
+/**
+ * A claim's confidence for its evidence reason, to two places: the product of
+ * the six factor values in `confidence`, clamped to [0, 1]. That is the
+ * backend's `ConfidenceBreakdown.score` (and `compactClaims[].confidence.score`),
+ * which is not serialized in `claims[].confidence`, so reading
+ * `confidence.score` printed "n/a" for every claim (#1007). `finalScore` is
+ * not used here: it is relevance × confidence, and the reason already names
+ * relevance on its own. "n/a" when any factor value is missing.
+ */
+function claimConfidence(scored: ScoredClaim): string {
+  const breakdown = scored.confidence as Partial<ConfidenceBreakdown> | undefined;
+  let product = 1;
+  for (const name of CONFIDENCE_FACTORS) {
+    const value = breakdown?.[name]?.value;
+    if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
+    product *= value;
+  }
+  return String(Math.round(Math.min(1, Math.max(0, product)) * 100) / 100);
+}
+
 /** Deterministic evidence ranking: tier, then a stable id tiebreaker. */
 function rankEvidence(input: {
   resolved: { id: string; name: string; kind: string };
@@ -2683,7 +2691,7 @@ function rankEvidence(input: {
       source: "context.claims",
       title: scored.claim.statement,
       score: tierScore(TIER.claims, 0),
-      reason: `context claim (relevance ${scored.relevance}, confidence ${scored.confidence?.score ?? "n/a"})`,
+      reason: `context claim (relevance ${scored.relevance}, confidence ${claimConfidence(scored)})`,
       refs: [scored.claim.entityId],
     });
   }
@@ -2858,7 +2866,9 @@ function issueEvidence(issue: IssueBundleInput): EvidenceItem[] {
  * {@link llmNextByCut}.
  */
 export function llmNextLines(bundle: ContextBundle): string[] {
-  return forMcp()
+  // A reader with tools is sent to the graph's own questions; one at a shell
+  // gets the reads (see nextToolCalls for why they differ).
+  return currentCaller().style === "tool"
     ? nextToolCalls(bundle, onDiskSymbolCheck())
       .map((step) => llmLine("next", { cmd: step.cmd, why: step.why, stale: step.stale, reanchor: step.reanchor }))
     : renderedNextReads(bundle).map((row) => llmLine("next", { cmd: row.cmd, stale: row.stale || undefined }));
@@ -3098,60 +3108,47 @@ function summariseCut(dropped: EvidenceItem[]): Array<{ what: string; count: num
  * for anything and pays for everything.
  */
 function cutLever(bundle: ContextBundle, top: { what: string }): string {
-  if (forMcp()) return mcpCutLever(bundle, top);
-  const name = bundle.target.name;
-  const container = CONTAINER_TARGET_KINDS.includes(bundle.target.kind.toLowerCase());
-  switch (top.what) {
-    case "member":
-      return container
-        ? `run ix context on one of them, or raise --max-tokens`
-        : `ix contains ${name}, or raise --max-tokens`;
-    case "caller":
-      return `ix callers ${name}, or raise --max-tokens`;
-    case "dependent":
-      return `ix impact ${name}, or raise --max-tokens`;
-    case "import":
-      return `ix imports ${name}, or raise --max-tokens`;
-    case "call":
-      return `ix callees ${name}, or raise --max-tokens`;
-    case "relationship":
-      return `ix depends ${name}, or raise --max-tokens`;
-    case "claim":
-    case "conflict":
-      return `ix conflicts ${name}, or raise --max-tokens`;
-    default:
-      return `raise --max-tokens`;
-  }
-}
-
-const CONTAINER_TARGET_KINDS: readonly string[] = ["file", "module", "class", "object", "trait", "interface"];
-
-/**
- * {@link cutLever} for an MCP caller: only core tools, and `max_tokens` for
- * the budget, since `ix_context` takes no flags. `ix contains`, `ix depends`
- * and `ix conflicts` have no core tool, so those cuts fall back to the nearest
- * one that does exist, or to the budget alone.
- */
-function mcpCutLever(bundle: ContextBundle, top: { what: string }): string {
+  const caller = currentCaller();
   const { name, path } = bundle.target;
-  const container = CONTAINER_TARGET_KINDS.includes(bundle.target.kind.toLowerCase());
-  const pin = container ? {} : { path };
-  const budget = "raise max_tokens (default 3000)";
-  switch (top.what) {
-    case "member":
-      return container ? `call ix_context on one of them, or ${budget}` : budget;
-    case "caller":
-      return `${suggest.neighbors(name, "callers", pin)}, or ${budget}`;
-    case "dependent":
-    case "relationship":
-      return `${suggest.impact(name, pin)}, or ${budget}`;
-    case "import":
-      return `${suggest.neighbors(name, "imports", pin)}, or ${budget}`;
-    case "call":
-      return `${suggest.neighbors(name, "callees", pin)}, or ${budget}`;
-    default:
-      return budget;
+  const container = CONTAINER_KINDS.has(bundle.target.kind.toLowerCase());
+  // Pins the target's file over MCP; the CLI forms never carried a path.
+  const pin = container ? undefined : path;
+  const budget = `raise ${caller.lever("max_tokens") ?? "the token budget"}`;
+  if (top.what === "member" && container) {
+    const context = caller.command({ action: "context" });
+    if (!context) return budget;
+    return `${caller.style === "tool" ? "call" : "run"} ${context} on one of them, or ${budget}`;
   }
+  // The steps that get the cut back, in order of preference; the first the
+  // reader can run is named. `ix contains`, `ix depends` and `ix conflicts`
+  // have no core MCP tool, so a core session falls back to the nearest one
+  // that does exist, or to the budget alone.
+  const steps: Hint[] = (() => {
+    switch (top.what) {
+      case "member":
+        return [{ action: "contains", symbol: name }];
+      case "caller":
+        return [{ action: "neighbors", symbol: name, relation: "callers", path: pin }];
+      case "dependent":
+        return [{ action: "impact", target: name, path: pin }];
+      case "import":
+        return [{ action: "neighbors", symbol: name, relation: "imports", path: pin }];
+      case "call":
+        return [{ action: "neighbors", symbol: name, relation: "callees", path: pin }];
+      case "relationship":
+        return [{ action: "depends", symbol: name }, { action: "impact", target: name, path: pin }];
+      case "claim":
+      case "conflict":
+        return [{ action: "conflicts", symbol: name }];
+      default:
+        return [];
+    }
+  })();
+  for (const step of steps) {
+    const command = caller.command(step);
+    if (command !== undefined) return `${command}, or ${budget}`;
+  }
+  return budget;
 }
 
 /** One sentence naming what was cut and the cheapest way to get it back. */
@@ -3362,13 +3359,14 @@ export const NEXT_READ_MAX_LINES = 120;
  * the target's own range comes last, capped so a 558-line class does not turn
  * into a 558-line suggestion.
  *
- * Every call names core tools only, and pins the target's file with `path=` so
- * an ambiguous name resolves to the entity this bundle was built for.
+ * Every step names a tool the session was offered (a step it was not is left
+ * out), and pins the target's file with `path=` so an ambiguous name resolves
+ * to the entity this bundle was built for.
  *
  * The read step carries `stale: true` when its file changed since the last
  * ingest (its range is from the last ingest), and then, if the symbol re-anchors
- * safely (the same checks as {@link nextReads}), `reanchor`: an `ix_read
- * symbol=<name> path=<file>` call that lands on where the name is now.
+ * safely (the same checks as {@link nextReads}), `reanchor`: a symbol read
+ * pinned to the file, which lands on where the name is now.
  */
 export function nextToolCalls(
   bundle: ContextBundle,
@@ -3379,14 +3377,15 @@ export function nextToolCalls(
   const isFile = kind.toLowerCase() === "file";
   // A file resolves by its path; a symbol by name, pinned to its file.
   const symbol = isFile ? (path ?? name) : name;
-  const pin = isFile ? {} : { path };
+  const pin = isFile ? undefined : path;
+  const push = (step: Hint, why: string): void => {
+    const cmd = hint(step);
+    if (cmd !== undefined) steps.push({ cmd, why });
+  };
 
-  steps.push(
-    isFile
-      ? { cmd: suggest.neighbors(symbol, "imported_by", pin), why: "every file that imports this one" }
-      : { cmd: suggest.neighbors(symbol, "callers", pin), why: "every call site across files, from the graph rather than a name match" },
-  );
-  steps.push({ cmd: suggest.impact(symbol, pin), why: "what a change here reaches, before you edit it" });
+  if (isFile) push({ action: "neighbors", symbol, relation: "imported_by", path: pin }, "every file that imports this one");
+  else push({ action: "neighbors", symbol, relation: "callers", path: pin }, "every call site across files, from the graph rather than a name match");
+  push({ action: "impact", target: symbol, path: pin }, "what a change here reaches, before you edit it");
 
   const readItem = bundle.evidence.find(
     (item) => item.location?.path && item.location.lineStart !== undefined && item.location.lineEnd !== undefined,
@@ -3394,17 +3393,21 @@ export function nextToolCalls(
   const read = readItem?.location;
   if (readItem && read?.lineStart !== undefined && read.lineEnd !== undefined) {
     const end = Math.min(read.lineEnd, read.lineStart + NEXT_READ_MAX_LINES - 1);
-    // Additive: the range call is unchanged; a stale file adds `stale` and,
-    // where the name re-anchors safely, the symbol form beside it.
-    const { stale, symbol } = rowFreshness(bundle)(readItem, read.path, symbolRead);
-    steps.push({
-      cmd: toolCall("ix_read", { symbol: `${read.path}:${read.lineStart}-${end}` }),
-      why: end < read.lineEnd
-        ? `first ${NEXT_READ_MAX_LINES} of ${read.lineEnd - read.lineStart + 1} lines of the top-ranked evidence`
-        : "the top-ranked evidence",
-      ...(stale ? { stale: true as const } : {}),
-      ...(symbol ? { reanchor: toolCall("ix_read", { symbol, path: read.path }) } : {}),
-    });
+    const cmd = hint({ action: "read", target: `${read.path}:${read.lineStart}-${end}` });
+    if (cmd !== undefined) {
+      // Additive: the range call is unchanged; a stale file adds `stale` and,
+      // where the name re-anchors safely, the symbol form beside it.
+      const { stale, symbol } = rowFreshness(bundle)(readItem, read.path, symbolRead);
+      const reanchor = symbol ? hint({ action: "read", target: symbol, path: read.path }) : undefined;
+      steps.push({
+        cmd,
+        why: end < read.lineEnd
+          ? `first ${NEXT_READ_MAX_LINES} of ${read.lineEnd - read.lineStart + 1} lines of the top-ranked evidence`
+          : "the top-ranked evidence",
+        ...(stale ? { stale: true as const } : {}),
+        ...(reanchor ? { reanchor } : {}),
+      });
+    }
   }
   return steps;
 }

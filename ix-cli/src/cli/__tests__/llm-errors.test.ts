@@ -74,7 +74,7 @@ describe("detectRequestedFormat", () => {
     expect(detectRequestedFormat(["text", "--", "--format", "llm"])).toBeUndefined();
   });
 
-  it("does not read IX_FORMAT — that default is not in effect yet", () => {
+  it("reads only what was typed: IX_FORMAT is resolveErrorFormat's job", () => {
     const original = process.env.IX_FORMAT;
     process.env.IX_FORMAT = "llm";
     try {

@@ -92,7 +92,9 @@ describe("ix mcp", () => {
 
     // Dropped on purpose: ix_query (deprecated) and ix_docs_tool (a composite
     // of ix_overview). ix_neighbors is served. ix_status is Gemini's name for
-    // ix_health.
+    // ix_health. ix_decide here is the Pro decision recorder; the
+    // openclaw/opencode `ix-decide` pre-edit verdict is a different tool and
+    // is not served (#998, mcp-plugin-consolidation.test.ts).
     for (const tool of ["ix_decide", "ix_ingest", "ix_health", "ix_locate", "ix_impact", "ix_neighbors"]) {
       expect(names).toContain(tool);
     }
