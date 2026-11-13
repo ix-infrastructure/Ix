@@ -30,7 +30,8 @@ const client = {
   expand: async (id: string, opts: { direction: string; predicates: string[] }) => {
     const key = `${id} ${opts.direction} ${opts.predicates.join(",")}`;
     graph.calls.push(key);
-    return { nodes: graph.value.get(key) ?? [], edges: [] };
+    // Partial nodes, as the code under test reads them: not full GraphNodes.
+    return { nodes: graph.value.get(key) ?? [], edges: [] } as never;
   },
   // Name search, as the backend answers it: fuzzy, so callers match the name exactly.
   search: async (term: string) => {

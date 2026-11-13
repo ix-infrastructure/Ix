@@ -90,7 +90,7 @@ export default defineConfig({
         },
         {
           label: 'Community',
-          items: ['community/contributing', 'community/security', 'community/support'],
+          items: ['community/contributing', 'community/adding-a-language', 'community/security', 'community/support'],
         },
       ],
     }),

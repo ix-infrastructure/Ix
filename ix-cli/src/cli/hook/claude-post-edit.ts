@@ -8,6 +8,7 @@ import { SourceFiles } from "../edge-sites.js";
 import { isSourcePath } from "../explain/issue.js";
 import type { FileDiff } from "./session.js";
 import { canonicalPath, gitShowHead, symbolKey } from "./session.js";
+import { CLAUDE_EDIT_TOOLS } from "./hosts/claude.js";
 import { hookTimeoutMs, postToolUseOutput } from "./io.js";
 import {
   DEFAULT_TOKEN_BUDGET, estimateTokens, fitToBudget, gatherAround, hasDependents, type AroundRequest, type AroundResult, type LineRange,
@@ -69,7 +70,7 @@ export interface HookOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-export const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write"]);
+export const EDIT_TOOLS: ReadonlySet<string> = CLAUDE_EDIT_TOOLS;
 /** Where a `new_string` occurs more often than this, it says nothing about where the edit was. */
 const MAX_OCCURRENCES = 3;
 

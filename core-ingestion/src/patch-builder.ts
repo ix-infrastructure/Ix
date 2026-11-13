@@ -2,7 +2,17 @@
 
 import * as crypto from 'node:crypto';
 import * as nodePath from 'node:path';
-import type { GraphPatchPayload, PatchOp } from './types.js';
+import type { GraphPatchPayload } from './types.js';
+import type {
+  ChunkNodeAttrs,
+  EdgePredicate,
+  ExternalNodeAttrs,
+  FileNodeAttrs,
+  PatchOp,
+  ResolvedEdgeAttrs,
+  SymbolNodeAttrs,
+  UpsertEdgeOp,
+} from './schema.js';
 import { resolveEdges } from './index.js';
 import type { FileParseResult, ParsedEntity, ResolutionTier, ResolvedEdge } from './index.js';
 
@@ -39,7 +49,7 @@ function makeIds(workspaceId: string) {
     nodeId: (filePath: string, name: string): string =>
       deterministicId(`${ns}${normalizePath(filePath)}:${name}`),
 
-    edgeId: (filePath: string, src: string, dst: string, predicate: string): string =>
+    edgeId: (filePath: string, src: string, dst: string, predicate: EdgePredicate): string =>
       deterministicId(`${ns}${normalizePath(filePath)}:${src}:${dst}:${predicate}`),
 
     // Chunk id is keyed on file + kind + name + start line to survive minor edits.
@@ -61,6 +71,8 @@ function makeIds(workspaceId: string) {
  * Exposed so the Path-2 stitcher (CLI) can reference a repo's entry node and its
  * importing nodes by the SAME id buildPatch produces — never a recomputed guess.
  * Mirrors buildPatch: the file node's key is the file entity name = basename.
+ *
+ * @public The CLI loads this from dist (`ingestion-loader.ts`), out of knip's sight.
  */
 export function fileNodeId(workspaceId: string, filePath: string): string {
   return makeIds(workspaceId).nodeId(filePath, nodePath.basename(filePath));
@@ -118,7 +130,7 @@ function deduplicateUpsertEdges(ops: PatchOp[]): PatchOp[] {
       deduplicated.push(op);
       continue;
     }
-    const existing = deduplicated[existingIndex];
+    const existing = deduplicated[existingIndex] as UpsertEdgeOp;
     if (existing.src !== op.src || existing.dst !== op.dst || existing.predicate !== op.predicate) {
       throw new Error(`Conflicting UpsertEdge identity for deterministic id ${edgeId}`);
     }
@@ -232,10 +244,10 @@ function unresolvedCallRecorder(knownNodeIds: ReadonlySet<string>, fileNodeId: s
       if (byNode.size === 0) return;
       for (const op of ops) {
         if (op.type !== 'UpsertNode') continue;
-        const names = byNode.get(op.id as string);
+        const names = byNode.get(op.id);
         if (!names) continue;
         op.attrs = {
-          ...((op.attrs as Record<string, unknown> | undefined) ?? {}),
+          ...op.attrs,
           unresolved_calls: [...names].slice(0, UNRESOLVED_CALLS_CAP),
           unresolved_call_count: names.size,
         };
@@ -248,6 +260,13 @@ function unresolvedCallRecorder(knownNodeIds: ReadonlySet<string>, fileNodeId: s
 // Build a GraphPatchPayload from a FileParseResult
 // ---------------------------------------------------------------------------
 
+/**
+ * The patch for one file resolved on its own: `buildPatchWithResolution` over
+ * the edges `resolveEdges` finds inside this file alone. There is one op
+ * builder; this is it with no other file in view, so a cross-file call has no
+ * destination and is recorded on its caller as unresolved. The CLI resolves a
+ * whole repo and calls `buildPatchWithResolution` directly.
+ */
 export function buildPatch(
   result: FileParseResult,
   sourceHash: string,
@@ -255,265 +274,13 @@ export function buildPatch(
   previousSourceHash?: string,
   multiRepo?: MultiRepoContext,
 ): GraphPatchPayload {
-  const { entities, chunks } = result;
-  // A typed receiver call is resolved even within one file: its exact member
-  // decides whether a receiver-only relationship becomes an edge at all.
-  if (result.relationships.some(r => r.receiverType || r.receiverFactory)) {
-    return buildPatchWithResolution(result, sourceHash, workspaceId, resolveEdges([result]), previousSourceHash, multiRepo);
-  }
-  // A helper-literal import is inferred and only means something once resolved
-  // to a tracked file; without resolution it would be a dangling edge.
-  const relationships = result.relationships.filter(r => r.importVia !== 'helper');
-  // Two paths, deliberately distinct (see toMemberRelativePath):
-  //  - filePath (workspace-relative, repo-prefixed in a co-ingest) is PROVENANCE:
-  //    source_uri / file_uri / patch id. Reads reconstruct an absolute path by
-  //    joining it to the workspace root, so it must stay relative to that root.
-  //  - idPath (member-relative) is IDENTITY: node / edge / chunk ids fold it so a
-  //    member's ids are byte-identical whether ingested alone or in a system.
-  // Single repo: idPath === filePath.
-  const filePath = result.filePath;
-  const idPath = toMemberRelativePath(result.filePath, multiRepo);
-  const { nodeId, edgeId, chunkId, computePatchId, legacyPatchId } = makeIds(workspaceId);
-  const ops: PatchOp[] = [];
-
-  // Build a qualified-key map so that same-named entities in different
-  // enclosing classes within the same file get distinct nodeIds.
-  // e.g.  ClassA.update  vs  ClassB.update  instead of both being "update".
-  const entityQKey = new Map<ParsedEntity, string>();
-  for (const e of entities) {
-    entityQKey.set(e, e.container ? `${e.container}.${e.name}` : e.name);
-  }
-
-  // Reverse lookup: plain name → list of qualified keys (for edge resolution).
-  const nameToQKeys = new Map<string, string[]>();
-  for (const [e, qk] of entityQKey) {
-    const list = nameToQKeys.get(e.name) ?? [];
-    list.push(qk);
-    nameToQKeys.set(e.name, list);
-  }
-
-  // Set of all qualified keys defined in this file — used to distinguish same-file
-  // dotted calls (e.g. "Foo.bar" where Foo is defined here) from external qualified
-  // calls (e.g. "dplyr.filter" from R's pkg::func syntax) that would produce phantoms.
-  const allQKeys = new Set<string>(entityQKey.values());
-
-  // Resolve a relationship endpoint to the best qualified key.
-  // For unambiguous names (appear once), returns the single qualified key.
-  // For ambiguous names (appear multiple times), falls back to the plain name
-  // so that the edge still points to *something* deterministic.
-  function resolveKey(name: string, container?: string): string {
-    const rawKeys = nameToQKeys.get(name);
-    if (!rawKeys) return name;
-    // Deduplicate: @overload in Python (and similar patterns in other languages)
-    // produces multiple definitions with identical qualified keys. A Set collapses
-    // these so we don't mistake three `Session.execute` overloads for ambiguity.
-    const keys = [...new Set(rawKeys)];
-    if (keys.length === 1) return keys[0];
-    // More than one distinct entity with this name — try to pick by container
-    if (container) {
-      const qualified = `${container}.${name}`;
-      if (keys.includes(qualified)) return qualified;
-    }
-    // Ambiguous: return plain name so we don't silently drop the edge
-    return name;
-  }
-
-  // UpsertNode for each entity (deduplicated by id — last occurrence wins)
-  const seenNodeIds = new Set<string>();
-  for (const e of entities) {
-    const qk = entityQKey.get(e)!;
-    const id = nodeId(idPath, qk);
-    if (!seenNodeIds.has(id)) {
-      seenNodeIds.add(id);
-      const roleAttrs = e.kind === 'file'
-        ? { role: result.fileRole.role, role_confidence: result.fileRole.role_confidence, role_signals: result.fileRole.role_signals, ...(result.hasParseErrors ? { parse_errors: true } : {}) }
-        : { role: result.fileRole.role, role_source: 'inherited_from_file' };
-      ops.push({
-        type: 'UpsertNode',
-        id,
-        kind: e.kind,
-        name: e.name,
-        attrs: {
-          line_start: e.lineStart,
-          line_end: e.lineEnd,
-          language: e.language,
-          ...roleAttrs,
-        },
-      });
-    }
-  }
-
-  // UpsertNode + edges for each chunk
-  const fileNodeId = nodeId(idPath, entities.find(e => e.kind === 'file')?.name ?? idPath);
-  for (const chunk of chunks) {
-    const cid = chunkId(idPath, chunk.chunkKind, chunk.name, chunk.lineStart);
-    const chunkName = chunk.name ?? `file_body:${chunk.lineStart}`;
-    const chunkNodeKind = chunk.chunkKind === 'section' ? 'section' : 'chunk';
-    ops.push({
-      type: 'UpsertNode',
-      id: cid,
-      kind: chunkNodeKind,
-      name: chunkName,
-      attrs: {
-        file_uri: filePath,
-        language: chunk.language,
-        chunk_kind: chunk.chunkKind,
-        start_line: chunk.lineStart,
-        end_line: chunk.lineEnd,
-        start_byte: chunk.startByte,
-        end_byte: chunk.endByte,
-        content_hash: chunk.contentHash,
-        parser_version: extractorName(),
-      },
-    });
-    // File -[CONTAINS]-> Chunk
-    ops.push({
-      type: 'UpsertEdge',
-      id: edgeId(idPath, fileNodeId, cid, 'CONTAINS_CHUNK'),
-      src: fileNodeId,
-      dst: cid,
-      predicate: 'CONTAINS_CHUNK',
-      attrs: {},
-    });
-    // Chunk -[DEFINES]-> Symbol (only for named chunks whose symbol this patch
-    // writes; any other would point at a node that does not exist)
-    if (chunk.name !== null) {
-      const symbolKey = chunk.container ? `${chunk.container}.${chunk.name}` : chunk.name;
-      const symbolNid = nodeId(idPath, symbolKey);
-      if (seenNodeIds.has(symbolNid)) ops.push({
-        type: 'UpsertEdge',
-        id: edgeId(idPath, cid, symbolNid, 'DEFINES'),
-        src: cid,
-        dst: symbolNid,
-        predicate: 'DEFINES',
-        attrs: {},
-      });
-    }
-  }
-
-  // NEXT edges for source-order chunk adjacency
-  for (let i = 0; i + 1 < chunks.length; i++) {
-    const a = chunks[i];
-    const b = chunks[i + 1];
-    // Only link top-level chunks (no container) to avoid intra-class ordering noise
-    if (a.container == null && b.container == null) {
-      const aid = chunkId(idPath, a.chunkKind, a.name, a.lineStart);
-      const bid = chunkId(idPath, b.chunkKind, b.name, b.lineStart);
-      ops.push({
-        type: 'UpsertEdge',
-        id: edgeId(idPath, aid, bid, 'NEXT'),
-        src: aid,
-        dst: bid,
-        predicate: 'NEXT',
-        attrs: {},
-      });
-    }
-  }
-
-  // UpsertEdge for each relationship -- only those with a node at both ends; see
-  // `keepEdge` in buildPatchWithResolution. Without resolution, that means a
-  // node this patch writes or an external node it mints.
-  const seenExternalNodes = new Set<string>();
-  const unresolvedCalls = unresolvedCallRecorder(seenNodeIds, fileNodeId);
-  for (const r of relationships) {
-    // For CONTAINS edges, srcName is the container of dstName — use that to disambiguate.
-    const srcKey = resolveKey(r.srcName);
-    const dstKey = r.predicate === 'CONTAINS'
-      ? resolveKey(r.dstName, r.srcName)
-      : resolveKey(r.dstName);
-    const external = r.predicate === 'CALLS' && dstKey.includes('::') && !allQKeys.has(dstKey);
-    if (!seenNodeIds.has(nodeId(idPath, srcKey)) || (!external && !seenNodeIds.has(nodeId(idPath, dstKey)))) {
-      if (r.predicate === 'CALLS') unresolvedCalls.add(nodeId(idPath, srcKey), r.dstName);
-      continue;
-    }
-
-    let dstNid: string;
-    if (external) {
-      const sep = dstKey.indexOf('::');
-      const pkgName = dstKey.slice(0, sep);
-      const funcName = dstKey.slice(sep + 2);
-      const extPath = `external://${pkgName}`;
-      dstNid = nodeId(extPath, dstKey);
-      if (!seenExternalNodes.has(dstNid)) {
-        seenExternalNodes.add(dstNid);
-        ops.push({
-          type: 'UpsertNode',
-          id: dstNid,
-          kind: 'function',
-          name: funcName,
-          attrs: { package: pkgName, external: true, language: result.language },
-        });
-      }
-    } else {
-      dstNid = nodeId(idPath, dstKey);
-    }
-
-    ops.push({
-      type: 'UpsertEdge',
-      id: edgeId(idPath, srcKey, dstKey, r.predicate),
-      src: nodeId(idPath, srcKey),
-      dst: dstNid,
-      predicate: r.predicate,
-      attrs: {},
-    });
-  }
-  unresolvedCalls.applyTo(ops);
-
-  // AssertClaim for each relationship (feeds the confidence/conflict engine)
-  // phpCallKind splits the relationship dedup key, so `handle(); $obj->handle();`
-  // arrives as two relationships that produce byte-identical claims. The kind is
-  // not part of a claim, so nothing downstream can tell them apart.
-  const emittedClaims = new Set<string>();
-  for (const r of relationships) {
-    const srcKey = resolveKey(r.srcName);
-    const entityId = nodeId(idPath, srcKey);
-    const field = `${r.predicate.toLowerCase()}:${r.dstName}`;
-    const claimIdentity = `${entityId}\x00${field}`;
-    if (emittedClaims.has(claimIdentity)) continue;
-    emittedClaims.add(claimIdentity);
-    ops.push({
-      type: 'AssertClaim',
-      entityId,
-      field,
-      value: r.dstName,
-      confidence: null,
-    });
-  }
-
-  // patchId is deterministic: same file + same content + same extractor → same id.
-  const extractor = extractorName();
-  const patchId = computePatchId(filePath, sourceHash, extractor);
-  // When re-ingesting with new extractor version, replace the old patch so the
-  // server accepts the new ops rather than deduplicating on the old patchId.
-  const previousPatchId = previousSourceHash
-    ? computePatchId(filePath, previousSourceHash, extractor)
-    : legacyPatchId(filePath, sourceHash);
-  // Also supersede any patches created by previous extractor versions for the same file+content.
-  const replaces = [previousPatchId, ...PREVIOUS_EXTRACTORS.map(prev => computePatchId(filePath, sourceHash, prev))];
-
-  return {
-    patchId,
-    actor: patchActor(),
-    timestamp: new Date().toISOString(),
-    source: {
-      uri: filePath,
-      sourceHash,
-      extractor,
-      sourceType: sourceType(filePath),
-      workspaceId,
-      ...(multiRepo?.systemId ? { systemId: multiRepo.systemId } : {}),
-      ...(multiRepo?.repoId ? { repoId: multiRepo.repoId } : {}),
-    },
-    baseRev: 0,
-    ops: deduplicateUpsertEdges(ops),
-    replaces,
-    intent: `Parsed ${nodePath.basename(filePath)}`,
-  };
+  return buildPatchWithResolution(result, sourceHash, workspaceId, resolveEdges([result]), previousSourceHash, multiRepo);
 }
 
 // ---------------------------------------------------------------------------
-// buildPatchWithResolution — like buildPatch but fixes CALLS edge dst to point
-// to the actual defining file for cross-file calls resolved by resolveCallEdges.
+// buildPatchWithResolution: the op builder. Same-file edges point at this
+// file's nodes; an edge resolveEdges tied to another file points at the node
+// in that file.
 // ---------------------------------------------------------------------------
 
 /**
@@ -637,11 +404,15 @@ export function buildPatchWithResolution(
   };
   const ops: PatchOp[] = [];
 
+  // Build a qualified-key map so that same-named entities in different
+  // enclosing classes within the same file get distinct nodeIds.
+  // e.g.  ClassA.update  vs  ClassB.update  instead of both being "update".
   const entityQKey = new Map<ParsedEntity, string>();
   for (const e of entities) {
     entityQKey.set(e, e.container ? `${e.container}.${e.name}` : e.name);
   }
 
+  // Reverse lookup: plain name → list of qualified keys (for edge resolution).
   const nameToQKeys = new Map<string, string[]>();
   for (const [e, qk] of entityQKey) {
     const list = nameToQKeys.get(e.name) ?? [];
@@ -649,74 +420,86 @@ export function buildPatchWithResolution(
     nameToQKeys.set(e.name, list);
   }
 
-  const allQKeys2 = new Set<string>(entityQKey.values());
+  // Set of all qualified keys defined in this file — used to distinguish same-file
+  // dotted calls (e.g. "Foo.bar" where Foo is defined here) from external qualified
+  // calls (e.g. "dplyr.filter" from R's pkg::func syntax) that would produce phantoms.
+  const allQKeys = new Set<string>(entityQKey.values());
 
+  // Resolve a relationship endpoint to the best qualified key.
+  // For unambiguous names (appear once), returns the single qualified key.
+  // For ambiguous names (appear multiple times), falls back to the plain name
+  // so that the edge still points to *something* deterministic.
   function resolveKey(name: string, container?: string): string {
     const rawKeys = nameToQKeys.get(name);
     if (!rawKeys) return name;
-    const keys = [...new Set(rawKeys)]; // deduplicate — @overload produces identical qks
+    // Deduplicate: @overload in Python (and similar patterns in other languages)
+    // produces multiple definitions with identical qualified keys. A Set collapses
+    // these so we don't mistake three `Session.execute` overloads for ambiguity.
+    const keys = [...new Set(rawKeys)];
     if (keys.length === 1) return keys[0];
+    // More than one distinct entity with this name — try to pick by container
     if (container) {
       const qualified = `${container}.${name}`;
       if (keys.includes(qualified)) return qualified;
     }
+    // Ambiguous: return plain name so we don't silently drop the edge
     return name;
   }
 
-  const seenNodeIds2 = new Set<string>();
+  // UpsertNode for each entity (deduplicated by id — first occurrence wins)
+  const seenNodeIds = new Set<string>();
   for (const e of entities) {
     const qk = entityQKey.get(e)!;
     const id = nodeId(idPath, qk);
-    if (!seenNodeIds2.has(id)) {
-      seenNodeIds2.add(id);
-      const roleAttrs = e.kind === 'file'
-        ? { role: result.fileRole.role, role_confidence: result.fileRole.role_confidence, role_signals: result.fileRole.role_signals, ...(result.hasParseErrors ? { parse_errors: true } : {}) }
-        : { role: result.fileRole.role, role_source: 'inherited_from_file' };
+    if (!seenNodeIds.has(id)) {
+      seenNodeIds.add(id);
+      const lines = { line_start: e.lineStart, line_end: e.lineEnd, language: e.language };
+      const attrs: FileNodeAttrs | SymbolNodeAttrs = e.kind === 'file'
+        ? { ...lines, role: result.fileRole.role, role_confidence: result.fileRole.role_confidence, role_signals: result.fileRole.role_signals, ...(result.hasParseErrors ? { parse_errors: true } : {}) }
+        : { ...lines, role: result.fileRole.role, role_source: 'inherited_from_file' };
       ops.push({
         type: 'UpsertNode',
         id,
         kind: e.kind,
         name: e.name,
-        attrs: { line_start: e.lineStart, line_end: e.lineEnd, language: e.language, ...roleAttrs },
+        attrs,
       });
     }
   }
 
-  // UpsertNode + edges for each chunk (same logic as buildPatch)
-  const fileNodeId2 = nodeId(idPath, entities.find(e => e.kind === 'file')?.name ?? idPath);
+  // UpsertNode + edges for each chunk
+  const fileNodeId = nodeId(idPath, entities.find(e => e.kind === 'file')?.name ?? idPath);
   for (const chunk of chunks) {
     const cid = chunkId(idPath, chunk.chunkKind, chunk.name, chunk.lineStart);
     const chunkName = chunk.name ?? `file_body:${chunk.lineStart}`;
-    const chunkNodeKind2 = chunk.chunkKind === 'section' ? 'section' : 'chunk';
-    ops.push({
-      type: 'UpsertNode',
-      id: cid,
-      kind: chunkNodeKind2,
-      name: chunkName,
-      attrs: {
-        file_uri: filePath,
-        language: chunk.language,
-        chunk_kind: chunk.chunkKind,
-        start_line: chunk.lineStart,
-        end_line: chunk.lineEnd,
-        start_byte: chunk.startByte,
-        end_byte: chunk.endByte,
-        content_hash: chunk.contentHash,
-        parser_version: extractorName(),
-      },
-    });
+    const chunkNodeKind = chunk.chunkKind === 'section' ? 'section' : 'chunk';
+    const chunkAttrs: ChunkNodeAttrs = {
+      file_uri: filePath,
+      language: chunk.language,
+      chunk_kind: chunk.chunkKind,
+      start_line: chunk.lineStart,
+      end_line: chunk.lineEnd,
+      start_byte: chunk.startByte,
+      end_byte: chunk.endByte,
+      content_hash: chunk.contentHash,
+      parser_version: extractorName(),
+    };
+    ops.push({ type: 'UpsertNode', id: cid, kind: chunkNodeKind, name: chunkName, attrs: chunkAttrs });
+    // File -[CONTAINS]-> Chunk
     ops.push({
       type: 'UpsertEdge',
-      id: edgeId(idPath, fileNodeId2, cid, 'CONTAINS_CHUNK'),
-      src: fileNodeId2,
+      id: edgeId(idPath, fileNodeId, cid, 'CONTAINS_CHUNK'),
+      src: fileNodeId,
       dst: cid,
       predicate: 'CONTAINS_CHUNK',
       attrs: {},
     });
+    // Chunk -[DEFINES]-> Symbol (only for named chunks whose symbol this patch
+    // writes; any other would point at a node that does not exist)
     if (chunk.name !== null) {
       const symbolKey = chunk.container ? `${chunk.container}.${chunk.name}` : chunk.name;
       const symbolNid = nodeId(idPath, symbolKey);
-      if (seenNodeIds2.has(symbolNid)) ops.push({
+      if (seenNodeIds.has(symbolNid)) ops.push({
         type: 'UpsertEdge',
         id: edgeId(idPath, cid, symbolNid, 'DEFINES'),
         src: cid,
@@ -727,9 +510,11 @@ export function buildPatchWithResolution(
     }
   }
 
+  // NEXT edges for source-order chunk adjacency
   for (let i = 0; i + 1 < chunks.length; i++) {
     const a = chunks[i];
     const b = chunks[i + 1];
+    // Only link top-level chunks (no container) to avoid intra-class ordering noise
     if (a.container == null && b.container == null) {
       const aid = chunkId(idPath, a.chunkKind, a.name, a.lineStart);
       const bid = chunkId(idPath, b.chunkKind, b.name, b.lineStart);
@@ -744,10 +529,12 @@ export function buildPatchWithResolution(
     }
   }
 
-  const seenExternalNodes2 = new Set<string>();
-  const emittedEdgeIdentities = new Map<string, PatchOp>();
+  // UpsertEdge for each relationship -- only those with a node at both ends;
+  // see `keepEdge`.
+  const seenExternalNodes = new Set<string>();
+  const emittedEdgeIdentities = new Map<string, UpsertEdgeOp>();
   /** CALLS dropped for want of a destination node; recorded on their caller. */
-  const unresolvedCalls = unresolvedCallRecorder(seenNodeIds2, fileNodeId2);
+  const unresolvedCalls = unresolvedCallRecorder(seenNodeIds, fileNodeId);
   const relationshipShapeCounts = new Map<string, number>();
   for (const relationship of relationships) {
     const key = `${relationship.srcName}:${relationship.predicate}:${relationship.dstName}`;
@@ -780,7 +567,7 @@ export function buildPatchWithResolution(
         resolution: { confidence, tier },
       };
     }
-    if (r.predicate === 'CALLS' && dstKey.includes('::') && !allQKeys2.has(dstKey)) {
+    if (r.predicate === 'CALLS' && dstKey.includes('::') && !allQKeys.has(dstKey)) {
       const sep = dstKey.indexOf('::');
       const pkgName = dstKey.slice(0, sep);
       const funcName = dstKey.slice(sep + 2);
@@ -802,13 +589,13 @@ export function buildPatchWithResolution(
    * were over half the edges in a typical graph.
    */
   const keepEdge = (srcNodeId: string, dst: ReturnType<typeof resolveDst>): boolean =>
-    seenNodeIds2.has(srcNodeId) &&
-    (dst.resolution !== null || dst.externalPkg !== null || seenNodeIds2.has(dst.dstNodeId));
+    seenNodeIds.has(srcNodeId) &&
+    (dst.resolution !== null || dst.externalPkg !== null || seenNodeIds.has(dst.dstNodeId));
 
   const relationshipDstKey = (r: (typeof relationships)[number]): string =>
     r.predicate === 'CONTAINS' ? resolveKey(r.dstName, r.srcName) : resolveKey(r.dstName);
 
-  const edgeIdTuple = (srcKey: string, edgeDstKey: string, predicate: string): string =>
+  const edgeIdTuple = (srcKey: string, edgeDstKey: string, predicate: EdgePredicate): string =>
     `${srcKey}\x00${edgeDstKey}\x00${predicate}`;
 
   /**
@@ -859,14 +646,15 @@ export function buildPatchWithResolution(
       if (r.predicate === 'CALLS') unresolvedCalls.add(nodeId(idPath, srcKey), r.dstName);
       continue;
     }
-    if (externalPkg && !seenExternalNodes2.has(dstNodeId)) {
-      seenExternalNodes2.add(dstNodeId);
+    if (externalPkg && !seenExternalNodes.has(dstNodeId)) {
+      seenExternalNodes.add(dstNodeId);
+      const externalAttrs: ExternalNodeAttrs = { package: externalPkg.pkgName, external: true, language: result.language };
       ops.push({
         type: 'UpsertNode',
         id: dstNodeId,
         kind: 'function',
         name: externalPkg.funcName,
-        attrs: { package: externalPkg.pkgName, external: true, language: result.language },
+        attrs: externalAttrs,
       });
     }
 
@@ -892,21 +680,23 @@ export function buildPatchWithResolution(
     const idDstKey = collidingIdTuples.has(edgeIdTuple(srcKey, edgeDstKey, r.predicate))
       ? `${edgeDstKey}\x00${dstNodeId}`
       : edgeDstKey;
-    const edgeOp: PatchOp = {
+    const edgeAttrs: ResolvedEdgeAttrs = resolution
+      ? { confidence: resolution.confidence, ...(resolution.tier ? { tier: resolution.tier } : {}) }
+      : {};
+    const edgeOp: UpsertEdgeOp = {
       type: 'UpsertEdge',
       id: edgeId(idPath, srcKey, idDstKey, r.predicate),
       src: nodeId(idPath, srcKey),
       dst: dstNodeId,
       predicate: r.predicate,
-      attrs: resolution
-        ? { confidence: resolution.confidence, ...(resolution.tier ? { tier: resolution.tier } : {}) }
-        : {},
+      attrs: edgeAttrs,
     };
     emittedEdgeIdentities.set(edgeIdentity, edgeOp);
     ops.push(edgeOp);
   }
   unresolvedCalls.applyTo(ops);
 
+  // AssertClaim for each relationship (feeds the confidence/conflict engine)
   // phpCallKind splits the relationship dedup key, so `handle(); $obj->handle();`
   // arrives as two relationships that produce byte-identical claims. The kind is
   // not part of a claim, so nothing downstream can tell them apart.
@@ -929,11 +719,15 @@ export function buildPatchWithResolution(
     });
   }
 
+  // patchId is deterministic: same file + same content + same extractor → same id.
   const extractor = extractorName();
   const patchId = computePatchId(filePath, sourceHash, resolutionSalt ? `${extractor}#r${resolutionSalt}` : extractor);
+  // When re-ingesting with new extractor version, replace the old patch so the
+  // server accepts the new ops rather than deduplicating on the old patchId.
   const previousPatchId = previousSourceHash
     ? computePatchId(filePath, previousSourceHash, extractor)
     : legacyPatchId(filePath, sourceHash);
+  // Also supersede any patches created by previous extractor versions for the same file+content.
   const replaces = [previousPatchId, ...PREVIOUS_EXTRACTORS.map(prev => computePatchId(filePath, sourceHash, prev))];
 
   return {

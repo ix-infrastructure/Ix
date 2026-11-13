@@ -12,6 +12,7 @@ import { z } from "zod";
 import { isReadablePath, resolveWorkspaceRoot } from "../cli/config.js";
 import { resolveIngestRootWithSource } from "../cli/map-root.js";
 import { BUNDLE_SCHEMA } from "../cli/context-bundle-schema.js";
+import { PRO_MCP_TOOL_NAMES } from "../cli/register/pro-surface.js";
 
 import {
   createProtocolStdout,
@@ -21,6 +22,8 @@ import {
   resolveDefaultRunner,
   type IxRunner,
 } from "./runner.js";
+import { mcpCaller } from "./hints.js";
+import { withCaller } from "../cli/next-step.js";
 
 export type { IxRunner } from "./runner.js";
 
@@ -75,8 +78,11 @@ export const IX_MCP_OSS_TOOL_NAMES = [
  * unconditionally — as this server did for `ix_briefing` and `ix_decisions` —
  * hands an OSS agent tools whose every call returns "requires Ix Pro", which it
  * cannot tell apart from a real failure.
+ *
+ * The names are the MCP column of the Pro surface table
+ * (cli/register/pro-surface.ts); the handlers are registered below.
  */
-export const IX_MCP_PRO_TOOL_NAMES = ["ix_briefing", "ix_decisions", "ix_decide"] as const;
+export const IX_MCP_PRO_TOOL_NAMES = PRO_MCP_TOOL_NAMES;
 
 /** Every tool this server can serve, across both tiers. */
 export const IX_MCP_TOOL_NAMES = [...IX_MCP_OSS_TOOL_NAMES, ...IX_MCP_PRO_TOOL_NAMES] as const;
@@ -198,6 +204,25 @@ const TOOL_OUTPUT_SCHEMA: Partial<Record<(typeof IX_MCP_TOOL_NAMES)[number], z.Z
   // passing `structured: true` receives.
 };
 
+/**
+ * Tools whose result can be a JSON document. Every other tool returns
+ * `--format llm` records (`kind key=value`, one per line), which have no
+ * nested fields to read.
+ *
+ * Data only: nothing here routes on it. scripts/check-plugin-contract.mjs reads
+ * it to fail plugin skill text that tells a model to read a JSON path from a
+ * records tool, and mcp-argv-contract.test.ts checks it against the format
+ * each tool actually runs. `ix_smells` always answers in JSON, `ix_context`
+ * does with `structured: true`, and the Pro tools run `--format json`.
+ */
+export const IX_MCP_JSON_RESULT_TOOLS: readonly (typeof IX_MCP_TOOL_NAMES)[number][] = [
+  "ix_context",
+  "ix_map",
+  "ix_smells",
+  "ix_ingest",
+  ...IX_MCP_PRO_TOOL_NAMES,
+];
+
 /** Which catalog to advertise. */
 export type ToolsetName = "core" | "all";
 
@@ -303,10 +328,13 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   // process.stdout and process.exit, which a caller supplying its own runner
   // (every test, and any embedder) must not have done to it.
   let fallback: IxRunner | undefined;
-  const runIx: IxRunner =
+  const baseRunIx: IxRunner =
     options.runIx ??
     ((args, timeoutMs) =>
       (fallback ??= resolveDefaultRunner({ version, redirectIdleStdout: true }))(args, timeoutMs));
+  // Every command runs for this session's reader, so its hints name only the
+  // tools this session offers (`hintCaller`, below).
+  const runIx: IxRunner = (args, timeoutMs) => withCaller(hintCaller, () => baseRunIx(args, timeoutMs));
 
   const server = new McpServer(
     {
@@ -331,6 +359,8 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       || core.has(name)
       || (IX_MCP_PRO_TOOL_NAMES as readonly string[]).includes(name),
   };
+  // The OSS tools this session offers. Hints never name a Pro tool.
+  const hintCaller = mcpCaller(IX_MCP_OSS_TOOL_NAMES.filter((name) => ctx.advertise(name)));
 
   // First, so it heads tools/list: it is where a session should start.
   registerTool(
@@ -343,7 +373,9 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       kind: SYMBOL_TOOL_INPUT.kind,
       path: SYMBOL_TOOL_INPUT.path,
       pick: SYMBOL_TOOL_INPUT.pick,
-      as_of_rev: z.number().int().nonnegative().optional(),
+      // At least 1, as `ix context --as-of-rev` requires: a 0 the schema let
+      // through came back as a usage error naming a CLI flag.
+      as_of_rev: z.number().int().min(1).optional(),
       max_entities: z.number().int().min(1).max(500).optional(),
       max_relationships: z.number().int().min(1).max(1000).optional(),
       max_evidence: z.number().int().min(1).max(200).optional(),

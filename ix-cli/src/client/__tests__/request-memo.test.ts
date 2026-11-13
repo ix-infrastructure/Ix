@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { IxClient } from "../api.js";
 import { Limiter, mapLimit, QUERY_CLIENT_OPTIONS, RequestMemo } from "../request-memo.js";
+import type { GraphNode } from "../types.js";
 
 const servers: Server[] = [];
 type Seen = { method: string; path: string; body: string };
@@ -53,7 +54,7 @@ afterEach(async () => {
 
 const expandReply = (request: Seen) => {
   const { nodeId } = JSON.parse(request.body) as { nodeId: string };
-  return { body: { nodes: [{ id: `${nodeId}-n` }, { id: `${nodeId}-m` }], edges: [] } };
+  return { body: { nodes: [{ id: `${nodeId}-n`, kind: "function" }, { id: `${nodeId}-m`, kind: "function" }], edges: [] } };
 };
 
 describe("IxClient shareReads", () => {
@@ -76,7 +77,7 @@ describe("IxClient shareReads", () => {
 
   it("keys on the whole request: a different body or path is its own read", async () => {
     const b = await backend((request) => request.path.startsWith("/v1/entity/")
-      ? { body: { node: { id: request.path }, claims: [], edges: [] } }
+      ? { body: { node: { id: request.path, kind: "function" }, claims: [], edges: [] } }
       : expandReply(request));
     const client = new IxClient(b.endpoint, undefined, { shareReads: true });
 
@@ -97,10 +98,10 @@ describe("IxClient shareReads", () => {
     const client = new IxClient(b.endpoint, undefined, { shareReads: true });
 
     const first = await client.expand("a");
-    first.nodes.sort((x: { id: string }, y: { id: string }) => (x.id < y.id ? 1 : -1)).push({ id: "added" });
+    first.nodes.sort((x: { id: string }, y: { id: string }) => (x.id < y.id ? 1 : -1)).push({ id: "added", kind: "function" } as GraphNode);
     const second = await client.expand("a");
 
-    expect(second.nodes).toEqual([{ id: "a-n" }, { id: "a-m" }]);
+    expect(second.nodes).toEqual([{ id: "a-n", kind: "function" }, { id: "a-m", kind: "function" }]);
     expect(b.seen).toHaveLength(1);
   });
 
@@ -123,7 +124,7 @@ describe("IxClient shareReads", () => {
     const client = new IxClient(b.endpoint, undefined, { shareReads: true });
 
     await expect(client.expand("a")).rejects.toThrow("503: busy");
-    await expect(client.expand("a")).resolves.toEqual({ nodes: [{ id: "a-n" }, { id: "a-m" }], edges: [] });
+    await expect(client.expand("a")).resolves.toEqual({ nodes: [{ id: "a-n", kind: "function" }, { id: "a-m", kind: "function" }], edges: [] });
     expect(b.seen).toHaveLength(2);
   });
 

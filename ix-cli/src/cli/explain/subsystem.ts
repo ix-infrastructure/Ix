@@ -1,50 +1,9 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-export interface SubsystemScore {
-  region_id: string;
-  name: string;
-  level: number;
-  label_kind: string;
-  file_count: number;
-  health_score: number;
-  chunk_density: number;
-  smell_rate: number;
-  smell_files: number;
-  total_chunks: number;
-  confidence: number;
-  inference_version: string;
-}
-
-export interface ScopedSubsystemRegion {
-  id: string;
-  label: string;
-  level: number;
-  label_kind: string;
-  parent_id: string | null;
-  file_count: number;
-  confidence: number;
-  is_cross_cutting: boolean;
-  dominant_signals: string[];
-  children?: ScopedSubsystemRegion[];
-}
-
-export interface ScopedSubsystemResult {
-  target: ScopedSubsystemRegion;
-  parent?: {
-    id: string;
-    label: string;
-    level: number;
-    label_kind: string;
-  } | null;
-  summary: {
-    well_defined: number;
-    moderate: number;
-    fuzzy: number;
-    cross_cutting: number;
-  };
-  children: ScopedSubsystemRegion[];
-  hierarchy: ScopedSubsystemRegion;
-}
+// The `/v1/subsystems*` response types live with the client; exported from here
+// as well, where they were first defined.
+import type { SubsystemScore, ScopedSubsystemRegion, ScopedSubsystemResult } from "../../client/types.js";
+export type { SubsystemScore, ScopedSubsystemRegion, ScopedSubsystemResult };
 
 export interface SubsystemExplanationJson {
   resolvedTarget: {

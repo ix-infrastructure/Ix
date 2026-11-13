@@ -5,6 +5,7 @@ import chalk from "chalk";
 import { createClient } from "../../client/factory.js";
 import { lineSpan, relativePath, rowLocation, stripNulls, printJson } from "../format.js";
 import { llmLine, llmShortId } from "../llm.js";
+import { formatOption } from "../options.js";
 
 /** Render entity details as llm records: a header line then one `edge` row per edge. */
 export function renderEntityLlm(result: any): string[] {
@@ -36,7 +37,7 @@ export function registerEntityCommand(program: Command): void {
   program
     .command("entity <id>")
     .description("Get entity details with claims and edges")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .action(async (id: string, opts: { format: string }) => {
       const client = createClient();
       const resolvedId = await client.resolvePrefix(id);

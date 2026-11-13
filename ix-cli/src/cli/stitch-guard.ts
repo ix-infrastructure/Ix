@@ -2,6 +2,8 @@
 
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { isLoopbackEndpoint } from "./endpoint.js";
+import { routeMissing } from "../client/features.js";
 import { acquireLockAt, namedLockPath, type LockHandle } from "./single-flight.js";
 
 // ---------------------------------------------------------------------------
@@ -102,10 +104,10 @@ export function stitchWaitMs(): number {
  * exists to prevent — an `ix mcp` server launched with an IP and a shell
  * `ix map` reading the config both stitching at once.
  *
- * Loopback spellings are folded together deliberately. `localhost`,
- * `127.0.0.1` and `::1` are not the same host in general — and the endpoint
- * is not always local either; `IxClient.isLocalEndpoint` exists precisely
- * because a remote backend is supported. The folding is justified by its cost,
+ * Loopback spellings (whatever `isLoopbackEndpoint` accepts) are folded
+ * together deliberately. `localhost`, `127.0.0.1` and `::1` are not the same
+ * host in general — and the endpoint is not always local either;
+ * `isLoopbackEndpoint` exists precisely because a remote backend is supported. The folding is justified by its cost,
  * not by a claim about deployments: two loopback spellings that really did
  * name different backends cost one deferred stitch, while not folding them
  * costs the concurrency this guard exists to prevent.
@@ -113,7 +115,7 @@ export function stitchWaitMs(): number {
 export function stitchKey(endpoint: string): string {
   try {
     const u = new URL(endpoint);
-    const host = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(u.hostname.toLowerCase())
+    const host = isLoopbackEndpoint(endpoint)
       ? "localhost"
       : u.hostname.toLowerCase();
     const path = u.pathname.replace(/\/+$/, "");
@@ -267,8 +269,9 @@ export interface StitchOutcome {
  *   - the backend answered 4xx, which is it refusing the request rather than
  *     executing it. 408 is excluded: a proxy reporting that IT gave up waiting
  *     says nothing about whether the backend did, and that is this whole bug.
- *   - the backend answered 501. `isStitchUnsupported` already treats 404 AND
- *     501 as "this backend has no /v1/stitch", and the run swallows it
+ *   - the backend answered a status that `routeMissing("stitch", ...)` in
+ *     client/features.ts reads as "this backend has no /v1/stitch" (404 and
+ *     501; 404 is a 4xx anyway), and the run swallows it
  *     silently for exactly that reason -- so leaving a marker behind would
  *     refuse every map for 15 minutes, claiming a join may still be running,
  *     against a backend that has never had one.
@@ -303,7 +306,7 @@ export function outcomeProvesNothingRunning(outcome: StitchOutcome): boolean {
   // Deliberately no 2xx arm -- see the note above. `ok` covers a stitch that
   // actually returned; a 2xx reaching the catch means the body was unreadable,
   // which is what a proxy error page looks like.
-  if (status === 501) return true;
+  if (routeMissing("stitch", status)) return true;
   return status >= 400 && status < 500 && status !== 408;
 }
 
