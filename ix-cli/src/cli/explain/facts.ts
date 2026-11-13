@@ -616,6 +616,9 @@ export async function collectFacts(
       parts.push(`${unresolvedCalls.total} called name(s) have no definition in the graph: ${unresolvedCallNames(unresolvedCalls)}.`);
     }
     if (danglingCallees > 0) parts.push(`${danglingCallees} callee(s) could not be resolved to named entities.`);
+    // Only dangling edges means a graph built before tree-sitter/1.28; the next
+    // map rebuilds it. llm output prints no notes, so the hint lives here.
+    if (!unresolvedCalls) parts.push(`Run ${forMcp() ? "ix_map" : "`ix map`"} to improve coverage.`);
     diagnostics.push({ code: "unresolved_call_target", message: parts.join(" ") });
   }
 

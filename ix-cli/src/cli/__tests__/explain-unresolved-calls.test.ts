@@ -58,6 +58,49 @@ describe("ix explain on a function with unresolved calls", () => {
     expect(renderExplainLlm(facts, role, importance, rendered).join("\n")).toContain("fetch, JSON.parse, retry");
   });
 
+  it("names them once in the llm output, on the diagnostic", async () => {
+    const facts = await collectFacts(graphWith(RECORDED), TARGET, "runJob", "function");
+    const role = inferRole(facts);
+    const importance = inferImportance(facts);
+    const lines = renderExplainLlm(facts, role, importance, renderExplanation(facts, role, importance));
+
+    expect(lines.filter((l) => l.includes("fetch, JSON.parse, retry"))).toEqual([
+      'diagnostic code=unresolved_call_target message="5 called name(s) have no definition in the graph: fetch, JSON.parse, retry and 2 more."',
+    ]);
+    expect(lines.filter((l) => l.startsWith("note "))).toEqual([]);
+  });
+
+  it("keeps the map hint in the llm output for a graph built before tree-sitter/1.28", async () => {
+    // Only a dangling CALLS edge: its target has no node.
+    const DANGLING = "00000000-0000-0000-0000-0000000000ff";
+    const client = {
+      async entity(id: string) {
+        if (id !== TARGET) throw new Error("not found");
+        return {
+          node: { id, name: "runJob", kind: "function", attrs: {}, provenance: { sourceUri: "src/job.ts" } },
+          claims: [],
+          decisions: [],
+          edges: [{ predicate: "CALLS", src: TARGET, dst: DANGLING }],
+        };
+      },
+      async expand() {
+        return { nodes: [], edges: [] };
+      },
+      async provenance(id: string) {
+        return { entityId: id, chain: [] };
+      },
+    } as unknown as IxClient;
+    const facts = await collectFacts(client, TARGET, "runJob", "function");
+    const role = inferRole(facts);
+    const importance = inferImportance(facts);
+    const lines = renderExplainLlm(facts, role, importance, renderExplanation(facts, role, importance));
+
+    expect(lines.filter((l) => l.startsWith("diagnostic code=unresolved_call_target"))).toEqual([
+      'diagnostic code=unresolved_call_target message="1 callee(s) could not be resolved to named entities. Run `ix map` to improve coverage."',
+    ]);
+    expect(lines.filter((l) => l.startsWith("note "))).toEqual([]);
+  });
+
   it("says nothing when ingest recorded none", async () => {
     const facts = await collectFacts(graphWith({}), TARGET, "runJob", "function");
 
