@@ -6,6 +6,7 @@ import chalk from "chalk";
 import { llmLine, type LlmValue } from "../llm.js";
 import type { DoctorReport, HostReport, InstallReport, Outcome } from "../../mcp/install.js";
 import { printJson } from "../format.js";
+import { choiceOption, formatOption } from "../options.js";
 
 /** Symbol and colour per outcome, shared by install and doctor. */
 const OUTCOME_STYLE: Record<Outcome, { mark: string; paint: (text: string) => string }> = {
@@ -102,11 +103,12 @@ export function registerMcpCommand(program: Command): void {
   const mcp = program
     .command("mcp")
     .description("Serve Ix tools over the Model Context Protocol (stdio)")
-    .option(
+    .addOption(choiceOption(
       "--tools <set>",
       "Which catalog to advertise (core|all). core is five task-shaped tools; all is every one",
+      ["core", "all"],
       "core",
-    )
+    ))
     .action(async (opts: { tools: string }) => {
       // Keep the SDK off the startup path for ordinary CLI commands.
       const { startIxMcpServer } = await import("../../mcp/server.js");
@@ -119,7 +121,7 @@ export function registerMcpCommand(program: Command): void {
     .option("--host <ids...>", "Only these hosts (claude, codex, cursor, vscode, gemini, openclaw, opencode)")
     .option("--dry-run", "Report what would change without writing anything", false)
     .option("--force", "Replace a registration held by a different server", false)
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .action(async (opts: { host?: string[]; dryRun: boolean; force: boolean; format: string }) => {
       const { runInstall } = await import("../../mcp/install.js");
       const report = await runInstall({ only: opts.host, dryRun: opts.dryRun, force: opts.force });
@@ -131,7 +133,7 @@ export function registerMcpCommand(program: Command): void {
     .command("doctor")
     .description("Check that `ix mcp` is registered and launchable from each client")
     .option("--host <ids...>", "Only these hosts")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .action(async (opts: { host?: string[]; format: string }) => {
       const { runDoctor } = await import("../../mcp/install.js");
       const report = await runDoctor({ only: opts.host });

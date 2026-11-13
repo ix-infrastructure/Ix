@@ -9,9 +9,10 @@ import {
   synthesizeSystemRole,
   hierarchyImpactPhrase,
 } from "./hierarchy-semantics.js";
-import { inferSystemMeaning } from "./system-meaning.js";
+import { impactStep, inferSystemMeaning } from "./system-meaning.js";
 import { type FlowSemantics, inferFlowSemantics } from "./flow-semantics.js";
-import { forMcp, suggest } from "../next-step.js";
+import { hint } from "../next-step.js";
+import { CALLABLE_KINDS } from "../graph-model.js";
 
 export interface ExplanationOutput {
   explanation: string;
@@ -100,8 +101,6 @@ function fileBaseName(path?: string): string {
 }
 
 // ── Callable detection ──────────────────────────────────────────────────────
-
-const CALLABLE_KINDS = new Set(["function", "method", "def", "fun", "constructor"]);
 
 function isCallable(kind: string, role: RoleLabel): boolean {
   if (CALLABLE_KINDS.has(kind.toLowerCase())) return true;
@@ -202,16 +201,14 @@ function renderFlowWhyItMatters(
     return (
       `Although it has ${callerPhrase}, this ${role} sits in the ${flowName} ` +
       `and feeds ${downstream}, ` +
-      `making it a critical decision point in that flow. ` +
-      `Consider running \`${suggest.impact(facts.name)}\` before modifying.`
+      `making it a critical decision point in that flow.${impactStep(facts.name, " Consider running")}`
     );
   }
 
   if (importance.level === "high") {
     return (
       `Because this ${role} ${behaviorVerb}, changes here ${verb} affect how ` +
-      `${actionNoun} behaves across the system. ` +
-      `Run \`${suggest.impact(facts.name)}\` before modifying.`
+      `${actionNoun} behaves across the system.${impactStep(facts.name, " Run")}`
     );
   }
 
@@ -401,16 +398,14 @@ function renderWhyItMatters(
       return (
         `Although it has ${callerPhrase}, it sits inside the ${location} ` +
         `and feeds ${facts.downstreamDependents} downstream dependents, ` +
-        `making it a critical decision point in that flow. ` +
-        `Consider running \`${suggest.impact(facts.name)}\` before modifying.`
+        `making it a critical decision point in that flow.${impactStep(facts.name, " Consider running")}`
       );
     }
 
     return (
       `Although it has ${callerPhrase}, it sits in a path with ` +
       `${facts.downstreamDependents} downstream dependents, making it a ` +
-      `structurally important decision point in the pipeline. ` +
-      `Consider running \`${suggest.impact(facts.name)}\` before modifying.`
+      `structurally important decision point in the pipeline.${impactStep(facts.name, " Consider running")}`
     );
   }
 
@@ -419,8 +414,7 @@ function renderWhyItMatters(
     const hierPhrase = hierarchyImpactPhrase(facts, sem);
     if (hierPhrase) {
       return (
-        `Because ${hierPhrase}. ` +
-        `Run \`${suggest.impact(facts.name)}\` before modifying.`
+        `Because ${hierPhrase}.${impactStep(facts.name, " Run")}`
       );
     }
 
@@ -428,8 +422,7 @@ function renderWhyItMatters(
     const roleContext = roleFusionPhraseLocal(role.role, facts);
     if (roleContext) {
       return (
-        `${roleContext}, changes here ${verb} propagate across the codebase. ` +
-        `Run \`${suggest.impact(facts.name)}\` before modifying.`
+        `${roleContext}, changes here ${verb} propagate across the codebase.${impactStep(facts.name, " Run")}`
       );
     }
 
@@ -437,8 +430,7 @@ function renderWhyItMatters(
       ? importance.reasons[0]
       : "High connectivity";
     return (
-      `${reasonStr}. This is a central shared dependency — changes ${verb} propagate broadly. ` +
-      `Run \`${suggest.impact(facts.name)}\` before modifying.`
+      `${reasonStr}. This is a central shared dependency — changes ${verb} propagate broadly.${impactStep(facts.name, " Run")}`
     );
   }
 
@@ -461,16 +453,14 @@ function renderWhyItMatters(
     const hierPhrase = hierarchyImpactPhrase(facts, sem);
     if (hierPhrase) {
       return (
-        `Because ${hierPhrase}. ` +
-        `Run \`${suggest.impact(facts.name)}\` before modifying.`
+        `Because ${hierPhrase}.${impactStep(facts.name, " Run")}`
       );
     }
 
     const roleContext = roleFusionPhraseLocal(role.role, facts);
     if (roleContext) {
       return (
-        `${roleContext}, changes here ${verb} have wide impact. ` +
-        `Run \`${suggest.impact(facts.name)}\` before modifying.`
+        `${roleContext}, changes here ${verb} have wide impact.${impactStep(facts.name, " Run")}`
       );
     }
 
@@ -478,8 +468,7 @@ function renderWhyItMatters(
       ? importance.reasons[0]
       : "This entity has high connectivity";
     return (
-      `${reasonStr}. Changes here ${verb} have wide impact — run ` +
-      `\`${suggest.impact(facts.name)}\` before modifying.`
+      `${reasonStr}. Changes here ${verb} have wide impact${impactStep(facts.name, " — run", "")}.`
     );
   }
 
@@ -529,6 +518,12 @@ function roleFusionPhraseLocal(role: RoleLabel, facts: EntityFacts): string | nu
   }
 }
 
+/** The note for downstream calls that resolved to nothing; the next map rebuilds them. */
+function unresolvedCallsNote(): string {
+  const map = hint({ action: "map" });
+  return `Some downstream calls could not be resolved to named entities.${map ? ` Run \`${map}\` to improve coverage.` : ""}`;
+}
+
 // ── Notes (human-readable diagnostics) ──────────────────────────────────────
 
 function renderNotes(facts: EntityFacts): string[] {
@@ -540,7 +535,7 @@ function renderNotes(facts: EntityFacts): string[] {
         // edges, and the next map rebuilds it.
         notes.push(facts.unresolvedCalls
           ? `Calls with no definition in the graph (builtins, libraries or unresolved names): ${unresolvedCallNames(facts.unresolvedCalls)}.`
-          : `Some downstream calls could not be resolved to named entities. Run ${forMcp() ? "ix_map" : "`ix map`"} to improve coverage.`);
+          : unresolvedCallsNote());
         break;
       case "stale_source":
         notes.push("Source file has changed since last ingest — results may be incomplete.");

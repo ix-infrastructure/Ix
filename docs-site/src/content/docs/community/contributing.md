@@ -22,10 +22,15 @@ You don't need the backend source. The CLI is developed against the published ba
 (`ghcr.io/ix-infrastructure/ix-memory-layer`), which anyone can pull. If a change needs something new from the
 backend, open an issue describing what the CLI needs, and a maintainer will carry it across.
 
+For a map of the code (the packages, command registration, the ingest pipeline, the backend contract, the release
+and the test layers), read `docs/architecture.md` in the repository.
+
 ## Workflow
 
 1. Branch from `main` with a prefix: `feat/`, `fix/`, `docs/`, `refactor/`, `test/`, `ci/` or `chore/`.
-2. Make your change and run the tests (`cd ix-cli && npm test`).
+2. Make your change. Before you open the PR, run every check CI gates on, listed under
+   [Before you open a PR](https://github.com/ix-infrastructure/Ix/blob/main/CONTRIBUTING.md#before-you-open-a-pr).
+   `cd ix-cli && npm test` alone covers only the unit tests and the parser smoke test.
 3. Commit with [Conventional Commits](https://www.conventionalcommits.org/) prefixes (`feat:`, `fix:`, `docs:` and so
    on). Use `feat!:` or `fix!:` for breaking changes.
 4. Open a pull request using the template, and make sure CI passes.
@@ -39,6 +44,11 @@ backend, open an issue describing what the CLI needs, and a maintainer will carr
   exit non-zero can break them. Read the exit-code section of CONTRIBUTING.md before changing one.
 - **OSS and Pro.** Some features belong to Ix Pro. Don't move Pro features into this repository. If you're unsure
   where something belongs, ask in your pull request.
+
+## Adding a language
+
+[Adding a language](/community/adding-a-language/) lists the files to change and the tests to write when Ix learns a
+new language or file format.
 
 ## Improving these docs
 

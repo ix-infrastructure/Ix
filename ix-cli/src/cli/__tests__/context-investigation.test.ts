@@ -166,7 +166,6 @@ function makeClaim(statement: string, relevance: number): ScoredClaim {
       corroboration: { value: 0.5, reason: "corroborate" },
       conflictPenalty: { value: 0.5, reason: "penalty" },
       intentAlignment: { value: 0.5, reason: "intent" },
-      score: 0.5,
     },
   };
 }

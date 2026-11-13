@@ -3,16 +3,16 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { readGrammarStatus, type GrammarStatus } from "../grammar-status.js";
+import type { StoredSummary } from "../ingest-symbols.js";
+
 type IngestionModule = {
   parseFile: (filePath: string, source: string) => any;
   resolveEdges: (results: any[], stats?: any, globalIndex?: any) => any[];
   isGrammarSupported: (filePath: string) => boolean;
-  buildGlobalResolutionIndex: (
-    filePaths: string[],
-    sources?: Map<string, string>,
-    preParsed?: Map<string, any>,
-    summaries?: Map<string, any>,
-  ) => any;
+  /** Absent from a core-ingestion build older than #967; read it through `readGrammarStatus`. */
+  grammarStatus?: () => GrammarStatus[];
+  buildGlobalResolutionIndex: (filePaths: string[], summaries?: Map<string, any>) => any;
   summarizeParseResult: (parsed: any) => { filePath: string; [key: string]: unknown };
 };
 
@@ -26,6 +26,23 @@ type PatchBuilderModule = {
   extractorName: () => string;
   /** Earlier extractor names, newest first: `sourcePatchIdCandidates` order after the current one. */
   PREVIOUS_EXTRACTORS?: readonly string[];
+};
+
+/**
+ * core-ingestion's `symbol-index.js`: what a stored summary means for other
+ * files (IN-11). It loads no grammar, so the dependents step can use it
+ * without loading the parser.
+ */
+type SymbolIndexModule = {
+  changedNames: (before: StoredSummary | undefined, after: StoredSummary | undefined) => Set<string>;
+  importsChanged: (before: StoredSummary | undefined, after: StoredSummary | undefined) => boolean;
+  findDependents: (
+    table: ReadonlyMap<string, { summary: StoredSummary }>,
+    names: ReadonlySet<string>,
+    paths: Iterable<string>,
+    exclude: ReadonlySet<string>,
+    packageEntries?: Iterable<string>,
+  ) => string[];
 };
 
 type LanguagesModule = {
@@ -131,12 +148,19 @@ export async function loadIngestionModules(): Promise<[
   ]);
 }
 
-export async function loadWatchIngestionModules(): Promise<[
-  IngestionModule,
-  PatchBuilderModule,
-]> {
-  return Promise.all([
-    importModule(resolveIngestionModule("../../../../core-ingestion/dist/index.js")),
-    importModule(resolveIngestionModule("../../../../core-ingestion/dist/patch-builder.js")),
-  ]);
+/** core-ingestion's dependents rules (`symbol-index.ts`), without the parser. */
+export async function loadSymbolIndex(): Promise<SymbolIndexModule> {
+  return importModule(resolveIngestionModule("../../../../core-ingestion/dist/symbol-index.js"));
+}
+
+/**
+ * Which tree-sitter grammars loaded in this install (#967), for `ix doctor`.
+ *
+ * Loads only the parser entry point, and is deliberately not
+ * `loadIngestionModules`: reading grammar status parses nothing, and doctor's
+ * tests count that function's calls to prove the re-parse check stays idle on
+ * an unhealthy backend.
+ */
+export async function loadGrammarStatus(): Promise<GrammarStatus[]> {
+  return readGrammarStatus(await importModule(resolveIngestionModule("../../../../core-ingestion/dist/index.js")));
 }

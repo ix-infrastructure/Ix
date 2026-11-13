@@ -6,6 +6,7 @@ import { buildDependencyTree, type DependencyNode } from "../commands/depends.js
 import { searchPath } from "../commands/trace.js";
 import { isRawId } from "../resolve.js";
 import { createLimiter, EXPAND_CONCURRENCY, walkTree } from "../tree-walk.js";
+import { expandAnswer } from "./helpers/expand-answer.js";
 
 /**
  * The walks behind `ix depends` and `ix trace` fetch breadth-first now. The
@@ -179,14 +180,14 @@ function clientFor(adjacency: Adjacency, delaySeed?: number) {
   const rand = delaySeed === undefined ? undefined : mulberry32(delaySeed);
   const stats = { calls: 0, inFlight: 0, maxInFlight: 0, ids: [] as string[] };
   const client = {
-    expand: vi.fn(async (id: string, opts: { predicates: string[] }) => {
+    expand: vi.fn(async (id: string, opts: { direction?: string; predicates: string[] }) => {
       stats.calls++;
       stats.ids.push(id);
       stats.inFlight++;
       stats.maxInFlight = Math.max(stats.maxInFlight, stats.inFlight);
       try {
         if (rand) await new Promise((r) => setTimeout(r, Math.floor(rand() * 4)));
-        return { nodes: adjacency[id]?.[opts.predicates[0]] ?? [], edges: [] };
+        return expandAnswer(id, opts.direction ?? "in", adjacency[id], opts.predicates);
       } finally {
         stats.inFlight--;
       }
@@ -353,26 +354,36 @@ describe("when the node cap cuts the walk", () => {
   it("stops requesting once the cap is reached", async () => {
     // Every node has two callers, forever.
     const fanout = () => ({
-      expand: vi.fn(async (id: string, opts: { predicates: string[] }) => ({
-        nodes: opts.predicates[0] === "CALLS" ? [fn(`${id}.a`), fn(`${id}.b`)] : [],
-      })),
+      expand: vi.fn(async (id: string, opts: { direction?: string; predicates: string[] }) =>
+        expandAnswer(id, opts.direction ?? "in", { CALLS: [fn(`${id}.a`), fn(`${id}.b`)] }, opts.predicates)),
     });
     const bounds = { maxDepth: 50, maxNodes: 100 };
     const client = fanout();
     const walk = await buildDependencyTree(client as never, "root", bounds);
     expect(walk.truncated).toBe(true);
+    const sent = client.expand.mock.calls.length;
     const expanded = new Set(client.expand.mock.calls.map(([id]) => id));
     // Level order reads 1 + 2 + 4 + 8 + 16 nodes and 19 of the next 32
-    // before the 100th kept node: 50. Past that is only what was already
-    // requested when the cap was reached.
+    // before the 100th kept node: 50. Past that is only prefetches of nodes
+    // the walk kept: one request for each (all predicates at once), and none
+    // for a node beyond the cap. How far the prefetch runs ahead of the reads
+    // depends on response timing, so it is bounded by the kept nodes.
     expect(expanded.size).toBeGreaterThanOrEqual(50);
-    expect(expanded.size).toBeLessThanOrEqual(50 + EXPAND_CONCURRENCY);
+    const kept = new Set<string>(["root"]);
+    const collect = (nodes: DependencyNode[]): void => { for (const n of nodes) { kept.add(n.id); collect(n.children); } };
+    collect(walk.tree);
+    expect([...expanded].filter((id) => !kept.has(id))).toEqual([]);
+    expect(sent).toBe(expanded.size);
+    // Nothing still queued goes out once the walk has returned.
+    await new Promise((r) => setTimeout(r, 5));
+    expect(client.expand.mock.calls.length).toBe(sent);
 
     // The depth-first walk spent the same budget on 73 expansions, most of
-    // them one long branch.
+    // them one long branch, at one request per predicate each.
     const old = fanout();
     await oldBuildDependencyTree(old, "root", bounds);
     expect(new Set(old.expand.mock.calls.map(([id]) => id)).size).toBe(73);
+    expect(old.expand.mock.calls.length).toBe(73 * 5);
   });
 });
 

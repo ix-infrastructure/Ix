@@ -8,8 +8,9 @@ import { createClient } from "../../client/factory.js";
 import { resolveWorkspaceRoot } from "../config.js";
 import { expandCapped, formatEdgeResults, printJson, relativePath, sliceEdgeResults, sliceRanked, truncationHint, type Diagnostic, type EdgeCandidate } from "../format.js";
 import { checkGraphHealth, graphHealthProse, isUnhealthy, type GraphHealth } from "../graph-health.js";
-import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
-import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
+import { formatOption, kindOption, pageLimitOption, noSuggestOption, pageOffsetOption, pagingValues, pathOption, pickOption, strictOption } from "../options.js";
+import { nextPageCommand } from "../paging.js";
+import { registerEdgeCommand } from "../edge-command.js";
 import { activeReadScope, candidatesCut, resolveTargetSetOrReport, printResolved, type TargetSet } from "../resolve.js";
 import { emptyEdgeResultsJson } from "../text-matches.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
@@ -22,6 +23,7 @@ import { renderWarning } from "../ui.js";
 import { currentRunSignal } from "../../client/run-signal.js";
 import { mapLimit } from "../../client/request-memo.js";
 import { clipSnippet } from "./text.js";
+import { TYPE_KINDS } from "../graph-model.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -36,7 +38,6 @@ export const DISPATCH_DEPTH = 5;
 /** Supertypes looked at, at most, for one target: each costs one small expand. */
 export const DISPATCH_MAX_TYPES = 16;
 
-export const TYPE_KINDS = new Set(["class", "interface", "enum", "record", "trait", "object", "annotation"]);
 export const byName = (a: any, b: any): number =>
   String(a.name ?? "").localeCompare(String(b.name ?? "")) || String(a.id ?? "").localeCompare(String(b.id ?? ""));
 
@@ -184,15 +185,15 @@ export function registerCallersCommand(program: Command): void {
   program
     .command("callers <symbols...>")
     .description("Show methods/functions that call the given symbols (cross-file)")
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--no-suggest", "Disable did-you-mean candidates on unresolved targets")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(noSuggestOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
     .option("--all", ALL_FLAG)
-    .option("--limit <n>", "Max results to show", "50")
-    .option("--offset <n>", OFFSET_FLAG, "0")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(pageLimitOption())
+    .addOption(pageOffsetOption())
+    .addOption(formatOption())
     .addHelpText("after", `\nExamples:
   ix callers verify_token
   ix callers processPayment --format json
@@ -208,53 +209,34 @@ ${EXIT_CODES_HELP}`)
       await runPerTarget(symbols, opts.format, (symbol) => callersOne(client, symbol, opts, cmd));
     });
 
-  program
-    .command("callees <symbol>")
-    .description("Show methods/functions called by the given symbol (cross-file)")
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
-    .option("--all", ALL_FLAG)
-    .option("--limit <n>", "Max results to show", "50")
-    .option("--offset <n>", OFFSET_FLAG, "0")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
-    .addHelpText("after", `\nExamples:
+  registerEdgeCommand(program, {
+    name: "callees",
+    description: "Show methods/functions called by the given symbol (cross-file)",
+    helpAfter: `\nExamples:
   ix callees processPayment
   ix callees parse --format json
   ix callees handle --all --format llm
-${EXIT_CODES_HELP}`)
-    .action(async (symbol: string, opts: EdgeOpts, cmd: Command) => {
-      const client = createClient();
-      const calleeLimit = parseInt(opts.limit, 10);
-      const calleeOffset = parseOffset(opts.offset);
-      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all, textAnswerJson: emptyEdgeResultsJson() };
-      const set = await resolveTargetSetOrReport(client, symbol, resolveOpts, opts.format);
-      if (!set) return;
-      if (set.all) {
-        await edgesOfAll(client, symbol, set, "callees", calleeLimit, calleeOffset, opts.format, cmd);
-        return;
-      }
-      const target = set.entities[0];
-      if (opts.format === "text") printResolved(target);
+${EXIT_CODES_HELP}`,
+    direction: "out",
+    predicates: ["CALLS", "REFERENCES"],
+    withSites: true,
+    all: {
+      help: ALL_FLAG,
+      run: (client, symbol, set, limit, offset, format, cmd) => edgesOfAll(client, symbol, set, "callees", limit, offset, format, cmd),
+    },
+    diagnose: (client) => {
       const healthCheck = checkGraphHealth(client, activeReadScope());
-      // Use expand by entity ID to avoid aggregating results across all same-named entities
-      const result = await client.expand(target.id, {
-        direction: "out",
-        predicates: ["CALLS", "REFERENCES"],
-      });
-      const health = await healthDiagnostics(healthCheck);
-      bannerOverRows(health, opts.format, result.nodes.length);
-      const slice = sliceEdgeResults(result.nodes, calleeLimit, calleeOffset, expandCapped(result));
-      if (slice.nextOffset !== undefined) slice.next = nextPageCommand(cmd, [symbol], slice.nextOffset);
-      const site = await edgeTargetFor(client, target, "callees");
-      formatEdgeResults({ ...slice, rows: withEdgeSites(slice.rows, "callees", site) }, "callees", target.name, opts.format, target, "graph", health.diagnostics);
-    });
+      return async (rows, format) => {
+        const health = await healthDiagnostics(healthCheck);
+        bannerOverRows(health, format, rows);
+        return health.diagnostics;
+      };
+    },
+  });
 }
 
 async function callersOne(client: IxClient, symbol: string, opts: EdgeOpts, cmd: Command): Promise<void> {
-  const limit = parseInt(opts.limit, 10);
-  const offset = parseOffset(opts.offset);
+  const { limit, offset } = pagingValues(opts);
   const resolveOpts = { suggest: opts.suggest, suggestCommand: "callers", kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all, textAnswerJson: emptyEdgeResultsJson() };
   const set = await resolveTargetSetOrReport(client, symbol, resolveOpts, opts.format);
   if (!set) return;

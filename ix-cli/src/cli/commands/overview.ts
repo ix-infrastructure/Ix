@@ -4,19 +4,14 @@ import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
-import { getEffectiveSystemPath, getSystemPath, hasMapData } from "../hierarchy.js";
+import { getEffectiveSystemPath, getSystemPath, hasMapData, noSystemMap } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { relativePath, printJson } from "../format.js";
 import { llmLine, type LlmValue } from "../llm.js";
-import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
+import { formatOption, kindOption, pathOption, pickOption, strictOption } from "../options.js";
 import { renderSection, renderKeyValue, renderNote, renderBreadcrumb } from "../ui.js";
-import { forMcp } from "../next-step.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
-
-const CONTAINER_KINDS = new Set(["class", "module", "file", "trait", "object", "interface"]);
-const STRUCTURAL_CONTAINER_KINDS = new Set(["class", "object", "trait", "interface"]);
-const REGION_KINDS = new Set(["system", "subsystem", "module", "region"]);
-const FILE_KINDS = new Set(["file"]);
+import { CONTAINER_KINDS, FILE_KINDS, REGION_KINDS, TYPE_KINDS } from "../graph-model.js";
 
 const KEY_ITEMS_LIMIT = 5;
 
@@ -40,11 +35,11 @@ export function registerOverviewCommand(program: Command): void {
   program
     .command("overview <target>")
     .description("Structural summary — what a target contains or what surrounds it")
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
+    .addOption(formatOption())
     .addHelpText(
       "after",
       `\nUse overview for structural summaries. Use 'ix locate' for position.
@@ -175,7 +170,7 @@ async function overviewContainer(
 
   const hasMap = hasMapData(systemPath);
   if (!hasMap) {
-    diagnostics.push(`No system map. Run ${forMcp() ? "ix_map" : "`ix map`"} to see hierarchy.`);
+    diagnostics.push(noSystemMap());
   }
 
   // Append container symbol to system path for non-file, non-region containers
@@ -258,7 +253,7 @@ async function overviewLeaf(
 
   const hasMap = hasMapData(systemPath);
   if (!hasMap) {
-    diagnostics.push(`No system map. Run ${forMcp() ? "ix_map" : "`ix map`"} to see hierarchy.`);
+    diagnostics.push(noSystemMap());
   }
 
   // Append target to system path if not already there
@@ -274,7 +269,7 @@ async function overviewLeaf(
   let containerId: string | null = null;
 
   const parents = parentResult.nodes as any[];
-  const structuralParent = parents.find((p) => STRUCTURAL_CONTAINER_KINDS.has(p.kind));
+  const structuralParent = parents.find((p) => TYPE_KINDS.has(p.kind));
   const fileParent = parents.find((p) => FILE_KINDS.has(p.kind));
   const bestParent = structuralParent ?? fileParent ?? parents[0];
 
@@ -451,7 +446,7 @@ function renderOverviewHeader(
     renderKeyValue("File", displayPath);
   }
   if (containedIn) {
-    const containerLabel = STRUCTURAL_CONTAINER_KINDS.has(containedIn.kind)
+    const containerLabel = TYPE_KINDS.has(containedIn.kind)
       ? `${containedIn.kind} ${containedIn.name}`
       : containedIn.name;
     renderKeyValue("Contained in", containerLabel);

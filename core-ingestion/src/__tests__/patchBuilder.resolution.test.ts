@@ -137,6 +137,34 @@ function run(): void { new Helper(); Helper(); }
     }));
   });
 
+  it('does not link a PHP static call to a same-named method of the calling class', () => {
+    const consumer = parseFile(
+      '/repo/app/ItemService.php',
+      `<?php
+namespace App;
+use App\\Repo\\ItemRepository;
+class ItemService
+{
+    public function findByOwner(int $id): array
+    {
+        return ItemRepository::findByOwner($id);
+    }
+}
+      `,
+    )!;
+    const provider = parseFile(
+      '/repo/app/Repo/ItemRepository.php',
+      '<?php namespace App\\Repo; class ItemRepository { public static function findByOwner(int $id): array { return []; } }',
+    )!;
+    const patch = buildPatchWithResolution(consumer, 'hash', '', resolveEdges([consumer, provider]));
+    const callEdges = patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+
+    expect(callEdges).toEqual([expect.objectContaining({
+      src: nodeId('/repo/app/ItemService.php', 'ItemService.findByOwner'),
+      dst: nodeId('/repo/app/Repo/ItemRepository.php', 'ItemRepository.findByOwner'),
+    })]);
+  });
+
   it('materialises external stub node for unresolved :: package calls', () => {
     const file = '/repo/model.R';
     const externalNodeId = nodeId('external://dplyr', 'dplyr::filter');

@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { isGrammarSupported, parseFile } from '../index.js';
 import { SupportedLanguages } from '../languages.js';
 import { LANGUAGE_QUERIES } from '../queries.js';
+import { REQUIRED_GRAMMARS } from './helpers/grammars.js';
 
 // A query that names a node type or field its grammar does not have fails to
 // compile. parseFile catches that, returns null, and the whole language goes
@@ -44,16 +45,6 @@ const PROBE_PATHS: Partial<Record<SupportedLanguages, string>> = {
   [SupportedLanguages.CSS]: 'probe.css',
 };
 
-// Grammars that are regular dependencies of core-ingestion: they are always
-// installed, so they must always be checked rather than skipped.
-const REQUIRED = [
-  SupportedLanguages.TypeScript, SupportedLanguages.JavaScript, SupportedLanguages.Python,
-  SupportedLanguages.Java, SupportedLanguages.C, SupportedLanguages.CPlusPlus,
-  SupportedLanguages.CSharp, SupportedLanguages.Go, SupportedLanguages.Rust,
-  SupportedLanguages.Ruby, SupportedLanguages.PHP, SupportedLanguages.Scala,
-  SupportedLanguages.PowerShell,
-];
-
 const queriedLanguages = (Object.keys(LANGUAGE_QUERIES) as SupportedLanguages[])
   .filter(language => LANGUAGE_QUERIES[language].trim() !== '');
 
@@ -88,6 +79,6 @@ describe('every language query compiles against its installed grammar', () => {
     if (tsxError) failures.push(`tsx: ${tsxError}`);
 
     expect(failures).toEqual([]);
-    expect(checked).toEqual(expect.arrayContaining(REQUIRED));
+    expect(checked).toEqual(expect.arrayContaining([...REQUIRED_GRAMMARS]));
   });
 });

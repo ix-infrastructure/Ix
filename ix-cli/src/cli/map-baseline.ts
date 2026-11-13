@@ -1,9 +1,11 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { mapBaselinePath } from "./config.js";
 import { isRev, type IngestBaseline } from "./ingest-baseline.js";
+import { readState, writeStateAtomic } from "./workspace-state.js";
+
+/** The marker's format version (see `workspace-state.ts`); none reads as 0, same rules. */
+const MAP_BASELINE_VERSION = 1;
 
 interface SerializedMapBaseline {
   root: string;
@@ -15,17 +17,13 @@ export interface MapBaseline {
 }
 
 export function loadMapBaseline(projectRoot: string): MapBaseline | null {
-  try {
-    const data = JSON.parse(
-      fs.readFileSync(mapBaselinePath(projectRoot), "utf-8"),
-    ) as SerializedMapBaseline;
+  return readState(mapBaselinePath(projectRoot), { version: MAP_BASELINE_VERSION, validate: (raw) => {
+    const data = raw as Partial<SerializedMapBaseline>;
     if (data.root !== projectRoot || !isRev(data.sourceRev)) {
       return null;
     }
     return { sourceRev: data.sourceRev };
-  } catch {
-    return null;
-  }
+  } });
 }
 
 export function saveMapBaseline(projectRoot: string, sourceRev: number): boolean {
@@ -35,8 +33,8 @@ export function saveMapBaseline(projectRoot: string, sourceRev: number): boolean
       root: projectRoot,
       sourceRev,
     };
-    fs.mkdirSync(path.dirname(mapBaselinePath(projectRoot)), { recursive: true });
-    fs.writeFileSync(mapBaselinePath(projectRoot), JSON.stringify(data));
+    // Atomically: written in place, a killed process left a truncated marker.
+    writeStateAtomic(mapBaselinePath(projectRoot), MAP_BASELINE_VERSION, data);
     return true;
   } catch {
     return false;

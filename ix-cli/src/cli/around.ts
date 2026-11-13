@@ -10,6 +10,8 @@ import { rowLocation } from "./format.js";
 import { checkGraphHealth, isUnhealthy, type GraphHealth } from "./graph-health.js";
 import { isTestPath } from "./explain/related-files.js";
 import { heuristicTests } from "./around-tests.js";
+import { TYPE_REFERENCE_KINDS } from "./graph-model.js";
+import { fileUri, findFileNode } from "./file-node.js";
 
 /**
  * `ix around`: who depends on the code at a place in a file.
@@ -106,12 +108,6 @@ export interface AroundSymbol {
   declarations?: { lineStart: number; lineEnd: number };
 }
 
-/** Definitions whose "callers" are references to a type rather than calls. */
-export const CONTAINER_KINDS = new Set([
-  "class", "interface", "enum", "struct", "trait", "object", "module", "record",
-  "annotation", "union", "namespace", "impl", "type",
-]);
-
 /**
  * The edited lines inside container `d` that no member of it covers -- its
  * fields and declarations, which the graph does not index as definitions
@@ -121,7 +117,7 @@ export const CONTAINER_KINDS = new Set([
 export function declarationLines(
   d: PlacedDef, placed: PlacedDef[], ranges: LineRange[],
 ): { start: number; end: number } | undefined {
-  if (!CONTAINER_KINDS.has(d.kind.toLowerCase())) return undefined;
+  if (!TYPE_REFERENCE_KINDS.has(d.kind.toLowerCase())) return undefined;
   const members = placed.filter((o) => o.id !== d.id && o.start >= d.start && o.end <= d.end
     && (o.end - o.start) < (d.end - d.start));
   let lo = Infinity;
@@ -430,27 +426,6 @@ export interface AroundRequest {
 
 type AroundClient = Pick<IxClient, "search" | "expand" | "workspaceSystem" | "currentRevision" | "stats"> & { endpoint?: string };
 
-function nodeUri(n: any): string {
-  return String(n?.provenance?.sourceUri ?? n?.provenance?.source_uri ?? "").replace(/\\/g, "/");
-}
-
-/** The graph's file node for a workspace-relative path: exact, else a unique suffix match. */
-export async function findFileNode(client: Pick<IxClient, "search">, relPath: string): Promise<any | undefined> {
-  const want = relPath.replace(/\\/g, "/").replace(/^\.\//, "");
-  const { workspaceId, systemId } = activeReadScope();
-  const nodes = await client.search(path.posix.basename(want), {
-    kind: "file", nameOnly: true, limit: 50, workspaceId, systemId, scope: want,
-  });
-  const files = (nodes as any[]).filter((n) => String(n.kind).toLowerCase() === "file");
-  const exact = files.find((n) => nodeUri(n) === want);
-  if (exact) return exact;
-  const suffix = files.filter((n) => {
-    const uri = nodeUri(n);
-    return uri.endsWith(`/${want}`) || want.endsWith(`/${uri}`);
-  });
-  return suffix.length === 1 ? suffix[0] : undefined;
-}
-
 function toDef(n: any, topLevel: boolean, container?: string): FileDef | undefined {
   const loc = rowLocation(n);
   if (loc.lineStart === undefined) return undefined;
@@ -515,9 +490,10 @@ export async function gatherAround(client: AroundClient, req: AroundRequest): Pr
   // Never let the health probe reject past a caller that stopped waiting.
   healthP.catch(() => undefined);
 
-  const file = await findFileNode(client, req.relPath);
+  // The path comes from an editor or a hook, so a unique suffix match counts.
+  const file = await findFileNode(client, req.relPath, { scope: activeReadScope(), suffixMatch: true });
   if (!file) throw new AroundError("file_not_in_graph", `${req.relPath} is not in the graph.`);
-  const relPath = nodeUri(file) || req.relPath;
+  const relPath = fileUri(file) || req.relPath;
 
   const [contains, imported] = await Promise.all([
     client.expand(file.id, { direction: "out", predicates: ["CONTAINS"], hops: 2 }),
