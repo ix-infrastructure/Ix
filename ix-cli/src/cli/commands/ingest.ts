@@ -324,9 +324,27 @@ export function fullModePatchId(patchId: string): string {
   return [hash.slice(0, 8), hash.slice(8, 12), hash.slice(12, 16), hash.slice(16, 20), hash.slice(20, 32)].join('-');
 }
 
-/** The patch a run of this mode sends for a built one: its ops and its id. */
+/**
+ * The patch a run of this mode sends for a built one: its ops, its id, and
+ * its `replaces`. `buildPatch` and `buildDeletionPatch` put first in
+ * `replaces` the patch this one supersedes, this extractor's for the previous
+ * hash, by built id. Either mode may have stored that one, so it is named
+ * under the full-mode id as well, as one id named it whichever mode wrote it
+ * before the split. The rest of the list (earlier extractors' ids, the legacy
+ * id) predates the split, so no full-mode id exists for them, and doubling
+ * them would add about a kilobyte to every patch sent. Nothing is added when
+ * the first id is the built id itself: the other mode's patch for the same
+ * source stays. The backend already takes `replaces` ids it does not hold
+ * (most earlier-extractor ids name no stored patch), so the added one needs
+ * no lookup.
+ */
 export function patchForMode(patch: GraphPatchPayload, mapMode: boolean): GraphPatchPayload {
-  return mapMode ? stripMapModeOps(patch) : { ...patch, patchId: fullModePatchId(patch.patchId) };
+  const patchId = mapMode ? patch.patchId : fullModePatchId(patch.patchId);
+  const superseded = patch.replaces[0];
+  const replaces = superseded === undefined || superseded === patch.patchId
+    ? patch.replaces
+    : [...patch.replaces, fullModePatchId(superseded)];
+  return { ...(mapMode ? stripMapModeOps(patch) : patch), patchId, replaces };
 }
 
 /**

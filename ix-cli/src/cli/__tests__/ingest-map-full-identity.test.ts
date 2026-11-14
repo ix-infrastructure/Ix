@@ -319,6 +319,30 @@ describe("mode-specific patch ids", () => {
     expect(patchForMode(patch, false)).toMatchObject({ patchId: fullModePatchId(ID), ops: patch.ops });
   });
 
+  it("names the superseded patch under both modes' ids, never the patch's own", () => {
+    const PREV = "11111111-2222-3333-4444-555555555555";
+    const OLD = "66666666-7777-8888-9999-000000000000";
+    const patch = {
+      patchId: ID, actor: "t", timestamp: "", baseRev: 0, replaces: [PREV, OLD],
+      source: { uri: "a.ts", sourceHash: "h", extractor: "x", sourceType: "code" },
+      ops: [],
+    } as unknown as Parameters<typeof patchForMode>[0];
+    // The first entry (this extractor, previous hash) may be stored under
+    // either id; the earlier extractors' predate the split and stay single.
+    const named = [PREV, OLD, fullModePatchId(PREV)];
+    expect(patchForMode(patch, true).replaces).toEqual(named);
+    expect(patchForMode(patch, false).replaces).toEqual(named);
+    // The built patch is left as it was.
+    expect(patch.replaces).toEqual([PREV, OLD]);
+
+    // A list that starts with the built id itself (same source hash): the
+    // full patch does not replace itself, nor the map one the full one.
+    const self = { ...patch, replaces: [ID, PREV] };
+    expect(patchForMode(self, false).replaces).toEqual([ID, PREV]);
+    expect(patchForMode(self, true).replaces).toEqual([ID, PREV]);
+    expect(patchForMode({ ...patch, replaces: [] }, false).replaces).toEqual([]);
+  });
+
   it("pairs each candidate with its other-mode id, this run's mode first", () => {
     expect(modeAlternatives(["a", "b"], true)).toEqual([["a", fullModePatchId("a")], ["b", fullModePatchId("b")]]);
     expect(modeAlternatives(["a", "b"], false)).toEqual([[fullModePatchId("a"), "a"], [fullModePatchId("b"), "b"]]);
