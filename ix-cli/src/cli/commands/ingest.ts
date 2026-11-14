@@ -317,7 +317,7 @@ export function stripMapModeOps(patch: GraphPatchPayload): GraphPatchPayload {
  * The full patch takes the derived id, not the map one: a CLI before this sent
  * both under the built id, and most of those patches are `ix map`'s. Derived
  * from the built id alone, so a reader holding `sourcePatchIdCandidates` can
- * name both (`withModeVariants`). Same UUID shape as the built id.
+ * name both (`modeAlternatives`). Same UUID shape as the built id.
  */
 export function fullModePatchId(patchId: string): string {
   const hash = crypto.createHash('sha256').update(`${patchId}:full`).digest('hex');
@@ -806,16 +806,30 @@ export async function sweepOrphanNodes(
       const reads = await Promise.all(file.previousPatchIds.map(async candidate => {
         const ids = candidateIds(candidate);
         for (let k = 0; k < ids.length; k++) {
-          // The first id of each was counted above; a fallback read counts as it is made.
-          if (k > 0) budget.requests++;
+          // The first id of each was counted above. A fallback read (the
+          // other mode's id) is checked against the budget and counted as it
+          // is made, so the sweep never reads past its cap.
+          if (k > 0) {
+            if (budget.requests >= budget.maxRequests || spent() >= budget.maxMs) {
+              return { raw: null, error: null as string | null, outOfBudget: true };
+            }
+            budget.requests++;
+          }
           try {
-            return { raw: await client.getPatch(ids[k]!) as unknown, error: null as string | null };
+            return { raw: await client.getPatch(ids[k]!) as unknown, error: null as string | null, outOfBudget: false };
           } catch (err) {
-            if (!isNotFoundError(err)) return { raw: null, error: err instanceof Error ? err.message : String(err) };
+            if (!isNotFoundError(err)) return { raw: null, error: err instanceof Error ? err.message : String(err), outOfBudget: false };
           }
         }
-        return { raw: null, error: null as string | null };
+        return { raw: null, error: null as string | null, outOfBudget: false };
       }));
+      // A file the budget cut short is left unswept, as one past it is: a
+      // read it did not make may name orphans.
+      if (reads.some(r => r.outOfBudget)) {
+        budget.skipped++;
+        opts.onUnswept?.(file);
+        return null;
+      }
       const failed = reads.find(r => r.error !== null);
       if (failed) {
         opts.onSkip?.(file, failed.error!);

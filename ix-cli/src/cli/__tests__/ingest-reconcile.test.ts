@@ -509,6 +509,34 @@ describe("sweepOrphanNodes (IN-20 same-hash sweep)", () => {
     expect(budget.requests).toBe(3);
   });
 
+  it("reads the other mode's id only when the first is not found, and never past the request budget", async () => {
+    const getPatch = vi.fn(async (pid: string) => {
+      if (pid === "this-mode") throw notFound();
+      return { data: { nodeIds: [A, B] } };
+    });
+    const nodes = vi.fn(async (ids: string[], _fields?: "full") => ({ rev: 1, nodes: ids.map(i => node(i)), missing: [] }));
+    const file = () => ({ ...fileWith([{ type: "UpsertNode", id: A, kind: "function" }]), previousPatchIds: [["this-mode", "other-mode"]] });
+
+    // Room for the fallback: both ids read, then one node read.
+    const roomy = orphanSweepBudget({});
+    expect(await sweepOrphanNodes({ getPatch, nodes }, [file()], { mapMode: false, budget: roomy })).toEqual([[B]]);
+    expect(getPatch.mock.calls.map(c => c[0])).toEqual(["this-mode", "other-mode"]);
+    expect(roomy.requests).toBe(3);
+
+    // A budget of one request covers the first read only: the fallback is not
+    // made, and the file is left unswept rather than swept on half its reads.
+    getPatch.mockClear();
+    nodes.mockClear();
+    const onUnswept = vi.fn();
+    const tight = orphanSweepBudget({ IX_ORPHAN_SWEEP_MAX_REQUESTS: "1" });
+    expect(await sweepOrphanNodes({ getPatch, nodes }, [file()], { mapMode: false, budget: tight, onUnswept })).toEqual([[]]);
+    expect(getPatch.mock.calls.map(c => c[0])).toEqual(["this-mode"]);
+    expect(nodes).not.toHaveBeenCalled();
+    expect(tight.requests).toBe(1);
+    expect(tight.skipped).toBe(1);
+    expect(onUnswept).toHaveBeenCalledTimes(1);
+  });
+
   it("never deletes a node another file wrote last, one a patch of the batch upserts, an absent one, or a chunk in map mode", async () => {
     const getPatch = vi.fn(async () => ({ data: { nodeIds: [A, B, C, D, E] } }));
     const nodes = vi.fn(async (_ids: string[], _fields?: "full") => ({

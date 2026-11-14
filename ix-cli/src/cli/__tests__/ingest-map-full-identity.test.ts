@@ -179,6 +179,20 @@ describe("ix map and a full ingest write under different patch ids (Ix#965)", ()
     }, 120_000);
   }
 
+  it("map, then an unforced full ingest: unchanged files are skipped, so it takes --force to add the chunks", async () => {
+    // The hash baseline skips an unchanged file whichever mode stored it, so
+    // the full run sends nothing; the forced run above is how chunks arrive.
+    const target = await world.backend("head");
+    await world.run(target, "map");
+    const mapIds = new Map(target.backend.lastPatchIds);
+    const mapOps = new Map(target.backend.lastOps);
+
+    await world.run(target, "full");
+    expect(target.backend.lastPatchIds).toEqual(mapIds);
+    expect(target.backend.lastOps).toEqual(mapOps);
+    expect(chunkNodes(target.backend.graphSignature().nodes)).toEqual([]);
+  }, 120_000);
+
   it("the same source in the same mode keeps one patch id", async () => {
     for (const mode of ["map", "full"] as const) {
       const a = await world.backend("head");
