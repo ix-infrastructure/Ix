@@ -60,6 +60,7 @@ import {
   assessTargetStructure, checkGraphHealth, graphHealthJson, isUnhealthy, worseHealth, type GraphHealth,
 } from "../graph-health.js";
 import { CONTAINER_KINDS } from "../graph-model.js";
+import { findFileNode } from "../file-node.js";
 
 /** The `--max-*` knobs that bound a bundle. */
 interface BudgetSnapshot {
@@ -1745,28 +1746,16 @@ async function collectHistory(
  * back to a synthetic id rather than dropping a file the graph has not seen.
  */
 async function fileNodeId(client: IxClient, path: string): Promise<string> {
-  return (await findFileNode(client, path)) ?? `file:${path}`;
+  return (await fileNodeIdOrUndefined(client, path)) ?? `file:${path}`;
 }
 
 /**
- * Search candidates for one file node. `scope` narrows the search to the path
- * on a backend that applies it (Ix-memory >= 1.0.31); an older one ignores it
- * and returns every file sharing the basename, so the limit has to reach past
- * a monorepo's `index.ts`, `__init__.py` or `mod.rs` -- at 10 a file ranked
- * eleventh among its namesakes had no node, and `--from-issue` discarded a path
- * the issue named for a BM25 guess. The headroom exists for backends that
- * ignore `scope`, so it can shrink once MIN_BACKEND_VERSION reaches 1.0.31
- * (`searchScope` in client/features.ts).
+ * A file's graph node id, or undefined when the graph has no node for it or
+ * the search failed. Exact paths only: the id is paired with this path.
  */
-const FILE_NODE_SEARCH_LIMIT = 200;
-
-/** A file's graph node id, or undefined when the graph has no node for it. */
-export async function findFileNode(client: IxClient, path: string): Promise<string | undefined> {
-  const name = path.split("/").pop()!;
-  const nodes = await client.search(name, {
-    kind: "file", nameOnly: true, limit: FILE_NODE_SEARCH_LIMIT, scope: path, ...activeReadScope(),
-  }).catch(() => []);
-  return nodes.find((n) => relativePath(n.provenance?.sourceUri) === path)?.id;
+async function fileNodeIdOrUndefined(client: IxClient, path: string): Promise<string | undefined> {
+  const node = await findFileNode(client, path, { scope: activeReadScope() }).catch(() => undefined);
+  return node?.id;
 }
 
 /** Search candidates fetched per name the issue mentions; only exact names are kept. */
@@ -1797,7 +1786,7 @@ async function buildIssueBundle(
   // A path start has no node yet, and the graph may not have one either: it
   // does not index every tracked file. chooseCentre walks BM25 for one it does.
   const { starts, centre, walked } = await chooseCentre(
-    plan.starts, plan.bm25, (path) => findFileNode(client, path), CENTRE_FALLBACK_TRIES, plan.sourcePaths);
+    plan.starts, plan.bm25, (path) => fileNodeIdOrUndefined(client, path), CENTRE_FALLBACK_TRIES, plan.sourcePaths);
   if (!centre) {
     reportFailure(
       "issue_unresolved",

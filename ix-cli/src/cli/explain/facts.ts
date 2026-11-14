@@ -10,7 +10,7 @@ import { getSystemPath } from "../hierarchy.js";
 import type { CommitRef } from "./history.js";
 import { isTestPath, type RelatedRef } from "./related-files.js";
 import { suggestedCommand } from "../next-step.js";
-import { TYPE_KINDS } from "../graph-model.js";
+import { TYPE_KINDS, type GraphKind, type KindSet } from "../graph-model.js";
 
 /** A related entity and where it is defined. */
 export interface EntityLocation {
@@ -211,7 +211,7 @@ const MEMBER_USE_CONCURRENCY = 6;
 const USE_PREDICATES = ["CALLS", "REFERENCES", "IMPORTS"];
 
 /** Kinds a reader navigates by. Everything else ranks after them. */
-const PRIMARY_MEMBER_KINDS = new Set([
+const PRIMARY_MEMBER_KINDS: KindSet = new Set<GraphKind>([
   "class", "interface", "function", "method", "type", "enum", "trait", "struct", "object", "module",
 ]);
 
@@ -430,8 +430,12 @@ async function lookUpContainer(client: IxClient, containerId: string): Promise<E
   }
 }
 
-/** The target's callees by name, one entity read each, in edge order. */
-function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRef[]> {
+/**
+ * The target's callees by name, one entity read each, in edge order. A callee
+ * with no usable name, or one that cannot be read, is listed unresolved with a
+ * text-search suggestion. `ix explain` and `collectFacts` both use this one.
+ */
+export function resolveCallList(client: Pick<IxClient, "entity">, calleeEdges: any[]): Promise<EntityRef[]> {
   return Promise.all(
     calleeEdges.map(async (e: any): Promise<EntityRef> => {
       try {

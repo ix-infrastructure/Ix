@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import type { IxClient } from "../client/api.js";
 import { ixHome } from "./ix-home.js";
 import { revisionToken } from "./map-result-cache.js";
+import type { GraphKind, KindSet } from "./graph-model.js";
 
 /**
  * Is the graph a command is about to answer from structurally intact?
@@ -164,7 +165,7 @@ export function assessGraphStats(stats: unknown): GraphHealth {
 }
 
 /** Kinds a parser always attaches to a file (or to a class inside one). */
-const ATTACHED_KINDS = new Set([
+const ATTACHED_KINDS: KindSet = new Set<GraphKind>([
   "function", "method", "class", "interface", "trait", "object", "struct", "enum",
   "constant", "type", "type_alias", "variable",
 ]);
