@@ -1,6 +1,11 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { Command } from "commander";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CAPABILITIES_SCHEMA,
@@ -10,6 +15,7 @@ import {
   renderCapabilities,
   runFastCapabilities,
 } from "../capabilities.js";
+import { registerCapabilitiesCommand } from "../commands/capabilities.js";
 import { registerHookCommand } from "../commands/hook.js";
 import { proInstallState } from "../register/pro-loader.js";
 import { isRepairInvocation, skipsProLoading } from "../register/pro-failure.js";
@@ -176,6 +182,76 @@ describe("an installed Ix Pro", () => {
     for (const word of ["status", "briefing", "doctor", "help", undefined]) {
       const argv = word === undefined ? ["node", "ix"] : ["node", "ix", word];
       expect(skipsProLoading(argv)).toBe(false);
+    }
+  });
+});
+
+describe("when to ask again", () => {
+  // Installing, breaking or repairing Ix Pro changes pro.state while the ix
+  // executable stays byte-for-byte the same, so a plugin cache keyed on the
+  // resolved ix path and its mtime would keep a stale answer. This drives a
+  // real install layout through those steps to prove it, then holds the
+  // advice to "ask again once per session".
+  it("pro.state changes across a Pro install, breakage and repair while the ix entry point does not", () => {
+    const root = mkdtempSync(join(tmpdir(), "ix-capabilities-"));
+    try {
+      const main = join(root, "dist", "cli", "main.js");
+      mkdirSync(dirname(main), { recursive: true });
+      writeFileSync(main, "// ix\n");
+      const req = createRequire(main);
+      // Resolve from the ix entry point, as the loader resolves from itself.
+      // CommonJS says MODULE_NOT_FOUND where ESM says ERR_MODULE_NOT_FOUND.
+      const resolve = (specifier: string): string => {
+        try {
+          return pathToFileURL(req.resolve(specifier)).href;
+        } catch (error) {
+          const code = (error as { code?: string }).code;
+          throw Object.assign(new Error(String(error)), { code: code === "MODULE_NOT_FOUND" ? "ERR_MODULE_NOT_FOUND" : code });
+        }
+      };
+      const probe = () => collectCapabilities(() => proInstallState(resolve), "1.0.0").pro.state;
+      const ixKey = () => { const st = statSync(main); return `${main}@${st.mtimeMs}`; };
+      const key = ixKey();
+
+      expect(probe()).toBe("absent");
+
+      const pro = join(root, "node_modules", "@ix", "pro");
+      const register = join(pro, "register.js");
+      mkdirSync(pro, { recursive: true });
+      writeFileSync(join(pro, "package.json"), JSON.stringify({
+        name: "@ix/pro", exports: { ".": "./index.js", "./register": "./register.js" },
+      }));
+      writeFileSync(join(pro, "index.js"), "");
+      writeFileSync(register, "");
+      expect(probe()).toBe("installed");
+
+      rmSync(register);
+      expect(probe()).toBe("broken");
+
+      writeFileSync(register, "");
+      expect(probe()).toBe("installed");
+
+      expect(ixKey()).toBe(key);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("is advised once per session, not cached per ix path, in the help and in flags.md", () => {
+    const program = new Command();
+    let help = "";
+    program.configureOutput({ writeOut: (s) => { help += s; }, writeErr: () => {} });
+    registerCapabilitiesCommand(program);
+    program.commands.find((c) => c.name() === "capabilities")!.outputHelp();
+
+    const flagsMd = readFileSync(
+      fileURLToPath(new URL("../../../../skills/ix/references/flags.md", import.meta.url)), "utf8",
+    );
+    const section = flagsMd.slice(flagsMd.indexOf("### `ix capabilities`"), flagsMd.indexOf("### `ix config`"));
+
+    for (const [where, text] of [["help", help.replace(/\s+/g, " ")], ["flags.md", section]] as const) {
+      expect(text, where).toContain("Ask again once per session");
+      expect(text, where).not.toMatch(/cache it per resolved/i);
     }
   });
 });

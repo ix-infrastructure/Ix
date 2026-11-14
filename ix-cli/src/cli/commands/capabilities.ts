@@ -26,12 +26,16 @@ from IX_FORMAT or config, so scripts should pass --format json.
    "pro":{"available":false,"state":"absent"},"hooks":["claude-post-edit"]}
 
 pro.state is absent, installed, or broken (installed but its entry point does
-not resolve or its file is missing). installed is read from module resolution only: a Pro that then
-fails to initialize still reads installed, and the next Pro command exits 1
-saying so; treat that as Pro unavailable until ix upgrade. The answer changes only when the CLI or Ix Pro is reinstalled,
-so cache it per resolved ix path and its modification time. A new field is
-not a breaking change; a breaking one changes "schema". Exits 0 whenever it
-answers.`)
+not resolve or its file is missing). installed is read from module resolution
+only: a Pro that then fails to initialize still reads installed, and the next
+Pro command exits 1 saying so; treat that as Pro unavailable until ix upgrade.
+
+Ask again once per session rather than caching the answer across sessions: it
+is cheap (no backend, no config, Pro not loaded), and installing, breaking or
+repairing Ix Pro changes pro.state without changing the ix executable, so a
+cache keyed on the ix path or its modification time goes stale. A new field
+is not a breaking change; a breaking one changes "schema". Exits 0 whenever
+it answers.`)
     .action((opts: { format: string }) => {
       renderCapabilities(collectCapabilities(), opts.format);
     });

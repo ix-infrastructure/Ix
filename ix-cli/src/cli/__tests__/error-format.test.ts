@@ -1,7 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { spawn } from "node:child_process";
-import { createServer } from "node:net";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as nodeModule from "node:module";
 import { tmpdir } from "node:os";
@@ -358,17 +357,20 @@ const scratch: string[] = [];
 let endpoint: string;
 let work: string;
 
-/** A loopback port with nothing listening on it. */
-async function closedPort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
-  const { port } = server.address() as { port: number };
-  await new Promise<void>((done) => server.close(() => done()));
-  return port;
-}
+/**
+ * A loopback endpoint with nothing listening on it. A fixed low port rather
+ * than one taken from `listen(0)` and closed again: the kernel hands that port
+ * straight back to the next `listen(0)`, and with test files running in
+ * parallel that is another file's fake backend (ingest-files), which then
+ * answers this file's `ix patches` with a 404 and sees a request it does not
+ * implement. Port 2 is outside every OS's ephemeral range, so `listen(0)`
+ * never hands it to a test. Not port 1 (or 9): fetch refuses those as "bad
+ * port" before connecting, which is not the refused connection under test.
+ */
+const UNREACHABLE_ENDPOINT = "http://127.0.0.1:2";
 
-beforeAll(async () => {
-  endpoint = `http://127.0.0.1:${await closedPort()}`;
+beforeAll(() => {
+  endpoint = UNREACHABLE_ENDPOINT;
   work = mkdtempSync(join(tmpdir(), "ix-errfmt-work-"));
   scratch.push(work);
 });
