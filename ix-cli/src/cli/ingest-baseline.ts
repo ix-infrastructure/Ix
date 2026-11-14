@@ -21,14 +21,19 @@ interface SerializedIngestBaseline {
   lastIngestAt?: string;
   tracksMapBaseline?: boolean;
   extractor?: string;
+  fileModes?: Record<string, IngestMode>;
   replayedFiles?: string[];
   pendingFiles?: string[];
   parseTimeouts?: string[];
   pythonPackageEntries?: string[];
 }
 
+export type IngestMode = "map" | "full";
+
 export interface IngestBaseline {
   files: Map<string, number>;
+  /** Mode last committed for each file. Missing entries predate mode-aware IDs. */
+  fileModes: Map<string, IngestMode>;
   deletedFiles: Map<string, string[]>;
   currentRev: number;
   lastIngestAt: string;
@@ -90,6 +95,7 @@ export interface IngestBaseline {
 
 /** Per-file lists a baseline write records beside the mtimes. */
 export interface BaselineFileNotes {
+  fileModes?: ReadonlyMap<string, IngestMode>;
   /** See `IngestBaseline.replayedFiles`. */
   replayedFiles?: readonly string[];
   /** See `IngestBaseline.pendingFiles`. */
@@ -143,6 +149,9 @@ export function loadIngestBaseline(projectRoot: string): IngestBaseline | null {
 
     return {
       files,
+      fileModes: new Map(Object.entries(data.fileModes ?? {}).filter(
+        (entry): entry is [string, IngestMode] => files.has(entry[0]) && (entry[1] === "map" || entry[1] === "full"),
+      )),
       deletedFiles,
       currentRev,
       lastIngestAt,
@@ -163,7 +172,7 @@ export function saveIngestBaseline(
   now: Date = new Date(),
   deletedFiles: Map<string, string[]> = new Map(),
   extractor?: string | null,
-  { replayedFiles = [], pendingFiles = [], parseTimeouts = [], pythonPackageEntries }: BaselineFileNotes = {},
+  { replayedFiles = [], pendingFiles = [], parseTimeouts = [], pythonPackageEntries, fileModes }: BaselineFileNotes = {},
 ): void {
   try {
     // Keep the last good rev rather than writing a shape the read side will
@@ -179,6 +188,7 @@ export function saveIngestBaseline(
     const data: SerializedIngestBaseline = {
       root: projectRoot,
       files: Object.fromEntries(mtimes),
+      ...(fileModes ? { fileModes: Object.fromEntries([...fileModes].filter(([file]) => mtimes.has(file))) } : {}),
       deletedFiles: Object.fromEntries(deletedFiles),
       currentRev: rev,
       lastIngestAt: now.toISOString(),
