@@ -813,8 +813,6 @@ class Child extends Base
     it('walks ancestors that are outside the parse batch', () => {
       const globalIndex = buildGlobalResolutionIndex(
         ['/repo/app/Child.php', '/repo/app/Base.php', '/repo/app/Loud.php'],
-        undefined,
-        undefined,
         new Map([base(), loud()].map(r => [r.filePath, summarizeParseResult(r)])),
       );
 
