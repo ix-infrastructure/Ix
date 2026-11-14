@@ -177,6 +177,7 @@ import { LANGUAGE_QUERIES } from './queries.js';
 import { classifyFileRole } from './role-classifier.js';
 import type { RoleClassification } from './role-classifier.js';
 import { callReceiver, collectReceiverFacts } from './receiver-types.js';
+import { collectPythonReceiverFacts } from './python-receivers.js';
 import { summarySignature, type FileSummary } from './symbol-index.js';
 export type { FileSummary } from './symbol-index.js';
 
@@ -3361,8 +3362,12 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       }
     }
 
-    const receiverFacts = [SupportedLanguages.Scala, SupportedLanguages.TypeScript, SupportedLanguages.Go, SupportedLanguages.Java].includes(language)
-      ? collectReceiverFacts(tree.rootNode, language, checkBudget) : undefined;
+    // Python: additive like the others. A typed receiver adds a typed
+    // relationship; the call's own bare/qualified relationships are unchanged.
+    const receiverFacts = language === SupportedLanguages.Python
+      ? collectPythonReceiverFacts(tree.rootNode, checkBudget)
+      : [SupportedLanguages.Scala, SupportedLanguages.TypeScript, SupportedLanguages.Go, SupportedLanguages.Java].includes(language)
+        ? collectReceiverFacts(tree.rootNode, language, checkBudget) : undefined;
 
     // --- Second pass: calls and imports ---
     for (const match of pass2Matches) {
@@ -3815,7 +3820,12 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           // `Type.member`, `receiver.member` for a factory-typed receiver, or
           // Java `Type.getB().member` for a chain.
           const chain = typedReceiver.chain?.length ? `${typedReceiver.chain.map(m => `${m}()`).join('.')}.` : '';
-          const typedName = `${typedReceiver.type ?? typedReceiver.receiver}.${chain}${callee}`;
+          // Python writes an imported type with its module (`pkg.model.Target`);
+          // the relationship is named by the class alone, as the call's own
+          // `Target.run` (see effectiveCallee) is, so the two merge when equal.
+          const typeName = language === SupportedLanguages.Python && typedReceiver.type
+            ? typedReceiver.type.slice(typedReceiver.type.lastIndexOf('.') + 1) : typedReceiver.type;
+          const typedName = `${typeName ?? typedReceiver.receiver}.${chain}${callee}`;
           const typedKey = `${scope}\x00${typedName}`;
           const receiver = typedReceiver.type
             ? { receiverType: typedReceiver.type, ...(chain ? { receiverChain: typedReceiver.chain } : {}) }
@@ -5454,6 +5464,7 @@ export function resolveEdges(
       }).map(fp => ({ fp, type }));
     }
     if (language === SupportedLanguages.Java) return javaReceiverProviders(context, summary, parts, type);
+    if (language === SupportedLanguages.Python) return pythonReceiverProviders(context, rawType);
     const binding = importBindingsByLocal.get(context)?.get(type);
     // A same-named declaration in the importing file can only be a nested
     // shadow (a `namespace` class); without scope facts, guess neither.
@@ -5520,6 +5531,26 @@ export function resolveEdges(
     const samePackage = summary?.receiverPackage ? inPackage(summary.receiverPackage, type) : [];
     if (samePackage.length) return as(samePackage);
     return as(imports.flatMap(pkg => inPackage(pkg, type)));
+  }
+
+  /**
+   * Python: python-receivers writes a class of the typing file as its bare
+   * name and an imported class as `<module>.<Name>`, relative dots kept
+   * (`pkg.model.Target`, `.model.Target`, `..Target`), so a stored summary
+   * resolves without import facts. The module must name one file by its full
+   * path (never a coincidental stem) that defines the class.
+   */
+  function pythonReceiverProviders(context: string, rawType: string): Array<{ fp: string; type: string }> {
+    const [, dots, rest] = /^(\.*)(.*)$/.exec(rawType)!;
+    const dot = rest.lastIndexOf('.');
+    const type = rest.slice(dot + 1);
+    if (!type) return [];
+    const module = dot >= 0 ? `${dots}${rest.slice(0, dot)}` : dots;
+    if (!module) return fileHasSymbol.get(context)?.has(type) ? [{ fp: context, type }] : [];
+    const files = dots
+      ? resolveRelativeImportTargets(context, SupportedLanguages.Python, module) ?? []
+      : pythonModuleTargets(context, module, true);
+    return [...new Set(files)].filter(fp => fileHasSymbol.get(fp)?.has(type)).map(fp => ({ fp, type }));
   }
 
   const receiverProviderCache = new Map<string, Array<{ fp: string; type: string }>>();
