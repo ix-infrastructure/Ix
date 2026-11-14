@@ -126,7 +126,7 @@ describe("ix status", () => {
   }
 
   async function statusWith(
-    info: { mapCompleted?: boolean; mapStale?: boolean; mapRefreshError?: string | null },
+    info: { mapCompleted?: boolean; mapStale?: boolean; mapRefreshError?: string | null; files?: string[] },
     ...args: string[]
   ): Promise<string> {
     vi.doMock("../stale.js", async (orig) => ({
@@ -134,7 +134,8 @@ describe("ix status", () => {
       detectStaleFiles: () => ({
         graphCompleted: true, mapCompleted: info.mapCompleted ?? true, mapStale: info.mapStale ?? false, mapRefreshError: info.mapRefreshError ?? null,
         currentRev: 7, lastIngestAt,
-        staleFiles: 0, sampleChangedFiles: [], replayedFiles: [], parseTimeouts: [],
+        staleFiles: info.files?.length ?? 0, sampleChangedFiles: info.files ?? [],
+        replayedFiles: info.files ?? [], parseTimeouts: info.files ?? [],
       }),
     }));
     const { registerStatusCommand } = await import("../commands/status.js");
@@ -309,6 +310,31 @@ describe("ix status", () => {
     expect(await status()).not.toMatch(/Verified/);
     out.length = 0;
     expect(JSON.parse(await status("--format", "json")).verify).toBeNull();
+  });
+
+  it("prints only the json paths it publishes (contracts/fields.ts), and all of them", async () => {
+    // The plugin contract check fails a plugin read of a path not published
+    // for `status`, so a printed path missing from the list would fail a
+    // plugin that reads it correctly.
+    const { acceptsField, JSON_FIELDS } = await import("../contracts/fields.js");
+    const { fieldPaths } = await import("./helpers/field-paths.js");
+    const { saveVerifyRecord } = await import("../verify.js");
+    registerRepo();
+    stats = HOLLOW;
+    saveVerifyRecord({
+      root: repo, at: new Date().toISOString(), lastIngestAt: null, graph: "diverged",
+      files: 20, stale: 1, diverged: 1, unverified: 0, divergedFiles: ["a.ts"], fix: "ix reset --workspace --yes --ingest",
+    });
+    const printed = new Set<string>();
+    for (const info of [{ files: ["a.ts"] }, { mapCompleted: false, mapStale: true, mapRefreshError: "timed out" }]) {
+      out.length = 0;
+      for (const p of fieldPaths(JSON.parse(await statusWith(info, "--format", "json")))) printed.add(p);
+    }
+    expect([...printed].filter((p) => acceptsField("status", p) !== true)).toEqual([]);
+    // The failure record's paths are pinned in json-fields.test.ts; every
+    // other published path is printed here.
+    const own = JSON_FIELDS.status.filter((p) => !["error", "message", "dir", "next"].includes(p));
+    expect(own.filter((p) => !printed.has(p))).toEqual([]);
   });
 
   it("says unverified, not ok, when the directory is in no workspace", async () => {
