@@ -4,6 +4,9 @@
  * Cutting a ranked list to `--limit`/`--offset` and saying what was left out.
  */
 
+import { attrLabel } from "./rows.js";
+import type { EdgeRow } from "./types.js";
+
 // ── Bounded lists ──────────────────────────────────────────────────────────
 
 /** A list that was cut to `--limit`, and what it left behind. */
@@ -64,10 +67,10 @@ export function isRawIdName(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(value) || /^[0-9a-f]{32,}$/i.test(value);
 }
 
-function edgeRowPriority(node: any): number {
+function edgeRowPriority(node: EdgeRow): number {
   // A dispatch row (`ix callers` through a supertype) follows every direct one.
   const dispatch = typeof node.dispatchVia === "string" ? 3 : 0;
-  const name = node.name || node.attrs?.name || "";
+  const name = node.name || attrLabel(node.attrs?.name) || "";
   const resolved = !!name && !isRawIdName(name);
   if (!resolved) return dispatch + 2;
   const path = node.provenance?.source_uri ?? node.provenance?.sourceUri ?? node.attrs?.path;
@@ -75,7 +78,7 @@ function edgeRowPriority(node: any): number {
 }
 
 /** The supertype member a dispatch row's call targets (`via`), absent on a direct row. */
-export function dispatchVia(node: any): string | undefined {
+export function dispatchVia(node: EdgeRow): string | undefined {
   return typeof node.dispatchVia === "string" ? node.dispatchVia : undefined;
 }
 
@@ -87,7 +90,7 @@ export function dispatchVia(node: any): string | undefined {
  * caller a `locate` before it can be read. Neither should displace a row that
  * carries both.
  */
-export function sliceEdgeResults(nodes: any[], limit: number, offset = 0, capped = false): Slice<any> {
+export function sliceEdgeResults<T extends EdgeRow>(nodes: T[], limit: number, offset = 0, capped = false): Slice<T> {
   const slice = sliceRanked(nodes, limit, edgeRowPriority, offset);
   if (capped) {
     slice.capped = true;

@@ -72,14 +72,43 @@ function lineNumber(value: unknown): number | undefined {
  * A file gets no span: its range is the whole file, which says nothing its path
  * does not. Same rule the context bundle's `toLocation` uses.
  */
-export function rowLocation(node: any): { path?: string; lineStart?: number; lineEnd?: number } {
+export function rowLocation(row: unknown): { path?: string; lineStart?: number; lineEnd?: number } {
+  // Rows come from many places, so the fields `NodeLocation` (output/types.ts)
+  // names are read off whatever arrives; anything else counts as absent.
+  const node = asRecord(row);
+  const provenance = asRecord(node.provenance);
+  const attrs = asRecord(node.attrs);
   const path = relativePath(
-    node?.provenance?.source_uri ?? node?.provenance?.sourceUri ?? node?.attrs?.path ?? undefined,
+    attrString(provenance.source_uri) ?? attrString(provenance.sourceUri) ?? attrString(attrs.path),
   );
-  if (String(node?.kind ?? "").toLowerCase() === "file") return { path };
-  const lineStart = lineNumber(node?.attrs?.line_start);
-  const lineEnd = lineNumber(node?.attrs?.line_end);
+  if (String(node.kind ?? "").toLowerCase() === "file") return { path };
+  const lineStart = lineNumber(attrs.line_start);
+  const lineEnd = lineNumber(attrs.line_end);
   return { path, lineStart, lineEnd };
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+}
+
+/**
+ * A string a node keeps in its attrs (`attrs.name`, `attrs.path`). Attrs are
+ * untyped on the wire, so anything but a string counts as absent.
+ */
+export function attrString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * A display name kept in attrs (`attrs.name`, `attrs.title`). Before the
+ * renderers were typed, any truthy value printed, so a number or boolean name
+ * still prints as its text; empty values and objects count as absent.
+ */
+export function attrLabel(value: unknown): string | undefined {
+  if (!value) return undefined;
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value);
+  return undefined;
 }
 
 /** `17-145`, or `17` when the entity is one line, or nothing when unknown. */
