@@ -12,6 +12,7 @@
 // `ix capabilities --format <fmt>` from here before `run-cli.ts` loads.
 
 import { readCliVersion } from "./cli-version.js";
+import { HOOK_SUBCOMMANDS as HOOK_RUNNERS } from "./hook/subcommands.js";
 import { printJson, setPrettyJson } from "./format.js";
 import { llmLine } from "./llm.js";
 import { proInstallState, type ProInstallState } from "./register/pro-loader.js";
@@ -24,10 +25,12 @@ import { proInstallState, type ProInstallState } from "./register/pro-loader.js"
 export const CAPABILITIES_SCHEMA = "ix-capabilities/1";
 
 /**
- * The `ix hook` subcommands this CLI registers (`commands/hook.ts`). A test
- * holds the two to the same set.
+ * The `ix hook` subcommands this CLI registers, from the one list in
+ * `hook/subcommands.ts` (which `commands/hook.ts` registers from too; a test
+ * holds the two to each other). That module loads each hook's code only when
+ * it runs, so reading its names costs this fast path nothing.
  */
-export const HOOK_SUBCOMMANDS = ["claude-post-edit"] as const;
+export const HOOK_SUBCOMMANDS: readonly string[] = Object.freeze(Object.keys(HOOK_RUNNERS));
 
 export interface Capabilities {
   /** {@link CAPABILITIES_SCHEMA}. */

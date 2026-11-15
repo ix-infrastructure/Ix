@@ -30,11 +30,23 @@ The plugins never shared one tool surface. Measured against `ix mcp`:
 | ix-codex-plugin | 23 | — |
 | ix-cursor-plugin | 23 | — |
 | ix-gemini-plugin | 23 | `ix_decide`, `ix_ingest`, `ix_query`, `ix_status` |
-| ix-openclaw-plugin | 17 | `ix_decide`, `ix_docs_tool`, `ix_ingest`, `ix_neighbors`, `ix_query` |
-| ix-opencode-plugin | 17 | `ix_decide`, `ix_docs_tool`, `ix_ingest`, `ix_neighbors`, `ix_query` |
+| ix-openclaw-plugin | 17 | `ix-decide` (pre-edit verdict), `ix_docs_tool`, `ix_ingest`, `ix_neighbors`, `ix_query` |
+| ix-opencode-plugin | 17 | `ix-decide` (pre-edit verdict), `ix_docs_tool`, `ix_ingest`, `ix_neighbors`, `ix_query` |
 | ix-claude-plugin | 0 (skills only) | — |
 
-`ix mcp` now closes that gap, with three deliberate exclusions:
+`ix mcp` now closes most of that gap. One gap stays open, and three tools are
+excluded on purpose.
+
+Not served: **the pre-edit verdict.** The openclaw and opencode plugins ship an
+`ix-decide` tool (`tools/ix-decide.ts`) that takes `touched_paths`, `intent` and
+`risk_tolerance` and answers ALLOW or REVIEW, computed from `ix impact`. It is
+read-only and needs no Pro. `ix mcp` has no equivalent. Its `ix_decide` shares
+the name and nothing else: it runs the Pro command `ix decide <title>` and
+records a design decision, which is a write. The verdict stays in those
+plugins' own tools and hooks until a read-only MCP tool exists for it, and that
+tool should not reuse the name.
+
+The deliberate exclusions:
 
 - **`ix_query`** — the deprecated command the CLI docs tell agents not to use
   ("produces oversized low-signal responses"). Dropped on purpose.
@@ -45,13 +57,18 @@ The plugins never shared one tool surface. Measured against `ix mcp`:
 And `ix_status` is Gemini's name for what `ix mcp` calls `ix_health`; both run
 `ix status`.
 
-`ix_decide` and `ix_ingest` were real gaps and are now served. `ix_decide` is a
-write and needs Pro, so it is advertised only when `@ix/pro` resolves — as are
-`ix_briefing` and `ix_decisions`, which this server previously offered to every
-install even though every call answered "requires Ix Pro".
+`ix_ingest` was a real gap and is now served. `ix_decide` is served too, but
+it is the Pro decision recorder; whether that is what gemini's own `ix_decide`
+does has not been re-checked here, so compare its parameters before migrating
+that plugin. `ix_decide` is a write and needs Pro, so it is advertised only
+when `@ix/pro` resolves — as are `ix_briefing` and `ix_decisions`, which this
+server previously offered to every install even though every call answered
+"requires Ix Pro".
 
 **Net:** codex and cursor can delegate with no change in what an agent can do.
-gemini, openclaw and opencode lose only `ix_query` and the two composites.
+gemini loses `ix_query`, plus a verdict tool if its `ix_decide` turns out to be
+one. openclaw and opencode lose `ix_query`, the two composites and the pre-edit
+verdict.
 
 ## Structured results and tool annotations
 
@@ -102,6 +119,10 @@ gemini, openclaw and opencode lose only `ix_query` and the two composites.
    becomes a new floor.
 2. **Point each plugin's registration at `ix mcp`** instead of its own server,
    and delete that server. Start with codex and cursor — those two are lossless.
+   Before migrating openclaw or opencode, remove every prompt, skill or hook
+   text that tells an agent to call `ix-decide` before editing. Under `ix mcp`
+   the closest name an agent will find is `ix_decide`, which writes a decision
+   record instead of returning a verdict.
 3. **Leave agents, hooks, skills and commands where they are.** They are the
    plugins' remaining reason to exist.
 

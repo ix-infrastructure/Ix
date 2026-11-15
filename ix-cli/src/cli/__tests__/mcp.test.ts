@@ -93,7 +93,9 @@ describe("ix mcp", () => {
     // The union exposed by ix-codex/cursor/gemini/openclaw/opencode-plugin,
     // less ix_query (deprecated), ix_neighbors and ix_docs_tool (composites of
     // callers/callees/depends and of overview), and ix_status (gemini's name
-    // for ix_health).
+    // for ix_health). ix_decide here is the Pro decision recorder; the
+    // openclaw/opencode `ix-decide` pre-edit verdict is a different tool and
+    // is not served (#998, mcp-plugin-consolidation.test.ts).
     for (const tool of ["ix_decide", "ix_ingest", "ix_health", "ix_locate", "ix_impact"]) {
       expect(names).toContain(tool);
     }
@@ -442,6 +444,27 @@ describe("ix mcp", () => {
     // Substring, not prefix: `ix-cli/src/a.ts` is what `ix inventory --path src`
     // would have returned, and ix_smells must agree with it.
     expect(parsed.candidates).toEqual([{ file: "ix-cli/src/a.ts", smell: "orphan" }]);
+  });
+
+  it("ix_smells filters on a candidate's path when it has one: file is only a basename", async () => {
+    const candidates = [
+      { file: "util.ts", path: "app/util.ts", smell: "orphan" },
+      { file: "util.ts", path: "lib/util.ts", smell: "orphan" },
+      { file: "app.ts", path: "lib/app.ts", smell: "orphan" },
+      // No path (an older backend): the basename is all there is to match.
+      { file: "legacy.ts", smell: "orphan" },
+    ];
+    const client = await connect(async () => ({ ok: true, stdout: JSON.stringify({ count: 4, candidates }), stderr: "" }));
+    const filtered = async (path: string) => {
+      const result = await client.callTool({ name: "ix_smells", arguments: { path } });
+      const content = (result as CallToolResult).content[0];
+      return JSON.parse(content?.type === "text" ? content.text : "{}").candidates;
+    };
+
+    expect(await filtered("app")).toEqual([candidates[0], candidates[2]]);
+    expect(await filtered("app/util")).toEqual([candidates[0]]);
+    expect(await filtered("lib/util.ts")).toEqual([candidates[1]]);
+    expect(await filtered("legacy")).toEqual([candidates[3]]);
   });
 
   it("a stale ix_smells answer goes through the same path filter and limit, stale fields kept", async () => {

@@ -282,7 +282,7 @@ describe("the fast and full paths answer identically", () => {
     ["configured default format", ["read", "a.txt"], { IX_FORMAT: "json" }],
     ["invalid --format choice", ["text", "needle", "--format", "bogus"]],
     ["invalid integer option", ["text", "needle", "--limit", "abc"]],
-    ["invalid OPTION_CHOICES value", ["context", "x", "--depth", "bogus"]],
+    ["invalid choiceOption value", ["context", "x", "--depth", "bogus"]],
     ["unknown option", ["locate", "x", "--bogus"]],
     ["text --format json", ["text", "needle", "--format", "json"]],
     ["graph command outside a workspace", ["locate", "x", "--format", "json"]],
@@ -318,7 +318,7 @@ describe("the fast and full paths answer identically", () => {
       schema: "ix-capabilities/1",
       version: VERSION,
       pro: { available: false, state: "absent" },
-      hooks: ["claude-post-edit"],
+      hooks: ["claude-post-edit", "auto-map"],
     });
   }, 60_000);
 

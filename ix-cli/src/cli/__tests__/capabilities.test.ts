@@ -77,7 +77,7 @@ describe("collectCapabilities", () => {
       schema: "ix-capabilities/1",
       version: "1.2.3",
       pro: { available: true, state: "installed" },
-      hooks: ["claude-post-edit"],
+      hooks: ["claude-post-edit", "auto-map"],
     });
     expect(Object.keys(caps)).toEqual(["schema", "version", "pro", "hooks"]);
     expect(CAPABILITIES_SCHEMA).toBe("ix-capabilities/1");
@@ -115,12 +115,12 @@ describe("renderCapabilities", () => {
 
   it("prints llm records", () => {
     expect(captured("llm")).toBe(
-      "capabilities schema=ix-capabilities/1 version=1.2.3 pro=absent\nhook name=claude-post-edit",
+      "capabilities schema=ix-capabilities/1 version=1.2.3 pro=absent\nhook name=claude-post-edit\nhook name=auto-map",
     );
   });
 
   it("prints text for a person", () => {
-    expect(captured("text")).toBe("Version: 1.2.3\nIx Pro:  not installed\nHooks:   claude-post-edit");
+    expect(captured("text")).toBe("Version: 1.2.3\nIx Pro:  not installed\nHooks:   claude-post-edit, auto-map");
   });
 });
 

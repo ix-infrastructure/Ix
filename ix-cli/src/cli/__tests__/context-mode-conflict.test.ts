@@ -508,12 +508,16 @@ describe("a caller that asked for records gets the error as a record", () => {
     expect(r.stderr).toBe("");
   });
 
-  it("still writes prose to stderr for every other format", async () => {
+  it("still writes prose to stderr for every other format, and json gets its record on stdout", async () => {
     for (const format of ["text", "json"]) {
       const r = await runProgram(registerContextCommand, ["context", "--resume", "x", "--diff", "y", "--format", format]);
       expect(r.exitCode).toBe(1);
       expect(r.stderr).toMatch(/^Error:/m);
-      expect(r.stdout).toBe("");
+      if (format === "json") {
+        expect(JSON.parse(r.stdout)).toMatchObject({ error: "mode_conflict" });
+      } else {
+        expect(r.stdout).toBe("");
+      }
     }
   });
 });
@@ -955,9 +959,10 @@ describe("reportFailure with llm format", () => {
     expect(stdoutOutput.join("\n")).toMatch(/llm conflict message/);
   });
 
-  it("uses stderr Error: prefix when format is 'json'", () => {
+  it("prints a json record on stdout and keeps the Error: prose on stderr when format is 'json'", () => {
     reportFailure("mode_conflict", "json conflict message", "json");
     expect(process.exitCode).toBe(1);
+    expect(JSON.parse(stdoutOutput.join("\n"))).toEqual({ error: "mode_conflict", message: "json conflict message" });
     expect(stderrOutput.join("\n")).toMatch(/Error:/);
     expect(stderrOutput.join("\n")).toMatch(/json conflict message/);
   });

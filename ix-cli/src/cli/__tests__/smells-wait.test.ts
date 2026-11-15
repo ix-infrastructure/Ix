@@ -13,6 +13,8 @@ vi.mock("../resolve.js", () => ({ resolveReadSystemId: async () => undefined }))
 vi.mock("../bootstrap.js", () => ({ resolveWorkspaceId: () => "ws-test" }));
 
 import { registerSmellsCommand, type SmellReport } from "../commands/smells.js";
+import { mcpCaller } from "../../mcp/hints.js";
+import { withCaller } from "../next-step.js";
 
 /** What fetch rejects with when `AbortSignal.timeout` fires. */
 function timeoutError(): Error {
@@ -413,14 +415,7 @@ describe("ix smells wait budget and stored-results fallback", () => {
     it("ignores IX_SMELLS_WAIT under MCP, whose runner gives ix_smells 30 s", async () => {
       fakeClient.runSmells.mockResolvedValue(REPORT);
       process.env.IX_SMELLS_WAIT = "45";
-      const savedCaller = process.env.IX_CALLER;
-      process.env.IX_CALLER = "mcp";
-      try {
-        await run(["--format", "json"]);
-      } finally {
-        if (savedCaller === undefined) delete process.env.IX_CALLER;
-        else process.env.IX_CALLER = savedCaller;
-      }
+      await withCaller(mcpCaller(), () => run(["--format", "json"]));
       expect(waitPassed()).toBe(20_000);
     });
 

@@ -4,13 +4,12 @@ import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import { resolveFileOrReport, printResolved } from "../resolve.js";
-import { getEffectiveSystemPath, getSystemPath, hasMapData } from "../hierarchy.js";
+import { getEffectiveSystemPath, getSystemPath, hasMapData, noSystemMap } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { relativePath, printJson } from "../format.js";
 import { llmLine, type LlmValue } from "../llm.js";
 import { formatOption, kindOption, pathOption, pickOption, strictOption } from "../options.js";
 import { renderSection, renderKeyValue, renderNote, renderBreadcrumb } from "../ui.js";
-import { forMcp } from "../next-step.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
 import { CONTAINER_KINDS, FILE_KINDS, REGION_KINDS, TYPE_KINDS } from "../graph-model.js";
 
@@ -171,7 +170,7 @@ async function overviewContainer(
 
   const hasMap = hasMapData(systemPath);
   if (!hasMap) {
-    diagnostics.push(`No system map. Run ${forMcp() ? "ix_map" : "`ix map`"} to see hierarchy.`);
+    diagnostics.push(noSystemMap());
   }
 
   // Append container symbol to system path for non-file, non-region containers
@@ -254,7 +253,7 @@ async function overviewLeaf(
 
   const hasMap = hasMapData(systemPath);
   if (!hasMap) {
-    diagnostics.push(`No system map. Run ${forMcp() ? "ix_map" : "`ix map`"} to see hierarchy.`);
+    diagnostics.push(noSystemMap());
   }
 
   // Append target to system path if not already there

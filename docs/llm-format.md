@@ -411,6 +411,22 @@ Two commands cannot know a true total and say so rather than inventing one:
   `offset_past_end`: more matches exist). `--format json` stays a bare array of matches with no
   paging fields; the next offset is the offset plus its length.
 
+`ix rank` scores at most 2000 entities of the kind, the first 2000 `/v1/list`
+returns. `/v1/list` has no offset and does not order by degree, so an entity
+past that window is never a candidate, whatever its score. When more than
+2000 exist the header carries `truncated=true` and a
+`diagnostic code=candidates_truncated` record follows it (json:
+`summary.truncated: true` and the message in `diagnostics`; text: the message
+under the ranking). `evaluated` is then the window, not the workspace, and the
+ranking is of that window only. `--path` is applied by the server before the
+cut, so narrowing with it (or a more specific `--kind`) brings the rest in.
+
+```
+rank metric=callers kind=function evaluated=2000 returned=3 truncated=true
+diagnostic code=candidates_truncated message="More than 2000 function entities exist; only the first 2000 the server returned were ranked, so entities that belong in this ranking may be missing. Narrow with --path (or a more specific --kind)."
+entity name=hotZ kind=function score=3
+```
+
 `ix read` caps a read at 400 lines and marks the `file` record with
 `truncated=true total_lines=<n> next=<target>`. `total_lines` is always a
 count, never a line number:
@@ -665,6 +681,15 @@ templates, data/config) are dropped; `filtered_non_source=<k>` appears when any
 were. Output stops at `--limit` (default 50, highest confidence first); when it
 cuts, a `diagnostic code=results_truncated` record follows the header.
 
+`file` is the file's name as the backend reports it, a basename that two files
+can share. `--format json` adds each candidate's `path` beside it, read from
+the file's node in one batched request; it is left out when the backend cannot
+serve that read or the file is no longer in the graph. `path` is written the
+way other rows write one: relative to the current directory when the file is
+inside it, otherwise `~/...` or absolute. The MCP tool `ix_smells` keeps the
+candidates whose `path` contains its `path` argument as a substring, and
+matches against `file` only when a candidate has no `path`.
+
 `ix smells` waits for a fresh analysis for 20 s in llm and json (`--wait
 <seconds>` or `IX_SMELLS_WAIT` changes it; text waits 5 minutes, which is
 also the most: Node's HTTP client stops waiting for a response there). When the analysis has not finished by then, or the backend refuses
@@ -709,7 +734,7 @@ and limits a stale answer's candidates as it does a fresh one's, and ignores
 ```
 impact target=verify_token kind=function risk=high category=boundary summary="Auth check; 14 call sites at risk"
 behavior text="Token validation across the request pipeline"
-counts callers=14 callees=3 shown_callers=10 shown_callees=3
+counts callers=14 callees=3 shown_callers=10 shown_callees=3 dependents_total=14
 bucket region="Auth Layer" kind=subsystem count=9
 caller name=handleLogin kind=method path=src/auth/login.ts lines=20-48
 diagnostic code=results_truncated message="14 callers; showing 10. Raise --limit to see them, or page them with ix callers verify_token"
@@ -722,6 +747,33 @@ printed after the `--limit` cut (the two lists share one header, so `shown`/`tot
 In `--format json` the same rows (`callerList`, `calleeList`, bucket `members`) carry `path`,
 `lineStart` and `lineEnd`, and a container target's JSON adds `dependentList`, its located
 importers and dependents.
+
+For a container target the `counts` record is
+`counts members=<n> importers=<n> dependents=<n> member_callers=<n> dependents_total=<n>`;
+its `dependents=` is the `CALLS`/`REFERENCES` expand alone (`summary.directDependents`).
+
+**Dependents: the one count.** `dependents_total=` on the `counts` record, and
+`summary.dependents` in `--format json`, is how many distinct entities depend on the target. Read it instead of combining the other counts,
+which overlap:
+
+- a leaf target (function, method, ...): its callers (`CALLS`/`REFERENCES`, to `--depth`), each
+  entity once; the target calling itself is not counted;
+- a container target (`class`, `module`, `file`, `object`, `trait`, `interface`): the union of its
+  importers (`IMPORTS`, to `--depth`), its direct dependents (`CALLS`/`REFERENCES`, to `--depth`)
+  and the direct callers of its members (`CALLS`/`REFERENCES`, the first 20 members, as
+  `memberLevelCallers` reads them), each entity once. The target, its own direct members and
+  what is nested deeper inside it are not counted, so code inside the target calling other code
+  inside it adds nothing. "Nested deeper" is read from locations: for a `file` target, any entity
+  in that file; for another container, an entity in the target's file whose lines fall within one
+  of its members (a method of a nested class). An entity with no path or lines is counted.
+  With more than 20 members the member callers come from the first 20 only, so the count is a
+  lower bound: an entity that reaches the target only through member 21 or later is missed.
+
+Entities are matched by graph id. A file that imports the target and a function in that file
+that calls one of its members are two entities. The other counts stay as they were:
+`memberLevelCallers` adds every member's callers up (one function calling three members counts
+three times), and `directImporters`/`directDependents` are the two expands before any dedup.
+A member whose callers could not be read (a `diagnostics` entry) adds nothing.
 
 `ix overview <container>`:
 
