@@ -5,7 +5,7 @@
 
 import { createClient } from "../../client/factory.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
-import { activeReadScope, isRawId, resolveFileOrEntityFull, resolveFileOrReport, type ResolvedEntity } from "../resolve.js";
+import { activeReadScope, isRawId, resolveFileOrEntityFull, resolveFileOrReport, shownTarget, type ResolvedEntity } from "../resolve.js";
 import { hasCompletedSourceGraphBaseline } from "../stale.js";
 import { renderSection } from "../ui.js";
 import { printJson } from "../format.js";
@@ -291,6 +291,7 @@ export async function buildFreshBundle(
     strict: true,
   }, format);
   if (!resolved) return undefined;
+  resolved = shownTarget(resolved);
 
   const asOfRev = opts.asOfRev;
   const [facts, context, workspaceHealth] = await Promise.all([
