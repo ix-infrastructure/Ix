@@ -4,7 +4,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { httpError, LocalTokenRequiredError } from "../api.js";
+import { httpError, IxClient, LocalTokenRequiredError } from "../api.js";
 import { httpStatusOf, isIxHttpError, IxHttpError } from "../http-error.js";
 import { isPreConnectionFailure } from "../transport.js";
 import { isBackendUnreachable } from "../../cli/errors.js";
@@ -119,6 +119,30 @@ describe("a body's code is the server's, not a socket's", () => {
     const refused = Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("connect"), { code: "ECONNREFUSED" }) });
     expect(isPreConnectionFailure(refused)).toBe(true);
     expect(isBackendUnreachable(refused)).toBe(true);
+  });
+
+  it("does not retry a read whose answer's body names a dropped-connection code", async () => {
+    // 500 is not a retryable status, so only the body's `code` could make the
+    // client ask again, and it must not: the server answered.
+    try {
+      for (const code of ["ECONNRESET", "EPIPE", "UND_ERR_SOCKET"]) {
+        const fetchMock = vi.fn(async () => new Response(JSON.stringify({ code }), { status: 500 }));
+        vi.stubGlobal("fetch", fetchMock);
+        const err = await new IxClient("http://ix.test", undefined, { retryReads: true }).health().catch((e: unknown) => e);
+        expect(isIxHttpError(err) && err.code, code).toBe(code);
+        expect(fetchMock, code).toHaveBeenCalledTimes(1);
+      }
+      // A real dropped connection is still retried.
+      const dropped = Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" }) });
+      const fetchMock = vi.fn()
+        .mockRejectedValueOnce(dropped)
+        .mockResolvedValueOnce(new Response("{}", { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      await new IxClient("http://ix.test", undefined, { retryReads: true }).health();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

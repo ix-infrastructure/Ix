@@ -234,6 +234,16 @@ describe("ix smells wait budget and stored-results fallback", () => {
       expect(errs.join("\n")).toContain("500: boom");
       expect(fakeClient.listSmells).not.toHaveBeenCalled();
     });
+
+    it("reads an answer whose body says UND_ERR_HEADERS_TIMEOUT as today's error, not a timeout", async () => {
+      // The server answered, so its body's `code` is not undici's headers timeout.
+      const body = JSON.stringify({ code: "UND_ERR_HEADERS_TIMEOUT", message: "upstream slow" });
+      fakeClient.runSmells.mockRejectedValue(new IxHttpError(500, body));
+      await run(["--format", "json"]);
+      expect(process.exitCode).toBe(1);
+      expect(errs.join("\n")).toContain("500: ");
+      expect(fakeClient.listSmells).not.toHaveBeenCalled();
+    });
   });
 
   describe("llm", () => {
