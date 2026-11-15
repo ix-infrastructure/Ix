@@ -3,6 +3,6 @@
   "ignoreDependencies": ["@ix/pro"],
   "entry": ["src/cli/main.ts", "src/index.ts", "test/parser.smoke.mjs"],
   "project": ["src/**/*.ts"],
-  "ignore": ["test/fixtures/**", "test/parser.stress.mjs"],
+  "ignore": ["test/fixtures/**"],
   "ignoreBinaries": ["ix", "rg", "cygpath", "tar", "mkfifo"]
 }

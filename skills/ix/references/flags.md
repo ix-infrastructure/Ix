@@ -531,6 +531,15 @@ Claude Code PostToolUse hook, matcher `Edit|MultiEdit|Write|Bash`. Reads the hoo
 | `--worktree` | `<dir>` | — | Checkout the agent edits (default: the git root of the hook's `cwd`); its paths map to the same relative paths in `--graph-root` |
 | `--budget` | `<tokens>` | `300` | Token budget for the context it adds (~4 chars a token) |
 
+#### `ix hook auto-map`
+
+Guarded, debounced automatic map for any agent host (Claude Code, Cursor, Gemini CLI, Codex): the one copy of the auto-map the agent plugins each used to implement. Reads the host's hook JSON on stdin for the project directory (`cwd`; Cursor's `workspace_roots`), else the host's project variable (`CLAUDE_PROJECT_DIR`, `CURSOR_PROJECT_DIR`, `GEMINI_PROJECT_DIR`), else the hook's cwd, and for its git root starts at most one detached `ix map <root> --silent` with `IX_AUTO_MAP=1`, then returns. Skips, in this order: a directory outside git; a git root that is `$HOME`; a root tried within `IX_MAP_DEBOUNCE_SECONDS` (default 300; the per-root stamp under `IX_HOOK_STATE_DIR`, default `<IX_HOME>/hook-state`, is written before the next check, so an unmapped project is asked once per window too); a root that is not a registered workspace with a completed graph ingest (`ix status`'s `graphCompleted`, read in process) -- an automatic map never creates a workspace. When a map of the root is already running it asks that map for one more pass instead of starting another. Prints nothing and always exits 0; `IX_HOOK_TIMEOUT_MS` (default 3000) bounds the hook, never the map. `IX_HOOK_DEBUG=1` says why on stderr; `IX_HOOK_LOG=<file>` appends one JSON line per call. Run it on the host's end-of-turn event: Claude Code and Codex `Stop`, Cursor `stop`, Gemini CLI `SessionEnd` (`ix hook auto-map --help` shows each manifest line).
+
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--host` | `claude\|cursor\|gemini\|codex` | `claude` | Whose hook payload is on stdin, for its field names |
+| `--root` | `<dir>` | — | Project directory to map from, over the payload's |
+
 ### `ix impact <target>`
 
 System risk analysis — what behavior is at risk if this changes.

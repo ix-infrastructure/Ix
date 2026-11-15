@@ -5,6 +5,7 @@ import {
   CliUsageError, WorkspaceNotMappedError, backendUnreachableError, formatFetchError, isBackendUnreachable,
   parseBackendError,
 } from "./errors.js";
+import type { ErrorRecordJson, MultiTargetJson, TargetSummaryJson } from "./contracts/envelope.js";
 import { captureJson, printJson, resetResolutionNotices } from "./format.js";
 import { llmError, llmLine } from "./llm.js";
 import {
@@ -45,7 +46,7 @@ export async function runPerTarget(
 
   const codes: TargetCode[] = [];
   if (format === "json") {
-    const groups: Record<string, unknown>[] = [];
+    const groups: MultiTargetJson<Record<string, unknown>>["targets"] = [];
     for (const target of targets) {
       // A target that throws after queueing a resolution notice must not
       // hand it to the next target's json.
@@ -66,12 +67,12 @@ export async function runPerTarget(
         ? {
           target, exitCode, error: failure.code, message: failure.message,
           ...(failure.dir ? { dir: failure.dir } : {}), ...(failure.next ? { next: failure.next } : {}),
-        }
+        } satisfies ErrorRecordJson & { target: string; exitCode: number }
         : { target, exitCode, ...groupBody(payloads) });
     }
     // Nor may the last target's leftovers land on the grouping object.
     resetResolutionNotices();
-    printJson({ targets: groups, summary: summarize(codes) });
+    printJson({ targets: groups, summary: summarize(codes) } satisfies MultiTargetJson<Record<string, unknown>>);
     return;
   }
 
@@ -176,7 +177,7 @@ function bucketOf({ exitCode, outcome }: TargetCode): "ok" | MissOutcome | "fail
   return outcome && exitCode === EXIT_ERROR && exitCodeFor(outcome) === EXIT_ERROR ? outcome : "failed";
 }
 
-function summarize(codes: readonly TargetCode[]) {
+function summarize(codes: readonly TargetCode[]): TargetSummaryJson {
   const buckets = codes.map(bucketOf);
   const count = (b: ReturnType<typeof bucketOf>) => buckets.filter((x) => x === b).length;
   return {

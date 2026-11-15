@@ -20,6 +20,7 @@ import {
 } from "../backend-version.js";
 import { backendComposeArgs } from "../backend-compose.js";
 import { ixHome } from "../ix-home.js";
+import { DEFAULT_ENDPOINT } from "../endpoint.js";
 
 // Re-exported for the existing importers of this module (tests and call sites
 // that predate backend-version.ts). recordBackendRelease is deliberately NOT
@@ -1742,7 +1743,7 @@ export function registerUpgradeCommand(program: Command): void {
           // Restart backend if running
           let backendRunning = false;
           try {
-            execFileSync("curl", ["-sf", "http://localhost:8090/v1/health"], {
+            execFileSync("curl", ["-sf", `${DEFAULT_ENDPOINT}/v1/health`], {
               stdio: "ignore",
               timeout: 3000,
             });

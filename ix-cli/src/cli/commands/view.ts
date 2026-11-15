@@ -18,6 +18,7 @@ import { findWorkspaceForCwd, getDefaultWorkspace, getLocalToken, loadWorkspaces
 import { detectSystem } from "../system.js";
 import { createClient } from "../../client/factory.js";
 import { ixHome } from "../ix-home.js";
+import { BROWSER_LOOPBACK_HOSTNAMES, DEFAULT_ENDPOINT } from "../endpoint.js";
 import { ensureFreshMap } from "../map-freshness.js";
 
 // The paths below are functions, not consts, so they follow IX_HOME as it is
@@ -41,7 +42,7 @@ const portFile = (): string => join(ixHome(), "compass.port");
  * says. (`$HOME/package.json` is rare but real — this box has one.)
  */
 const serverScriptFile = (): string => join(ixHome(), "tmp", "compass-server.cjs");
-const BACKEND_URL = "http://localhost:8090";
+const BACKEND_URL = DEFAULT_ENDPOINT;
 
 /** Resolve the compass dist directory — installed path first, then dev fallback. */
 function findCompassDist(): string | null {
@@ -389,7 +390,8 @@ const cacheControl = (f) =>
 // users cannot read it from the process list. Empty until the CLI has one.
 const BACKEND_TOKEN = process.env.IX_VIEW_BACKEND_TOKEN || "";
 
-const isLoopbackName = (h) => h === "localhost" || h === "127.0.0.1" || h === "[::1]";
+const LOOPBACK_NAMES = ${JSON.stringify(BROWSER_LOOPBACK_HOSTNAMES)};
+const isLoopbackName = (h) => LOOPBACK_NAMES.includes(h);
 
 // Loopback-only, for every request: the /v1 proxy forwards to a backend that
 // can reset the graph, /__ix/remap shells out with the user's privileges, and
@@ -446,7 +448,7 @@ const server = http.createServer((req, res) => {
       return;
     }
     const backendUrl = target.href;
-    const proxyHeaders = { ...req.headers, host: "localhost:8090" };
+    const proxyHeaders = { ...req.headers, host: ${JSON.stringify(new URL(BACKEND_URL).host)} };
     // The backend authenticates this server, not the browser: never forward a
     // caller's own credentials or origin, and add the token when there is one.
     delete proxyHeaders.authorization;

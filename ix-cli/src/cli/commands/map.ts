@@ -20,7 +20,10 @@ import { clearMapStale, markMapStale, mapStaleNotice, readMapStale, type MapStal
 import { resolveMapRoot } from "../map-root.js";
 import { readBackendHealth } from "./upgrade.js";
 import { renderWarning } from "../ui.js";
+import { describeUnavailableGrammars } from "../grammar-status.js";
 import type { IxClient } from "../../client/api.js";
+import { choiceOption, formatOption } from "../options.js";
+import { DEFAULT_FORMAT_CHOICES } from "../default-format.js";
 
 // Hard wall-clock budget for a single `ix map`. Past this, the shared deadline
 // signal aborts every in-flight request and the command exits, so a single
@@ -120,64 +123,10 @@ export function mapModeForIngest(raw = process.env.IX_MAP_FULL_INGEST): boolean 
   return raw !== "1";
 }
 
-export interface MapRegion {
-  id: string;
-  label: string;
-  label_kind: string;
-  level: number;
-  file_count: number;
-  child_region_count: number;
-  parent_id: string | null;
-  cohesion: number;
-  external_coupling: number;
-  boundary_ratio: number;
-  confidence: number;
-  crosscut_score: number;
-  dominant_signals: string[];
-  interface_node_count: number;
-  children?: MapRegion[];
-}
-
-interface MapPreflight {
-  cost: {
-    file_count: number;
-    directory_count: number;
-    directory_quadratic: number;
-    symbol_estimate: number;
-    edge_estimate: number;
-  };
-  capacity: {
-    cpu_cores: number;
-    heap_max_bytes: number;
-    heap_free_bytes: number;
-    container_memory: number | null;
-    disk_free_bytes: number | null;
-  };
-  risk: string;
-  mode: string;
-  warnings: string[];
-  duration_ms: number;
-}
-
-interface MapPersistence {
-  region_nodes: number;
-  file_edges: number;
-  region_edges: number;
-  delete_ops: number;
-  total_ops: number;
-}
-
-export interface MapResult {
-  file_count: number;
-  region_count: number;
-  levels: number;
-  map_rev: number;
-  regions: MapRegion[];
-  hierarchy: MapRegion[];
-  outcome?: string;
-  preflight?: MapPreflight;
-  persistence?: MapPersistence;
-}
+// The `/v1/map` response types live with the client; exported from here as well,
+// where they were first defined.
+import type { MapRegion, MapResult } from "../../client/types.js";
+export type { MapRegion, MapResult };
 
 /**
  * The fields of a `/v1/map` response that `ix map` reads -- all a reused
@@ -326,8 +275,18 @@ export function describeDroppedFiles(
   return `${parts.join(" and ")} — those files are absent from the graph. Re-run with 'ix ingest' to see the per-file errors.`;
 }
 
+/**
+ * The languages whose files went unparsed because their grammar did not load
+ * (#967), one line each, ready for stderr. Exported for tests.
+ */
+export function describeGrammarSkips(
+  ingest: Pick<IngestFilesSummary, "grammarUnavailable"> | undefined,
+): string[] {
+  return describeUnavailableGrammars(ingest?.grammarUnavailable ?? []).map((line) => `grammar unavailable: ${line}`);
+}
+
 function emitDroppedFileWarning(
-  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "filesTooLarge"> | undefined,
+  ingest: Pick<IngestFilesSummary, "parseErrors" | "commitErrors" | "filesTooLarge" | "grammarUnavailable"> | undefined,
   silent: boolean,
 ): void {
   const message = describeDroppedFiles(ingest);
@@ -339,6 +298,9 @@ function emitDroppedFileWarning(
   if (silent) return;
   const tooLarge = describeTooLargeFiles(ingest);
   if (tooLarge) process.stderr.write(chalk.dim(`  ${tooLarge}\n`));
+  // Also not under --silent, for the same reason: a missing grammar recurs on
+  // every run. stderr, so no JSON or llm payload changes shape.
+  for (const line of describeGrammarSkips(ingest)) process.stderr.write(chalk.yellow(`  ${line}\n`));
 }
 
 /**
@@ -438,12 +400,17 @@ export function registerMapCommand(program: Command): void {
   program
     .command("map [path]")
     .description("Map the architectural hierarchy of a codebase")
-    .option("--format <fmt>", "Output format (text|json|llm|silent)", "text")
+    .addOption(formatOption([...DEFAULT_FORMAT_CHOICES, "silent"]))
     .option("--level <n>", "Show only regions at this level (1=finest, higher=coarser)")
     .option("--min-confidence <n>", "Only show regions above this confidence threshold (0-1)", "0")
     .option("--max-items <n>", "Max items to show per section in text output (default: 10)", "10")
     .option("--all-items", "Show all items in each section (overrides --max-items)")
-    .option("--sort <mode>", "Sort mode for text output (importance|confidence|size|alpha)", "importance")
+    .addOption(choiceOption(
+      "--sort <mode>",
+      "Sort mode for text output (importance|confidence|size|alpha)",
+      ["importance", "confidence", "size", "alpha"],
+      "importance",
+    ))
     .option("--graph", "Render the hierarchy as a graph/tree view (default)")
     .option("--list", "Render the ranked list view instead of the default graph/tree view")
     .option("--full", "Force full local map, bypassing automatic safety limits (advanced/testing)")

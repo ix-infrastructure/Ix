@@ -9,6 +9,8 @@ import { llmLine } from "../llm.js";
 import { normalizeForPathMatch, normalizePathSeparators } from "../path-match.js";
 import { printJson } from "../format.js";
 import { mapLimit } from "../../client/request-memo.js";
+import { featureOff, markFeatureOff, routeMissing } from "../../client/features.js";
+import { formatOption } from "../options.js";
 
 type Metric = "dependents" | "callers" | "importers" | "members";
 
@@ -176,29 +178,14 @@ const EXPAND_DEFAULT_LIMIT = 1000;
 export const DEGREE_UNUSABLE_TTL_MS = 10 * 60_000;
 
 /**
- * Backends (by endpoint) not to score through `POST /v1/degree` again until
- * the time stored (epoch ms): the route answered 404 or 405 (it predates them,
- * Ix-memory < v1.0.33), or it counted fewer neighbours than expand lists for
- * some node.
+ * Stop scoring through `POST /v1/degree` against this backend for
+ * `DEGREE_UNUSABLE_TTL_MS`: the route is missing (Ix-memory < v1.0.33; the
+ * expand fallback is removable once MIN_BACKEND_VERSION reaches 1.0.33, see
+ * `degree` in client/features.ts), or it counted fewer neighbours than expand
+ * lists for some node. The memo itself lives in client/features.ts.
  */
-const degreeUnusable = new Map<string, number>();
-
 function markDegreeUnusable(endpoint: string): void {
-  degreeUnusable.set(endpoint, Date.now() + DEGREE_UNUSABLE_TTL_MS);
-}
-
-function isDegreeUnusable(endpoint: string): boolean {
-  const until = degreeUnusable.get(endpoint);
-  if (until === undefined) return false;
-  if (Date.now() < until) return true;
-  degreeUnusable.delete(endpoint);
-  return false;
-}
-
-/** The HTTP status an `IxClient` error carries at the front of its message, if any. */
-function errorStatus(err: unknown): number | undefined {
-  const m = err instanceof Error ? /^(\d{3}):/.exec(err.message) : null;
-  return m ? Number(m[1]) : undefined;
+  markFeatureOff("degree", endpoint, DEGREE_UNUSABLE_TTL_MS);
 }
 
 /** The `n`th largest of `values` (1-based); `Infinity` when `n` is 0. */
@@ -251,7 +238,7 @@ export async function scoreViaDegree(
   top = 0,
 ): Promise<ScoredEntity[] | null> {
   const endpoint = String(client.endpoint);
-  if (isDegreeUnusable(endpoint)) return null;
+  if (featureOff("degree", endpoint)) return null;
 
   const counts = new Map<string, number>();
   const ids = [...new Set<string>(candidates.map((node: any) => node.id))];
@@ -265,8 +252,7 @@ export async function scoreViaDegree(
         timeoutMs: DEGREE_TIMEOUT_MS,
       });
     } catch (err) {
-      const status = errorStatus(err);
-      if (status === 404 || status === 405) markDegreeUnusable(endpoint);
+      if (routeMissing("degree", err)) markDegreeUnusable(endpoint);
       return null;
     }
     if (!res || typeof res.counts !== "object" || res.counts === null) return null;
@@ -362,7 +348,7 @@ export function registerRankCommand(program: Command): void {
     .option("--path <path>", "Filter entities by source path substring")
     .option("--exclude-path <path>", "Exclude entities whose source path contains this substring")
     .option("--exclude-kind <kinds>", "Comma-separated kinds to exclude from results")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .addHelpText(
       "after",
       `\nExamples:

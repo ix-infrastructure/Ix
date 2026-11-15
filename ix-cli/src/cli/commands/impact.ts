@@ -11,26 +11,26 @@ import { checkGraphHealth, graphHealthJson, graphHealthLlmFields, graphHealthPro
 import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type BucketMember, type SystemPath } from "../hierarchy.js";
 import { inferRiskSemantics, humanizeLabel, type ImpactFacts, type RiskSemantics } from "../impact/risk-semantics.js";
 import { captureJson, lineSpan, printJson, relativePath, rowLocation, sliceEdgeResults, stripNulls, type Slice } from "../format.js";
-import { forMcp, suggest, type Relation } from "../next-step.js";
+import { currentCaller, type Relation } from "../next-step.js";
 import { llmLine, llmShortId } from "../llm.js";
-import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
+import { formatOption, kindOption, noSuggestOption, pathOption, pickOption, strictOption } from "../options.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
+import { CONTAINER_KINDS } from "../graph-model.js";
 
-const CONTAINER_KINDS = new Set(["class", "module", "file", "object", "trait", "interface"]);
 
 export function registerImpactCommand(program: Command): void {
   program
     .command("impact <target>")
     .description("System risk analysis — what behavior is at risk if this changes")
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--no-suggest", "Disable did-you-mean candidates on unresolved targets")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(noSuggestOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
     .option("--all", "When the target is ambiguous, analyse every candidate; each analysis is tagged with its candidate")
     .option("--depth <n>", "Expansion depth for callers/importers (default 1, max 3)", "1")
     .option("--limit <n>", "Max top-impacted members (and llm caller/callee rows) to show", "10")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .addHelpText(
       "after",
       "\nExamples:\n  ix impact IngestionService\n  ix impact IngestionService --kind class\n  ix impact verify_token --format json\n  ix impact AuthProvider --limit 5\n  ix impact handle --all --format llm\n" +
@@ -400,6 +400,8 @@ async function containerImpact(
     path?: string; lineStart?: number; lineEnd?: number;
   }> = [];
   let totalMemberCallers = 0;
+  // Each member's callers, kept for `summary.dependents`.
+  const memberCallerNodes: any[][] = [];
 
   const callerPromises = membersToCheck.map(async (member: any) => {
     try {
@@ -407,6 +409,7 @@ async function containerImpact(
         direction: "in",
         predicates: ["CALLS", "REFERENCES"],
       });
+      memberCallerNodes.push(callersResult.nodes);
       return {
         name: member.name || member.attrs?.name || "(unnamed)",
         kind: member.kind || "unknown",
@@ -454,6 +457,14 @@ async function containerImpact(
 
   const systemPathMapped = systemPath.map((n) => ({ name: n.name, kind: n.kind }));
 
+  // The target's own members calling each other are not dependents, nor is
+  // anything nested deeper inside it (a method of a class in a file target).
+  const dependentGroups = [directImporters, directDependents, ...memberCallerNodes];
+  const dependents = distinctDependents(
+    dependentGroups,
+    [target.id, ...members.map((m: any) => m.id), ...nestedInside(target, members, dependentGroups)],
+  );
+
   // Infer risk semantics
   const riskFacts: ImpactFacts = {
     name: target.name,
@@ -494,6 +505,7 @@ async function containerImpact(
           directImporters: directImporters.length,
           directDependents: directDependents.length,
           memberLevelCallers: totalMemberCallers,
+          dependents,
         },
         topImpactedMembers: topMembers.length > 0 ? topMembers : undefined,
         propagationBuckets: propagationBuckets.length > 0 ? propagationBuckets.map((b) => ({
@@ -523,6 +535,7 @@ async function containerImpact(
         ["importers", directImporters.length],
         ["dependents", directDependents.length],
         ["member_callers", totalMemberCallers],
+        ["dependents_total", dependents],
       ]),
       ...impactPropagationLlm(propagationBuckets, risk.flowPropagation),
       // The rows `ix impact` exists to produce: the members a change reaches.
@@ -562,6 +575,68 @@ async function containerImpact(
       renderNote(`Diagnostics: ${diagnostics.join("; ")}`);
     }
   }
+}
+
+// ── Dependents ───────────────────────────────────────────────────────────────
+
+/**
+ * The ids in `groups` that sit inside the container `target` below its direct
+ * members, found from the nodes already in hand (no extra request). CONTAINS
+ * gives a method to its class, not to the file, so the one-hop member list
+ * misses it. A node is inside when it is in the target's file and either the
+ * target is that file or its lines fall within one of the target's members
+ * (a method of a nested class). A node with no path or lines is not matched.
+ */
+export function nestedInside(
+  target: { kind: string; path?: string },
+  members: ReadonlyArray<unknown>,
+  groups: ReadonlyArray<ReadonlyArray<unknown>>,
+): string[] {
+  const targetPath = relativePath(target.path);
+  if (!targetPath) return [];
+  const isFile = target.kind.toLowerCase() === "file";
+  const spans = members
+    .map((m) => rowLocation(m))
+    .filter((l) => l.path === targetPath && l.lineStart !== undefined && l.lineEnd !== undefined);
+  const inside: string[] = [];
+  for (const nodes of groups) {
+    for (const n of nodes as any[]) {
+      if (n?.id == null) continue;
+      const loc = rowLocation(n);
+      if (loc.path !== targetPath) continue;
+      if (isFile && String(n.kind ?? "").toLowerCase() !== "file") { inside.push(n.id); continue; }
+      if (loc.lineStart === undefined) continue;
+      const end = loc.lineEnd ?? loc.lineStart;
+      if (spans.some((s) => loc.lineStart! >= s.lineStart! && end <= s.lineEnd!)) inside.push(n.id);
+    }
+  }
+  return inside;
+}
+
+/**
+ * `summary.dependents` (llm `dependents_total=`): how many distinct entities
+ * depend on the target, each counted once however many ways it reaches it.
+ *
+ * `groups` are the dependent lists (a leaf's callers; a container's importers,
+ * dependents and each member's callers), `excluded` the ids that are not
+ * dependents (the target itself and, for a container, its own members and what
+ * `nestedInside` finds nested in it). A node
+ * with no id cannot be matched against the others and is not counted.
+ * docs/llm-format.md holds the definition consumers rely on.
+ */
+export function distinctDependents(
+  groups: ReadonlyArray<ReadonlyArray<{ id?: unknown }>>,
+  excluded: Iterable<unknown>,
+): number {
+  const skip = new Set(excluded);
+  const seen = new Set<unknown>();
+  for (const nodes of groups) {
+    for (const n of nodes) {
+      if (n?.id == null || skip.has(n.id)) continue;
+      seen.add(n.id);
+    }
+  }
+  return seen.size;
 }
 
 // ── JSON rows ────────────────────────────────────────────────────────────────
@@ -613,9 +688,10 @@ export function leafRowLlm(kind: string, node: any): string {
 export function leafTruncationLlm(relation: Relation, slice: Slice<unknown>, target: string): string[] {
   if (!slice.truncated) return [];
   const head = `${slice.total} ${relation}; showing ${slice.shown}.`;
-  const page = suggest.neighbors(target, relation);
-  const message = forMcp()
-    ? `${head} To page them: ${page}`
+  const caller = currentCaller();
+  const page = caller.command({ action: "neighbors", symbol: target, relation });
+  const message = caller.style === "tool"
+    ? (page ? `${head} To page them: ${page}` : head)
     : `${head} Raise --limit to see them, or page them with ${page}`;
   return [llmLine("diagnostic", [
     ["code", "results_truncated"],
@@ -662,6 +738,8 @@ async function leafImpact(
   // Extract caller/callee names for rendering
   const callerNames = callersResult.nodes.map((n: any) => n.name || n.attrs?.name || "(unnamed)");
   const calleeNames = calleesResult.nodes.map((n: any) => n.name || n.attrs?.name || "(unnamed)");
+  // A recursive call is not a dependent.
+  const dependents = distinctDependents([callersResult.nodes], [target.id]);
 
   // Infer risk semantics
   const riskFacts: ImpactFacts = {
@@ -702,6 +780,7 @@ async function leafImpact(
         summary: {
           callers: callersResult.nodes.length,
           callees: calleesResult.nodes.length,
+          dependents,
         },
         callerList: callersResult.nodes.length > 0 ? callersResult.nodes.map(impactRowJson) : undefined,
         calleeList: calleesResult.nodes.length > 0 ? calleesResult.nodes.map(impactRowJson) : undefined,
@@ -728,6 +807,7 @@ async function leafImpact(
         ["callees", calleeSlice.total],
         ["shown_callers", callerSlice.shown],
         ["shown_callees", calleeSlice.shown],
+        ["dependents_total", dependents],
       ]),
       ...impactPropagationLlm(propagationBuckets, risk.flowPropagation),
       ...callerSlice.rows.map((n: any) => leafRowLlm("caller", n)),

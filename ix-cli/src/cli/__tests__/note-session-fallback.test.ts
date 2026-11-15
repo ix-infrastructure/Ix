@@ -109,9 +109,14 @@ function ix(args: string[], input = "", ixHome = home, extra: { env?: Record<str
     child.stdout.setEncoding("utf-8").on("data", (d: string) => { stdout += d; });
     child.stderr.setEncoding("utf-8").on("data", (d: string) => { stderr += d; });
     child.on("error", fail);
-    child.on("close", (status) => done({ stdout, stderr, status }));
+    // A child that gives up first (the IX_STDIN_IDLE_MS case) has closed its stdin by the time a
+    // delayed write lands. That write fails with EPIPE (raised on Windows), which is expected here,
+    // not a test failure: swallow it, and don't write at all once the child is gone.
+    child.stdin.on("error", (err: NodeJS.ErrnoException) => { if (err.code !== "EPIPE" && err.code !== "EOF") fail(err); });
+    let timer: NodeJS.Timeout | undefined;
+    child.on("close", (status) => { if (timer) clearTimeout(timer); done({ stdout, stderr, status }); });
     if (extra.delayMs === undefined) child.stdin.end(input);
-    else setTimeout(() => child.stdin.end(input), extra.delayMs);
+    else timer = setTimeout(() => { if (child.exitCode === null && !child.stdin.destroyed) child.stdin.end(input); }, extra.delayMs);
   });
 }
 

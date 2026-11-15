@@ -6,8 +6,8 @@ import { createClient } from "../../client/factory.js";
 import { readBackendHealth } from "./upgrade.js";
 import { findWorkspaceForCwd, getEndpoint, resolveWorkspaceRoot } from "../config.js";
 import { detectStaleFiles } from "../stale.js";
-import { llmError, llmLine, printLlmLines } from "../llm.js";
-import { backendUnreachableError, isBackendUnreachable } from "../errors.js";
+import { llmLine, printLlmLines } from "../llm.js";
+import { backendUnreachableError, emitErrorRecord, isBackendUnreachable } from "../errors.js";
 import { printJson } from "../format.js";
 import {
   checkGraphHealth,
@@ -22,6 +22,8 @@ import {
 } from "../graph-health.js";
 import { detectSystem } from "../system.js";
 import { loadVerifyRecord, verifyRecordOutdated, type VerifyRecord } from "../verify.js";
+import { formatOption } from "../options.js";
+import type { StatusGraphHealthJson, StatusJson } from "../contracts/status.js";
 
 interface StatusStaleInfo {
   graphCompleted: boolean;
@@ -106,7 +108,7 @@ export function renderStatusLlm(
  * the check could not run (no workspace here, an old backend, a slow stats
  * probe), which is not the same as a graph that was checked and is fine.
  */
-export function graphHealthWord(graph: GraphHealth): string {
+export function graphHealthWord(graph: GraphHealth): StatusGraphHealthJson["status"] {
   return graph.status === "unknown" ? "unverified" : graph.status;
 }
 
@@ -134,7 +136,7 @@ export function registerStatusCommand(program: Command): void {
   program
     .command("status")
     .description("Show Ix backend health and status")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .option("--root <dir>", "Workspace root directory")
     .action(async (opts: { format: string; root?: string }) => {
       const client = createClient();
@@ -165,7 +167,7 @@ export function registerStatusCommand(program: Command): void {
         if (opts.format === "llm") {
           printLlmLines(renderStatusLlm(health.status, getEndpoint(), staleInfo ?? null, graph, verified));
         } else if (opts.format === "json") {
-          const result: any = {
+          const result: StatusJson = {
             backend: health.status,
             graphCompleted: staleInfo?.graphCompleted ?? null,
             mapCompleted: staleInfo?.mapCompleted ?? null,
@@ -270,9 +272,9 @@ export function registerStatusCommand(program: Command): void {
         // llm` parses the failure the same way it parses a result rather than
         // hitting an unparseable human sentence. Exit code is unchanged.
         const unreachable = backendUnreachableError(getEndpoint());
-        if (opts.format === "llm") {
-          console.log(llmError(unreachable.error, unreachable.message, [["hint", unreachable.next ?? null]]));
-        } else {
+        // The boundary's record, in this command's format: llm replaces the
+        // prose, json goes to stdout with the prose kept on stderr.
+        if (!emitErrorRecord(unreachable.error, unreachable.message, unreachable.next, [], opts.format)) {
           console.error(unreachable.message);
           if (unreachable.next) console.error(unreachable.next);
         }

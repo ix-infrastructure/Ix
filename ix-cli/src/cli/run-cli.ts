@@ -14,8 +14,17 @@ import { registerOssFallbacks } from "./register/oss-fallbacks.js";
 import { isRepairInvocation } from "./register/pro-failure.js";
 import { buildHelpText } from "./help-text.js";
 import { stderrIsTerminal } from "./stderr.js";
-import { detectRequestedFormat, renderCliError, setErrorFormat } from "./errors.js";
-import { getEndpoint } from "./config.js";
+import {
+  bindCommanderErrors,
+  commandFormat,
+  renderCliError,
+  resolveErrorFormat,
+  setErrorFormat,
+  setErrorFormatFallback,
+  throwCommanderExit,
+  writeCommanderError,
+} from "./errors.js";
+import { getEndpoint, readConfiguredFormat } from "./config.js";
 
 import { readFileSync } from "fs";
 import { join, dirname } from "path";
@@ -33,9 +42,12 @@ const debug = process.env.IX_DEBUG === "1";
 
 // Before anything can throw. The handlers below are installed for
 // `unhandledRejection` and `uncaughtException`, which can fire before
-// commander has parsed a thing, so the error boundary gets the format from
-// argv rather than from a parsed command.
-setErrorFormat(detectRequestedFormat(process.argv.slice(2)));
+// commander has parsed a thing, so until a command is parsed the error
+// boundary resolves the format the way a command's default is resolved: the
+// typed `--format`, then IX_FORMAT, then config.format. Lazily -- a run that
+// never fails never reads config for it.
+setErrorFormatFallback(() =>
+  resolveErrorFormat(process.argv.slice(2), process.env, readConfiguredFormat));
 
 // Resolving the endpoint reads config off disk, which can itself fail. An
 // error renderer must never throw, so failure here just drops the endpoint
@@ -61,7 +73,20 @@ process.on("uncaughtException", (err: unknown) => {
 const program = new Command();
 program
   .name("ix")
-  .version(cliVersion);
+  .version(cliVersion)
+  // Set before any command is registered, so every subcommand inherits both:
+  // a usage error (unknown option, bad value) is thrown to the boundary below
+  // and answered in the caller's format, rather than commander printing prose
+  // and exiting on its own. Help and version still exit 0.
+  .exitOverride(throwCommanderExit)
+  .configureOutput({ outputError: writeCommanderError });
+
+// Registered first, so it runs before the option checks in `applyOssSetup`:
+// from here on a failure is answered in the format the payload would have
+// been -- the command's own `--format`, whatever set it.
+program.hook("preAction", (_thisCommand, actionCommand) => {
+  setErrorFormat(commandFormat(actionCommand));
+});
 
 // Start with OSS-only help; updated after Pro probe.
 program.helpInformation = () => buildHelpText();
@@ -128,6 +153,11 @@ const lazy = await registerForPlan(program, planStartup(process.argv.slice(2)));
     // unhandledRejection handler then aborts a command that already succeeded.
     updates.checkForUpdate().catch(() => {});
   }
+
+  // Every command is registered now. Give each its own usage-error format, so
+  // only a command that takes --format answers a bad flag in records: `ix hook`
+  // and `ix mcp` print prose, whatever IX_FORMAT says.
+  bindCommanderErrors(program, args);
 
   // parseAsync (not parse) so rejections from async action handlers surface
   // here instead of floating off as unhandled rejections.

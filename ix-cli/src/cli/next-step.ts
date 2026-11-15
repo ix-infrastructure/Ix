@@ -1,55 +1,83 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
 /**
- * Hints and next steps, phrased for whoever will act on them.
+ * Hints and next steps, as data, and the reader that phrases them.
  *
  * A command's closing advice used to be CLI text everywhere: `ix callers X`,
  * `raise --max-tokens`, `Use --include-tests`. Over MCP the same output reaches
- * an agent that has tools, not a shell: `ix_context` has no `--max-tokens`,
- * `ix_search` had no `--include-tests`, and `ix conflicts` is not a tool at
- * all. Advice the reader cannot run is worse than none, because it reads as
- * the one move left.
+ * an agent that has tools, not a shell, and advice the reader cannot run is
+ * worse than none, because it reads as the one move left.
  *
- * The MCP runner sets {@link IX_CALLER_ENV} for the duration of every command
- * it runs (in-process and in the child-process runner alike), and every hint
- * generator asks {@link forMcp} which phrasing to produce. CLI output is
- * unchanged: the CLI branch of every helper here returns the exact string the
- * command printed before.
+ * So a command describes the step it means ({@link Hint}, {@link Lever}) and
+ * asks the {@link Caller} it is running for how to phrase it. This module only
+ * knows the CLI phrasing ({@link CLI_CALLER}), which is the exact text the
+ * commands printed before. The MCP layer (`mcp/hints.ts`) supplies the other
+ * reader: it alone knows the tool names and their arguments, and it phrases
+ * only tools the session was offered, so a hint for anything else is dropped.
  *
- * Over MCP, a hint from a command in the core toolset may name only core
- * tools (see `IX_MCP_CORE_TOOL_NAMES`), because a core session has nothing
- * else. A command outside the core set is only reachable with `--tools=all`,
- * so its hints may name any tool in that catalog.
+ * The caller is scoped to one command run ({@link withCaller}), not read from
+ * the process environment, so concurrent runs and anything else in the process
+ * cannot see each other's reader.
  */
 
-/** Set to `mcp` by the MCP runner; unset (or anything else) means a person at a shell. */
-export const IX_CALLER_ENV = "IX_CALLER";
-
-/** True while a command's output is being produced for an MCP client. */
-export function forMcp(): boolean {
-  return process.env[IX_CALLER_ENV] === "mcp";
-}
-
-type ArgValue = string | number | boolean | undefined | null;
-
-/**
- * One MCP tool call as a caller would write it: `ix_neighbors symbol=X relation=callers`.
- *
- * Empty arguments are dropped, and a value with whitespace or a quote is
- * JSON-quoted so the call still reads as one token per argument.
- */
-export function toolCall(tool: string, args: Record<string, ArgValue> = {}): string {
-  const parts = [tool];
-  for (const [key, value] of Object.entries(args)) {
-    if (value === undefined || value === null || value === "") continue;
-    const text = String(value);
-    parts.push(`${key}=${/[\s"'=]/.test(text) ? JSON.stringify(text) : text}`);
-  }
-  return parts.join(" ");
-}
-
-/** The four edge directions `ix_neighbors` takes, and the CLI command for each. */
+/** The four edge directions a neighbour lookup takes. */
 export type Relation = "callers" | "callees" | "imports" | "imported_by";
+
+/** One next step a command suggests, as data. */
+export type Hint =
+  /** One hop of edges from `symbol`. */
+  | { action: "neighbors"; symbol: string; relation: Relation; path?: string }
+  /** What a change to `target` reaches. */
+  | { action: "impact"; target: string; path?: string }
+  /** Ranked evidence for `target`; with no target, the command itself. */
+  | { action: "context"; target?: string; path?: string }
+  /** The source of a symbol, a path, or `path:start-end`. */
+  | { action: "read"; target: string; path?: string }
+  /** A text search; with no pattern, the command itself. `quote` double-quotes the CLI argument. */
+  | { action: "text"; pattern?: string; quote?: boolean }
+  /** What `symbol` is for. `quote` double-quotes the CLI argument. */
+  | { action: "explain"; symbol: string; quote?: boolean }
+  /** The dependent tree of `symbol`. */
+  | { action: "depends"; symbol: string; depth?: number }
+  /** The members of `symbol`. */
+  | { action: "contains"; symbol: string }
+  /** The claims that conflict over `symbol`. */
+  | { action: "conflicts"; symbol: string }
+  /** Re-map the workspace. */
+  | { action: "map" }
+  /**
+   * The next page of the command that printed this one. `argv` is that
+   * command line as shell words, already quoted, ending in `--offset <offset>`
+   * and its positionals.
+   */
+  | { action: "page"; offset: number; argv: readonly string[] };
+
+/** A request input a hint can point at: a flag at a shell, a tool argument over MCP. */
+export type Lever = "pick" | "kind" | "path" | "all" | "include_tests" | "max_tokens";
+
+/** Who reads a command's output, and how a hint must be phrased for them. */
+export interface Caller {
+  /**
+   * How the reader acts on a hint: by typing a command line (`shell`), or by
+   * making a tool call (`tool`). Commands choose which steps to offer by it;
+   * the wording of each step comes from {@link command} and {@link lever}.
+   */
+  readonly style: "shell" | "tool";
+  /**
+   * True when the command runs inside a long-lived host process that owns its
+   * deadline (`ix mcp`): it must not start services on the user's machine or
+   * take a wait budget from the host's environment.
+   */
+  readonly hosted: boolean;
+  /** The command line or tool call that performs `hint`; undefined when this reader cannot run it. */
+  command(hint: Hint): string | undefined;
+  /** How to set `lever` on the next request (`--pick <n>`, `pick=<n>`); undefined when there is no such input. */
+  lever(lever: Lever): string | undefined;
+  /** How to disambiguate a name that resolved to several entities. `cli` is the shell phrasing. */
+  disambiguation(cli: string): string;
+}
 
 const RELATION_COMMAND: Record<Relation, string> = {
   callers: "callers",
@@ -58,36 +86,104 @@ const RELATION_COMMAND: Record<Relation, string> = {
   imported_by: "imported-by",
 };
 
-/**
- * Suggestions for the core tools, each in the reader's phrasing.
- *
- * The CLI forms are the strings the commands printed before this module
- * existed; keep them byte-identical so CLI output does not move.
- */
-export const suggest = {
-  neighbors(symbol: string, relation: Relation, opts: { path?: string } = {}): string {
-    return forMcp()
-      ? toolCall("ix_neighbors", { symbol, relation, path: opts.path })
-      : `ix ${RELATION_COMMAND[relation]} ${symbol}`;
-  },
-  impact(target: string, opts: { path?: string } = {}): string {
-    return forMcp() ? toolCall("ix_impact", { target, path: opts.path }) : `ix impact ${target}`;
-  },
-  context(target: string, opts: { path?: string } = {}): string {
-    return forMcp() ? toolCall("ix_context", { target, path: opts.path }) : `ix context ${target}`;
-  },
-  read(target: string): string {
-    return forMcp() ? toolCall("ix_read", { symbol: target }) : `ix read ${target}`;
-  },
+const CLI_LEVERS: Record<Lever, string> = {
+  pick: "--pick <n>",
+  kind: "--kind",
+  path: "--path",
+  all: "--all",
+  include_tests: "--include-tests",
+  max_tokens: "--max-tokens",
 };
 
+/** A shell runs every `ix` command, so every hint has a CLI form. */
+interface CliCaller extends Caller {
+  command(hint: Hint): string;
+}
+
 /**
- * How a caller disambiguates a name that resolved to more than one entity.
- *
- * Every core tool that takes a symbol also takes `pick`, `kind` and `path`
- * (`ix_neighbors`, `ix_read`, `ix_impact`, `ix_context`), so the MCP form can
- * name them without knowing which tool it is inside.
+ * A person at a shell, the default. Every form here is the string the
+ * commands printed before hints were data; keep them byte-identical so CLI
+ * output does not move. Paths pin a target over MCP only: the CLI forms never
+ * carried one.
  */
+export const CLI_CALLER: CliCaller = {
+  style: "shell",
+  hosted: false,
+  command(hint: Hint): string {
+    switch (hint.action) {
+      case "neighbors":
+        return `ix ${RELATION_COMMAND[hint.relation]} ${hint.symbol}`;
+      case "impact":
+        return `ix impact ${hint.target}`;
+      case "context":
+        return hint.target === undefined ? "ix context" : `ix context ${hint.target}`;
+      case "read":
+        return `ix read ${hint.target}`;
+      case "text":
+        return hint.pattern === undefined ? "ix text" : `ix text ${hint.quote ? `"${hint.pattern}"` : hint.pattern}`;
+      case "explain":
+        return `ix explain ${hint.quote ? `"${hint.symbol}"` : hint.symbol}`;
+      case "depends":
+        return `ix depends ${hint.symbol}${hint.depth === undefined ? "" : ` --depth ${hint.depth}`}`;
+      case "contains":
+        return `ix contains ${hint.symbol}`;
+      case "conflicts":
+        return `ix conflicts ${hint.symbol}`;
+      case "map":
+        return "ix map";
+      case "page":
+        return hint.argv.join(" ");
+    }
+  },
+  lever: (lever) => CLI_LEVERS[lever],
+  disambiguation: (cli) => cli,
+};
+
+const scope = new AsyncLocalStorage<Caller>();
+let processCaller: Caller = CLI_CALLER;
+
+/** The reader of the command running now: the run's caller, else the process's, else the CLI. */
+export function currentCaller(): Caller {
+  return scope.getStore() ?? processCaller;
+}
+
+/** Run `fn` with `caller` as the reader of everything it prints, including its async work. */
+export function withCaller<T>(caller: Caller, fn: () => T): T {
+  return scope.run(caller, fn);
+}
+
+/**
+ * Set the reader for a whole process. Only for a process that runs one
+ * command for a host (the MCP child-process runner), before the CLI loads; a
+ * run's own caller ({@link withCaller}) still wins.
+ */
+export function setProcessCaller(caller: Caller): void {
+  processCaller = caller;
+}
+
+/** `hint` phrased for the current reader, or undefined when it cannot run it. */
+export function hint(step: Hint): string | undefined {
+  return currentCaller().command(step);
+}
+
+/** `{ suggestedCommand }` for a row a reader can act on, or nothing when it cannot run the step. */
+export function suggestedCommand(step: Hint): { suggestedCommand?: string } {
+  const command = hint(step);
+  return command === undefined ? {} : { suggestedCommand: command };
+}
+
+/**
+ * `Use --pick <n> or --kind to <purpose>.` at a shell, `Pass pick=<n> or
+ * kind=<kind> to <purpose>.` over MCP. Levers the reader has no input for are
+ * left out.
+ */
+export function leverSentence(levers: readonly Lever[], purpose: string): string {
+  const caller = currentCaller();
+  const spelled = levers.map((lever) => caller.lever(lever)).filter((text): text is string => text !== undefined);
+  return `${caller.style === "tool" ? "Pass" : "Use"} ${spelled.join(" or ")} ${purpose}.`;
+}
+
+/** How a caller disambiguates a name that resolved to more than one entity. */
 export function disambiguationHint(cli: string): string {
-  return forMcp() ? "Pass pick=<n> (1-based), kind=<kind> or path=<file substring> to disambiguate." : cli;
+  return currentCaller().disambiguation(cli);
 }
