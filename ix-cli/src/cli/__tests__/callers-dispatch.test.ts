@@ -253,14 +253,20 @@ describe("ix callers output contract", () => {
     });
   });
 
-  it("the text fallback searches for the member's own name", async () => {
+  it("a qualified target with no graph callers skips the text fallback", async () => {
     target.value = { ...IMPL, displayName: "TimeoutInvoker.getUrl" };
     graph.value = new Map();
-    rgMatches.value = [["src/b.java", 3, "invoker.getUrl();"]];
+    rgMatches.value = [["src/b.java", 3, "other.getUrl();"]];
+    rgMatches.args = [];
     const l = await run(["--format", "llm"]);
-    expect(rgMatches.args[0]).toEqual(["--json", "--max-count", "10", "-F", "-e", "getUrl", "--", "/ws"]);
-    expect(l.out[0]).toBe("callers target=TimeoutInvoker.getUrl source=text shown=1 total=1");
+    // A text search for the bare `getUrl` would match every getUrl in any class.
+    expect(rgMatches.args).toEqual([]);
+    expect(l.out[0]).toMatch(/^callers target=TimeoutInvoker\.getUrl /);
+    expect(l.out.join("\n")).not.toContain("source=text");
     const body = json((await run(["--format", "json"])).out);
+    expect(rgMatches.args).toEqual([]);
+    expect(body.resultSource).toBe("graph");
+    expect(body.results).toEqual([]);
     expect(body.resolvedTarget).toMatchObject({ id: IMPL.id, name: "TimeoutInvoker.getUrl" });
     expect(Object.keys(body.resolvedTarget)).not.toContain("displayName");
   });

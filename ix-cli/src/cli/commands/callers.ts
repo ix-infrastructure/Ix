@@ -262,7 +262,10 @@ async function callersOne(client: IxClient, symbol: string, opts: EdgeOpts, cmd:
 
   if (result.nodes.length === 0) {
     // Fallback to text search: pages of TEXT_FALLBACK_PAGE rows, --offset honoured.
-    try {
+    // Not for a qualified `Class.method` target: target.name is then the bare
+    // member name, and a text search for it would match every same-named
+    // member in any class.
+    if (target.displayName === undefined) try {
       const root = resolveWorkspaceRoot();
       // The timeout bounds a search that rg could otherwise run for ever.
       const { stdout } = await execFileAsync("rg", callersTextSearchArgs(target.name, root), {
