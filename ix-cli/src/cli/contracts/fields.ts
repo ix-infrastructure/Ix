@@ -33,6 +33,7 @@ import type { ErrorRecordJson, MultiTargetJson } from "./envelope.js";
 import type { LocateJson, LocateMissJson, LocateStrictAmbiguityJson, LocateTextMatchesJson } from "./locate.js";
 import type { UnresolvedTargetJson } from "./miss.js";
 import type { ReadAmbiguityJson, ReadFailureJson, ReadJson } from "./read.js";
+import type { StatusJson } from "./status.js";
 
 /** Recursion budget for {@link FieldPath}: deeper than any json contract nests. */
 type Depth = [never, 0, 1, 2, 3, 4, 5, 6];
@@ -78,6 +79,9 @@ type ReadOutput = ReadJson | ReadAmbiguityJson | ReadFailureJson | UnresolvedTar
  * A failure is the one object it prints instead.
  */
 type TextOutput = TextResult[] | ErrorRecordJson;
+
+/** Every shape `ix status --format json` prints (contracts/status.ts). */
+type StatusOutput = StatusJson | ErrorRecordJson;
 
 const CANDIDATE = ["id", "name", "kind", "path", "line", "score", "rank", "container"] as const;
 const NAMED = ["id", "name", "kind", "path"] as const;
@@ -151,6 +155,14 @@ export const JSON_FIELDS: Readonly<Record<string, readonly string[]>> = {
   ]),
   text: fieldsOf<TextOutput>()([
     ...under("[]", ["path", "line_start", "line_end", "snippet", "engine", "score", "language", "symbol_hint"]),
+    ...ERROR_RECORD,
+  ]),
+  status: fieldsOf<StatusOutput>()([
+    "backend", "graphCompleted", "mapCompleted", "mapStale", "mapRefreshError", "currentRev", "lastIngestAt",
+    "staleFiles", "sampleChangedFiles", "sampleChangedFiles[]", "replayedFiles", "replayedFiles[]",
+    "parseTimeouts", "parseTimeouts[]",
+    ...under("graphHealth", ["status", "reason", "message", "fix", "nodes", "edges", "structuralEdges", "symbols"]),
+    ...under("verify", ["at", "graph", "files", "diverged", "stale", "unverified", "lastIngestAt", "outdated", "fix"]),
     ...ERROR_RECORD,
   ]),
 };
