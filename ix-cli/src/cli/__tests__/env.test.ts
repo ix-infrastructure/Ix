@@ -22,12 +22,29 @@ describe("parseFlag: the one flag parser (#948)", () => {
     for (const raw of [undefined, "", "   "]) expect(parseFlag(raw), String(raw)).toBeUndefined();
   });
 
-  it("is off for 0, false and no, in any case and with spaces around", () => {
-    for (const raw of ["0", "false", "no", "FALSE", "No", " 0 ", "\tfalse\n"]) expect(parseFlag(raw), raw).toBe(false);
+  it("is off for 0, false, no, n and off, in any case and with spaces around", () => {
+    for (const raw of ["0", "false", "no", "n", "off", "FALSE", "No", "OFF", " 0 ", "\tfalse\n"]) expect(parseFlag(raw), raw).toBe(false);
   });
 
-  it("is on for anything else", () => {
-    for (const raw of ["1", "true", "yes", "on", "TRUE", " 1 ", "2", "enabled"]) expect(parseFlag(raw), raw).toBe(true);
+  it("is on for 1, true, yes, y and on, in any case and with spaces around", () => {
+    for (const raw of ["1", "true", "yes", "y", "on", "TRUE", "On", " 1 "]) expect(parseFlag(raw), raw).toBe(true);
+  });
+
+  it("is undefined (the default) for any other value, so a word meant as off never turns a flag on", () => {
+    for (const raw of ["2", "00", "enabled", "disabled", "none", "nope", "abc"]) expect(parseFlag(raw), raw).toBeUndefined();
+    // Flags whose old reader took only `1`: none of these may switch them on.
+    for (const raw of ["off", "n", "disabled", "none"]) {
+      expect(flagValue("IX_DEBUG", raw), raw).toBe(false);
+      expect(flagValue("IX_AUTO_MAP", raw), raw).toBe(false);
+      expect(flagValue("IX_RECONCILE_ON_FORCE", raw), raw).toBe(false);
+    }
+    // IX_BULK_DELETES: `off` forces the old route; an unknown word leaves it to the backend's release.
+    expect(flagValue("IX_BULK_DELETES", "off")).toBe(false);
+    expect(flagValue("IX_BULK_DELETES", "disabled")).toBeUndefined();
+    expect(flagValue("IX_BULK_DELETES", "2")).toBeUndefined();
+    // A default-on flag stays on for an unknown word.
+    expect(flagValue("IX_GRAPH_HEALTH", "disabled")).toBe(true);
+    expect(flagValue("IX_GRAPH_HEALTH", "off")).toBe(false);
   });
 
   it("gives a flag its default when unset, and a third state when the default is unset", () => {
@@ -44,11 +61,35 @@ describe("parseNumber: the one number parser (#948)", () => {
   const ms = { type: "ms", zero: true } as const;
   const int = { type: "int", zero: true } as const;
 
-  it("reads what Number() reads in full, spaces around ignored", () => {
+  it("reads a whole decimal number in full, spaces around ignored", () => {
     expect(parseNumber("250", int)).toBe(250);
     expect(parseNumber(" 250 ", int)).toBe(250);
     expect(parseNumber("1e3", int)).toBe(1000);
-    expect(parseNumber("2.5", ms)).toBe(2.5);
+    expect(parseNumber("1e3", ms)).toBe(1000);
+    expect(parseNumber("1000.0", ms)).toBe(1000);
+    expect(parseNumber("+5", ms)).toBe(5);
+  });
+
+  it("rejects hex, octal, binary, Infinity and fractions, which Number() alone would take", () => {
+    for (const raw of ["0x10", "0X10", "0o17", "0b1", "0x0", "Infinity", "0.5", "2.5", "1e-9", ".5"]) {
+      expect(parseNumber(raw, ms), raw).toBeUndefined();
+      expect(parseNumber(raw, int), raw).toBeUndefined();
+    }
+  });
+
+  it("never lets a hex or fractional value shrink a lock age, a deadline or the commit cutoff", () => {
+    for (const raw of ["0.5", "0x10", "0b1", "1e-9"]) {
+      expect(numberValue("IX_MAP_LOCK_MAX_MS", raw), raw).toBe(20 * 60 * 1000);
+      expect(numberValue("IX_MAP_DEADLINE_MS", raw), raw).toBe(15 * 60 * 1000);
+      expect(numberValue("IX_COMMIT_FAILURE_LIMIT", raw), raw).toBe(5);
+    }
+    expect(numberValue("IX_COMMIT_FAILURE_LIMIT", "0x0")).toBe(5);
+  });
+
+  it("reads an int too large to write as the most there can be, not as the default", () => {
+    expect(numberValue("IX_COMMIT_FAILURE_LIMIT", "9".repeat(400))).toBe(Number.MAX_SAFE_INTEGER);
+    expect(numberValue("IX_COMMIT_FAILURE_LIMIT", "1e400")).toBe(Number.MAX_SAFE_INTEGER);
+    expect(parseNumber("1e400", ms)).toBeUndefined();
   });
 
   it("never reads a numeric prefix", () => {
@@ -251,18 +292,32 @@ const OLD_FLAGS: Record<string, Old> = {
  * Values that worked one way before and now work another, on purpose:
  * - `IX_NO_UPDATE_CHECK=no` was ON (its parser alone did not treat `no` as
  *   off); the issue names it as the inconsistency to remove.
- * - A fraction for IX_ORPHAN_SWEEP_MAX_REQUESTS, a count of requests, which
- *   Number() took; the shared parser takes whole numbers for an int.
+ * - For the three flags whose old reader took any value but 0/false(/no) as
+ *   on (IX_STRICT_TARGETS, IX_LEGACY_EXIT_CODES, IX_NO_UPDATE_CHECK), `off`
+ *   and `n` are now off, and a value outside the on and off words (`2`, `00`,
+ *   `abc`) now keeps the default.
+ *   Their docs only ever said `=1`; reading unknown words as on is what let
+ *   `IX_DEBUG=off` switch debugging on.
+ * - A fraction (`1.5`) or a hex value (`0x10`) for a number whose old reader
+ *   used Number(); the shared parser takes whole decimal numbers only, as
+ *   the old digits-only readers did.
  */
-const CHANGED_ON_PURPOSE = new Set([
-  "IX_NO_UPDATE_CHECK=no", "IX_NO_UPDATE_CHECK=No", "IX_NO_UPDATE_CHECK= no ",
-  "IX_ORPHAN_SWEEP_MAX_REQUESTS=1.5", "IX_ORPHAN_SWEEP_MAX_REQUESTS=0.5",
-]);
+const ANY_VALUE_ON = new Set(["IX_STRICT_TARGETS", "IX_LEGACY_EXIT_CODES", "IX_NO_UPDATE_CHECK"]);
+function changedOnPurpose(name: string, raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  if (name === "IX_NO_UPDATE_CHECK" && raw.trim().toLowerCase() === "no") return true;
+  if (ANY_VALUE_ON.has(name)) return parseFlag(raw) !== true;
+  if (name in OLD_NUMBERS) {
+    const t = raw.trim();
+    return /^0[xob]/i.test(t) || (t !== "" && !Number.isInteger(Number(t)));
+  }
+  return false;
+}
 
 const CORPUS = [
   "", " ", "0", " 0 ", "00", "1", " 1 ", "2", "5", "7", "250", "300", "301", "1000", "1e3", "1E3", "0x10",
   "1.5", "0.5", "1.0", "+5", "-1", "-0", "15m", "2k", "abc", "Infinity", "99999999999999999999",
-  "true", "TRUE", "false", "no", "No", " no ", "yes", "on", "off",
+  "true", "TRUE", "false", "no", "No", " no ", "yes", "on", "off", "n", "y", "disabled", "none",
 ];
 
 /** Equal (-0 is 0), counting two ints past MAX_SAFE_INTEGER as the same "as many as there can be". */
@@ -281,7 +336,7 @@ describe("no behaviour change for values that work today (#948)", () => {
   it.each(Object.keys(OLD_NUMBERS))("%s", (name) => {
     const old = OLD_NUMBERS[name];
     for (const raw of CORPUS) {
-      if (same(old(raw), old(undefined)) || CHANGED_ON_PURPOSE.has(`${name}=${raw}`)) continue;
+      if (same(old(raw), old(undefined)) || changedOnPurpose(name, raw)) continue;
       expect(numberValue(name as NumberName, raw), `${name}=${JSON.stringify(raw)}`).toSatisfy((v: unknown) => same(v, old(raw)));
     }
     expect(numberValue(name as NumberName, undefined)).toBe(old(undefined));
@@ -290,7 +345,7 @@ describe("no behaviour change for values that work today (#948)", () => {
   it.each(Object.keys(OLD_FLAGS))("%s", (name) => {
     const old = OLD_FLAGS[name];
     for (const raw of CORPUS) {
-      if (old(raw) === old(undefined) || CHANGED_ON_PURPOSE.has(`${name}=${raw}`)) continue;
+      if (old(raw) === old(undefined) || changedOnPurpose(name, raw)) continue;
       expect(flagValue(name as FlagName, raw), `${name}=${JSON.stringify(raw)}`).toBe(old(raw));
     }
     expect(flagValue(name as FlagName, undefined)).toBe(old(undefined));

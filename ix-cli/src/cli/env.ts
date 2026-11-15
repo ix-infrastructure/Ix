@@ -11,16 +11,19 @@
  * `envFlag` / `envNumber` (or `flagValue` / `numberValue` for a reader that
  * takes the raw string as a parameter), and the docs table is regenerated.
  *
- * Flags (`parseFlag`): unset or empty means the variable's default; `0`,
- * `false` and `no` (any case, surrounding spaces ignored) mean off; any other
- * value means on.
+ * Flags (`parseFlag`): `1`, `true`, `yes`, `y` and `on` mean on; `0`,
+ * `false`, `no`, `n` and `off` mean off (any case, surrounding spaces
+ * ignored). Unset, empty or any other value means the variable's default, so
+ * a word meant as "off" that is not in the list (`disabled`, `none`) never
+ * turns a flag on.
  *
  * Numbers (`parseNumber`): surrounding spaces are ignored, and the rest must be
- * a number `Number()` reads in full: never a numeric prefix, so `15m` is not
- * 15 and keeps the default, as does a negative value. `int` variables take
- * whole numbers only (past MAX_SAFE_INTEGER, MAX_SAFE_INTEGER); `ms` variables
- * also take fractions. Each entry says whether 0 is a value (often "off") or
- * falls back to the default, what an empty value means, and the most it takes.
+ * a whole number written in decimal, in full (`1000`, `1e3` and `1000.0` are
+ * all 1000): never a numeric prefix, so `15m` is not 15 and keeps the
+ * default, as do a negative value, a fraction such as `0.5`, and hex, octal
+ * or binary (`0x10`). An `int` past MAX_SAFE_INTEGER is MAX_SAFE_INTEGER.
+ * Each entry says whether 0 is a value (often "off") or falls back to the
+ * default, what an empty value means, and the most it takes.
  *
  * This module imports nothing: anything may read the environment through it,
  * however early in start-up.
@@ -44,7 +47,7 @@ export interface FlagSpec extends BaseSpec {
 }
 
 export interface NumberSpec extends BaseSpec {
-  /** `int`: whole numbers. `ms`: milliseconds, fractions allowed. */
+  /** `int`: a count. `ms`: milliseconds. Both take whole numbers only. */
   type: "int" | "ms";
   default: number | undefined;
   /** Whether 0 is a value. When it is not, 0 falls back to the default. */
@@ -343,40 +346,57 @@ type NumberValue<N extends NumberName> = Registry[N]["default"] extends number ?
 
 type Env = Readonly<Record<string, string | undefined>>;
 
-const OFF = new Set(["0", "false", "no"]);
+const ON = new Set(["1", "true", "yes", "y", "on"]);
+const OFF = new Set(["0", "false", "no", "n", "off"]);
 
 /**
- * The one flag parser: undefined for unset or empty, false for `0`, `false`
- * or `no` (any case, surrounding spaces ignored), true for anything else.
+ * The one flag parser: true for `1`, `true`, `yes`, `y` or `on`; false for
+ * `0`, `false`, `no`, `n` or `off` (any case, surrounding spaces ignored);
+ * undefined for anything else, unset and empty included (the caller's
+ * default applies). An unknown word is not read as on: `IX_DEBUG=off` or
+ * `IX_BULK_DELETES=disabled` must not switch a behaviour on.
  */
 export function parseFlag(raw: string | undefined): boolean | undefined {
   const value = raw?.trim().toLowerCase();
-  if (!value) return undefined;
-  return !OFF.has(value);
+  if (value === undefined) return undefined;
+  if (ON.has(value)) return true;
+  if (OFF.has(value)) return false;
+  return undefined;
 }
 
 /** How `parseNumber` reads one variable; a `NumberSpec` is one. */
 export type NumberRule = Pick<NumberSpec, "type" | "zero" | "empty" | "max" | "clamp">;
 
+/** A decimal number, optionally signed and with an exponent. No hex, octal, binary or `Infinity`. */
+const DECIMAL = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i;
+
 /**
  * The one number parser: the value `rule` reads `raw` as, or undefined when
  * it is unset or not a value (the caller's default applies).
  *
- * `Number()`, never `parseInt`: `parseInt` reads any numeric prefix, so `15m`
- * was 15 ms and `1e3` was 1. What `Number()` reads in full (`1000`, `1e3`,
- * `2.5`) is the value; anything else (`15m`, `-1`, `abc`) is not one.
+ * Never `parseInt`: it reads any numeric prefix, so `15m` was 15 ms and `1e3`
+ * was 1. A whole number written in decimal, in full (`1000`, `1e3`), is the
+ * value; anything else is not one: `15m`, `-1`, `abc`, and also `0.5` and
+ * `0x10`, which `Number()` alone would take. A fraction of a millisecond or
+ * of a count is never meant, and a lock age, deadline or cutoff of 0.5 or 0
+ * written as `0x0` would quietly disable what it bounds.
  */
 export function parseNumber(raw: string | undefined, rule: NumberRule): number | undefined {
   if (raw === undefined) return undefined;
   const text = raw.trim();
   if (text === "") return rule.empty;
+  if (!DECIMAL.test(text)) return undefined;
   const n = Number(text);
-  if (!Number.isFinite(n) || n < 0) return undefined;
-  if (rule.type === "int" && !Number.isInteger(n)) return undefined;
+  if (n < 0) return undefined;
+  // Infinity (`1e400`, or 309 digits) is a whole number too large to write.
+  if (!Number.isInteger(n) && n !== Infinity) return undefined;
   if (n === 0) return rule.zero ? 0 : undefined;
   if (rule.max !== undefined && n > rule.max) return rule.clamp ? rule.max : undefined;
-  // Not exact past MAX_SAFE_INTEGER, but unmistakably "as many as there can be".
-  if (rule.type === "int" && n > Number.MAX_SAFE_INTEGER) return Number.MAX_SAFE_INTEGER;
+  if (n > Number.MAX_SAFE_INTEGER) {
+    // Not exact, but unmistakably "as many as there can be".
+    if (rule.type === "int") return Number.MAX_SAFE_INTEGER;
+    if (n === Infinity) return undefined;
+  }
   return n;
 }
 

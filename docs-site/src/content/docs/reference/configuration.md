@@ -15,7 +15,7 @@ ix config set format llm      # set a value
 
 ## Environment variables
 
-Generated from the registry in `ix-cli/src/cli/env.ts`. A flag is on for any value but `0`, `false` or `no` (any case); unset or empty leaves its default. A number must be a number in full: `15m` or `-1` keeps the default rather than meaning 15 or -1. An `int` takes whole numbers; an `ms` value is milliseconds.
+Generated from the registry in `ix-cli/src/cli/env.ts`. A flag is on for `1`, `true`, `yes`, `y` or `on` and off for `0`, `false`, `no`, `n` or `off` (any case); unset, empty or any other value leaves its default. A number must be a whole number written in decimal, in full: `15m`, `-1`, `0.5` or `0x10` keeps the default rather than meaning 15, -1, 0.5 or 16 (`1e3` is 1000). An `int` is a count; an `ms` value is milliseconds.
 
 <!-- env-vars:start (generated from ix-cli/src/cli/env.ts by ix-cli/scripts/check-env-registry.mjs --write) -->
 | Variable | Type | Default | Effect |

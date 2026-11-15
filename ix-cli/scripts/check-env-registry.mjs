@@ -11,8 +11,9 @@
  *     registered or listed in NOT_VARIABLES below, with the reason it is not a
  *     variable the CLI reads (a constant's identifier, another program's
  *     variable);
- *   - every registered name still appears in ix-cli/src, so a variable the
- *     code stopped reading does not stay documented;
+ *   - every registered name still appears in ix-cli/src outside the registry
+ *     itself (src/cli/env.ts names every entry, so it does not count), so a
+ *     variable the code stopped reading does not stay documented;
  *   - the table of public variables on the configuration reference, between
  *     the `<!-- env-vars:… -->` markers, is exactly what `renderEnvTable`
  *     makes from the registry (`--write` regenerates it).
@@ -61,13 +62,21 @@ export const NOT_VARIABLES = {
 
 const NAME = /\bIX_[A-Z0-9_]{3,}\b/g;
 
-/** Source files the gate reads: src/**\/*.ts, without tests. */
-function sourceFiles(dir) {
+/**
+ * The registry, relative to src/. It names every registered variable, so
+ * scanning it would make every entry look used; the gate leaves it out.
+ */
+export const REGISTRY_FILE = join("cli", "env.ts");
+
+/** Source files the gate reads: src/**\/*.ts, without tests or the registry. */
+function sourceFiles(dir, srcDir = dir) {
   const out = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (entry.name !== "__tests__") out.push(...sourceFiles(path));
+      if (entry.name !== "__tests__") out.push(...sourceFiles(path, srcDir));
+    } else if (relative(srcDir, path) === REGISTRY_FILE) {
+      continue;
     } else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) {
       out.push(path);
     }
@@ -76,7 +85,7 @@ function sourceFiles(dir) {
 }
 
 /**
- * Every `IX_*` name in ix-cli/src and where it appears, as
+ * Every `IX_*` name in ix-cli/src (outside the registry) and where it appears, as
  * `Map<name, string[]>` of `path:line` (paths relative to ix-cli).
  */
 export function scanSource(srcDir = join(CLI_ROOT, "src")) {
@@ -153,7 +162,7 @@ export function collectProblems({ registry, uses, doc }) {
   }
   for (const name of Object.keys(registry).sort()) {
     if (!uses.has(name)) {
-      problems.push(`${name} is registered in src/cli/env.ts but nothing in ix-cli/src mentions it: remove it.`);
+      problems.push(`${name} is registered in src/cli/env.ts but nothing in ix-cli/src outside it mentions it: remove it.`);
     }
   }
   for (const name of Object.keys(NOT_VARIABLES).sort()) {

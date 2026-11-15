@@ -34,7 +34,18 @@ describe("environment-variable registry (#948)", () => {
       IX_GONE: { type: "flag", default: false, visibility: "internal", description: "gone" },
     };
     expect(collectProblems({ registry, uses, doc })).toEqual([
-      "IX_GONE is registered in src/cli/env.ts but nothing in ix-cli/src mentions it: remove it.",
+      "IX_GONE is registered in src/cli/env.ts but nothing in ix-cli/src outside it mentions it: remove it.",
+    ]);
+  });
+
+  // env.ts names every entry, so if it were scanned no entry could ever be
+  // reported stale. A registered variable whose only reader went away must be.
+  it("does not count the registry's own mention of a variable as a use", () => {
+    expect([...uses.values()].flat().some((where) => where.startsWith("src/cli/env.ts:"))).toBe(false);
+    const readerGone = new Map(uses);
+    readerGone.delete("IX_MCP_HINT_TOOLS");
+    expect(collectProblems({ registry: ENV_VARS, uses: readerGone, doc })).toEqual([
+      "IX_MCP_HINT_TOOLS is registered in src/cli/env.ts but nothing in ix-cli/src outside it mentions it: remove it.",
     ]);
   });
 
