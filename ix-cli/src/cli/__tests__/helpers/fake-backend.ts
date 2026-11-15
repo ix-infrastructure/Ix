@@ -140,6 +140,20 @@ function graphEdge(e: ReadEdge): Record<string, unknown> {
   return { id: e.id, src: e.src, dst: e.dst, predicate: e.predicate, attrs: {}, createdRev: 1 };
 }
 
+/**
+ * A `GET /v1/stats` body, in the shape the CLI reads (`client/types.ts`
+ * `StatsResult`) and the real backend answers (the bodies recorded in
+ * `graph-health.test.ts`): nodes by `kind`, edges by `predicate`.
+ */
+function statsBody(nodeKinds: string[], edgePredicates: string[]): Record<string, unknown> {
+  const tally = (keys: string[], field: string): Array<Record<string, unknown>> =>
+    [...new Set(keys)].sort().map((k) => ({ [field]: k, count: keys.filter((x) => x === k).length }));
+  return {
+    nodes: { total: nodeKinds.length, byKind: tally(nodeKinds, "kind") },
+    edges: { total: edgePredicates.length, byPredicate: tally(edgePredicates, "predicate") },
+  };
+}
+
 /** A backend that answers the endpoints an ingest touches, and records them. */
 export class FakeBackend {
   readonly requests: Array<{ path: string; patches: number; code?: number }> = [];
@@ -305,6 +319,13 @@ export class FakeBackend {
    * `nodeOpCount`), no ops -- instead of with its ops.
    */
   bulkManifests = false;
+  /**
+   * Answer `POST /v1/list` with this status instead of rows, as a backend that
+   * lacks the route (404) or fails the read (500) does, whichever of
+   * `readGraph` or `semantics` would otherwise answer it. Unset, it is served
+   * from `readGraph` if set, else from the stored graph (needs `semantics`).
+   */
+  failList: number | undefined = undefined;
   private readonly hashes = new Map<string, { workspaceId: string | null; uri: string; hash: string }>();
 
   /**
@@ -337,7 +358,9 @@ export class FakeBackend {
    * report none, as a pre-#157 backend does. `null` reports none in any mode.
    */
   releaseVersion: string | null | undefined = undefined;
-  private readonly nodes = new Map<string, { kind: unknown; name: unknown; attrs?: unknown; uri?: string; hash?: string; extractor?: string; live: boolean }>();
+  private readonly nodes = new Map<string, {
+    kind: unknown; name: unknown; attrs?: unknown; uri?: string; hash?: string; extractor?: string; workspaceId?: string; live: boolean;
+  }>();
   private readonly edges = new Map<string, {
     src: unknown; dst: unknown; predicate: unknown; attrs?: unknown; workspaceId: string; uri: string; live: boolean;
   }>();
@@ -422,7 +445,7 @@ export class FakeBackend {
       const id = String(op.id);
       if (op.type === "UpsertNode") {
         // As the bulk route does, every upsert takes the patch's provenance.
-        this.nodes.set(id, { kind: op.kind, name: op.name, attrs: op.attrs, uri, hash: patch.source?.sourceHash, extractor: patch.source?.extractor, live: true });
+        this.nodes.set(id, { kind: op.kind, name: op.name, attrs: op.attrs, uri, hash: patch.source?.sourceHash, extractor: patch.source?.extractor, workspaceId, live: true });
       }
       else if (op.type === "UpsertEdge") {
         this.edges.set(id, { src: op.src, dst: op.dst, predicate: op.predicate, attrs: op.attrs, workspaceId, uri, live: true });
@@ -691,12 +714,7 @@ export class FakeBackend {
     if (path === "/v1/stats") {
       // The graph-health probe's input (graph-health.ts assessGraphStats).
       record();
-      const tally = (keys: string[], field: string): Array<Record<string, unknown>> =>
-        [...new Set(keys)].sort().map((k) => ({ [field]: k, count: keys.filter((x) => x === k).length }));
-      return ok({
-        nodes: { total: graph.nodes.length, byKind: tally(graph.nodes.map((n) => n.kind), "kind") },
-        edges: { total: graph.edges.length, byPredicate: tally(graph.edges.map((e) => e.predicate), "predicate") },
-      });
+      return ok(statsBody(graph.nodes.map((n) => n.kind), graph.edges.map((e) => e.predicate)));
     }
     if (path.startsWith("/v1/provenance/")) {
       record();
@@ -877,6 +895,9 @@ export class FakeBackend {
       const wanted = new Set(uris);
       return send(200, [...this.hashes.values()].filter((row) => wanted.has(row.uri)));
     }
+    // Before `readGraph`, which also serves /v1/list: `failList` wins in either mode.
+    if (this.failList !== undefined && path === "/v1/list")
+      return send(this.failList, { error: `${this.failList}: list failed` });
     if (this.readGraph !== undefined) {
       const answer = this.answerRead(this.readGraph, path, body);
       if (answer !== undefined) return send(answer.code, answer.payload);
@@ -939,6 +960,33 @@ export class FakeBackend {
         .filter(([, e]) => e.live && (e.src === id || e.dst === id))
         .map(([edgeId, e]) => ({ id: edgeId, predicate: e.predicate, provenance: { sourceUri: e.uri } }));
       return send(200, { node: { id, kind: node.kind, name: node.name, attrs: node.attrs ?? {} }, edges });
+    }
+    // The two reads `ix verify` and `ix stats` make, answered from the stored
+    // graph. Only with `semantics`: without it nothing is stored, and an empty
+    // answer would read as "the graph is empty" rather than "not implemented".
+    // `readGraph`, when set, answers these first. Its /v1/list is a read-route
+    // stub (default limit 100, case-insensitive scope); this one follows the
+    // committed graph and the real backend's case-sensitive URI substring, and
+    // is not recorded in `reads`.
+    if (this.semantics !== undefined && path === "/v1/list") {
+      let q: { kind?: string; limit?: number; scope?: string; workspaceId?: string } = {};
+      try { q = JSON.parse(body || "{}"); } catch { /* none */ }
+      const rows = [...this.nodes]
+        .filter(([, n]) => n.live && n.kind === q.kind)
+        // The real backend's `scope` is a substring of the source URI.
+        .filter(([, n]) => q.scope === undefined || (n.uri ?? "").includes(q.scope))
+        .filter(([, n]) => q.workspaceId === undefined || n.workspaceId === q.workspaceId)
+        .map(([id, n]) => ({
+          id, kind: n.kind, name: n.name, attrs: n.attrs ?? {},
+          provenance: { sourceUri: n.uri ?? "", sourceHash: n.hash, extractor: n.extractor },
+        }));
+      return send(200, q.limit !== undefined ? rows.slice(0, q.limit) : rows);
+    }
+    if (this.semantics !== undefined && path === "/v1/stats") {
+      const ws = new URL(url, "http://x").searchParams.get("workspace_id");
+      const nodes = [...this.nodes.values()].filter((n) => n.live && (ws === null || n.workspaceId === ws));
+      const edges = [...this.edges.values()].filter((e) => e.live && (ws === null || e.workspaceId === ws));
+      return send(200, statsBody(nodes.map((n) => String(n.kind)), edges.map((e) => String(e.predicate))));
     }
     if (path === "/v1/stitch") {
       this.requests.push({ path, patches: 0 });

@@ -24,6 +24,7 @@ import { findTargetCandidates, rowsInclude } from "./target-suggestions.js";
 import { isFileStemMatch } from "./candidate-origin.js";
 import { normalizeForPathMatch } from "./path-match.js";
 import { STRUCTURAL_KINDS, type GraphKind } from "./graph-model.js";
+import { httpStatusOf } from "../client/http-error.js";
 import { hasDefinitionOf, looksTypeLikeSymbol } from "./resolve/score.js";
 import {
   AMBIGUOUS_HINT, allCandidatesOf, applyPick as pickAmong, buildAmbiguous, candidateOf, cmpStr,
@@ -1412,14 +1413,15 @@ function candidateSet(owner: AmbiguousResult | ResolutionNotice, total?: number,
 
 /**
  * Whether an id lookup failed because the id names nothing: the backend's
- * 400/404/410 (`<status>: ...`, see `httpError`) or `resolvePrefix`'s own
+ * 400/404/410 (`IxHttpError.status`, see `httpError`) or `resolvePrefix`'s own
  * no-match and ambiguous-prefix errors. Anything else -- a refused
  * connection, a 5xx, a 401 -- is not evidence about the id.
  */
 export function isLookupMiss(err: unknown): boolean {
+  const status = httpStatusOf(err);
+  if (status === 400 || status === 404 || status === 410) return true;
   const message = err instanceof Error ? err.message : String(err);
-  return /^(400|404|410):/.test(message)
-    || message.startsWith("No entity found for prefix:")
+  return message.startsWith("No entity found for prefix:")
     || message.startsWith("Ambiguous prefix ");
 }
 

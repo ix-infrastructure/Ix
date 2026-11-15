@@ -11,6 +11,7 @@ import { WorkspaceNotMappedError, renderCliError, setErrorFormat } from "../erro
 import { LEGACY_EXIT_CODES_ENV, exitCodeFor, worseExitCode } from "../outcome.js";
 import { ALL_CANDIDATE_CAP } from "../resolve.js";
 import { SUGGEST_MAX_MS } from "../target-suggestions.js";
+import { IxHttpError } from "../../client/http-error.js";
 
 // The outcome contract an agent routes on (outcome.ts): 0 results, 2 ambiguous
 // (candidates returned, under --strict), 3 not found (suggestions), 4
@@ -636,7 +637,7 @@ describe("several targets in one call", () => {
     graph({ Unique: UNIQUE, Other: [{ id: "other-id", kind: "function", name: "Other", provenance: { sourceUri: "src/other.ts" } }] });
     const base = expand.getMockImplementation()!;
     expand.mockImplementation(async (...args: unknown[]) => {
-      if (args[0] === "only-id") throw new Error('500: {"error":"query_failed","message":"backend broke"}');
+      if (args[0] === "only-id") throw new IxHttpError(500, '{"error":"query_failed","message":"backend broke"}');
       return base(...(args as [string, { direction: string }]));
     });
     const json = await run(["callers", "Unique", "Other", "--format", "json"]);
@@ -705,16 +706,16 @@ describe("an id lookup the backend could not answer", () => {
     const { resolveFileOrEntityFull } = await import("../resolve.js");
     const down = { entity: async () => { throw new Error("fetch failed: connect ECONNREFUSED 127.0.0.1:8090"); } };
     await expect(resolveFileOrEntityFull(down as never, RAW_ID, { format: "json" })).rejects.toThrow(/ECONNREFUSED/);
-    const failing = { entity: async () => { throw new Error("500: internal error"); } };
+    const failing = { entity: async () => { throw new IxHttpError(500, "internal error"); } };
     await expect(resolveFileOrEntityFull(failing as never, RAW_ID, { format: "json" })).rejects.toThrow(/^500:/);
   });
 
   it("is a miss only when the backend says the id does not exist", async () => {
     const { resolveFileOrEntityFull, isLookupMiss } = await import("../resolve.js");
-    const absent = { entity: async () => { throw new Error("404: not found"); } };
+    const absent = { entity: async () => { throw new IxHttpError(404, "not found"); } };
     expect(await resolveFileOrEntityFull(absent as never, RAW_ID, { format: "json" })).toEqual({ resolved: false, ambiguous: false });
     expect(isLookupMiss(new Error("No entity found for prefix: abcd1234"))).toBe(true);
-    expect(isLookupMiss(new Error("401: unauthorized"))).toBe(false);
+    expect(isLookupMiss(new IxHttpError(401, "unauthorized"))).toBe(false);
   });
 
   it("is a miss when the backend answers 200 without a node", async () => {

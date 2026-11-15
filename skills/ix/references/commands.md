@@ -3,9 +3,10 @@
 Use bounded, composable CLI commands — never broad queries. Run every command
 with the `ix` prefix from the repo root of the mapped workspace.
 
-This file routes a goal to a command. For the complete flag surface of any
-command — every option, its accepted values and its default — see
-[flags.md](flags.md).
+This file routes a goal to a command. For every option of one command, with
+its accepted values and its default, run `ix <command> --help`.
+[flags.md](flags.md) holds the same tables for every command at once. Search
+it for a flag instead of loading it.
 
 The examples carry no `--format`. Set it once instead of per call: `IX_FORMAT=llm`
 in the environment, or `ix config set format llm`. `llm` is the format to read —
@@ -100,6 +101,7 @@ mapped one, pass `--graph-root <mapped>` and `--worktree <agent checkout>`.
 | Backend health | `ix status` | `ix status` |
 | System doctor | `ix doctor` | `ix doctor` |
 | Is the graph actually right? (nodes vs a re-parse) | `ix verify` | `ix verify --sample 20` or `ix verify src/auth.py` |
+| CLI version, Ix Pro installed, hook entry points (no backend) | `ix capabilities` | `ix capabilities --format json` |
 | Start backend | `ix docker start` | `ix docker start` |
 | Graph statistics | `ix stats` | `ix stats` |
 
@@ -185,6 +187,9 @@ ix imported-by verify_token
 ```bash
 ix rank --by dependents --kind class --top 10
 ```
+Rank scores at most 2000 entities of the kind. When more exist it says so
+(`truncated=true` and a `candidates_truncated` diagnostic) and the ranking may
+miss entities: narrow with `--path`.
 
 **"List all functions in a file"**
 ```bash

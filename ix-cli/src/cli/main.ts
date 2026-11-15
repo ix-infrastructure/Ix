@@ -66,7 +66,12 @@ if (args[0] === "__map-refresh" && args[1] !== undefined) {
   const run = hookSubcommand(args[1]);
   if (run) await run(args.slice(2));
   else await import("./run-cli.js");
-} else {
+} else if (!(args[0] === "capabilities" && (await import("./capabilities.js")).runFastCapabilities(args.slice(1)))) {
+  // `ix capabilities --format <fmt>` is the probe plugins run before anything
+  // else, so it is answered above without the command tree, the config file or
+  // Ix Pro (which it only resolves). Any other shape of it -- no `--format`,
+  // `--help`, an unknown flag -- printed nothing there and comes here.
+  //
   // One command for `ix mcp`'s child-process runner: phrase its hints for the
   // MCP session that asked, with the tools that session was offered.
   if (process.env.IX_MCP_CHILD === "1") {

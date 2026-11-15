@@ -272,6 +272,11 @@ export const OSS_COMMANDS: readonly OssCommandEntry[] = [
     load: async () => (await import("../commands/verify.js")).registerVerifyCommand,
     help: [{ usage: "verify", summary: "Compare graph to a re-parse" }],
   },
+  {
+    names: ["capabilities"],
+    load: async () => (await import("../commands/capabilities.js")).registerCapabilitiesCommand,
+    help: [{ usage: "capabilities", summary: "What this CLI supports" }],
+  },
 ];
 
 /**
@@ -295,6 +300,6 @@ export const ROOT_HELP_SECTIONS: readonly { readonly title: string; readonly com
   },
   {
     title: "System",
-    commands: ["status", "stats", "doctor", "verify", "mcp", "install", "docker", "view", "reset", "savings", "upgrade"],
+    commands: ["status", "stats", "doctor", "capabilities", "verify", "mcp", "install", "docker", "view", "reset", "savings", "upgrade"],
   },
 ];
