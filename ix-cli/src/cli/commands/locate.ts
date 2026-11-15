@@ -19,12 +19,11 @@ import { stderr } from "../stderr.js";
 import { relativePath, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
 import { formatOption, kindOption, noSuggestOption, pickOption, strictOption } from "../options.js";
-import { getEffectiveSystemPath, hasMapData } from "../hierarchy.js";
+import { getEffectiveSystemPath, hasMapData, noSystemMap } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { renderSection, renderKeyValue, renderNote, renderWarning, renderBreadcrumb, reportAmbiguousTarget, reportResolutionNotices } from "../ui.js";
-import { forMcp } from "../next-step.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
-import { CONTAINER_KINDS, FILE_KINDS, REGION_KINDS } from "../graph-model.js";
+import { CONTAINER_KINDS, FILE_KINDS, REGION_KINDS, type GraphKind } from "../graph-model.js";
 import { ambiguousTargetMessage, unresolvedTargetJson } from "../contracts/miss.js";
 import type { LocateJson, LocateMissJson, LocateStrictAmbiguityJson, LocateTextMatchesJson } from "../contracts/locate.js";
 
@@ -180,7 +179,7 @@ async function locateOne(
   // Diagnostic for missing map data
   const hasMap = hasMapData(systemPath);
   if (!hasMap) {
-    diagnostics.push(`No system map. Run ${forMcp() ? "ix_map" : "`ix map`"} to see hierarchy.`);
+    diagnostics.push(noSystemMap());
   }
 
   // Build system path: append resolved symbol for non-file targets
@@ -238,7 +237,7 @@ async function resolveWithAmbiguity(
     result = await resolveFileOrEntityFull(client, symbol, { ...opts, format });
   } else {
     // Symbol resolution — use full result to detect ambiguity
-    const allKinds = ["file", "class", "object", "trait", "interface", "module", "function", "method", "constant"];
+    const allKinds: GraphKind[] = ["file", "class", "object", "trait", "interface", "module", "function", "method", "constant"];
     const sep = qualifiedSeparator(symbol);
     result = await rankEntity(client, symbol, allKinds, { ...opts, format, ...(sep ? { silentMiss: true } : {}) });
     // `Class::method`, `Class.method` and `Class#method` are read as a qualified

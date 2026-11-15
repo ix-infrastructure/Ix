@@ -8,7 +8,7 @@ import { resolveWorkspaceId } from "../bootstrap.js";
 import { resolveReadSystemId } from "../resolve.js";
 import { roundFloat, printJson } from "../format.js";
 import { llmLine, llmError, llmShortId } from "../llm.js";
-import { formatOption, parsePickOption } from "../options.js";
+import { choiceOption, formatOption, parsePickOption } from "../options.js";
 import { setOutcome } from "../outcome.js";
 import { CliUsageError } from "../errors.js";
 import { renderMapText, renderMapLlm, type MapRegion, type MapResult } from "./map.js";
@@ -77,7 +77,12 @@ export function registerSubsystemsCommand(program: Command): void {
     .option("--min-confidence <n>", "Only show regions above this confidence threshold (0-1)", "0")
     .option("--max-items <n>", "Max items to show per section in text output (default: 10)", "10")
     .option("--all-items", "Show all items in each section (overrides --max-items)")
-    .option("--sort <mode>", "Sort mode for text output (importance|confidence|size|alpha)", "importance")
+    .addOption(choiceOption(
+      "--sort <mode>",
+      "Sort mode for text output (importance|confidence|size|alpha)",
+      ["importance", "confidence", "size", "alpha"],
+      "importance",
+    ))
     .option("--graph", "Render the hierarchy as a graph/tree view instead of the default ranked list")
     .option("--verbose", "Show raw confidence scores, crosscut scores, boundary ratios, and signals")
     .option("--explain", "Explain a scoped subsystem region in plain English")

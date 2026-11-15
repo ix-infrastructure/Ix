@@ -12,7 +12,7 @@ import { ParsePool } from './parse-pool.js';
 import chalk from 'chalk';
 import { IxClient } from '../../client/api.js';
 import { combineSignals, currentRunSignal } from '../../client/run-signal.js';
-import type { GraphNode, GraphPatchPayload } from '../../client/types.js';
+import type { GraphNode, GraphPatchPayload, PatchOp, UpsertNodeOp } from '../../client/types.js';
 import { canonicalWorkspacePath, getEndpoint, isPathInside, loadWorkspaces, resolveWorkspaceRoot, clearMapResultCache, clearStitchScopeCache } from '../config.js';
 import { resolveIngestRootWithSource } from '../map-root.js';
 import { acquireMapLock, requestMapRerun, takeMapRerun } from '../single-flight.js';
@@ -27,11 +27,11 @@ import {
 } from '../ingest-baseline.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
-import { loadIngestionModules } from './ingestion-loader.js';
+import { loadIngestionModules, loadSymbolIndex } from './ingestion-loader.js';
 import { declaredPackageDirs } from '../package-dirs.js';
 import { assertStaleWorkspacePruneAllowed, clearPendingPrune, ensureWorkspaceIdState, staleWorkspaceCleanup, workspaceStateFor, type StaleWorkspaceKeepReason } from '../bootstrap.js';
 import {
-  changedNames, findDependents, importsChanged, loadIngestSymbols, resolutionHash, saveIngestSymbols,
+  loadIngestSymbols, resolutionHash, saveIngestSymbols,
   type StoredSummary, type SymbolEntry,
 } from '../ingest-symbols.js';
 import { detectSystem, fileIdentity, lookupPackage, readPackageNames, readPackageDeps } from '../system.js';
@@ -288,18 +288,103 @@ function isLikelyMinifiedSource(source: string): boolean {
  * `ix map` graph.
  */
 export function stripMapModeOps(patch: GraphPatchPayload): GraphPatchPayload {
-  const droppedNodes = new Set<unknown>(
-    patch.ops.filter(op => op.type === 'UpsertNode' && op['kind'] === 'chunk').map(op => op['id']),
-  );
+  const isChunk = (op: PatchOp): op is UpsertNodeOp => op.type === 'UpsertNode' && op.kind === 'chunk';
+  const droppedNodes = new Set<string>(patch.ops.filter(isChunk).map(op => op.id));
   return {
     ...patch,
     ops: patch.ops.filter(op => {
       if (op.type === 'AssertClaim' || op.type === 'RetractClaim') return false;
-      if (op.type === 'UpsertNode' && op['kind'] === 'chunk') return false;
-      if (op.type === 'UpsertEdge' && (droppedNodes.has(op['src']) || droppedNodes.has(op['dst']))) return false;
+      if (isChunk(op)) return false;
+      if (op.type === 'UpsertEdge' && (droppedNodes.has(op.src) || droppedNodes.has(op.dst))) return false;
       return true;
     }),
   };
+}
+
+/**
+ * The id a full (not map mode) run re-sends held content under. `buildPatch`
+ * names a patch by path, source hash and extractor, and `ix map` sends that id
+ * with the chunks, their edges and claims stripped. The backend skips an id it
+ * already holds, so with one id for both a file kept whichever mode wrote it
+ * first: a forced `ix ingest` after `ix map` never added the chunks (Ix#965).
+ *
+ * Only that re-send takes this id (`patchForMode`). Every other patch, in
+ * either mode, keeps the built id: it is the one a CLI from before this reads
+ * back on the file's next edit or deletion. Derived from the built id alone,
+ * so a reader holding `sourcePatchIdCandidates` can name both
+ * (`modeAlternatives`). Same UUID shape as the built id.
+ */
+export function fullModePatchId(patchId: string): string {
+  const hash = crypto.createHash('sha256').update(`${patchId}:full`).digest('hex');
+  return [hash.slice(0, 8), hash.slice(8, 12), hash.slice(12, 16), hash.slice(16, 20), hash.slice(20, 32)].join('-');
+}
+
+export interface PatchModeOptions {
+  /**
+   * The backend already holds this file at this source hash (its known hash
+   * is this one): a forced run, or a dependents re-send, of unchanged bytes.
+   * Whichever mode stored it, a full run sends the patch under
+   * `fullModePatchId`, so it is not skipped as one `ix map` stored without
+   * chunks. The stored patch keeps its id, and stays what a CLI from before
+   * this finds. New and edited files, and deletions, keep the built id.
+   */
+  held?: boolean;
+  /**
+   * `replaces[0]` is the patch this one supersedes: this extractor's for the
+   * previous hash (an edit, or a deletion). It may be stored under either id,
+   * so its `fullModePatchId` is named as well. Without it `replaces[0]` is the
+   * legacy id, which no full-mode patch was ever sent under.
+   */
+  supersedes?: boolean;
+}
+
+/**
+ * The patch a run of this mode sends for a built one: its ops, its id, and
+ * its `replaces`. Only the superseded patch is named under both ids: the
+ * rest of the list (earlier extractors' ids, the legacy id) predates the
+ * split, and doubling them would add about a kilobyte to every patch sent.
+ * The backend already takes `replaces` ids it does not hold (most
+ * earlier-extractor ids name no stored patch), so the added one needs no
+ * lookup.
+ */
+export function patchForMode(patch: GraphPatchPayload, mapMode: boolean, opts: PatchModeOptions = {}): GraphPatchPayload {
+  const patchId = !mapMode && opts.held ? fullModePatchId(patch.patchId) : patch.patchId;
+  const superseded = opts.supersedes ? patch.replaces[0] : undefined;
+  const replaces = superseded === undefined || superseded === patch.patchId
+    ? patch.replaces
+    : [...patch.replaces, fullModePatchId(superseded)];
+  return { ...(mapMode ? stripMapModeOps(patch) : patch), patchId, replaces };
+}
+
+/**
+ * One stored patch a reader may look for, one extractor's: its id, or the ids
+ * it may be stored under in order of preference. The first one found wins.
+ */
+export type StoredPatchCandidate = string | readonly string[];
+
+const candidateIds = (candidate: StoredPatchCandidate): readonly string[] =>
+  typeof candidate === 'string' ? [candidate] : candidate;
+
+/**
+ * Stored-patch candidates (`sourcePatchIdCandidates` order, one per extractor)
+ * as the ids a patch may be stored under, built id first: the one every patch
+ * takes but a full run's re-send of held content (`patchForMode`).
+ */
+export function builtFirstAlternatives(candidates: readonly string[]): string[][] {
+  return candidates.map(id => [id, fullModePatchId(id)]);
+}
+
+/**
+ * The candidates a reconcile reads. Map mode prefers the built id: map mode
+ * leaves chunks alone, so either patch will do, and the built one is the one
+ * nearly always stored. A full run prefers the full-mode id. Where it exists
+ * the built one may be `ix map`'s, without chunks, and the full run has to
+ * reconcile against the patch that has them. `loadStoredPatchEntities` reads
+ * both ids of a candidate at once in a full run, so that costs no extra round
+ * trip on an ordinary edit.
+ */
+export function modeAlternatives(candidates: readonly string[], mapMode: boolean): string[][] {
+  return mapMode ? builtFirstAlternatives(candidates) : candidates.map(id => [fullModePatchId(id), id]);
 }
 
 interface StoredPatchEntities {
@@ -371,20 +456,53 @@ function readStoredPatchEntities(raw: unknown): StoredPatchEntities | null {
  */
 const RECONCILE_MANIFEST_WINDOW = 2;
 
+interface StoredPatchRead {
+  patchId: string;
+  raw: unknown;
+  failed: boolean;
+  error: unknown;
+}
+
+/**
+ * The first of a candidate's ids that is stored, in preference order. A read
+ * that fails, not with a 404, before one is found fails the candidate, as the
+ * first-hit walk always did. `atOnce` reads every id in parallel and keeps the
+ * same answer: one round trip, at the cost of reading every id.
+ */
+async function readStoredPatchCandidate(
+  client: Pick<IxClient, 'getPatch'>,
+  candidate: StoredPatchCandidate,
+  atOnce: boolean,
+): Promise<StoredPatchRead> {
+  const ids = candidateIds(candidate);
+  const read = async (patchId: string): Promise<StoredPatchRead | null> => {
+    try {
+      return { patchId, raw: await client.getPatch(patchId) as unknown, failed: false, error: undefined };
+    } catch (err) {
+      return isNotFoundError(err) ? null : { patchId, raw: null, failed: true, error: err };
+    }
+  };
+  if (atOnce && ids.length > 1) {
+    const results = await Promise.all(ids.map(read));
+    return results.find(r => r !== null) ?? { patchId: '', raw: null, failed: false, error: undefined };
+  }
+  for (const patchId of ids) {
+    const result = await read(patchId);
+    if (result) return result;
+  }
+  return { patchId: '', raw: null, failed: false, error: undefined };
+}
+
 async function loadStoredPatchEntities(
   client: Pick<IxClient, 'getPatch'>,
-  patchIds: string[],
+  patchIds: readonly StoredPatchCandidate[],
   window: number = RECONCILE_MANIFEST_WINDOW,
+  alternativesAtOnce = false,
 ): Promise<StoredPatchEntities> {
-  const windowIds = patchIds.slice(0, window);
-  const windowResults = await Promise.all(windowIds.map(async patchId => {
-    try {
-      return { patchId, raw: await client.getPatch(patchId) as unknown, failed: false, error: undefined as unknown };
-    } catch (err) {
-      if (isNotFoundError(err)) return { patchId, raw: null, failed: false, error: undefined as unknown };
-      return { patchId, raw: null, failed: true, error: err };
-    }
-  }));
+  // The window candidates are read in parallel, each up to the first of its
+  // ids that is stored.
+  const windowResults = await Promise.all(patchIds.slice(0, window).map(candidate =>
+    readStoredPatchCandidate(client, candidate, alternativesAtOnce)));
 
   // Results are walked in candidate order. A backend error before any patch
   // was found fails the reconcile, as the first-hit walk always did. One on a
@@ -423,14 +541,13 @@ async function loadStoredPatchEntities(
   }
   if (primary) return primary;
 
-  for (const patchId of patchIds.slice(window)) {
-    try {
-      const entities = readStoredPatchEntities(await client.getPatch(patchId));
-      if (entities) return entities;
-      throw new Error(`Patch ${patchId} has no entity manifest`);
-    } catch (err) {
-      if (!isNotFoundError(err)) throw err;
-    }
+  for (const candidate of patchIds.slice(window)) {
+    const result = await readStoredPatchCandidate(client, candidate, alternativesAtOnce);
+    if (result.failed) throw result.error;
+    if (result.patchId === '') continue;
+    const entities = readStoredPatchEntities(result.raw);
+    if (entities) return entities;
+    throw new Error(`Patch ${result.patchId} has no entity manifest`);
   }
   throw new Error('Previous source patch was not found');
 }
@@ -449,7 +566,7 @@ interface ReconcileOptions {
 export async function reconcileRemovedEntities(
   client: Pick<IxClient, 'getPatch' | 'entity'>,
   patch: GraphPatchPayload,
-  previousPatchIds: string[],
+  previousPatchIds: readonly StoredPatchCandidate[],
   dependentSourceUris?: Set<string>,
   // `ix map` does not write chunks: stripMapModeOps drops every chunk UpsertNode
   // from the patch. It does NOT drop DeleteNode, and chunk ids hash the chunk's
@@ -464,7 +581,8 @@ export async function reconcileRemovedEntities(
   lookupLimit: Limiter = task => task(),
   options: ReconcileOptions = {},
 ): Promise<GraphPatchPayload> {
-  const previous = await loadStoredPatchEntities(client, previousPatchIds, options.window);
+  // A full run reads both ids of a candidate at once (`modeAlternatives`).
+  const previous = await loadStoredPatchEntities(client, previousPatchIds, options.window, !mapMode);
   if (previous.extraSkipped) options.onWindowSkipped?.(previous.extraSkipped);
   const currentNodeIds = new Set(
     patch.ops
@@ -564,9 +682,9 @@ export async function reconcileRemovedEntities(
   return {
     ...patch,
     ops: [
-      ...removedNodeIds.map(id => ({ type: 'DeleteNode', id })),
+      ...removedNodeIds.map((id): PatchOp => ({ type: 'DeleteNode', id })),
       ...nodeOps,
-      ...[...removedEdgeIds].map(id => ({ type: 'DeleteEdge', id })),
+      ...[...removedEdgeIds].map((id): PatchOp => ({ type: 'DeleteEdge', id })),
       ...edgeOps,
       ...otherOps,
     ],
@@ -613,10 +731,11 @@ export interface OrphanSweepFile {
   /** The file's patch as built, before map mode strips it. */
   patch: GraphPatchPayload;
   /**
-   * The stored patch ids, one per earlier extractor, that may name the file's
+   * The stored patches, one per earlier extractor, that may name the file's
    * orphans for its (unchanged) hash: usually just the previous extractor's.
+   * Each is read up to the first of its ids found (`builtFirstAlternatives`).
    */
-  previousPatchIds: string[];
+  previousPatchIds: StoredPatchCandidate[];
 }
 
 /**
@@ -742,13 +861,33 @@ export async function sweepOrphanNodes(
         return null;
       }
       budget.requests += file.previousPatchIds.length;
-      const reads = await Promise.all(file.previousPatchIds.map(async patchId => {
-        try {
-          return { raw: await client.getPatch(patchId) as unknown, error: null as string | null };
-        } catch (err) {
-          return { raw: null, error: isNotFoundError(err) ? null : (err instanceof Error ? err.message : String(err)) };
+      const reads = await Promise.all(file.previousPatchIds.map(async candidate => {
+        const ids = candidateIds(candidate);
+        for (let k = 0; k < ids.length; k++) {
+          // The first id of each was counted above. A fallback read (the
+          // full-mode id) is checked against the budget and counted as it
+          // is made, so the sweep never reads past its cap.
+          if (k > 0) {
+            if (budget.requests >= budget.maxRequests || spent() >= budget.maxMs) {
+              return { raw: null, error: null as string | null, outOfBudget: true };
+            }
+            budget.requests++;
+          }
+          try {
+            return { raw: await client.getPatch(ids[k]!) as unknown, error: null as string | null, outOfBudget: false };
+          } catch (err) {
+            if (!isNotFoundError(err)) return { raw: null, error: err instanceof Error ? err.message : String(err), outOfBudget: false };
+          }
         }
+        return { raw: null, error: null as string | null, outOfBudget: false };
       }));
+      // A file the budget cut short is left unswept, as one past it is: a
+      // read it did not make may name orphans.
+      if (reads.some(r => r.outOfBudget)) {
+        budget.skipped++;
+        opts.onUnswept?.(file);
+        return null;
+      }
       const failed = reads.find(r => r.error !== null);
       if (failed) {
         opts.onSkip?.(file, failed.error!);
@@ -4205,7 +4344,7 @@ export async function ingestFiles(
             patch = await reconcileRemovedEntities(
               client,
               patch,
-              sourcePatchIdCandidates(p.filePath, previousHash, fileWorkspace),
+              modeAlternatives(sourcePatchIdCandidates(p.filePath, previousHash, fileWorkspace), mapMode),
               undefined,
               mapMode,
               reconcileLookups,
@@ -4218,17 +4357,20 @@ export async function ingestFiles(
           // and serves the batched node read the file is committed exactly as
           // built, as before IN-20.
           let orphanSources: string[] | undefined;
-          let previousPatchIds: string[] | undefined;
+          let previousPatchIds: StoredPatchCandidate[] | undefined;
           if (!previousHash && knownHash && reconcileOrphans) {
             if (orphanSweep.blocker !== null) noteOrphanSweepBlocked();
             else {
               orphanSources = orphanSourcesFor(p.filePath);
               const candidates = sourcePatchIdCandidates(p.filePath, knownHash, fileWorkspace);
-              previousPatchIds = orphanSources.map(extractor => candidates[orphanCandidateIndex(extractor)!]!);
+              // One read per extractor: the built id, the one stored but
+              // after a full run's re-send of held content. Two for a file
+              // where only that re-send's patch is stored.
+              previousPatchIds = builtFirstAlternatives(orphanSources.map(extractor => candidates[orphanCandidateIndex(extractor)!]!));
               if (previousPatchIds.length === 0) previousPatchIds = undefined;
             }
           }
-          return { p, hash, j, previousHash, patch: patch as GraphPatchPayload, previousPatchIds, orphanSources };
+          return { p, hash, j, previousHash, knownHash, patch: patch as GraphPatchPayload, previousPatchIds, orphanSources };
         } catch (err) {
           parseErrors++;
           process.stderr.write(`\n  [patch build error] ${p.filePath}: ${err}\n`);
@@ -4240,7 +4382,7 @@ export async function ingestFiles(
       // per file and one batched node read. Best effort -- whatever fails here
       // leaves the patches to commit as built, with no parse error and no
       // change to the exit code.
-      const sweepable = built.filter((b): b is NonNullable<typeof b> & { previousPatchIds: string[]; orphanSources: string[] } =>
+      const sweepable = built.filter((b): b is NonNullable<typeof b> & { previousPatchIds: StoredPatchCandidate[]; orphanSources: string[] } =>
         b !== null && b.previousPatchIds !== undefined);
       if (sweepable.length > 0 && orphanSweep.blocker === null) {
         const batchUpserts = new Set<string>();
@@ -4267,7 +4409,7 @@ export async function ingestFiles(
           sweepable.forEach((b, i) => {
             const ids = orphans[i]!;
             if (ids.length === 0) return;
-            b.patch = { ...b.patch, ops: [...ids.map(id => ({ type: 'DeleteNode', id })), ...b.patch.ops] };
+            b.patch = { ...b.patch, ops: [...ids.map((id): PatchOp => ({ type: 'DeleteNode', id })), ...b.patch.ops] };
             if (orphanRepair || writtenBefore.has(i)) {
               // The backend already holds this file's patch id: a repair runs
               // at the current extractor, and an extractor-change run may
@@ -4318,8 +4460,9 @@ export async function ingestFiles(
       return built.map(b => {
         if (b === null) return null;
         try {
-          let patch = b.patch;
-          if (mapMode) patch = stripMapModeOps(patch);
+          // Held content (a forced run of unchanged bytes) goes under the
+          // full-mode id in a full run; every other patch keeps the built id.
+          const patch = patchForMode(b.patch, mapMode, { held: b.knownHash === b.hash, supersedes: b.previousHash !== undefined });
           noteResolution(b.p.filePath, patch);
           // source.uri (workspace-relative) and source.workspaceId are set
           // inside buildPatch; the backend stores both as opaque attributes.
@@ -4717,7 +4860,7 @@ export async function ingestFiles(
           patch = await reconcileRemovedEntities(
             client,
             patch,
-            sourcePatchIdCandidates(relFilePath, previousHash, fileWorkspace),
+            modeAlternatives(sourcePatchIdCandidates(relFilePath, previousHash, fileWorkspace), mapMode),
             dependentSourceUris,
             mapMode,
             reconcileLookups,
@@ -4729,7 +4872,7 @@ export async function ingestFiles(
               window: orphanSweepBlocker === null ? RECONCILE_MANIFEST_WINDOW : 1,
             },
           );
-          if (mapMode) patch = stripMapModeOps(patch);
+          patch = patchForMode(patch, mapMode, { supersedes: true });
           deletedPatches.push(makePreparedPatch(patch, i + 1, relFilePath, true));
           const dependents = [...dependentSourceUris].sort();
           nextDeletedFiles.set(absFilePath, dependents);
@@ -4804,6 +4947,7 @@ export async function ingestFiles(
     const packagesChanged = pathsAddedOrDeleted.some(rel => nodePath.posix.basename(rel) === '__init__.py');
     if (incrementalRun && (summaryBeforeRun.size > 0 || deletedRel.length > 0 || pendingRel.length > 0 || packagesChanged)) {
       const table = symbolTable();
+      const { changedNames, findDependents, importsChanged } = await loadSymbolIndex();
       const names = new Set<string>();
       // Paths whose importers may resolve differently: files that appeared,
       // and files that changed what they import (a re-export moved).
@@ -4863,7 +5007,8 @@ export async function ingestFiles(
           const entry = table.get(rel);
           const build = (salt?: string): GraphPatchPayload => {
             const patch = buildPatchFn!(p, hash, fileWorkspaceId(rel), edgesByFile.get(rel) ?? emptyEdges, undefined, fileMultiRepo(rel), salt);
-            return mapMode ? stripMapModeOps(patch) : patch;
+            // Unchanged bytes the backend holds, re-sent for their edges.
+            return patchForMode(patch, mapMode, { held: true });
           };
           const res = resolutionHash(build().ops);
           // Equal: re-resolving changes nothing this file says. A different

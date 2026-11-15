@@ -7,6 +7,7 @@ import type { IxClient } from "../client/api.js";
 import { ixHome } from "./ix-home.js";
 import { revisionToken } from "./map-result-cache.js";
 import { envFlag, envNumber } from "./env.js";
+import type { GraphKind, KindSet } from "./graph-model.js";
 
 /**
  * Is the graph a command is about to answer from structurally intact?
@@ -165,7 +166,7 @@ export function assessGraphStats(stats: unknown): GraphHealth {
 }
 
 /** Kinds a parser always attaches to a file (or to a class inside one). */
-const ATTACHED_KINDS = new Set([
+const ATTACHED_KINDS: KindSet = new Set<GraphKind>([
   "function", "method", "class", "interface", "trait", "object", "struct", "enum",
   "constant", "type", "type_alias", "variable",
 ]);
@@ -334,14 +335,21 @@ export function graphHealthLlmFields(health: GraphHealth): Array<[string, string
   ];
 }
 
+/**
+ * What {@link graphHealthJson} prints: the verdict's own fields, each left out
+ * when empty. Part of `ix status`'s json contract (contracts/status.ts).
+ */
+export type GraphHealthJson = Pick<GraphHealth, keyof GraphHealth>;
+
 /** The same verdict for `--format json`: only what a consumer acts on. */
-export function graphHealthJson(health: GraphHealth): Record<string, unknown> {
-  const out: Record<string, unknown> = { status: health.status };
+export function graphHealthJson(health: GraphHealth): GraphHealthJson {
+  const out: GraphHealthJson = { status: health.status };
   if (health.reason) out.reason = health.reason;
   if (health.message) out.message = health.message;
   if (health.fix) out.fix = health.fix;
   for (const k of ["nodes", "edges", "structuralEdges", "symbols"] as const) {
-    if (typeof health[k] === "number") out[k] = health[k];
+    const n = health[k];
+    if (typeof n === "number") out[k] = n;
   }
   return out;
 }

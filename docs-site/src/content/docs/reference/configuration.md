@@ -49,6 +49,7 @@ Generated from the registry in `ix-cli/src/cli/env.ts`. A flag is on for any val
 | `IX_MAP_BACKGROUND_REFRESH` | flag | on | Read commands start a background `ix map` when the map is stale. `0` turns that off: they answer from the last map and say it is stale |
 | `IX_MAP_BACKGROUND_TIMEOUT_MS` | ms | 300000 | The background refresh's hard time limit, so a wedged refresh cannot hold the map lock |
 | `IX_MAP_DEADLINE_MS` | ms | 900000 | The wall-clock budget of one `ix map` or `ix ingest`; past it every request is aborted and the command exits. `0` or empty turns it off |
+| `IX_MAP_DEBOUNCE_SECONDS` | int | 300 | Seconds `ix hook auto-map` waits before it tries the same project again; 0 for no wait |
 | `IX_MAP_EAGER` | flag | off | Makes an automatic `ix map` compute the map after an incremental edit too, for a hook that reads regions straight from `ix map` |
 | `IX_MAP_LOCK_MAX_MS` | ms | 1200000 | How long a map or stitch lock may go untouched before the next run treats it as abandoned and takes it |
 | `IX_MAP_REFRESH_DEBOUNCE_MS` | ms | 30000 | How long after one background refresh another may start. `0` or empty means no wait |

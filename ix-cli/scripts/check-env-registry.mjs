@@ -47,9 +47,10 @@ export const TABLE_END = "<!-- env-vars:end -->";
  * reads, and why. Anything else that looks like one must be registered.
  */
 export const NOT_VARIABLES = {
-  IX_CALLER_ENV: "constant holding the name IX_CALLER",
   IX_COMPOSE_PROJECTS: "constant: Compose project names",
   IX_MCP_CORE_TOOL_NAMES: "constant: MCP tool list",
+  IX_MCP_HINT_TOOLS_ENV: "constant holding the name IX_MCP_HINT_TOOLS",
+  IX_MCP_JSON_RESULT_TOOLS: "constant: MCP tool list",
   IX_MCP_INSTRUCTIONS: "constant: MCP server instructions",
   IX_MCP_OSS_TOOL_NAMES: "constant: MCP tool list",
   IX_MCP_PRO_TOOL_NAMES: "constant: MCP tool list",

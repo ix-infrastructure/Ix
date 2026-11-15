@@ -13,7 +13,7 @@ import { llmError, llmLine } from "./llm.js";
 import { noteResolutionNotices, printJson, relativePath } from "./format.js";
 import { isQuiet } from "./output-shape.js";
 import type { AmbiguousResult, ResolutionNotice, ResolveResult, Suggestion } from "./resolve.js";
-import { forMcp } from "./next-step.js";
+import { leverSentence, type Lever } from "./next-step.js";
 import { graphHealthJson, graphHealthLlmFields, graphHealthProse, type GraphHealth } from "./graph-health.js";
 import { EXIT_ERROR, outcomeForCode, setOutcome } from "./outcome.js";
 import { didYouMeanRows, type TargetCandidate } from "./target-suggestions.js";
@@ -268,12 +268,11 @@ export function reportAmbiguousTarget(
     return;
   }
   if (format === "llm") {
-    // Over MCP the same three levers are tool arguments, not flags.
-    const mcp = forMcp();
-    const hints = [mcp ? "pick=<n>" : "--pick <n>"];
-    if (!opts?.kind) hints.push(mcp ? "kind=<kind>" : "--kind");
-    if (!opts?.path) hints.push(mcp ? "path=<file substring>" : "--path");
-    if (opts?.offerAll && !mcp) hints.push("--all");
+    // Over MCP the same levers are tool arguments, not flags, and `--all` has none.
+    const levers: Lever[] = ["pick"];
+    if (!opts?.kind) levers.push("kind");
+    if (!opts?.path) levers.push("path");
+    if (opts?.offerAll) levers.push("all");
     const lines = [
       llmError("ambiguous_target", message, [
         ["count", String(result.candidates.length)],
@@ -281,7 +280,7 @@ export function reportAmbiguousTarget(
         ...(result.truncated ? [["truncated", "true"]] as Array<[string, string]> : []),
       ]),
       ...candidateLines(result.candidates, "candidate"),
-      llmLine("hint", [["text", `${mcp ? "Pass" : "Use"} ${hints.join(" or ")} to disambiguate.`]]),
+      llmLine("hint", [["text", leverSentence(levers, "to disambiguate")]]),
       ...(result.diagnostics ?? []).map((d) => llmLine("diagnostic", [["code", d.code], ["message", d.message]])),
     ];
     console.log(lines.join("\n"));
@@ -326,7 +325,6 @@ export function reportResolutionNotices(
     return;
   }
   if (format === "llm") {
-    const mcp = forMcp();
     const lines: string[] = [];
     for (const notice of notices) {
       if (notice.code === "fuzzy_match") {
@@ -352,9 +350,8 @@ export function reportResolutionNotices(
       for (const d of notice.diagnostics ?? []) {
         lines.push(llmLine("diagnostic", [["code", d.code], ["message", d.message]]));
       }
-      const hints = [mcp ? "pick=<n>" : "--pick <n>"];
-      if (!opts?.path) hints.push(mcp ? "path=<file substring>" : "--path");
-      lines.push(llmLine("hint", [["text", `${mcp ? "Pass" : "Use"} ${hints.join(" or ")} to choose another.`]]));
+      const levers: Lever[] = opts?.path ? ["pick"] : ["pick", "path"];
+      lines.push(llmLine("hint", [["text", leverSentence(levers, "to choose another")]]));
     }
     console.log(lines.join("\n"));
     return;

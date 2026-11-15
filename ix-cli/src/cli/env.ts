@@ -276,6 +276,10 @@ export const ENV_VARS = {
     type: "flag", default: false, visibility: "public",
     description: "Makes `ix hook post-edit` say on stderr why it printed what it did",
   },
+  IX_MAP_DEBOUNCE_SECONDS: {
+    type: "int", default: 300, zero: true, visibility: "public",
+    description: "Seconds `ix hook auto-map` waits before it tries the same project again; 0 for no wait",
+  },
   IX_HOOK_LOG: {
     type: "string", visibility: "public", defaultText: "unset",
     description: "A file `ix hook post-edit` appends one JSON line to per call, saying what it did and why",
@@ -286,13 +290,13 @@ export const ENV_VARS = {
   },
 
   // ── Internal: set by Ix itself, or test seams ─────────────────────────────
-  IX_CALLER: {
-    type: "enum", values: ["mcp"], visibility: "internal",
-    description: "Set to `mcp` by the MCP runner while a command's output is for an MCP client",
-  },
   IX_MCP_CHILD: {
     type: "flag", default: false, visibility: "internal",
-    description: "Set by `ix mcp` on the `ix` processes it starts; turns off the update check there",
+    description: "Set by `ix mcp` on the `ix` processes it starts; turns off the update check there and phrases hints for the MCP session",
+  },
+  IX_MCP_HINT_TOOLS: {
+    type: "string", visibility: "internal",
+    description: "Set by `ix mcp` on the `ix` processes it starts: the comma-separated MCP tools its session was offered, for phrasing hints",
   },
   IX_MAP_FULL_INGEST: {
     type: "flag", default: false, visibility: "internal",

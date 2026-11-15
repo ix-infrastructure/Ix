@@ -191,6 +191,10 @@ const OLD_NUMBERS: Record<string, Old> = {
     if (t === "") return 0;
     return /^\d+$/.test(t) ? Number.parseInt(t, 10) : 30_000;
   },
+  IX_MAP_DEBOUNCE_SECONDS: (raw) => {
+    const t = raw?.trim();
+    return t !== undefined && /^\d+$/.test(t) ? Number(t) : 300;
+  },
   IX_MAP_BACKGROUND_TIMEOUT_MS: (raw) => {
     if (raw === undefined || !/^\d+$/.test(raw.trim())) return 5 * 60 * 1000;
     const n = Number.parseInt(raw.trim(), 10);

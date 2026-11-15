@@ -3,9 +3,10 @@
 Use bounded, composable CLI commands — never broad queries. Run every command
 with the `ix` prefix from the repo root of the mapped workspace.
 
-This file routes a goal to a command. For the complete flag surface of any
-command — every option, its accepted values and its default — see
-[flags.md](flags.md).
+This file routes a goal to a command. For every option of one command, with
+its accepted values and its default, run `ix <command> --help`.
+[flags.md](flags.md) holds the same tables for every command at once. Search
+it for a flag instead of loading it.
 
 The examples carry no `--format`. Set it once instead of per call: `IX_FORMAT=llm`
 in the environment, or `ix config set format llm`. `llm` is the format to read —
@@ -185,6 +186,9 @@ ix imported-by verify_token
 ```bash
 ix rank --by dependents --kind class --top 10
 ```
+Rank scores at most 2000 entities of the kind. When more exist it says so
+(`truncated=true` and a `candidates_truncated` diagnostic) and the ranking may
+miss entities: narrow with `--path`.
 
 **"List all functions in a file"**
 ```bash
@@ -234,15 +238,13 @@ ix inventory --kind function --path auth.py
   after registering the OSS commands; the Pro probe (`tryLoadProCommands`)
   then diffs whatever commands exist against that set to decide which count
   as "Pro". Consequences:
-  - Adding a `register*Command` call in `oss.ts` silently reclassifies that
-    command as OSS — it vanishes from the Pro help diff.
-  - A new OSS command also needs an entry in `OSS_COMMAND_TABLE`
-    (`register/oss-table.ts`): with Pro absent, `run-cli.ts` loads only the
-    table's module for the command being run. Without the entry the command
-    still works (it takes the full path), but `startup-fast-path.test.ts`
-    fails until it is added. The shared per-command setup is in
-    `register/oss-setup.ts`.
-  - Removing one from `oss.ts` makes Pro own it, or — without the license — a
+  - Adding an entry to `OSS_COMMANDS` (`register/commands.ts`) silently
+    reclassifies that command as OSS — it vanishes from the Pro help diff.
+  - That entry is the only list: `registerOssCommands()`, the fast-path
+    `OSS_COMMAND_TABLE` (with Pro absent, `run-cli.ts` loads only the module
+    for the command being run) and the root help are built from it. The
+    shared per-command setup is in `register/oss-setup.ts`.
+  - Removing one from the manifest makes Pro own it, or — without the license — a
     Pro stub replaces it (stubs skip any name already registered, so an OSS
     command left in place blocks its stub).
   - The exception is `register/oss-fallbacks.ts` (`ix note`, `ix session`):

@@ -514,6 +514,18 @@ export function configLockError(detail: string): StructuredError {
 }
 
 /**
+ * A backend response of the wrong shape (`BackendContractError`): `message` is
+ * its own, which names the route and the field.
+ */
+export function backendContractError(message: string, endpoint?: string): StructuredError {
+  return {
+    error: "backend_contract_error",
+    message: message.replace(/^backend_contract_error:\s*/, `The Ix backend${endpoint ? ` at ${endpoint}` : ""} answered in a shape this CLI does not read: `),
+    next: "The backend and this CLI probably come from different releases. Run `ix doctor` to check the backend; `ix upgrade` updates the CLI and a local backend.",
+  };
+}
+
+/**
  * The backend answered 401 `local_token_required`: it was started with
  * IX_LOCAL_TOKEN and this CLI sent no token, or a different one.
  */
@@ -603,6 +615,16 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string): 
     if (!emitErrorRecord(refused.error, refused.message, refused.next)) {
       renderStructuredError(refused);
     }
+    if (debug) writeDebugDetail(err);
+    process.exit(1);
+  }
+
+  // A 2xx body of a shape this CLI does not read (client/contract.ts). Matched
+  // by name, like the token error above, so a copy of the class bundled
+  // elsewhere is recognised too.
+  if (e?.name === "BackendContractError" && typeof e.message === "string") {
+    const mismatch = backendContractError(e.message, endpoint);
+    if (!emitErrorRecord(mismatch.error, mismatch.message, mismatch.next)) renderStructuredError(mismatch);
     if (debug) writeDebugDetail(err);
     process.exit(1);
   }
