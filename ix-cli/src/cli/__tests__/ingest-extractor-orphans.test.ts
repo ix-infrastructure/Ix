@@ -621,9 +621,10 @@ describe.each(["head", "legacy"] as const)("an extractor change over the %s back
     }
   });
 
-  // Ix#965: `ix map` and `ix ingest` / `ix watch` store a file's patch under
-  // different ids. The sweep must find the old extractor's patch whichever
-  // mode wrote it, not only the mode of the run that committed last.
+  // Ix#965: a full run re-sends content the backend already holds under a
+  // full-mode id, so an extractor rebuild in full mode commits under it. The
+  // sweep must find the old extractor's patch whichever mode wrote it, and
+  // whichever mode the rebuild runs in.
   for (const [before, after] of [["map", "full"], ["full", "map"]] as const) {
     it(`retires the dropped kind when the old extractor's patch is ${before === "map" ? "ix map" : "a full ingest"}'s and the rebuild is ${after === "map" ? "ix map" : "a full ingest"}`, async () => {
       const backend = newBackend();
@@ -637,7 +638,7 @@ describe.each(["head", "legacy"] as const)("an extractor change over the %s back
         const log = await run(home, endpoint, { mapMode: after === "map" } as Parameters<typeof run>[2]);
         expect(sweepNotices(log)).toEqual([]);
         expect(ghosts(backend)).toEqual([]);
-        // This run's mode is read first, the other one only where it is absent.
+        // The built id is read first, the full-mode one only where it is absent.
         expect(backend.patchReads).toBeLessThanOrEqual(2 * FILES.length);
       } finally {
         await backend.stop();
@@ -646,7 +647,7 @@ describe.each(["head", "legacy"] as const)("an extractor change over the %s back
   }
 
   for (const mode of ["map", "full"] as const) {
-    it(`a ${mode} run deleting a file reads its patch under this mode's id and the previous extractor's under both`, async () => {
+    it(`a ${mode} run deleting a file reads both stored-patch candidates of the window under both ids, ${mode === "map" ? "one after another" : "at once"}`, async () => {
       const backend = newBackend();
       const home = join(root, `home-delete-${mode}-${semantics}`);
       restoreAll();
@@ -658,9 +659,12 @@ describe.each(["head", "legacy"] as const)("an extractor change over the %s back
         backend.patchReads = 0;
         await run(home, endpoint, { mapMode: mode === "map" } as Parameters<typeof run>[2]);
         expect(backend.graphSignature().nodes.filter((line) => line.includes("math.ts"))).toEqual([]);
-        // The current extractor's patch is found under this mode's id; the
+        // The current extractor's patch is stored under the built id; the
         // previous extractor's (merged where deletes go in bulk) under neither.
-        expect(backend.patchReads).toBe(3);
+        // Map mode reads the built id first and stops there for the current
+        // one: 1 + 2. A full run reads each candidate's two ids at once: 2 + 2,
+        // in the one round trip.
+        expect(backend.patchReads).toBe(mode === "map" ? 3 : 4);
       } finally {
         await backend.stop();
       }

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import { fullModePatchId, ingestFiles, modeAlternatives, patchForMode } from "../commands/ingest.js";
+import { builtFirstAlternatives, fullModePatchId, ingestFiles, modeAlternatives, patchForMode } from "../commands/ingest.js";
 import { FakeBackend } from "./helpers/fake-backend.js";
 
 // Two parse workers, as in ingest-equivalence.test.ts.
@@ -20,8 +20,10 @@ vi.mock("node:os", async (importOriginal) => {
  * `ix ingest` / `ix watch` send the whole patch. Both used to send it under
  * the same patch id, and the backend skips an id it already holds, so a
  * forced full ingest after `ix map` was answered `Idempotent` and the file
- * never got its chunks. Each mode now has its own id for the same source, and
- * a reader looks for a stored patch under both, this run's mode first.
+ * never got its chunks. A full run now re-sends content the backend holds
+ * under a full-mode id, and a reader looks for a stored patch under both.
+ * Every other patch keeps the built id, which is what a CLI from before this
+ * reads back on the file's next edit or deletion.
  */
 
 const ENV_KEYS = ["HOME", "USERPROFILE", "IX_ENDPOINT", "IX_LOCK_DIR", "IX_HOME", "IX_DEBUG"] as const;
@@ -81,6 +83,13 @@ class World {
     });
   }
 
+  /** The HTTP status `GET /v1/patches/{id}` answers: what any CLI's reconcile reads. */
+  async patchStatus(target: { endpoint: string }, id: string): Promise<number> {
+    const res = await fetch(`${target.endpoint}/v1/patches/${encodeURIComponent(id)}`);
+    await res.arrayBuffer();
+    return res.status;
+  }
+
   /** Rewrite one source and stage it, as an edit between runs. */
   write(path: string, text: string): void {
     writeFileSync(join(this.repo, path), text, "utf8");
@@ -115,7 +124,7 @@ const withoutChunks = (sig: { nodes: string[]; edges: string[] }) => {
   };
 };
 
-describe("ix map and a full ingest write under different patch ids (Ix#965)", () => {
+describe("a forced full ingest after ix map writes under its own patch id (Ix#965)", () => {
   const saved: Record<string, string | undefined> = {};
   let world: World;
   let freshFull: { nodes: string[]; edges: string[] };
@@ -156,26 +165,25 @@ describe("ix map and a full ingest write under different patch ids (Ix#965)", ()
       for (const [uri, id] of fullIds) expect(id, uri).not.toBe(mapIds.get(uri));
 
       expect(target.backend.graphSignature()).toEqual(freshFull);
+      // The map patches stay, under the built id a CLI from before this reads.
+      for (const [uri, id] of mapIds) expect(await world.patchStatus(target, id), uri).toBe(200);
     }, 120_000);
 
-    it(`${semantics}: a full ingest, then a forced map, sends map content under its own id`, async () => {
+    it(`${semantics}: a full ingest, then a forced map: both send the built id, so the full patch stays`, async () => {
       const target = await world.backend(semantics);
       await world.run(target, "full");
       const fullIds = new Map(target.backend.lastPatchIds);
 
       await world.run(target, "map", true);
       const mapIds = new Map(target.backend.lastPatchIds);
-      expect([...mapIds.keys()].sort()).toEqual([...fullIds.keys()].sort());
-      for (const [uri, id] of mapIds) {
-        expect(id, uri).not.toBe(fullIds.get(uri));
+      expect(mapIds).toEqual(fullIds);
+      for (const [uri] of mapIds) {
         expect(target.backend.lastOps.get(uri)!.some((op) => op.kind === "chunk"), uri).toBe(false);
       }
 
-      // The topology is the map's. Map mode does not reconcile chunks, so the
-      // nodes the full ingest wrote are left in place.
-      const after = target.backend.graphSignature();
-      expect(withoutChunks(after)).toEqual(withoutChunks(freshMap));
-      expect(chunkNodes(after.nodes)).toEqual(chunkNodes(freshFull.nodes));
+      // The backend skips the id it holds, so the graph is the full one, as
+      // it was before the split: map mode has nothing a full patch lacks.
+      expect(target.backend.graphSignature()).toEqual(freshFull);
     }, 120_000);
   }
 
@@ -193,14 +201,15 @@ describe("ix map and a full ingest write under different patch ids (Ix#965)", ()
     expect(chunkNodes(target.backend.graphSignature().nodes)).toEqual([]);
   }, 120_000);
 
-  it("the same source in the same mode keeps one patch id", async () => {
-    for (const mode of ["map", "full"] as const) {
+  it("the same source keeps one patch id, and a full run of new files sends the built one, as ix map does", async () => {
+    const ids: Map<string, string>[] = [];
+    for (const mode of ["map", "full", "full"] as const) {
       const a = await world.backend("head");
       await world.run(a, mode);
-      const b = await world.backend("head");
-      await world.run(b, mode);
-      expect(b.backend.lastPatchIds).toEqual(a.backend.lastPatchIds);
+      ids.push(new Map(a.backend.lastPatchIds));
     }
+    expect(ids[1]).toEqual(ids[0]);
+    expect(ids[2]).toEqual(ids[0]);
   }, 120_000);
 });
 
@@ -261,6 +270,56 @@ describe("an edit finds the stored patch whichever mode wrote it (Ix#965)", () =
   }
 });
 
+describe("a CLI from before the split finds the patch a full run stores", () => {
+  const saved: Record<string, string | undefined> = {};
+  let world: World;
+
+  beforeAll(() => {
+    for (const key of ENV_KEYS) saved[key] = process.env[key];
+    delete process.env.IX_HOME;
+    delete process.env.IX_DEBUG;
+    world = new World();
+  });
+
+  afterAll(async () => {
+    await world?.stop();
+    for (const key of ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+
+  /** The built ids of the repo as it is now: what `ix map` sends, and an older CLI reads back. */
+  const builtIds = async (): Promise<Map<string, string>> => {
+    const fresh = await world.backend("head");
+    await world.run(fresh, "map");
+    return new Map(fresh.backend.lastPatchIds);
+  };
+
+  it("new and edited files, and an edit after a forced run, are stored under the built id", async () => {
+    const target = await world.backend("head");
+    await world.run(target, "full");
+    expect(target.backend.lastPatchIds).toEqual(await builtIds());
+
+    world.write("src/a.ts", A_WITHOUT_BETA);
+    await world.run(target, "full");
+    const edited = await builtIds();
+    expect(target.backend.lastPatchIds.get("src/a.ts")).toBe(edited.get("src/a.ts"));
+
+    // A forced run re-sends held content under the full-mode id. The built
+    // patch stays, and the next edit goes under the built id again.
+    await world.run(target, "full", true);
+    for (const [uri, id] of edited) {
+      expect(target.backend.lastPatchIds.get(uri), uri).toBe(fullModePatchId(id));
+      expect(await world.patchStatus(target, id), uri).toBe(200);
+    }
+    world.write("src/a.ts", SOURCES["src/a.ts"]!);
+    await world.run(target, "full");
+    expect(target.backend.lastPatchIds.get("src/a.ts")).toBe((await builtIds()).get("src/a.ts"));
+    for (const [uri, id] of target.backend.lastPatchIds) expect(await world.patchStatus(target, id), uri).toBe(200);
+  }, 120_000);
+});
+
 /** `src/a.ts` one line lower and without `beta`: every chunk id it had changes. */
 const A_SHIFTED_WITHOUT_BETA = ["// shifted", A_WITHOUT_BETA].join("\n");
 
@@ -309,17 +368,19 @@ describe("mode-specific patch ids", () => {
     expect(fullModePatchId(ID)).not.toBe(ID);
   });
 
-  it("keeps the built id in map mode and derives it in full mode", () => {
+  it("keeps the built id, but for held content in a full run", () => {
     const patch = {
       patchId: ID, actor: "t", timestamp: "", baseRev: 0, replaces: [],
       source: { uri: "a.ts", sourceHash: "h", extractor: "x", sourceType: "code" },
       ops: [{ type: "UpsertNode", id: "n", kind: "chunk" }, { type: "UpsertNode", id: "f", kind: "function" }],
     } as unknown as Parameters<typeof patchForMode>[0];
     expect(patchForMode(patch, true)).toMatchObject({ patchId: ID, ops: [{ id: "f" }] });
-    expect(patchForMode(patch, false)).toMatchObject({ patchId: fullModePatchId(ID), ops: patch.ops });
+    expect(patchForMode(patch, true, { held: true })).toMatchObject({ patchId: ID, ops: [{ id: "f" }] });
+    expect(patchForMode(patch, false)).toMatchObject({ patchId: ID, ops: patch.ops });
+    expect(patchForMode(patch, false, { held: true })).toMatchObject({ patchId: fullModePatchId(ID), ops: patch.ops });
   });
 
-  it("names the superseded patch under both modes' ids, never the patch's own", () => {
+  it("names the superseded patch under both ids, only when there is one, never the patch's own", () => {
     const PREV = "11111111-2222-3333-4444-555555555555";
     const OLD = "66666666-7777-8888-9999-000000000000";
     const patch = {
@@ -330,21 +391,28 @@ describe("mode-specific patch ids", () => {
     // The first entry (this extractor, previous hash) may be stored under
     // either id; the earlier extractors' predate the split and stay single.
     const named = [PREV, OLD, fullModePatchId(PREV)];
-    expect(patchForMode(patch, true).replaces).toEqual(named);
-    expect(patchForMode(patch, false).replaces).toEqual(named);
+    for (const mapMode of [true, false]) {
+      for (const held of [true, false]) {
+        expect(patchForMode(patch, mapMode, { held, supersedes: true }).replaces).toEqual(named);
+        // No previous hash: the first entry is the legacy id, never sent
+        // under a full-mode id, so nothing is added.
+        expect(patchForMode(patch, mapMode, { held }).replaces).toEqual([PREV, OLD]);
+      }
+    }
     // The built patch is left as it was.
     expect(patch.replaces).toEqual([PREV, OLD]);
 
-    // A list that starts with the built id itself (same source hash): the
-    // full patch does not replace itself, nor the map one the full one.
+    // A list that starts with the built id itself: the patch does not
+    // replace itself, nor its full-mode twin.
     const self = { ...patch, replaces: [ID, PREV] };
-    expect(patchForMode(self, false).replaces).toEqual([ID, PREV]);
-    expect(patchForMode(self, true).replaces).toEqual([ID, PREV]);
-    expect(patchForMode({ ...patch, replaces: [] }, false).replaces).toEqual([]);
+    expect(patchForMode(self, false, { supersedes: true }).replaces).toEqual([ID, PREV]);
+    expect(patchForMode(self, true, { supersedes: true }).replaces).toEqual([ID, PREV]);
+    expect(patchForMode({ ...patch, replaces: [] }, false, { supersedes: true }).replaces).toEqual([]);
   });
 
-  it("pairs each candidate with its other-mode id, this run's mode first", () => {
-    expect(modeAlternatives(["a", "b"], true)).toEqual([["a", fullModePatchId("a")], ["b", fullModePatchId("b")]]);
+  it("pairs each candidate with its full-mode id: built first, but in a full run's reconcile", () => {
+    expect(builtFirstAlternatives(["a", "b"])).toEqual([["a", fullModePatchId("a")], ["b", fullModePatchId("b")]]);
+    expect(modeAlternatives(["a", "b"], true)).toEqual(builtFirstAlternatives(["a", "b"]));
     expect(modeAlternatives(["a", "b"], false)).toEqual([[fullModePatchId("a"), "a"], [fullModePatchId("b"), "b"]]);
   });
 });
