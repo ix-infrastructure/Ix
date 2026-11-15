@@ -17,7 +17,8 @@
     "paths": {
       "@ix/core-ingestion": ["../core-ingestion/dist/index.d.ts"],
       "@ix/core-ingestion/patch-builder": ["../core-ingestion/dist/patch-builder.d.ts"],
-      "@ix/core-ingestion/languages": ["../core-ingestion/dist/languages.d.ts"]
+      "@ix/core-ingestion/languages": ["../core-ingestion/dist/languages.d.ts"],
+      "@ix/core-ingestion/symbol-index": ["../core-ingestion/dist/symbol-index.d.ts"]
     }
   },
   // Covers tests too, so `npm run typecheck` keeps checking them.

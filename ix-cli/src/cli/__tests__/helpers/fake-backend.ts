@@ -27,6 +27,119 @@ function edgeLine(id: string, e: { src: unknown; dst: unknown; predicate: unknow
   return `${id} ${String(e.src)} ${String(e.dst)} ${String(e.predicate)} tier=${String(attrs.tier)} confidence=${String(attrs.confidence)}`;
 }
 
+/** One node of a `ReadGraph`. `uri` is workspace-relative, as ingest sends it. */
+export interface ReadNode {
+  id: string;
+  kind: string;
+  name: string;
+  uri: string;
+  attrs?: Record<string, unknown>;
+}
+
+/** One edge of a `ReadGraph`. */
+export interface ReadEdge {
+  id: string;
+  src: string;
+  dst: string;
+  predicate: string;
+}
+
+/**
+ * A fixed graph for the read routes (`FakeBackend.readGraph`), with the source
+ * files it was "extracted" from, so a command that reads source finds the
+ * lines the graph names.
+ */
+export interface ReadGraph {
+  nodes: ReadNode[];
+  edges: ReadEdge[];
+  files: Record<string, string>;
+}
+
+const GEOMETRY_TS = [
+  "export class Canvas {",
+  "  width = 0;",
+  "}",
+  "",
+  "export function draw(canvas: Canvas): void {",
+  "  canvas.width += 1;",
+  "}",
+  "",
+].join("\n");
+
+const APP_TS = [
+  'import { Canvas, draw as drawShape } from "./geometry";',
+  "",
+  "export function draw(canvas: Canvas): void {",
+  "  paint(canvas);",
+  "}",
+  "",
+  "export function paint(canvas: Canvas): void {",
+  "  drawShape(canvas);",
+  "}",
+  "",
+].join("\n");
+
+/** A fixed UUID whose first 8 characters (the short id the CLI prints) differ per entity. */
+const gid = (n: number): string => `${String(n).padStart(8, "0")}-0000-4000-8000-000000000000`;
+
+/**
+ * The one small graph the read-path snapshots answer from: two files, a class,
+ * three functions, and CONTAINS / IMPORTS / CALLS edges between them.
+ *
+ *   src/geometry.ts  CONTAINS  Canvas (class), draw (function)
+ *   src/app.ts       CONTAINS  draw (function), paint (function)
+ *   src/app.ts       IMPORTS   src/geometry.ts
+ *   app.ts draw      CALLS     paint
+ *   paint            CALLS     geometry.ts draw
+ *
+ * `paint` resolves to one entity, `draw` is ambiguous (one per file), and
+ * nothing is named `vanish` -- nor does any source file mention it.
+ */
+export const SMALL_READ_GRAPH: ReadGraph = {
+  nodes: [
+    { id: gid(1), kind: "file", name: "geometry.ts", uri: "src/geometry.ts", attrs: { language: "typescript", line_start: 1, line_end: 7 } },
+    { id: gid(2), kind: "file", name: "app.ts", uri: "src/app.ts", attrs: { language: "typescript", line_start: 1, line_end: 9 } },
+    { id: gid(3), kind: "class", name: "Canvas", uri: "src/geometry.ts", attrs: { language: "typescript", line_start: 1, line_end: 3 } },
+    { id: gid(4), kind: "function", name: "draw", uri: "src/geometry.ts", attrs: { language: "typescript", line_start: 5, line_end: 7 } },
+    { id: gid(5), kind: "function", name: "draw", uri: "src/app.ts", attrs: { language: "typescript", line_start: 3, line_end: 5 } },
+    { id: gid(6), kind: "function", name: "paint", uri: "src/app.ts", attrs: { language: "typescript", line_start: 7, line_end: 9 } },
+  ],
+  edges: [
+    { id: gid(101), src: gid(1), dst: gid(3), predicate: "CONTAINS" },
+    { id: gid(102), src: gid(1), dst: gid(4), predicate: "CONTAINS" },
+    { id: gid(103), src: gid(2), dst: gid(5), predicate: "CONTAINS" },
+    { id: gid(104), src: gid(2), dst: gid(6), predicate: "CONTAINS" },
+    { id: gid(105), src: gid(2), dst: gid(1), predicate: "IMPORTS" },
+    { id: gid(106), src: gid(5), dst: gid(6), predicate: "CALLS" },
+    { id: gid(107), src: gid(6), dst: gid(4), predicate: "CALLS" },
+  ],
+  files: { "src/geometry.ts": GEOMETRY_TS, "src/app.ts": APP_TS },
+};
+
+/** A `ReadNode` as the backend serialises a GraphNode. Fixed times: nothing volatile. */
+function graphNode(n: ReadNode): Record<string, unknown> {
+  return {
+    id: n.id,
+    kind: n.kind,
+    name: n.name,
+    attrs: n.attrs ?? {},
+    provenance: {
+      sourceUri: n.uri,
+      sourceHash: "0".repeat(64),
+      extractor: "fake",
+      sourceType: "code",
+      observedAt: "2026-01-01T00:00:00Z",
+    },
+    createdRev: 1,
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+  };
+}
+
+function graphEdge(e: ReadEdge): Record<string, unknown> {
+  return { id: e.id, src: e.src, dst: e.dst, predicate: e.predicate, attrs: {}, createdRev: 1 };
+}
+
 /** A backend that answers the endpoints an ingest touches, and records them. */
 export class FakeBackend {
   readonly requests: Array<{ path: string; patches: number; code?: number }> = [];
@@ -40,8 +153,18 @@ export class FakeBackend {
   readonly lastPatchIds = new Map<string, string>();
   /** Paths this fake does not implement. Asserted empty after every test. */
   readonly unknownPaths: string[] = [];
+  /**
+   * Answer the read routes (`/v1/search`, `/v1/expand`, `/v1/expand-by-name`, `/v1/entity/`,
+   * `/v1/degree`, `/v1/list`, `/v1/nodes`, `/v1/stats`, `/v1/provenance/`,
+   * `/v1/resolve-prefix/`) from this graph. Unset, those routes behave as
+   * before: unknown, or answered from the committed graph under `semantics`.
+   */
+  readGraph: ReadGraph | undefined;
+  /** Read requests `readGraph` answered, in order, with their parsed bodies. */
+  readonly reads: Array<{ path: string; body: unknown }> = [];
 
   private server: Server | undefined;
+  private baseUrl: string | undefined;
   private rev = 0;
 
   /** Patch-source substrings this backend refuses, whatever else is healthy. */
@@ -407,12 +530,20 @@ export class FakeBackend {
       this.server!.once("error", reject);
       this.server!.listen(0, "127.0.0.1", resolve);
     });
-    return `http://127.0.0.1:${(this.server!.address() as AddressInfo).port}`;
+    this.baseUrl = `http://127.0.0.1:${(this.server!.address() as AddressInfo).port}`;
+    return this.baseUrl;
+  }
+
+  /** The URL `start()` returned, while the server is up; undefined before and after. */
+  get url(): string | undefined {
+    return this.baseUrl;
   }
 
   async stop(): Promise<void> {
     if (!this.server) return;
     const server = this.server;
+    this.server = undefined;
+    this.baseUrl = undefined;
     // `closeAllConnections` first, and a deadline behind it. `close()` waits for
     // every open socket, so one keep-alive connection the run did not finish
     // with leaves this pending -- and a hook that never settles takes its
@@ -448,6 +579,139 @@ export class FakeBackend {
         "FakeBackend.stop: close() did not call back within 2s; the server handle is being abandoned\n",
       );
     }
+  }
+
+  /**
+   * The read routes, answered from `graph` with the real backend's shapes.
+   * Search matches names by case-insensitive substring and orders exact names
+   * first, then by name and id, as Ix-memory's weight ordering does for a
+   * graph this small. Undefined for a path that is not a read route.
+   */
+  private answerRead(graph: ReadGraph, path: string, rawBody: string): { code: number; payload: unknown } | undefined {
+    let body: Record<string, unknown> = {};
+    try { body = rawBody ? JSON.parse(rawBody) as Record<string, unknown> : {}; } catch { /* none */ }
+    const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+    const record = (): void => { this.reads.push({ path, body }); };
+    const ok = (payload: unknown): { code: number; payload: unknown } => ({ code: 200, payload });
+
+    if (path === "/v1/search") {
+      record();
+      const term = String(body.term ?? "").toLowerCase();
+      const kind = typeof body.kind === "string" ? body.kind : undefined;
+      const scope = typeof body.scope === "string" ? body.scope.toLowerCase() : undefined;
+      const limit = typeof body.limit === "number" ? body.limit : 20;
+      const hits = graph.nodes
+        .filter((n) => n.name.toLowerCase().includes(term))
+        .filter((n) => kind === undefined || n.kind === kind)
+        .filter((n) => scope === undefined || n.uri.toLowerCase().includes(scope))
+        .sort((a, b) => Number(b.name.toLowerCase() === term) - Number(a.name.toLowerCase() === term)
+          || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+      return ok(hits.slice(0, limit).map(graphNode));
+    }
+    if (path === "/v1/list") {
+      record();
+      const limit = typeof body.limit === "number" ? body.limit : 100;
+      const scope = typeof body.scope === "string" ? body.scope.toLowerCase() : undefined;
+      return ok(graph.nodes
+        .filter((n) => n.kind === body.kind && (scope === undefined || n.uri.toLowerCase().includes(scope)))
+        .slice(0, limit).map(graphNode));
+    }
+    const expandFrom = (starts: string[], hops: number): Record<string, unknown> => {
+      const direction = String(body.direction ?? "both");
+      const predicates = Array.isArray(body.predicates) ? body.predicates as string[] : undefined;
+      const seen = new Set<string>(starts);
+      let frontier = [...starts];
+      const nodes: ReadNode[] = [];
+      const edges: ReadEdge[] = [];
+      for (let hop = 0; hop < hops && frontier.length > 0; hop++) {
+        const next: string[] = [];
+        for (const id of frontier) {
+          for (const e of graph.edges) {
+            if (predicates && !predicates.includes(e.predicate)) continue;
+            const other = (direction !== "in" && e.src === id) ? e.dst
+              : (direction !== "out" && e.dst === id) ? e.src : undefined;
+            if (other === undefined) continue;
+            if (!edges.includes(e)) edges.push(e);
+            if (seen.has(other)) continue;
+            seen.add(other);
+            const n = byId.get(other);
+            if (n) { nodes.push(n); next.push(other); }
+          }
+        }
+        frontier = next;
+      }
+      return { nodes: nodes.map(graphNode), edges: edges.map(graphEdge) };
+    };
+    if (path === "/v1/expand") {
+      record();
+      return ok(expandFrom([String(body.nodeId)], typeof body.hops === "number" ? body.hops : 1));
+    }
+    if (path === "/v1/expand-by-name") {
+      // One hop from every entity with exactly this name (and kind, if given).
+      record();
+      const kinds = Array.isArray(body.kinds) ? body.kinds as string[] : undefined;
+      const starts = graph.nodes
+        .filter((n) => n.name === body.name && (kinds === undefined || kinds.includes(n.kind)))
+        .map((n) => n.id);
+      return ok(expandFrom(starts, 1));
+    }
+    if (path === "/v1/degree") {
+      record();
+      const ids = Array.isArray(body.ids) ? body.ids as string[] : [];
+      const direction = String(body.direction ?? "both");
+      const predicates = Array.isArray(body.predicates) ? body.predicates as string[] : undefined;
+      const counts: Record<string, number> = {};
+      for (const id of ids) {
+        if (!byId.has(id)) continue;
+        const neighbours = new Set<string>();
+        let edgeCount = 0;
+        for (const e of graph.edges) {
+          if (predicates && !predicates.includes(e.predicate)) continue;
+          if (direction !== "in" && e.src === id) { neighbours.add(e.dst); edgeCount++; }
+          else if (direction !== "out" && e.dst === id) { neighbours.add(e.src); edgeCount++; }
+        }
+        counts[id] = body.distinct ? neighbours.size : edgeCount;
+      }
+      return ok({ rev: 1, counts, truncated: false });
+    }
+    if (path.startsWith("/v1/entity/")) {
+      record();
+      const n = byId.get(decodeURIComponent(path.slice("/v1/entity/".length)));
+      if (!n) return { code: 404, payload: { error: "404: entity not found" } };
+      const edges = graph.edges.filter((e) => e.src === n.id || e.dst === n.id).map(graphEdge);
+      return ok({ node: graphNode(n), claims: [], edges });
+    }
+    if (path === "/v1/nodes") {
+      record();
+      const ids = Array.isArray(body.ids) ? body.ids as string[] : [];
+      const nodes = ids.flatMap((id) => { const n = byId.get(id); return n ? [graphNode(n)] : []; });
+      const found = new Set(nodes.map((n) => n.id));
+      return ok({ rev: 1, nodes, missing: ids.filter((id) => !found.has(id)) });
+    }
+    if (path === "/v1/stats") {
+      // The graph-health probe's input (graph-health.ts assessGraphStats).
+      record();
+      const tally = (keys: string[], field: string): Array<Record<string, unknown>> =>
+        [...new Set(keys)].sort().map((k) => ({ [field]: k, count: keys.filter((x) => x === k).length }));
+      return ok({
+        nodes: { total: graph.nodes.length, byKind: tally(graph.nodes.map((n) => n.kind), "kind") },
+        edges: { total: graph.edges.length, byPredicate: tally(graph.edges.map((e) => e.predicate), "predicate") },
+      });
+    }
+    if (path.startsWith("/v1/provenance/")) {
+      record();
+      const id = decodeURIComponent(path.slice("/v1/provenance/".length));
+      return ok({ entityId: id, chain: [] });
+    }
+    if (path.startsWith("/v1/resolve-prefix/")) {
+      record();
+      const prefix = decodeURIComponent(path.slice("/v1/resolve-prefix/".length));
+      const matches = graph.nodes.filter((n) => n.id.startsWith(prefix)).map((n) => n.id);
+      if (matches.length === 1) return ok({ id: matches[0] });
+      if (matches.length > 1) return ok({ error: "ambiguous", matches });
+      return ok({ error: "not_found" });
+    }
+    return undefined;
   }
 
   private route(url: string, body: string, res: ServerResponse): void {
@@ -612,6 +876,10 @@ export class FakeBackend {
       if (!this.rememberHashes) return send(200, []);
       const wanted = new Set(uris);
       return send(200, [...this.hashes.values()].filter((row) => wanted.has(row.uri)));
+    }
+    if (this.readGraph !== undefined) {
+      const answer = this.answerRead(this.readGraph, path, body);
+      if (answer !== undefined) return send(answer.code, answer.payload);
     }
     if (path.startsWith("/v1/stitch/system/")) return send(200, { systemId: null });
     // Read by `reconcileRemovedEntities`, which only an incremental run against

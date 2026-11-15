@@ -63,6 +63,61 @@ command substitution, an agent's tool result — and indents only when you are
 reading it on screen. Indentation is whitespace a parser throws away, and it is
 about a fifth of the payload. `--pretty` forces the indented shape anywhere.
 
+### JSON compatibility
+
+`--format json` is a public interface: plugins and scripts parse it. The rule:
+
+- Fields are only added. A new field may appear in any answer, so ignore keys
+  you do not know.
+- A rename or a removal keeps the old field next to the new one for one
+  deprecation period before the old field goes.
+
+The shapes are TypeScript types in `ix-cli/src/cli/contracts/`, and a test pins
+the keys each one prints. Covered so far: the shared miss records, `ix locate`,
+`ix read` and `ix text` (a bare array of matches, no envelope). Their field
+paths are also published as data (`contracts/fields.ts`), together with the
+failure record (`error`, `message`, `dir`, `next`) and, for `ix locate a b`, the
+`{ targets: [{ target, exitCode, ... }], summary }` grouping
+(`contracts/envelope.ts`). The plugin contract check fails a plugin that reads
+a field not listed there. The other
+commands' json is not typed yet; the rule applies to it all the same.
+
+**Misses share one envelope.** A target that resolves to nothing, or to several
+entities when nothing is answered, prints a string `error` slug and a
+`message`, with the exit code to match:
+
+| `error` | Exit | Also carries |
+|---|---|---|
+| `unresolved_target` | 3 | `reason`, `files`, `suggestions`, `didYouMean`, `graph` when known; `targets` when the target was a list of alternatives |
+| `ambiguous_target` | 2 | `candidates` (pick with `--pick <n>`), `total`, `truncated`, `diagnostics` |
+
+`candidates` belongs to an ambiguity only; a miss lists near names in
+`suggestions` and `didYouMean`. An ambiguity that was answered for its top
+candidate (exit 0) is not an error: it is a `resolutionNotices` entry beside
+the answer.
+
+**Guessed answers carry notices.** When `ix locate` or `ix read` answers a name
+that matched several entities (without `--strict`) or matched only fuzzily, the
+answer (exit 0) adds `resolutionNotices`: one record per guess, with `code`
+(`ambiguous_target` or `fuzzy_match`), `target`, `message`, `chosen`,
+`candidates`, `total`, and `truncated` or `diagnostics` when they apply. A fuzzy
+match also sets `resolutionMode: "fuzzy"`. These keys are part of the typed
+answers and are pinned by the same test.
+
+Two records predate the envelope and keep their shape for now:
+
+- `ix locate --strict` on an ambiguous name puts the slug in `code`, not
+  `error` (exit 2), beside locate's own `resolvedTarget: null`,
+  `resolutionMode: "ambiguous"`, `systemPath` and `diagnostics`.
+- `ix read` on an ambiguous file or symbol name exits 0 with `targetType:
+  "ambiguous-file"` or `"ambiguous-symbol"` and its `candidates`, and no
+  `error`.
+
+Both stay as they are because some readers treat any string `error` as a
+failure and would drop the candidates. Moving them is a deliberate change:
+each gains `error: "ambiguous_target"` and `message`, and keeps `code` or
+`targetType` for one deprecation period under the rule above.
+
 ### `ix impact` JSON
 
 One object per target (under `--all`, one per candidate in `results`). Top-level
@@ -89,6 +144,15 @@ once, importers first: `{ kind, name, path?, lineStart?, lineEnd?, via }`, with
 one reached over `CALLS`/`REFERENCES` (a node reached both ways is an
 `importer`). `summary.directImporters` and `summary.directDependents` count the
 two expands before that dedup.
+
+`summary.dependents` (llm: `dependents_total=` on the `counts` record) is the one
+"how many things depend on this" number: distinct entities that call or reference
+a leaf target, or that import, call or reference a container or call one of its
+members, each counted once, the target and what is inside it left out. For a
+container with more than 20 members it is a lower bound (member callers are read
+from the first 20 members only). Use it
+rather than adding or taking the max of the other counts, which overlap. The
+definition is in `docs/llm-format.md` ("Dependents: the one count").
 
 `--limit` cuts `topImpactedMembers` and the `llm` caller/callee rows only.
 `callerList`, `calleeList` and `dependentList` are never cut;

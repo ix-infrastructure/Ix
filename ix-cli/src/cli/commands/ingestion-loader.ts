@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { readGrammarStatus, type GrammarStatus } from "../grammar-status.js";
 
 /**
- * The three entry points, typed by core-ingestion's own declarations (#953).
+ * The entry points, typed by core-ingestion's own declarations (#953).
  *
  * Type-only: `@ix/core-ingestion` is a tsconfig `paths` entry onto the built
  * `.d.ts` files, and every use here is erased. At run time the modules are still
@@ -17,6 +17,12 @@ import { readGrammarStatus, type GrammarStatus } from "../grammar-status.js";
 export type IngestionModule = typeof import("@ix/core-ingestion");
 export type PatchBuilderModule = typeof import("@ix/core-ingestion/patch-builder");
 type LanguagesModule = typeof import("@ix/core-ingestion/languages");
+/**
+ * core-ingestion's `symbol-index.js`: what a stored summary means for other
+ * files (IN-11). It loads no grammar, so the dependents step can use it
+ * without loading the parser.
+ */
+type SymbolIndexModule = typeof import("@ix/core-ingestion/symbol-index");
 
 const importViaFunction = new Function(
   "specifier",
@@ -115,6 +121,11 @@ export async function loadIngestionModules(): Promise<[
     importModule(resolveIngestionModule("../../../../core-ingestion/dist/patch-builder.js")),
     importModule(resolveIngestionModule("../../../../core-ingestion/dist/languages.js")),
   ]);
+}
+
+/** core-ingestion's dependents rules (`symbol-index.ts`), without the parser. */
+export async function loadSymbolIndex(): Promise<SymbolIndexModule> {
+  return importModule(resolveIngestionModule("../../../../core-ingestion/dist/symbol-index.js"));
 }
 
 /**

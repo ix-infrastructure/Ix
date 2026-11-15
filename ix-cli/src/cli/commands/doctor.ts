@@ -45,6 +45,7 @@ import { loadMapBaseline } from "../map-baseline.js";
 import { printJson } from "../format.js";
 import { runVerify, type VerifyReport } from "../verify.js";
 import { healthFromError } from "../database-probe.js";
+import { BACKEND_FEATURES, MIN_BACKEND_VERSION, backendBelowMinimum, missingFeatures } from "../../client/features.js";
 import type { GrammarStatus } from "../grammar-status.js";
 import { loadGrammarStatus } from "./ingestion-loader.js";
 import type { CapabilitiesResponse, HealthResponse } from "../../client/types.js";
@@ -286,6 +287,31 @@ export async function assessDatabase(
     const msg = (e as Error)?.message ?? String(e);
     return { ok: false, detail: `the backend could not read its database: ${msg.slice(0, 200)}` };
   }
+}
+
+/**
+ * "Backend release supported": the release `/v1/health` reports, against
+ * `MIN_BACKEND_VERSION` (client/features.ts). Older is a warning, not a
+ * failure: the CLI still runs, with the fallbacks it carries. A backend that
+ * reports no release (one predating Ix-memory#157, or a local build) is not
+ * judged, since that proves nothing about its age.
+ */
+export function assessBackendRelease(health: HealthResponse | Error | null | undefined): CheckResult {
+  if (health instanceof Error) return { ok: true, detail: "backend unreachable (skipped)" };
+  const release = health?.release_version;
+  const below = backendBelowMinimum(release);
+  if (below === null) {
+    return { ok: true, detail: `not checked: the backend reports no release (this CLI supports ${MIN_BACKEND_VERSION} and later)` };
+  }
+  const lacking = missingFeatures(release).map((f) => BACKEND_FEATURES[f].label);
+  const without = lacking.length > 0 ? `; it lacks ${lacking.join(", ")}` : "";
+  if (below) {
+    return {
+      ok: false, warn: true,
+      detail: `backend ${release} is older than ${MIN_BACKEND_VERSION}, the oldest this CLI supports${without} — upgrade the backend`,
+    };
+  }
+  return { ok: true, detail: `${release} (this CLI supports ${MIN_BACKEND_VERSION} and later)${without}` };
 }
 
 /** What every other command does with a config.yaml that does not parse (#807). */
@@ -634,6 +660,16 @@ export function registerDoctorCommand(program: Command): void {
               h = e instanceof Error ? e : new Error(String(e));
             }
             return assessDatabase(h, () => client.currentRevision());
+          },
+        },
+        {
+          name: "Backend release supported",
+          run: async () => {
+            try {
+              return assessBackendRelease(await health());
+            } catch (e) {
+              return assessBackendRelease(e instanceof Error ? e : new Error(String(e)));
+            }
           },
         },
         {

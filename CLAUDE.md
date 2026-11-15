@@ -47,15 +47,16 @@ ix map --silent                             # refresh the graph after code chang
   global reset, re-map each workspace.
 - **The OSS↔Pro command boundary is derived at runtime, not declared.**
   `run-cli.ts` snapshots `ossCmdNames` right after registering the OSS
-  commands; the Pro probe diffs against it. Adding a command to `oss.ts`
-  silently makes it OSS; removing one makes Pro own it. `registerProCommands`
+  commands; the Pro probe diffs against it. Adding a command to the manifest
+  (`register/commands.ts`) silently makes it OSS; removing one makes Pro own it. `registerProCommands`
   is async and MUST be awaited.
-- **A new OSS command goes in two places:** `registerOssCommands()` in
-  `register/oss.ts` and `OSS_COMMAND_TABLE` in `register/oss-table.ts`. With
-  Pro absent, `run-cli.ts` loads only the table entry for the command being
-  run. A command missing from the table still works (it takes the full path),
-  but `startup-fast-path.test.ts` fails until it is added. The shared
-  per-command setup is in `register/oss-setup.ts`.
+- **A new OSS command is one file and one manifest entry:** `OSS_COMMANDS` in
+  `register/commands.ts` (names and aliases, lazy `load`, `ix --help` line,
+  placed in `ROOT_HELP_SECTIONS`). `registerOssCommands()`, `OSS_COMMAND_TABLE`
+  and `buildHelpText()` are built from it; keep entries in order (Pro
+  registers after them, first registration of a name wins). Fixed option
+  values are declared on the command with `choiceOption()` (`options.ts`) and
+  enforced by `register/oss-setup.ts`. See "Adding a command" in CONTRIBUTING.
 - **`ix note` / `ix session` are OSS fallbacks, not OSS commands.** They are
   registered by `register/oss-fallbacks.ts` only when Pro did not load (next
   to the Pro stubs in `run-cli.ts` and `mcp/runner.ts`), because Pro's versions

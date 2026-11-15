@@ -57,7 +57,7 @@ describe("ix impact --limit reaches the leaf llm rows", () => {
   it("llm: --limit 3 prints three caller rows and the true counts", async () => {
     const out = await run(["--limit", "3", "--format", "llm"]);
     expect(out.filter((l) => l.startsWith("caller "))).toHaveLength(3);
-    expect(out).toContain("counts callers=25 callees=0 shown_callers=3 shown_callees=0");
+    expect(out).toContain("counts callers=25 callees=0 shown_callers=3 shown_callees=0 dependents_total=25");
     const diag = out.find((l) => l.startsWith("diagnostic code=results_truncated"));
     expect(diag).toContain("25 callers; showing 3.");
     expect(diag).not.toContain("--offset");

@@ -12,7 +12,7 @@ import { nextPageCommand, parseOffset } from "../paging.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
 import { isQuiet, projectRow } from "../output-shape.js";
 import { printResolved, resolveFileOrReport } from "../resolve.js";
-import { reportError } from "./around.js";
+import { reportFailure } from "../ui.js";
 import { overrideFamily, type OverrideRelation, type OverrideRow } from "../type-walk.js";
 
 interface OverridesOpts {
@@ -60,7 +60,7 @@ ${EXIT_CODES_HELP}`)
       // The root hook refuses a malformed <n> already; this holds where it is
       // not installed, so `abc` never becomes NaN and silently zero rows.
       if (parseOverridesLimit(opts.limit) === undefined) {
-        reportError("invalid_limit", `--limit must be a non-negative integer (for example, 50), not "${opts.limit}".`, opts.format);
+        reportFailure("invalid_limit", `--limit must be a non-negative integer (for example, 50), not "${opts.limit}".`, opts.format);
         return;
       }
       const client = createClient();
