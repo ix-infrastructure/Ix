@@ -10,7 +10,7 @@ import { collectRelatedFiles, MAX_RELATED, type RelatedRef } from "../explain/re
 import { collectTextReferences, gitRepoAccess, type TextSource } from "../explain/text-references.js";
 import { coChangedFiles, gitRunner, recentCommits, type CommitRef } from "../explain/history.js";
 import { activeReadScope } from "../resolve.js";
-import { relativePath } from "../format.js";
+import { findFileNode } from "../file-node.js";
 import { assessTargetStructure, worseHealth, type GraphHealth } from "../graph-health.js";
 
 /**
@@ -72,26 +72,16 @@ async function collectHistory(
  * back to a synthetic id rather than dropping a file the graph has not seen.
  */
 async function fileNodeId(client: IxClient, path: string): Promise<string> {
-  return (await findFileNode(client, path)) ?? `file:${path}`;
+  return (await fileNodeIdOrUndefined(client, path)) ?? `file:${path}`;
 }
 
 /**
- * Search candidates for one file node. `scope` narrows the search to the path
- * on a backend that applies it (Ix-memory >= 1.0.31); an older one ignores it
- * and returns every file sharing the basename, so the limit has to reach past
- * a monorepo's `index.ts`, `__init__.py` or `mod.rs` -- at 10 a file ranked
- * eleventh among its namesakes had no node, and `--from-issue` discarded a path
- * the issue named for a BM25 guess.
+ * A file's graph node id, or undefined when the graph has no node for it or
+ * the search failed. Exact paths only: the id is paired with this path.
  */
-const FILE_NODE_SEARCH_LIMIT = 200;
-
-/** A file's graph node id, or undefined when the graph has no node for it. */
-export async function findFileNode(client: IxClient, path: string): Promise<string | undefined> {
-  const name = path.split("/").pop()!;
-  const nodes = await client.search(name, {
-    kind: "file", nameOnly: true, limit: FILE_NODE_SEARCH_LIMIT, scope: path, ...activeReadScope(),
-  }).catch(() => []);
-  return nodes.find((n) => relativePath(n.provenance?.sourceUri) === path)?.id;
+export async function fileNodeIdOrUndefined(client: IxClient, path: string): Promise<string | undefined> {
+  const node = await findFileNode(client, path, { scope: activeReadScope() }).catch(() => undefined);
+  return node?.id;
 }
 
 /** Imported files whose text is read for names, after the target's own. */

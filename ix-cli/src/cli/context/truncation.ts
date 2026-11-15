@@ -3,7 +3,7 @@
 // What a cut bundle tells its reader: which evidence was dropped and the
 // flag (or MCP argument) that would bring it back.
 
-import { forMcp, suggest } from "../next-step.js";
+import { currentCaller, type Hint } from "../next-step.js";
 import { CONTAINER_KINDS } from "../graph-model.js";
 
 import type { EvidenceItem, ContextBundle } from "./types.js";
@@ -49,58 +49,47 @@ export function summariseCut(dropped: EvidenceItem[]): Array<{ what: string; cou
  * for anything and pays for everything.
  */
 function cutLever(bundle: ContextBundle, top: { what: string }): string {
-  if (forMcp()) return mcpCutLever(bundle, top);
-  const name = bundle.target.name;
-  const container = CONTAINER_KINDS.has(bundle.target.kind.toLowerCase());
-  switch (top.what) {
-    case "member":
-      return container
-        ? `run ix context on one of them, or raise --max-tokens`
-        : `ix contains ${name}, or raise --max-tokens`;
-    case "caller":
-      return `ix callers ${name}, or raise --max-tokens`;
-    case "dependent":
-      return `ix impact ${name}, or raise --max-tokens`;
-    case "import":
-      return `ix imports ${name}, or raise --max-tokens`;
-    case "call":
-      return `ix callees ${name}, or raise --max-tokens`;
-    case "relationship":
-      return `ix depends ${name}, or raise --max-tokens`;
-    case "claim":
-    case "conflict":
-      return `ix conflicts ${name}, or raise --max-tokens`;
-    default:
-      return `raise --max-tokens`;
-  }
-}
-
-/**
- * {@link cutLever} for an MCP caller: only core tools, and `max_tokens` for
- * the budget, since `ix_context` takes no flags. `ix contains`, `ix depends`
- * and `ix conflicts` have no core tool, so those cuts fall back to the nearest
- * one that does exist, or to the budget alone.
- */
-function mcpCutLever(bundle: ContextBundle, top: { what: string }): string {
+  const caller = currentCaller();
   const { name, path } = bundle.target;
   const container = CONTAINER_KINDS.has(bundle.target.kind.toLowerCase());
-  const pin = container ? {} : { path };
-  const budget = "raise max_tokens (default 3000)";
-  switch (top.what) {
-    case "member":
-      return container ? `call ix_context on one of them, or ${budget}` : budget;
-    case "caller":
-      return `${suggest.neighbors(name, "callers", pin)}, or ${budget}`;
-    case "dependent":
-    case "relationship":
-      return `${suggest.impact(name, pin)}, or ${budget}`;
-    case "import":
-      return `${suggest.neighbors(name, "imports", pin)}, or ${budget}`;
-    case "call":
-      return `${suggest.neighbors(name, "callees", pin)}, or ${budget}`;
-    default:
-      return budget;
+  // Pins the target's file over MCP; the CLI forms never carried a path.
+  const pin = container ? undefined : path;
+  const budget = `raise ${caller.lever("max_tokens") ?? "the token budget"}`;
+  if (top.what === "member" && container) {
+    const context = caller.command({ action: "context" });
+    if (!context) return budget;
+    return `${caller.style === "tool" ? "call" : "run"} ${context} on one of them, or ${budget}`;
   }
+  // The steps that get the cut back, in order of preference; the first the
+  // reader can run is named. `ix contains`, `ix depends` and `ix conflicts`
+  // have no core MCP tool, so a core session falls back to the nearest one
+  // that does exist, or to the budget alone.
+  const steps: Hint[] = (() => {
+    switch (top.what) {
+      case "member":
+        return [{ action: "contains", symbol: name }];
+      case "caller":
+        return [{ action: "neighbors", symbol: name, relation: "callers", path: pin }];
+      case "dependent":
+        return [{ action: "impact", target: name, path: pin }];
+      case "import":
+        return [{ action: "neighbors", symbol: name, relation: "imports", path: pin }];
+      case "call":
+        return [{ action: "neighbors", symbol: name, relation: "callees", path: pin }];
+      case "relationship":
+        return [{ action: "depends", symbol: name }, { action: "impact", target: name, path: pin }];
+      case "claim":
+      case "conflict":
+        return [{ action: "conflicts", symbol: name }];
+      default:
+        return [];
+    }
+  })();
+  for (const step of steps) {
+    const command = caller.command(step);
+    if (command !== undefined) return `${command}, or ${budget}`;
+  }
+  return budget;
 }
 
 /** One sentence naming what was cut and the cheapest way to get it back. */

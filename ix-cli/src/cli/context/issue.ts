@@ -37,7 +37,7 @@ import { printJson, relativePath } from "../format.js";
 import { checkGraphHealth } from "../graph-health.js";
 
 import { buildBundle } from "./bundle.js";
-import { collectContextFacts, findFileNode, bundleGraphHealth } from "./collect.js";
+import { collectContextFacts, fileNodeIdOrUndefined, bundleGraphHealth } from "./collect.js";
 import type { BudgetSnapshot, BundleFormat, ContextOptions } from "./options.js";
 import type { ContextBundle, IssueBundleInput } from "./types.js";
 
@@ -69,9 +69,9 @@ export async function buildIssueBundle(
   // A path start has no node yet, and the graph may not have one either: it
   // does not index every tracked file. chooseCentre walks BM25 for one it does.
   const { starts, centre, walked } = await chooseCentre(
-    plan.starts, plan.bm25, (path) => findFileNode(client, path), CENTRE_FALLBACK_TRIES, plan.sourcePaths);
+    plan.starts, plan.bm25, (path) => fileNodeIdOrUndefined(client, path), CENTRE_FALLBACK_TRIES, plan.sourcePaths);
   if (!centre) {
-    issueFailure(
+    reportFailure(
       "issue_unresolved",
       starts.length === 0
         ? `Nothing the issue names resolved to a definition${plan.unresolved.length > 0 ? ` (tried ${plan.unresolved.slice(0, 5).join(", ")})` : ""}, and no tracked source file matched its text. Name a symbol or file and run ix context <target>.`
@@ -201,7 +201,7 @@ async function readIssueOrReport(arg: string, format: string | undefined): Promi
   try {
     text = await readIssueText(arg);
   } catch (error) {
-    issueFailure(
+    reportFailure(
       "issue_unreadable",
       `Cannot read the issue from ${arg === "-" ? "stdin" : `"${arg}"`}: ${(error as Error).message}`,
       format,
@@ -209,7 +209,7 @@ async function readIssueOrReport(arg: string, format: string | undefined): Promi
     return undefined;
   }
   if (!text.trim()) {
-    issueFailure("empty_issue", `The issue ${arg === "-" ? "on stdin" : `in "${arg}"`} is empty.`, format);
+    reportFailure("empty_issue", `The issue ${arg === "-" ? "on stdin" : `in "${arg}"`} is empty.`, format);
     return undefined;
   }
   return text;
@@ -315,21 +315,6 @@ export function renderLeanIssueLlm(view: LeanIssueView): string[] {
   }
   for (const f of view.alsoRanked) out.push(llmLine("ranked", [["path", f.path]]));
   return out;
-}
-
-/**
- * A `--from-issue` failure, readable by the format asked for. `reportFailure`
- * writes nothing to stdout under `--format json`, so a JSON caller got an empty
- * stdout and had to scrape stderr; this prints the record the other commands'
- * JSON failures use.
- */
-function issueFailure(code: string, message: string, format: string | undefined): void {
-  if (format === "json") {
-    printJson({ error: code, message });
-    process.exitCode = 1;
-    return;
-  }
-  reportFailure(code, message, format);
 }
 
 /** A secondary starting point's one-hop facts and related files. Best-effort. */

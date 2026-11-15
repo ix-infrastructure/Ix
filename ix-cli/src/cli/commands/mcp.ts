@@ -6,7 +6,7 @@ import chalk from "chalk";
 import { llmLine, type LlmValue } from "../llm.js";
 import type { DoctorReport, HostReport, InstallReport, Outcome } from "../../mcp/install.js";
 import { printJson } from "../format.js";
-import { formatOption } from "../options.js";
+import { choiceOption, formatOption } from "../options.js";
 
 /** Symbol and colour per outcome, shared by install and doctor. */
 const OUTCOME_STYLE: Record<Outcome, { mark: string; paint: (text: string) => string }> = {
@@ -103,11 +103,12 @@ export function registerMcpCommand(program: Command): void {
   const mcp = program
     .command("mcp")
     .description("Serve Ix tools over the Model Context Protocol (stdio)")
-    .option(
+    .addOption(choiceOption(
       "--tools <set>",
       "Which catalog to advertise (core|all). core is five task-shaped tools; all is every one",
+      ["core", "all"],
       "core",
-    )
+    ))
     .action(async (opts: { tools: string }) => {
       // Keep the SDK off the startup path for ordinary CLI commands.
       const { startIxMcpServer } = await import("../../mcp/server.js");

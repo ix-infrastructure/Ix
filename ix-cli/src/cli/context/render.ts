@@ -5,7 +5,7 @@
 import { llmLine, printLlmLines } from "../llm.js";
 import { renderNote, renderSection, renderWarning } from "../ui.js";
 import { printJson } from "../format.js";
-import { forMcp } from "../next-step.js";
+import { currentCaller } from "../next-step.js";
 
 import { formatLocation } from "./location.js";
 import { onDiskSymbolCheck, renderedNextReads, nextToolCalls } from "./next.js";
@@ -20,7 +20,9 @@ import { asString } from "./util.js";
  * {@link llmNextByCut}.
  */
 export function llmNextLines(bundle: ContextBundle): string[] {
-  return forMcp()
+  // A reader with tools is sent to the graph's own questions; one at a shell
+  // gets the reads (see nextToolCalls for why they differ).
+  return currentCaller().style === "tool"
     ? nextToolCalls(bundle, onDiskSymbolCheck())
       .map((step) => llmLine("next", { cmd: step.cmd, why: step.why, stale: step.stale, reanchor: step.reanchor }))
     : renderedNextReads(bundle).map((row) => llmLine("next", { cmd: row.cmd, stale: row.stale || undefined }));

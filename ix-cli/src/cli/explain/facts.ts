@@ -9,8 +9,8 @@ import { buildDependencyTree } from "../commands/depends.js";
 import { getSystemPath } from "../hierarchy.js";
 import type { CommitRef } from "./history.js";
 import { isTestPath, type RelatedRef } from "./related-files.js";
-import { forMcp, toolCall } from "../next-step.js";
-import { TYPE_KINDS } from "../graph-model.js";
+import { hint, suggestedCommand } from "../next-step.js";
+import { TYPE_KINDS, type GraphKind, type KindSet } from "../graph-model.js";
 
 /** A related entity and where it is defined. */
 export interface EntityLocation {
@@ -211,7 +211,7 @@ const MEMBER_USE_CONCURRENCY = 6;
 const USE_PREDICATES = ["CALLS", "REFERENCES", "IMPORTS"];
 
 /** Kinds a reader navigates by. Everything else ranks after them. */
-const PRIMARY_MEMBER_KINDS = new Set([
+const PRIMARY_MEMBER_KINDS: KindSet = new Set<GraphKind>([
   "class", "interface", "function", "method", "type", "enum", "trait", "struct", "object", "module",
 ]);
 
@@ -430,8 +430,12 @@ async function lookUpContainer(client: IxClient, containerId: string): Promise<E
   }
 }
 
-/** The target's callees by name, one entity read each, in edge order. */
-function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRef[]> {
+/**
+ * The target's callees by name, one entity read each, in edge order. A callee
+ * with no usable name, or one that cannot be read, is listed unresolved with a
+ * text-search suggestion. `ix explain` and `collectFacts` both use this one.
+ */
+export function resolveCallList(client: Pick<IxClient, "entity">, calleeEdges: any[]): Promise<EntityRef[]> {
   return Promise.all(
     calleeEdges.map(async (e: any): Promise<EntityRef> => {
       try {
@@ -443,7 +447,7 @@ function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRe
             name: name || e.dst,
             kind: calleeNode.kind,
             resolved: false,
-            suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
+            ...suggestedCommand({ action: "text", pattern: e.dst.slice(0, 8), quote: true }),
           };
         }
         return {
@@ -452,14 +456,14 @@ function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRe
           id: e.dst,
           resolved: true,
           path: relativePath(calleeNode.provenance?.source_uri ?? calleeNode.provenance?.sourceUri),
-          suggestedCommand: forMcp() ? toolCall("ix_explain", { symbol: name }) : `ix explain "${name}"`,
+          ...suggestedCommand({ action: "explain", symbol: name, quote: true }),
         };
       } catch {
         return {
           name: e.dst,
           resolved: false,
           diagnostic: "unresolved_call_target",
-          suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
+          ...suggestedCommand({ action: "text", pattern: e.dst.slice(0, 8), quote: true }),
         } as EntityRef;
       }
     }),
@@ -612,6 +616,10 @@ export async function collectFacts(
       parts.push(`${unresolvedCalls.total} called name(s) have no definition in the graph: ${unresolvedCallNames(unresolvedCalls)}.`);
     }
     if (danglingCallees > 0) parts.push(`${danglingCallees} callee(s) could not be resolved to named entities.`);
+    // Only dangling edges means a graph built before tree-sitter/1.28; the next
+    // map rebuilds it. llm output prints no notes, so the hint lives here.
+    const mapStep = unresolvedCalls ? undefined : hint({ action: "map" });
+    if (mapStep) parts.push(`Run \`${mapStep}\` to improve coverage.`);
     diagnostics.push({ code: "unresolved_call_target", message: parts.join(" ") });
   }
 

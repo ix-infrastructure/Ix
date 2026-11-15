@@ -11,6 +11,9 @@ import { registerReadCommand } from "../commands/read.js";
 import type { AmbiguousTargetJson, TextMatchesJson, UnresolvedTargetJson } from "../contracts/miss.js";
 import type { LocateJson, LocateMissJson, LocateStrictAmbiguityJson, LocateTextMatchesJson } from "../contracts/locate.js";
 import type { ReadAmbiguityJson, ReadFailureJson, ReadJson } from "../contracts/read.js";
+import type { MultiTargetJson, TargetSummaryJson } from "../contracts/envelope.js";
+import { acceptsField } from "../contracts/fields.js";
+import { fieldPaths } from "./helpers/field-paths.js";
 
 // Golden shapes for `--format json` (contracts/). Each case runs the real
 // command action against a mocked backend and pins the exact keys it prints.
@@ -84,7 +87,12 @@ async function json(args: string[]): Promise<{ body: Record<string, unknown>; ex
     error.mockRestore();
     write.mockRestore();
   }
-  return { body: JSON.parse(stdout.join("\n")) as Record<string, unknown>, exitCode: Number(process.exitCode ?? 0) };
+  const body = JSON.parse(stdout.join("\n")) as Record<string, unknown>;
+  // Every printed path is in the published list (contracts/fields.ts) that
+  // the plugin-contract check reads, for the commands that have one.
+  const command = args[0];
+  expect(fieldPaths(body).filter((p) => acceptsField(command, p) === false)).toEqual([]);
+  return { body, exitCode: Number(process.exitCode ?? 0) };
 }
 
 /** The printed keys, sorted, against the golden list (also sorted). */
@@ -181,6 +189,22 @@ describe("ix locate (contracts/locate.ts)", () => {
       "resolvedTarget", "resolutionMode", "systemPath", "diagnostics",
       "note", "target", "reason", "message", "textMatches", "shown", "total",
     ] satisfies Array<keyof TextMatchesJson | "resolvedTarget" | "resolutionMode" | "systemPath" | "diagnostics">);
+  });
+
+  it("several targets: the grouping (contracts/envelope.ts), a thrown target's failure record included", async () => {
+    search.mockImplementation(async (term: string) => {
+      if (term === "Boom") throw new Error("backend exploded");
+      return ({ Unique: UNIQUE } as Record<string, unknown[]>)[term] ?? [];
+    });
+    // json() fails on any printed path the published list lacks.
+    const { body } = await json(["locate", "Unique", "Missing", "Boom", "--no-suggest"]);
+    expectKeys<MultiTargetJson<unknown>>(body, ["targets", "summary"]);
+    const groups = body.targets as Array<Record<string, unknown>>;
+    expect(groups.map((g) => g.target)).toEqual(["Unique", "Missing", "Boom"]);
+    expect(groups[2]).toMatchObject({ error: "cli_error" });
+    expect(Object.keys(body.summary as object).sort()).toEqual(
+      (["total", "ok", "ambiguous", "notFound", "notMapped", "failed"] satisfies Array<keyof TargetSummaryJson>).sort(),
+    );
   });
 });
 

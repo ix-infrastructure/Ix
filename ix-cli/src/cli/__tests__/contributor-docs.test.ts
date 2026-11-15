@@ -173,3 +173,59 @@ describe("contributor documents match the repo (#988)", () => {
     expect(scope).toMatch(/security@ix-infra\.com/);
   });
 });
+
+describe("the architecture document (#987)", () => {
+  const ARCH = "docs/architecture.md";
+
+  it("exists and is linked from CONTRIBUTING, the docs index and the site's contributing page", () => {
+    expect(existsSync(join(ROOT, ARCH)), `${ARCH} exists`).toBe(true);
+    expect(read("CONTRIBUTING.md")).toContain("(docs/architecture.md)");
+    expect(read("docs/README.md")).toContain("(architecture.md)");
+    // The site page names the path rather than linking it: CI probes an
+    // absolute GitHub URL, which 404s until the file is on main.
+    expect(read("docs-site/src/content/docs/community/contributing.md")).toContain(
+      "`docs/architecture.md`",
+    );
+  });
+
+  it("every repo path it names exists", () => {
+    // Backticked tokens rooted at a top-level directory. Placeholders
+    // (`commands/<name>.ts`) and globs are illustrations, not paths.
+    const roots = /^(?:ix-cli|core-ingestion|docs|docs-site|scripts|skills|Formula|\.github)\//;
+    const named = [...read(ARCH).matchAll(/`([^`\s]+)`/g)]
+      .map((m) => m[1].replace(/\(\)$/, ""))
+      .filter((t) => roots.test(t) && !/[<>*]/.test(t));
+    expect(named.length).toBeGreaterThan(20);
+    const missing = [...new Set(named)].filter((p) => !existsSync(join(ROOT, p)));
+    expect(missing).toEqual([]);
+  });
+
+  it("names every CI job in its tests-and-CI section", () => {
+    const doc = read(ARCH);
+    const start = doc.indexOf("\n## Tests and CI\n");
+    expect(start, `${ARCH} has a '## Tests and CI' section`).toBeGreaterThan(-1);
+    const end = doc.indexOf("\n## ", start + 1);
+    const section = doc.slice(start, end === -1 ? undefined : end);
+    const wf = parse(read(".github/workflows/ci.yml")) as { jobs: Record<string, CiJob> };
+    const unnamed = Object.keys(wf.jobs).filter((job) => !section.includes(`\`${job}\``));
+    expect(unnamed).toEqual([]);
+  });
+
+  it("states the rules that otherwise live only in comments, next to what enforces them", () => {
+    const doc = read(ARCH);
+    // Every client from the factory, held by an ESLint rule.
+    expect(doc).toContain("createClient()");
+    expect(read("ix-cli/eslint.config.js")).toContain("NewExpression[callee.name='IxClient']");
+    // A command is one manifest entry; the Pro surface is one table.
+    expect(doc).toContain("OSS_COMMANDS");
+    expect(doc).toContain("PRO_COMMANDS");
+    // Runtime files ship through three packaging paths.
+    for (const path of ["ix-cli/package.json", ".github/workflows/release.yml", "Formula/ix.rb"]) {
+      expect(doc).toContain(`\`${path}\``);
+    }
+    // The patch schema is one file copied byte for byte.
+    expect(read("ix-cli/src/client/graph-schema.ts")).toBe(read("core-ingestion/src/schema.ts"));
+    expect(doc).toContain("`core-ingestion/src/schema.ts`");
+    expect(doc).toContain("`ix-cli/src/client/graph-schema.ts`");
+  });
+});

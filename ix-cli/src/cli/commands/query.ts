@@ -4,14 +4,14 @@ import type { Command } from "commander";
 import { createClient } from "../../client/factory.js";
 import { formatContext } from "../format.js";
 import { stderr } from "../stderr.js";
-import { formatOption } from "../options.js";
+import { choiceOption, formatOption } from "../options.js";
 
 export function registerQueryCommand(program: Command): void {
   program
     .command("query <question>")
     .description("[DEPRECATED] Broad NLP-style graph query — prefer bounded commands instead")
     .option("--as-of <rev>", "Time-travel to a specific revision")
-    .option("--depth <depth>", "Query depth (shallow|standard|deep)", "standard")
+    .addOption(choiceOption("--depth <depth>", "Query depth (shallow|standard|deep)", ["shallow", "standard", "deep"], "standard"))
     .addOption(formatOption(["text", "json"]))
     .option("--unsafe", "Enable query (can produce large outputs)")
     .action(async (question: string, opts: { asOf?: string; depth?: string; format: string; unsafe?: boolean }) => {

@@ -10,7 +10,7 @@ import { dirname, join, resolve } from "node:path";
 import { BUNDLE_SCHEMA, contextBundleSchema } from "../context-bundle-schema.js";
 import { createClient } from "../../client/factory.js";
 import { saveBm25Index } from "../explain/bm25-cache.js";
-import { formatOption, kindOption, parseRevisionOption, pathOption, pickOption, strictOption } from "../options.js";
+import { choiceOption, formatOption, kindOption, parseRevisionOption, pathOption, pickOption, strictOption } from "../options.js";
 import {
   activeReadScope,
   resolveFileOrReport,
@@ -76,10 +76,9 @@ export function registerContextCommand(program: Command): void {
     .addOption(pathOption())
     .addOption(pickOption())
     .addOption(strictOption())
-    .option(
-      "--depth <depth>",
-      `Context-graph expansion depth (${CONTEXT_DEPTHS.join("|")})`,
-      parseContextDepthOption,
+    .addOption(
+      choiceOption("--depth <depth>", `Context-graph expansion depth (${CONTEXT_DEPTHS.join("|")})`, CONTEXT_DEPTHS)
+        .argParser(parseContextDepthOption),
     )
     .option("--as-of-rev <n>", "Historical context as of a graph revision", parseRevisionOption)
     // No Commander default on the --max-* flags, so `parseRequestedBudgets`

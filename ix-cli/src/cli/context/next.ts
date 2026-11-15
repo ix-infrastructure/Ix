@@ -5,7 +5,7 @@
 
 import { resolveWorkspaceRoot } from "../config.js";
 import { symbolReadChecker } from "../symbol-read-check.js";
-import { suggest, toolCall } from "../next-step.js";
+import { hint, type Hint } from "../next-step.js";
 
 import type { EvidenceItem, ContextBundle } from "./types.js";
 
@@ -178,13 +178,14 @@ export const NEXT_READ_MAX_LINES = 120;
  * the target's own range comes last, capped so a 558-line class does not turn
  * into a 558-line suggestion.
  *
- * Every call names core tools only, and pins the target's file with `path=` so
- * an ambiguous name resolves to the entity this bundle was built for.
+ * Every step names a tool the session was offered (a step it was not is left
+ * out), and pins the target's file with `path=` so an ambiguous name resolves
+ * to the entity this bundle was built for.
  *
  * The read step carries `stale: true` when its file changed since the last
  * ingest (its range is from the last ingest), and then, if the symbol re-anchors
- * safely (the same checks as {@link nextReads}), `reanchor`: an `ix_read
- * symbol=<name> path=<file>` call that lands on where the name is now.
+ * safely (the same checks as {@link nextReads}), `reanchor`: a symbol read
+ * pinned to the file, which lands on where the name is now.
  */
 export function nextToolCalls(
   bundle: ContextBundle,
@@ -195,14 +196,15 @@ export function nextToolCalls(
   const isFile = kind.toLowerCase() === "file";
   // A file resolves by its path; a symbol by name, pinned to its file.
   const symbol = isFile ? (path ?? name) : name;
-  const pin = isFile ? {} : { path };
+  const pin = isFile ? undefined : path;
+  const push = (step: Hint, why: string): void => {
+    const cmd = hint(step);
+    if (cmd !== undefined) steps.push({ cmd, why });
+  };
 
-  steps.push(
-    isFile
-      ? { cmd: suggest.neighbors(symbol, "imported_by", pin), why: "every file that imports this one" }
-      : { cmd: suggest.neighbors(symbol, "callers", pin), why: "every call site across files, from the graph rather than a name match" },
-  );
-  steps.push({ cmd: suggest.impact(symbol, pin), why: "what a change here reaches, before you edit it" });
+  if (isFile) push({ action: "neighbors", symbol, relation: "imported_by", path: pin }, "every file that imports this one");
+  else push({ action: "neighbors", symbol, relation: "callers", path: pin }, "every call site across files, from the graph rather than a name match");
+  push({ action: "impact", target: symbol, path: pin }, "what a change here reaches, before you edit it");
 
   const readItem = bundle.evidence.find(
     (item) => item.location?.path && item.location.lineStart !== undefined && item.location.lineEnd !== undefined,
@@ -210,17 +212,21 @@ export function nextToolCalls(
   const read = readItem?.location;
   if (readItem && read?.lineStart !== undefined && read.lineEnd !== undefined) {
     const end = Math.min(read.lineEnd, read.lineStart + NEXT_READ_MAX_LINES - 1);
-    // Additive: the range call is unchanged; a stale file adds `stale` and,
-    // where the name re-anchors safely, the symbol form beside it.
-    const { stale, symbol } = rowFreshness(bundle)(readItem, read.path, symbolRead);
-    steps.push({
-      cmd: toolCall("ix_read", { symbol: `${read.path}:${read.lineStart}-${end}` }),
-      why: end < read.lineEnd
-        ? `first ${NEXT_READ_MAX_LINES} of ${read.lineEnd - read.lineStart + 1} lines of the top-ranked evidence`
-        : "the top-ranked evidence",
-      ...(stale ? { stale: true as const } : {}),
-      ...(symbol ? { reanchor: toolCall("ix_read", { symbol, path: read.path }) } : {}),
-    });
+    const cmd = hint({ action: "read", target: `${read.path}:${read.lineStart}-${end}` });
+    if (cmd !== undefined) {
+      // Additive: the range call is unchanged; a stale file adds `stale` and,
+      // where the name re-anchors safely, the symbol form beside it.
+      const { stale, symbol } = rowFreshness(bundle)(readItem, read.path, symbolRead);
+      const reanchor = symbol ? hint({ action: "read", target: symbol, path: read.path }) : undefined;
+      steps.push({
+        cmd,
+        why: end < read.lineEnd
+          ? `first ${NEXT_READ_MAX_LINES} of ${read.lineEnd - read.lineStart + 1} lines of the top-ranked evidence`
+          : "the top-ranked evidence",
+        ...(stale ? { stale: true as const } : {}),
+        ...(reanchor ? { reanchor } : {}),
+      });
+    }
   }
   return steps;
 }
