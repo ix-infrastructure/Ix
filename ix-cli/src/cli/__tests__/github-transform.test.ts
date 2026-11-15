@@ -25,7 +25,7 @@ describe("GitHub transform", () => {
       }
     );
     expect(ops.length).toBeGreaterThanOrEqual(1);
-    const upsert = ops.find((op: any) => op.type === "UpsertNode");
+    const upsert = ops.find((op) => op.type === "UpsertNode");
     expect(upsert).toBeDefined();
     expect(upsert!.kind).toBe("intent");
     expect(upsert!.name).toBe("Fix login bug");
@@ -43,7 +43,7 @@ describe("GitHub transform", () => {
         html_url: "https://github.com/acme/app/pull/10", changed_files: 5,
       }
     );
-    const upsert = ops.find((op: any) => op.type === "UpsertNode");
+    const upsert = ops.find((op) => op.type === "UpsertNode");
     expect(upsert).toBeDefined();
     expect(upsert!.kind).toBe("decision");
     expect(upsert!.name).toBe("Add auth flow");
@@ -60,7 +60,7 @@ describe("GitHub transform", () => {
         files: [{ filename: "src/auth.ts", status: "modified" }],
       }
     );
-    const upsert = ops.find((op: any) => op.type === "UpsertNode");
+    const upsert = ops.find((op) => op.type === "UpsertNode");
     expect(upsert).toBeDefined();
     expect(upsert!.kind).toBe("doc");
     expect(upsert!.name).toContain("fix: resolve null pointer");

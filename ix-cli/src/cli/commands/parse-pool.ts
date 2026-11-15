@@ -318,7 +318,7 @@ export class ParsePool {
    *
    * The consumer that does hold the leak is the MCP server's in-process
    * runner: `createInProcessRunner` in `src/mcp/runner.ts` is the default
-   * (`IX_MCP_SUBPROCESS=1` opts out), so repeated `ix_map` calls against a repo
+   * (`IX_MCP_SUBPROCESS=1` opts out), so repeated MCP map calls against a repo
    * with a wedging grammar would accumulate unref'd, still-spinning threads for
    * the life of the server. An earlier version of this comment named `ix watch`
    * and missed that one, which is exactly backwards. It is still the right

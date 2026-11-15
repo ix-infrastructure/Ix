@@ -11,8 +11,8 @@ import { formatOption, kindOption, pageLimitOption, pageOffsetOption, parseCount
 import { nextPageCommand, parseOffset } from "../paging.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
 import { isQuiet, projectRow } from "../output-shape.js";
-import { printResolved, resolveFileOrReport } from "../resolve.js";
-import { reportError } from "./around.js";
+import { displayNameOf, printResolved, resolveFileOrReport } from "../resolve.js";
+import { reportFailure } from "../ui.js";
 import { overrideFamily, type OverrideRelation, type OverrideRow } from "../type-walk.js";
 
 interface OverridesOpts {
@@ -60,7 +60,7 @@ ${EXIT_CODES_HELP}`)
       // The root hook refuses a malformed <n> already; this holds where it is
       // not installed, so `abc` never becomes NaN and silently zero rows.
       if (parseOverridesLimit(opts.limit) === undefined) {
-        reportError("invalid_limit", `--limit must be a non-negative integer (for example, 50), not "${opts.limit}".`, opts.format);
+        reportFailure("invalid_limit", `--limit must be a non-negative integer (for example, 50), not "${opts.limit}".`, opts.format);
         return;
       }
       const client = createClient();
@@ -96,7 +96,7 @@ async function overridesOne(client: IxClient, symbol: string, opts: OverridesOpt
   if (opts.format === "json") {
     printJson({
       target: symbol,
-      resolvedTarget: { id: target.id, name: target.name, kind: target.kind, ...(target.path ? { path: target.path } : {}) },
+      resolvedTarget: { id: target.id, name: displayNameOf(target), kind: target.kind, ...(target.path ? { path: target.path } : {}) },
       ...(family.owner ? { owner: family.owner } : {}),
       ...(family.root ? { root: family.root } : {}),
       ...(family.roots ? { roots: family.roots } : {}),

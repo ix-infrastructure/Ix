@@ -22,6 +22,9 @@ You don't need the backend source. The CLI is developed against the published ba
 (`ghcr.io/ix-infrastructure/ix-memory-layer`), which anyone can pull. If a change needs something new from the
 backend, open an issue describing what the CLI needs, and a maintainer will carry it across.
 
+For a map of the code (the packages, command registration, the ingest pipeline, the backend contract, the release
+and the test layers), read `docs/architecture.md` in the repository.
+
 ## Workflow
 
 1. Branch from `main` with a prefix: `feat/`, `fix/`, `docs/`, `refactor/`, `test/`, `ci/` or `chore/`.

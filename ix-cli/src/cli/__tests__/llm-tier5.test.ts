@@ -78,6 +78,16 @@ describe("explain --format llm", () => {
     expect(lines).toContain('diagnostic code=stale_source message="File changed since ingest."');
   });
 
+  it("does not repeat a diagnostic as a note", () => {
+    const lines = renderExplainLlm(
+      facts({ stale: true, diagnostics: [{ code: "stale_source", message: "File changed since ingest." }] }),
+      role, importance, { ...rendered, notes: ["Source file has changed since last ingest — results may be incomplete."] },
+    );
+
+    expect(lines.filter(l => l.startsWith("note "))).toEqual([]);
+    expect(lines.filter(l => l.startsWith("diagnostic "))).toEqual(['diagnostic code=stale_source message="File changed since ingest."']);
+  });
+
   it("quotes a signature so a record never spans two lines", () => {
     const lines = renderExplainLlm(
       facts({ signature: "run(a: string,\n      b: number): void" }),
@@ -134,6 +144,21 @@ describe("read --format llm", () => {
     expect(lines[0]).toBe("ambiguous kind=symbol target=run count=2");
     expect(lines[1]).toContain("candidate n=1 name=run kind=function");
     expect(lines[lines.length - 1]).toContain("--pick");
+  });
+
+  it.each([
+    ["ambiguous-symbol", "Use --pick <n> or --path to disambiguate.", 'hint text="Use --pick <n>, --kind, or --path to disambiguate."'],
+    ["ambiguous-file", "Provide a more specific path to disambiguate.", 'hint text="Provide a more specific path to disambiguate."'],
+  ])("says how to disambiguate once: %s", (targetType, message, hint) => {
+    const lines = renderReadAmbiguityLlm({
+      targetType,
+      candidates: [{ name: "run", kind: "function", path: "/repo/a.ts" }, { name: "run", kind: "method", path: "/repo/b.ts" }],
+      diagnostics: [{ code: "ambiguous_resolution", message }, { code: "stale_source", message: "File changed since ingest." }],
+    } as any, "run");
+
+    expect(lines.filter(l => l.includes("disambiguate"))).toEqual([hint]);
+    // A diagnostic that is not the hint still follows it.
+    expect(lines[lines.length - 1]).toBe('diagnostic code=stale_source message="File changed since ingest."');
   });
 });
 

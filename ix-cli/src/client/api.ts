@@ -2,11 +2,23 @@
 
 import { DEFAULT_ENDPOINT, isLoopbackEndpoint } from "../cli/endpoint.js";
 import { isPreConnectionFailure, RESET_RECONCILIATION_ERROR } from "./transport.js";
+import { httpStatusOf, isIxHttpError, IxHttpError, jsonCode } from "./http-error.js";
 import { Limiter, RequestMemo } from "./request-memo.js";
+import { routeMissing } from "./features.js";
 import { CORRELATION_ID_HEADER, debugRequest, nextCorrelationId } from "./correlation.js";
+import { contextResponse, entityResponse, expandResponse, searchResponse } from "./contract.js";
 import type {
   StructuredContext,
   GraphNode,
+  ExpandResponse,
+  EntityResponse,
+  MapResult,
+  SmellReport,
+  StoredSmellsResponse,
+  SubsystemScoresResponse,
+  ScopedSubsystemResult,
+  StatsResponse,
+  SavingsResponse,
   HealthResponse,
   PatchSummary,
   GraphPatchPayload,
@@ -68,7 +80,7 @@ export interface IxClientOptions {
 }
 
 /** Statuses a proxy or a restarting backend answers with, for which one retry is worth it. */
-const RETRYABLE_READ_STATUS = /^(502|503|504):/;
+const RETRYABLE_READ_STATUSES: ReadonlySet<number> = new Set([502, 503, 504]);
 
 /**
  * A connection dropped mid-request. Not safe to repeat for a write, which may
@@ -78,6 +90,8 @@ const DROPPED_CONNECTION_CODES = new Set(["ECONNRESET", "EPIPE", "UND_ERR_SOCKET
 
 function hasCode(err: unknown, codes: ReadonlySet<string>): boolean {
   for (let e: unknown = err, hops = 0; e && hops < 5; hops++) {
+    // The server answered: its body's `code` is not a socket code.
+    if (isIxHttpError(e)) return false;
     const code = (e as { code?: unknown }).code;
     if (typeof code === "string" && codes.has(code)) return true;
     e = (e as { cause?: unknown }).cause;
@@ -180,7 +194,7 @@ export class IxClient {
     question: string,
     opts?: { asOfRev?: number; depth?: string }
   ): Promise<StructuredContext> {
-    return this.post("/v1/context", { query: question, ...opts });
+    return contextResponse(await this.post<unknown>("/v1/context", { query: question, ...opts }));
   }
 
   /**
@@ -203,10 +217,10 @@ export class IxClient {
     opts?: { asOfRev?: number; depth?: string; hops?: number }
   ): Promise<StructuredContext> {
     const { hops = 1, ...rest } = opts ?? {};
-    return this.post("/v1/context", {
+    return contextResponse(await this.post<unknown>("/v1/context", {
       slices: [{ type: "nodes", nodeIds: [nodeId], expand: true, hops }],
       ...rest,
-    });
+    }));
   }
 
   /**
@@ -219,10 +233,10 @@ export class IxClient {
     nodeIds: string[],
     opts: { depth?: string; signal?: AbortSignal } = {},
   ): Promise<StructuredContext> {
-    return this.post("/v1/context", {
+    return contextResponse(await this.post<unknown>("/v1/context", {
       slices: [{ type: "nodes", nodeIds, expand: true, hops: 1 }],
       ...(opts.depth !== undefined ? { depth: opts.depth } : {}),
-    }, { signal: opts.signal });
+    }, { signal: opts.signal }));
   }
 
   async decide(
@@ -237,7 +251,7 @@ export class IxClient {
     term: string,
     opts?: { limit?: number; kind?: string; language?: string; asOfRev?: number; nameOnly?: boolean; workspaceId?: string; systemId?: string; scope?: string; signal?: AbortSignal }
   ): Promise<GraphNode[]> {
-    return this.post("/v1/search", {
+    return searchResponse(await this.post<unknown>("/v1/search", {
       term,
       limit: opts?.limit,
       kind: opts?.kind,
@@ -250,8 +264,11 @@ export class IxClient {
       // (Ix-memory ≥ 1.0.31, case-insensitive). Older backends decode the
       // request with a derived circe decoder and drop the unknown field, so
       // sending it is always safe; callers keep their own filter as well.
+      // What callers do for an older backend (a wider candidate window) is
+      // removable once MIN_BACKEND_VERSION reaches 1.0.31 (`searchScope` in
+      // features.ts).
       scope: opts?.scope,
-    }, { signal: opts?.signal });
+    }, { signal: opts?.signal }));
   }
 
   // Vector-similarity search. The backend (POST /v1/search/semantic) embeds the
@@ -303,38 +320,34 @@ export class IxClient {
     throw new Error(`No entity found for prefix: ${prefix}`);
   }
 
-  async entity(id: string): Promise<{
-    node: GraphNode;
-    claims: unknown[];
-    edges: unknown[];
-  }> {
-    return this.get(`/v1/entity/${encodeURIComponent(id)}`);
+  async entity(id: string): Promise<EntityResponse> {
+    return entityResponse(await this.get<unknown>(`/v1/entity/${encodeURIComponent(id)}`));
   }
 
   async expandByName(
     name: string,
     opts?: { direction?: string; predicates?: string[]; kinds?: string[]; timeoutMs?: number }
-  ): Promise<{ nodes: any[]; edges: any[] }> {
-    return this.post("/v1/expand-by-name", {
+  ): Promise<ExpandResponse> {
+    return expandResponse(await this.post<unknown>("/v1/expand-by-name", {
       name,
       direction: opts?.direction ?? "both",
       predicates: opts?.predicates,
       kinds: opts?.kinds,
-    }, { timeoutMs: opts?.timeoutMs });
+    }, { timeoutMs: opts?.timeoutMs }), "POST /v1/expand-by-name");
   }
 
   async expand(
     id: string,
     opts?: { direction?: string; predicates?: string[]; hops?: number; limit?: number }
-  ): Promise<{ nodes: any[]; edges: any[] }> {
-    return this.post("/v1/expand", {
+  ): Promise<ExpandResponse> {
+    return expandResponse(await this.post<unknown>("/v1/expand", {
       nodeId: id,
       direction: opts?.direction ?? "both",
       predicates: opts?.predicates,
       hops: opts?.hops ?? 1,
       // Only when asked for, so every existing caller sends the body it did.
       ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
-    });
+    }));
   }
 
   /**
@@ -562,7 +575,8 @@ export class IxClient {
   // Path-2 grouping (Ix#225 Half B): the system_id a workspace currently belongs
   // to (null if a singleton). Lets `ix map <repo>` scope to its stitched system.
   //
-  // Only a 404 (an older backend without the endpoint) means "no system". Any
+  // Only the route being missing (an older backend; see `workspaceSystem` in
+  // features.ts, which names when this fallback can go) means "no system". Any
   // other failure -- backend down, timeout, 5xx, a non-JSON body -- is not an
   // answer and is thrown: `ensureReadScope` persists what this returns with no
   // TTL, so turning an outage into `null` pinned every later read in a stitched
@@ -570,12 +584,12 @@ export class IxClient {
   async workspaceSystem(workspaceId: string): Promise<{ systemId: string | null }> {
     try { return await this.get(`/v1/stitch/system/${encodeURIComponent(workspaceId)}`); }
     catch (err) {
-      if (err instanceof Error && err.message.startsWith("404:")) return { systemId: null };
+      if (routeMissing("workspaceSystem", err)) return { systemId: null };
       throw err;
     }
   }
 
-  async map(opts?: { full?: boolean; workspaceId?: string; systemId?: string }): Promise<any> {
+  async map(opts?: { full?: boolean; workspaceId?: string; systemId?: string }): Promise<MapResult> {
     // /v1/map reads snake_case keys (full, branch_id, workspace_id, system_id) off the raw JSON body.
     const body: Record<string, unknown> = { full: opts?.full ?? false };
     if (opts?.workspaceId) body.workspace_id = opts.workspaceId;
@@ -590,7 +604,7 @@ export class IxClient {
       const text = await resp.text();
       throw httpError(resp.status, text);
     }
-    return resp.json();
+    return resp.json() as Promise<MapResult>;
   }
 
   async commitPatchBulk(patches: GraphPatchPayload[]): Promise<PatchCommitResult> {
@@ -619,7 +633,7 @@ export class IxClient {
      * 2 minutes). `ix smells` sets its `--wait` budget here. Never retried.
      */
     timeoutMs?: number;
-  }): Promise<any> {
+  }): Promise<SmellReport> {
     const params = new URLSearchParams();
     if (opts?.orphanMaxConnections !== undefined) params.set("orphan-max-connections", String(opts.orphanMaxConnections));
     if (opts?.godModuleChunks      !== undefined) params.set("god-module-chunks",      String(opts.godModuleChunks));
@@ -631,7 +645,7 @@ export class IxClient {
     return this.post(qs ? `/v1/smells?${qs}` : "/v1/smells", {}, { timeoutMs: opts?.timeoutMs });
   }
 
-  async listSmells(opts?: { workspaceId?: string; systemId?: string }): Promise<any> {
+  async listSmells(opts?: { workspaceId?: string; systemId?: string }): Promise<StoredSmellsResponse> {
     const params = new URLSearchParams();
     if (opts?.workspaceId) params.set("workspace_id", opts.workspaceId);
     if (opts?.systemId)    params.set("system_id",    opts.systemId);
@@ -639,7 +653,7 @@ export class IxClient {
     return this.get(`/v1/smells${qs ? `?${qs}` : ""}`);
   }
 
-  async scoreSubsystems(opts?: { workspaceId?: string; systemId?: string }): Promise<any> {
+  async scoreSubsystems(opts?: { workspaceId?: string; systemId?: string }): Promise<SubsystemScoresResponse> {
     const params = new URLSearchParams();
     if (opts?.workspaceId) params.set("workspace_id", opts.workspaceId);
     if (opts?.systemId)    params.set("system_id",    opts.systemId);
@@ -647,7 +661,7 @@ export class IxClient {
     return this.post(`/v1/subsystems/score${qs ? `?${qs}` : ""}`, {});
   }
 
-  async listSubsystems(opts?: ListSubsystemsOptions & { workspaceId?: string; systemId?: string }): Promise<any> {
+  async listSubsystems(opts?: ListSubsystemsOptions & { workspaceId?: string; systemId?: string }): Promise<SubsystemScoresResponse> {
     const params = new URLSearchParams();
     if (opts?.detailed) params.set("detailed", "true");
     if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
@@ -661,7 +675,8 @@ export class IxClient {
     return this.get(`/v1/subsystems${qs ? `?${qs}` : ""}`);
   }
 
-  async getSubsystemMap(opts?: { target?: string; pick?: number; workspaceId?: string; systemId?: string }): Promise<any> {
+  /** The persisted map, or with `target` that one region (`ScopedSubsystemResult`). */
+  async getSubsystemMap(opts?: { target?: string; pick?: number; workspaceId?: string; systemId?: string }): Promise<MapResult | ScopedSubsystemResult> {
     const params = new URLSearchParams();
     if (opts?.target) params.set("target", opts.target);
     if (opts?.pick !== undefined) params.set("pick", String(opts.pick));
@@ -735,8 +750,9 @@ export class IxClient {
   // so we keep the original sync request unchanged — identical behavior for
   // OSS and Pro users running against a local memory-layer.
   //
-  // If a remote backend predates the async endpoints (404 on begin), fall
-  // back to the sync request so old deployments still work.
+  // If a remote backend predates the async endpoints (`asyncReset` in
+  // features.ts decides, and names when this fallback can go), fall back to the
+  // sync request so old deployments still work.
   private async runReset(
     asyncPath: string,
     syncPath: string,
@@ -771,7 +787,7 @@ export class IxClient {
       await beginResp.body?.cancel().catch(() => {});
       throw this.resetRedirectError("start route", beginResp);
     }
-    if (beginResp.status === 404) {
+    if (routeMissing("asyncReset", beginResp.status)) {
       return this.runResetSync(syncPath);
     }
     if (!beginResp.ok) {
@@ -891,12 +907,13 @@ export class IxClient {
     return resp.json() as Promise<{ ok: boolean; message: string }>;
   }
 
-  async savings(detail?: boolean): Promise<any> {
+  async savings(detail?: boolean): Promise<SavingsResponse> {
     const qs = detail ? "?detail=true" : "";
     return this.get(`/v1/savings${qs}`);
   }
 
-  async savingsReset(): Promise<any> {
+  /** The body is a confirmation nothing reads; its shape is not documented. */
+  async savingsReset(): Promise<unknown> {
     const resp = await fetch(`${this.endpoint}/v1/savings`, {
       method: "DELETE",
       headers: this.headers(false, "DELETE", "/v1/savings"),
@@ -908,7 +925,7 @@ export class IxClient {
     return resp.json();
   }
 
-  async stats(opts?: { workspaceId?: string; systemId?: string; timeoutMs?: number }): Promise<any> {
+  async stats(opts?: { workspaceId?: string; systemId?: string; timeoutMs?: number }): Promise<StatsResponse> {
     const params = new URLSearchParams();
     if (opts?.workspaceId) params.set("workspace_id", opts.workspaceId);
     if (opts?.systemId)    params.set("system_id",    opts.systemId);
@@ -1003,7 +1020,8 @@ export class IxClient {
     if (this.deadlineSignal?.aborted) return false;
     if (this.readDeadlineAt !== undefined && Date.now() >= this.readDeadlineAt) return false;
     if (isPreConnectionFailure(err) || hasCode(err, DROPPED_CONNECTION_CODES)) return true;
-    return err instanceof Error && RETRYABLE_READ_STATUS.test(err.message);
+    const status = httpStatusOf(err);
+    return status !== undefined && RETRYABLE_READ_STATUSES.has(status);
   }
 
   /**
@@ -1050,15 +1068,14 @@ export class IxClient {
 
 /**
  * The backend refused a request for want of its local bearer token (a 401
- * with code `local_token_required`, from the loopback guard). The message keeps
- * the `401: <body>` shape every other HTTP failure has, so code that reads an
- * error code back out of a message still sees it; `renderCliError` recognises
+ * with code `local_token_required`, from the loopback guard). Its message is
+ * the `401: <body>` every other HTTP failure has; `renderCliError` recognises
  * the class and says how to fix it.
  */
-export class LocalTokenRequiredError extends Error {
-  readonly code = "local_token_required";
+export class LocalTokenRequiredError extends IxHttpError {
+  override readonly code = "local_token_required";
   constructor(body: string) {
-    super(`401: ${errorBodyForMessage(body)}`);
+    super(401, errorBodyForMessage(body));
     this.name = "LocalTokenRequiredError";
   }
 }
@@ -1072,33 +1089,22 @@ export interface HttpErrorDetail {
 }
 
 /**
- * The error for a non-2xx response: `<status>: <body>`, or a typed one we can explain.
+ * The error for a non-2xx response: an `IxHttpError` whose message is
+ * `<status>: <body>`, or a typed subclass we can explain.
  *
- * With `headers`, the Error also carries `status` and, when the response had
- * one, `retryAfter` (see `HttpErrorDetail`), both non-enumerable. The message
- * is the same either way: many callers read the status and the error code back
- * out of it, so it must not change shape. Only the commit routes pass headers,
- * for the ingest's transient-status retry (`cli/commit-retry.ts`).
+ * With `headers`, the error also carries `retryAfter` when the response had
+ * one. Only the commit routes pass headers, for the ingest's transient-status
+ * retry (`cli/commit-retry.ts`).
  */
-export function httpError(status: number, body: string, headers?: Pick<Headers, "get">): Error {
-  if (status === 401) {
-    try {
-      const parsed = JSON.parse(body) as { code?: unknown } | null;
-      if (parsed?.code === "local_token_required") return new LocalTokenRequiredError(body);
-    } catch { /* not the guard's JSON: a plain 401 */ }
-  }
-  const err = new Error(`${status}: ${errorBodyForMessage(body)}`);
-  if (headers !== undefined) {
-    Object.defineProperty(err, "status", { value: status, enumerable: false });
-    const retryAfter = headers.get("retry-after");
-    if (retryAfter !== null) Object.defineProperty(err, "retryAfter", { value: retryAfter, enumerable: false });
-  }
-  return err;
+export function httpError(status: number, body: string, headers?: Pick<Headers, "get">): IxHttpError {
+  if (status === 401 && jsonCode(body) === "local_token_required") return new LocalTokenRequiredError(body);
+  return new IxHttpError(status, errorBodyForMessage(body), { retryAfter: headers?.get("retry-after") });
 }
 
 /**
- * An error response body as it goes into an Error message. A JSON body is kept
- * whole: callers read its error code back out of the message. Anything else,
+ * An error response body as it goes into an Error message (and
+ * `IxHttpError.body`). A JSON body is kept whole: `parseBackendError` and the
+ * ingest read fields out of it. Anything else,
  * such as a proxy's HTML page, is cut to 300 characters, so a multi-megabyte
  * page never becomes a message, a log line or an MCP tool result.
  */
@@ -1129,14 +1135,15 @@ interface SuccessBody {
  * has no business making, since the whole premise of Ix#528 and Ix#568 is that
  * whatever proxy sits in front spells things the way it likes, up to and
  * including a 200 with an HTML error page. Stating the status turns that
- * inference into a fact the error carries, and it matches the `${status}: ...`
- * shape every other failure here already uses.
+ * inference into a fact the error carries: an `IxHttpError` with that 2xx
+ * status, whose message has the `${status}: ...` shape every other failure here
+ * already uses.
  */
 function parseOrThrowWithStatus<T>({ status, text }: SuccessBody): T {
   try {
     return JSON.parse(text) as T;
   } catch {
     const preview = text.length > 200 ? `${text.slice(0, 200)}…` : text;
-    throw new Error(`${status}: response body is not JSON: ${preview}`);
+    throw new IxHttpError(status, preview, { message: `${status}: response body is not JSON: ${preview}` });
   }
 }

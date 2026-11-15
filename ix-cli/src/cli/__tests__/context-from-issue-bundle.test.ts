@@ -6,7 +6,10 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { buildBundle, clampBudgets, issueRankedFiles, renderBundle } from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { issueRankedFiles } from "../context/issue.js";
+import { clampBudgets } from "../context/options.js";
+import { renderBundle } from "../context/render.js";
 import { contextBundleSchema } from "../context-bundle-schema.js";
 import type { ContextFacts, EntityLocation } from "../explain/facts.js";
 import type { RankedFile, StartingPoint } from "../explain/issue.js";
