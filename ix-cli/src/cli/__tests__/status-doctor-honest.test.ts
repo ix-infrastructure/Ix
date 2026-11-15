@@ -126,7 +126,7 @@ describe("ix status", () => {
   }
 
   async function statusWith(
-    info: { mapCompleted?: boolean; mapStale?: boolean; mapRefreshError?: string | null },
+    info: { mapCompleted?: boolean; mapStale?: boolean; mapRefreshError?: string | null; files?: string[] },
     ...args: string[]
   ): Promise<string> {
     vi.doMock("../stale.js", async (orig) => ({
@@ -134,7 +134,8 @@ describe("ix status", () => {
       detectStaleFiles: () => ({
         graphCompleted: true, mapCompleted: info.mapCompleted ?? true, mapStale: info.mapStale ?? false, mapRefreshError: info.mapRefreshError ?? null,
         currentRev: 7, lastIngestAt,
-        staleFiles: 0, sampleChangedFiles: [], replayedFiles: [], parseTimeouts: [],
+        staleFiles: info.files?.length ?? 0, sampleChangedFiles: info.files ?? [],
+        replayedFiles: info.files ?? [], parseTimeouts: info.files ?? [],
       }),
     }));
     const { registerStatusCommand } = await import("../commands/status.js");
@@ -309,6 +310,31 @@ describe("ix status", () => {
     expect(await status()).not.toMatch(/Verified/);
     out.length = 0;
     expect(JSON.parse(await status("--format", "json")).verify).toBeNull();
+  });
+
+  it("prints only the json paths it publishes (contracts/fields.ts), and all of them", async () => {
+    // The plugin contract check fails a plugin read of a path not published
+    // for `status`, so a printed path missing from the list would fail a
+    // plugin that reads it correctly.
+    const { acceptsField, JSON_FIELDS } = await import("../contracts/fields.js");
+    const { fieldPaths } = await import("./helpers/field-paths.js");
+    const { saveVerifyRecord } = await import("../verify.js");
+    registerRepo();
+    stats = HOLLOW;
+    saveVerifyRecord({
+      root: repo, at: new Date().toISOString(), lastIngestAt: null, graph: "diverged",
+      files: 20, stale: 1, diverged: 1, unverified: 0, divergedFiles: ["a.ts"], fix: "ix reset --workspace --yes --ingest",
+    });
+    const printed = new Set<string>();
+    for (const info of [{ files: ["a.ts"] }, { mapCompleted: false, mapStale: true, mapRefreshError: "timed out" }]) {
+      out.length = 0;
+      for (const p of fieldPaths(JSON.parse(await statusWith(info, "--format", "json")))) printed.add(p);
+    }
+    expect([...printed].filter((p) => acceptsField("status", p) !== true)).toEqual([]);
+    // The failure record's paths are pinned in json-fields.test.ts; every
+    // other published path is printed here.
+    const own = JSON_FIELDS.status.filter((p) => !["error", "message", "dir", "next"].includes(p));
+    expect(own.filter((p) => !printed.has(p))).toEqual([]);
   });
 
   it("says unverified, not ok, when the directory is in no workspace", async () => {
@@ -509,6 +535,50 @@ describe("doctor checks", () => {
     const check = json.checks.find((c: { name: string }) => c.name === "Graph matches a re-parse");
     expect(check).toEqual({ name: "Graph matches a re-parse", ok: true, detail: "not checked: backend degraded" });
     expect(loads).toBe(0);
+    process.exitCode = undefined;
+  });
+
+  it("ix doctor: lists every grammar, and names an unavailable one with its reason without failing (#967)", async () => {
+    registerRepo();
+    vi.doMock("../commands/ingestion-loader.js", async (orig) => ({
+      ...(await orig<typeof import("../commands/ingestion-loader.js")>()),
+      loadGrammarStatus: async () => [
+        { language: "kotlin", loaded: false, package: "tree-sitter-kotlin", reason: "Cannot find module 'tree-sitter-kotlin'" },
+        { language: "typescript", loaded: true },
+      ],
+    }));
+    mockNoDocker();
+    const { registerDoctorCommand } = await import("../commands/doctor.js");
+    const json = JSON.parse(await run(registerDoctorCommand, ["doctor", "--format", "json"]));
+    expect(json.grammars).toEqual([
+      { language: "kotlin", loaded: false, package: "tree-sitter-kotlin", reason: "Cannot find module 'tree-sitter-kotlin'" },
+      { language: "typescript", loaded: true },
+    ]);
+    const check = json.checks.find((c: { name: string }) => c.name === "Language grammars loaded");
+    expect(check).toEqual({
+      name: "Language grammars loaded",
+      ok: true,
+      detail: "1 of 2 loaded; unavailable: kotlin (Cannot find module 'tree-sitter-kotlin') — files in that language are not parsed",
+    });
+    process.exitCode = undefined;
+  });
+
+  it("ix doctor: text output lists the unavailable grammar under its check (#967)", async () => {
+    registerRepo();
+    vi.doMock("../commands/ingestion-loader.js", async (orig) => ({
+      ...(await orig<typeof import("../commands/ingestion-loader.js")>()),
+      loadGrammarStatus: async () => [
+        { language: "sas", loaded: false, package: "tree-sitter-sas", reason: "No native build was found" },
+        { language: "typescript", loaded: true },
+      ],
+    }));
+    mockNoDocker();
+    const { registerDoctorCommand } = await import("../commands/doctor.js");
+    // eslint-disable-next-line no-control-regex
+    const text = (await run(registerDoctorCommand, ["doctor"])).replace(/\x1b\[[0-9;]*m/g, "");
+    expect(text).toContain("Language grammars loaded — 1 of 2 loaded; unavailable: sas (No native build was found)");
+    expect(text).toContain("loaded: typescript");
+    expect(text).toContain("unavailable: sas (tree-sitter-sas) — No native build was found");
     process.exitCode = undefined;
   });
 

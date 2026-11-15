@@ -2,14 +2,26 @@
 
 The Ix backend exposes a JSON-over-HTTP API on **`http://localhost:8090`** (the
 local Docker memory-layer). The `ix` CLI and the Compass visualizer are its two
-primary clients. This reference is generated from the client source
+primary clients. This reference is written by hand from the client source
 (`ix-cli/src/client/api.ts`) and the shared client types
 (`ix-cli/src/client/types.ts`). The visualizer proxy
 (`ix-cli/src/cli/commands/view.ts`) forwards every `/v1/*` request to the
-backend and defines no endpoints of its own. A committed parity gate
-(`ix-cli/scripts/check-api-parity.mjs`, wired into CI) enforces that the
-OpenAPI paths/methods match the client surface, so the reference cannot drift
-from what the CLI actually calls.
+backend and defines no endpoints of its own.
+
+Two CI checks keep it honest:
+
+- **Against the client.** `ix-cli/scripts/check-api-parity.mjs` requires the
+  OpenAPI paths and methods to match what the client calls, in both
+  directions, so the reference cannot drift from what the CLI sends.
+- **Against a backend, for existence only.** The e2e job sends one request per
+  documented method and path to the backend pinned in
+  `ix-cli/test/e2e/compose.e2e.yml` and fails on any the backend does not
+  route (`ix-cli/test/e2e/api-reference.e2e.ts`). It does not check request
+  or response shapes; those are described from the client's side.
+
+The backend release it is checked against is the `ix-memory-layer` image
+pinned in `ix-cli/test/e2e/compose.e2e.yml`. The pin moves with Dependabot
+bumps, and the check runs on every one.
 
 ## Table of Contents
 
@@ -54,10 +66,8 @@ The API has two logical surfaces:
 # Liveness + graph schema version
 curl -s http://localhost:8090/v1/health
 
-# Ingest a repository
-curl -s -X POST http://localhost:8090/v1/ingest \
-  -H "Content-Type: application/json" \
-  -d '{"path": "/absolute/path/to/repo", "recursive": true}'
+# Map a repository first, with the CLI (it commits through /v1/patches/bulk)
+ix map /absolute/path/to/repo
 
 # Search for a symbol
 curl -s -X POST http://localhost:8090/v1/search \
@@ -139,45 +149,22 @@ decisions, intents, and the supporting subgraph.
 
 ### Ingestion & Mapping
 
-#### POST `/v1/ingest`
+The CLI ingests without an ingest endpoint: `ix ingest` and `ix map` parse
+source locally and commit the resulting graph patches through
+[`POST /v1/patches/bulk` and `POST /v1/patch`](#patches--provenance).
 
-Ingest a path into the graph. Long-running: the client allows **30 minutes**.
-
-**Request body**
-
-| Field | Type | Notes |
-|---|---|---|
-| `path` | string | required — absolute path to ingest |
-| `recursive` | boolean | optional |
-| `force` | boolean | optional — re-ingest unchanged files |
-
-**Response** — `IngestResult`:
-
-```json
-{
-  "filesProcessed": 128,
-  "patchesApplied": 142,
-  "filesSkipped": 3,
-  "entitiesCreated": 640,
-  "latestRev": 217,
-  "skipReasons": { "unchanged": 1, "emptyFile": 1, "parseError": 1, "tooLarge": 0 }
-}
-```
-
-> The **CLI's** `ix ingest --format json` emits a different, narrower breakdown
-> under the same key: `unchanged` there counts only files skipped as *mtime- or
-> hash-unchanged*, `emptyFile` is a real count rather than a hardcoded `0`, and
-> there is an extra `unparsed` bucket for files the parse pool returned nothing
-> for. A file whose parse ran past `IX_PARSE_BUDGET_MS` is counted in
-> `parseTimeout` and named in a top-level `parseTimeouts` list. Two buckets
-> come from discovery and are not part of `filesSkipped`: `skippedDirs` counts
-> files left out under a directory that is never source (build output,
-> dependencies, VCS metadata, tool caches) -- by name on a plain walk, and only
-> for untracked files in a git work tree, where a tracked file is always kept
-> -- and `unreadable` counts listed files that could not be stat'd.
-> That is the client's own summary of its own run and is not this response;
-> see the stitch section below for why the narrower `unchanged` is load-bearing
-> there.
+> The **CLI's** `ix ingest --format json` reports a `skipReasons` breakdown:
+> `unchanged` counts only files skipped as *mtime- or hash-unchanged*,
+> `emptyFile` is a real count, and there is an extra `unparsed` bucket for
+> files the parse pool returned nothing for. A file whose parse ran past
+> `IX_PARSE_BUDGET_MS` is counted in `parseTimeout` and named in a top-level
+> `parseTimeouts` list. Two buckets come from discovery and are not part of
+> `filesSkipped`: `skippedDirs` counts files left out under a directory that is
+> never source (build output, dependencies, VCS metadata, tool caches) -- by
+> name on a plain walk, and only for untracked files in a git work tree, where
+> a tracked file is always kept -- and `unreadable` counts listed files that
+> could not be stat'd. See the stitch section below for why the narrower
+> `unchanged` is load-bearing there.
 
 #### POST `/v1/map`
 
@@ -874,19 +861,6 @@ interface StructuredContext {
 }
 ```
 
-### IngestResult
-
-```ts
-interface IngestResult {
-  filesProcessed: number;
-  patchesApplied: number;
-  filesSkipped?: number;
-  entitiesCreated: number;
-  latestRev: number;
-  skipReasons?: { unchanged: number; emptyFile: number; parseError: number; tooLarge: number; minifiedLikely?: number };
-}
-```
-
 ### GraphPatchPayload
 
 ```ts
@@ -944,7 +918,7 @@ non-`ok` response, so CLI errors carry both the HTTP status and the raw body.
 |---|---|
 | General `get` / `post` | 2 minutes |
 | `POST /v1/patch`, `/v1/patches/bulk` | 5 minutes |
-| `POST /v1/ingest`, `/v1/map` | 30 minutes |
+| `POST /v1/map` | 30 minutes |
 | Async reset begin / status poll | 30 seconds each |
 | Sync reset (local) | 10 minutes |
 | Shared deadline (`ix map`) | hard wall-clock budget; aborts all in-flight requests via `AbortSignal.any` |

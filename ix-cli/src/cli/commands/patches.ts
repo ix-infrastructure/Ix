@@ -3,6 +3,7 @@
 import type { Command } from "commander";
 import { createClient } from "../config.js";
 import { formatPatches } from "../format.js";
+import { formatOption } from "../options.js";
 
 /**
  * `ix patches`.
@@ -25,7 +26,7 @@ export function registerPatchesCommand(program: Command): void {
     .command("patches")
     .description("List recent patches")
     .option("--limit <n>", "Maximum patches to return", "50")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .action(async (opts: { limit: string; format: string }) => {
       const client = await createClient();
       const patches = await client.listPatches({ limit: parseInt(opts.limit, 10) });

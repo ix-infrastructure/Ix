@@ -6,8 +6,8 @@ import * as nodePath from "node:path";
 import { renderSection, renderKeyValue, renderWarning, renderNote, renderSuccess } from "../ui.js";
 import { createClient } from "../../client/factory.js";
 import { canonicalWorkspacePath, getEndpoint, resolveWorkspaceRoot } from "../config.js";
-import { llmError, llmLine, printLlmLines } from "../llm.js";
-import { backendUnreachableError, CliUsageError, isBackendUnreachable } from "../errors.js";
+import { llmLine, printLlmLines } from "../llm.js";
+import { backendUnreachableError, emitErrorRecord, CliUsageError, isBackendUnreachable } from "../errors.js";
 import { printJson } from "../format.js";
 import { normalizePathSeparators } from "../path-match.js";
 import {
@@ -17,6 +17,7 @@ import {
   type VerifyFileResult,
   type VerifyReport,
 } from "../verify.js";
+import { formatOption } from "../options.js";
 
 /**
  * `ix verify --format llm`: one `verify` record with the verdict and the fix,
@@ -127,7 +128,7 @@ export function registerVerifyCommand(program: Command): void {
     .option("--sample <n>", `How many files to check (default ${DEFAULT_VERIFY_SAMPLE}, or the number of paths given)`)
     .option("--seed <n>", `Seed for the random part of the sample (default ${DEFAULT_VERIFY_SEED})`)
     .option("--root <dir>", "Workspace root directory")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .action(async (paths: string[] | undefined, opts: { format: string; root?: string; sample?: string; seed?: string }) => {
       const named = paths ?? [];
       const sample = parseCount("--sample", opts.sample, named.length > 0 ? named.length : DEFAULT_VERIFY_SAMPLE, 1);
@@ -145,9 +146,9 @@ export function registerVerifyCommand(program: Command): void {
         // anything else reaches the shared boundary in errors.ts.
         if (!isBackendUnreachable(err)) throw err;
         const unreachable = backendUnreachableError(getEndpoint());
-        if (opts.format === "llm") {
-          console.log(llmError(unreachable.error, unreachable.message, [["hint", unreachable.next ?? null]]));
-        } else {
+        // The boundary's record, in this command's format: llm replaces the
+        // prose, json goes to stdout with the prose kept on stderr.
+        if (!emitErrorRecord(unreachable.error, unreachable.message, unreachable.next, [], opts.format)) {
           console.error(unreachable.message);
           if (unreachable.next) console.error(unreachable.next);
         }

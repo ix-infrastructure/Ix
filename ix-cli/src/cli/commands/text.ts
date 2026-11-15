@@ -5,11 +5,12 @@ import { createInterface } from "node:readline";
 import path from "node:path";
 import type { Command } from "commander";
 import { formatTextResults, printJson, sliceRanked, type TextResult } from "../format.js";
-import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
+import { nextPageCommand, parseOffset } from "../paging.js";
 import { isPathInsideResolvedRoot, resolveWorkspaceRoot } from "../config.js";
 import { stderr } from "../stderr.js";
 import { llmError } from "../llm.js";
 import { currentRunSignal } from "../../client/run-signal.js";
+import { formatOption, pageOffsetOption } from "../options.js";
 
 /**
  * Runs ripgrep and returns at most `limit` match lines. `matched`, when given,
@@ -356,10 +357,10 @@ export function registerTextCommand(program: Command, executeRipgrep?: RunRipgre
     .command("text <term>")
     .description("Fast lexical/text search across the codebase (uses ripgrep)")
     .option("--limit <n>", "Max results", "20")
-    .option("--offset <n>", OFFSET_FLAG, "0")
+    .addOption(pageOffsetOption())
     .option("--path <dir>", "Restrict search to a workspace-relative directory", ".")
     .option("--language <lang>", "Filter by language (python, typescript, scala, etc.)")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .option("--root <dir>", "Workspace root directory")
     .addHelpText("after", "\nExamples:\n  ix text verify_token --language python\n  ix text \"class.*Service\" --limit 10 --format json\n  ix text TODO --path src/\n  ix text TODO --offset 20")
     .action(async (

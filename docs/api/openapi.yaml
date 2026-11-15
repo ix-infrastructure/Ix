@@ -96,30 +96,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/StructuredContext"
 
-  /v1/ingest:
-    post:
-      tags: [ingestion]
-      summary: Ingest a path into the graph (long-running, up to 30 min)
-      operationId: ingest
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [path]
-              properties:
-                path: { type: string, description: Absolute path to ingest }
-                recursive: { type: boolean }
-                force: { type: boolean, description: Re-ingest unchanged files }
-      responses:
-        "200":
-          description: Ingestion result
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/IngestResult"
-
   /v1/map:
     post:
       tags: [ingestion]
@@ -1403,10 +1379,63 @@ components:
         attrs: { type: object, additionalProperties: true }
         createdRev: { type: integer }
         deletedRev: { type: integer }
+    Factor:
+      type: object
+      required: [value, reason]
+      properties:
+        value: { type: number }
+        reason: { type: string }
+    ConfidenceBreakdown:
+      type: object
+      description: >-
+        The factors behind a claim's confidence. The combined confidence is the
+        product of the six factor values, clamped to [0, 1]; it is not
+        serialized in this object (compactClaims[].confidence.score carries
+        it). ScoredClaim.finalScore is relevance × confidence, not confidence.
+      required: [baseAuthority, verification, recency, corroboration, conflictPenalty, intentAlignment]
+      properties:
+        baseAuthority: { $ref: "#/components/schemas/Factor" }
+        verification: { $ref: "#/components/schemas/Factor" }
+        recency: { $ref: "#/components/schemas/Factor" }
+        corroboration: { $ref: "#/components/schemas/Factor" }
+        conflictPenalty: { $ref: "#/components/schemas/Factor" }
+        intentAlignment: { $ref: "#/components/schemas/Factor" }
+    Claim:
+      type: object
+      required: [id, entityId, statement, status]
+      properties:
+        id: { type: string }
+        entityId: { type: string }
+        statement: { type: string }
+        status:
+          type: string
+          enum: [Active, Stale, Retracted]
+        value:
+          description: The claimed value (any JSON value)
+        confidence:
+          description: Confidence stored on the claim itself; the scored breakdown is ScoredClaim.confidence
+        provenance:
+          type: object
+          properties:
+            sourceUri: { type: string, description: Workspace-relative path }
+            sourceHash: { type: string }
+            extractor: { type: string }
+            sourceType: { type: string }
+            observedAt: { type: string, format: date-time }
+        createdRev: { type: integer }
+        deletedRev: { type: integer }
+    ScoredClaim:
+      type: object
+      required: [claim, confidence, relevance, finalScore]
+      properties:
+        claim: { $ref: "#/components/schemas/Claim" }
+        confidence: { $ref: "#/components/schemas/ConfidenceBreakdown" }
+        relevance: { type: number }
+        finalScore: { type: number, description: relevance × confidence }
     StructuredContext:
       type: object
       properties:
-        claims: { type: array, items: { type: object } }
+        claims: { type: array, items: { $ref: "#/components/schemas/ScoredClaim" } }
         compactClaims: { type: array, items: { type: object } }
         conflicts: { type: array, items: { type: object } }
         decisions: { type: array, items: { type: object } }
@@ -1421,22 +1450,6 @@ components:
             hopsExpanded: { type: integer }
             asOfRev: { type: integer }
             depth: { type: string }
-    IngestResult:
-      type: object
-      properties:
-        filesProcessed: { type: integer }
-        patchesApplied: { type: integer }
-        filesSkipped: { type: integer }
-        entitiesCreated: { type: integer }
-        latestRev: { type: integer }
-        skipReasons:
-          type: object
-          properties:
-            unchanged: { type: integer }
-            emptyFile: { type: integer }
-            parseError: { type: integer }
-            tooLarge: { type: integer }
-            minifiedLikely: { type: integer }
     NodeCreationResult:
       type: object
       properties:
@@ -1531,12 +1544,99 @@ components:
         extractor: { type: string }
         sourceType: { type: string }
         workspaceId: { type: string, description: SHA-256 of the workspace root path }
-    PatchOp:
+    # The op shapes, node kinds and edge predicates below mirror
+    # core-ingestion/src/schema.ts (copied to ix-cli/src/client/graph-schema.ts);
+    # ix-cli/src/client/__tests__/graph-schema.test.ts checks they agree.
+    NodeKind:
+      type: string
+      description: |
+        Every node kind a patch from the ix CLI writes. Symbol nodes come from
+        the parser, which writes struct, enum, record, union, impl, type alias
+        and annotation definitions as `class`.
+      enum:
+        [file, module, class, interface, trait, function, method, constant, macro,
+         table, view, label, config, config_entry, frontmatter, heading, section,
+         environment, chunk, intent, doc, decision]
+    EdgePredicate:
+      type: string
+      description: Every edge predicate a patch from the ix CLI writes.
+      enum: [CONTAINS, CALLS, IMPORTS, EXTENDS, REFERENCES, CONTAINS_CHUNK, DEFINES, NEXT]
+    UpsertNodeOp:
       type: object
+      description: |
+        Create or replace a node. `attrs` is an open map. Symbol and file nodes
+        carry `line_start` / `line_end` / `language` / `role`; chunk nodes carry
+        `file_uri`, `chunk_kind`, `start_line` / `end_line`, `start_byte` /
+        `end_byte`, `content_hash` and `parser_version`.
+      required: [type, id, kind, name, attrs]
+      properties:
+        type: { type: string, enum: [UpsertNode] }
+        id: { type: string }
+        kind: { $ref: "#/components/schemas/NodeKind" }
+        name: { type: string }
+        attrs: { type: object, additionalProperties: true }
+    UpsertEdgeOp:
+      type: object
+      description: |
+        Create or replace an edge. `attrs` is an open map; an edge resolved to
+        another file carries `confidence` and `tier`.
+      required: [type, id, src, dst, predicate, attrs]
+      properties:
+        type: { type: string, enum: [UpsertEdge] }
+        id: { type: string }
+        src: { type: string, description: Source node id }
+        dst: { type: string, description: Destination node id }
+        predicate: { $ref: "#/components/schemas/EdgePredicate" }
+        attrs: { type: object, additionalProperties: true }
+    DeleteNodeOp:
+      type: object
+      description: Retire a node by id.
+      required: [type, id]
+      properties:
+        type: { type: string, enum: [DeleteNode] }
+        id: { type: string }
+    DeleteEdgeOp:
+      type: object
+      description: Retire an edge by id.
+      required: [type, id]
+      properties:
+        type: { type: string, enum: [DeleteEdge] }
+        id: { type: string }
+    AssertClaimOp:
+      type: object
+      description: Assert a fact about a node, for the confidence and conflict engine.
+      required: [type, entityId, field, value, confidence]
+      properties:
+        type: { type: string, enum: [AssertClaim] }
+        entityId: { type: string }
+        field: { type: string, description: "`<predicate in lower case>:<target name>`, e.g. `calls:render`" }
+        value: { description: The claimed value; the CLI sends the target name. }
+        confidence: { type: number, nullable: true, description: Null lets the backend score it }
+    RetractClaimOp:
+      type: object
+      description: Withdraw a claim. The ix CLI does not send one; only `type` is documented here.
       required: [type]
       properties:
-        type: { type: string }
+        type: { type: string, enum: [RetractClaim] }
       additionalProperties: true
+    PatchOp:
+      description: One op in a graph patch, told apart by `type`.
+      oneOf:
+        - $ref: "#/components/schemas/UpsertNodeOp"
+        - $ref: "#/components/schemas/UpsertEdgeOp"
+        - $ref: "#/components/schemas/DeleteNodeOp"
+        - $ref: "#/components/schemas/DeleteEdgeOp"
+        - $ref: "#/components/schemas/AssertClaimOp"
+        - $ref: "#/components/schemas/RetractClaimOp"
+      discriminator:
+        propertyName: type
+        mapping:
+          UpsertNode: "#/components/schemas/UpsertNodeOp"
+          UpsertEdge: "#/components/schemas/UpsertEdgeOp"
+          DeleteNode: "#/components/schemas/DeleteNodeOp"
+          DeleteEdge: "#/components/schemas/DeleteEdgeOp"
+          AssertClaim: "#/components/schemas/AssertClaimOp"
+          RetractClaim: "#/components/schemas/RetractClaimOp"
     GraphPatchPayload:
       type: object
       required: [patchId, actor, timestamp, source, baseRev, ops, replaces]

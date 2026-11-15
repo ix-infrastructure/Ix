@@ -320,18 +320,25 @@ Exhaustive references: **[commands](skills/ix/references/commands.md)** ·
 
 ### Supported languages
 
+<!-- languages:code:start (generated from SupportedLanguages by ix-cli/scripts/check-language-docs.mjs --write) -->
 Symbols, calls and imports are extracted across **27 languages**:
 
-`JavaScript` `TypeScript` `Python` `Java` `C` `C++` `C#` `Go` `Ruby` `Rust` `PHP`
-`Kotlin` `Swift` `Scala` `R` `SAS` `Elixir` `Haskell` `Zig` `Lua` `Bash`
-`PowerShell` `HTML` `XML` `CSS` `HCL / Terraform` `Makefile`
+`JavaScript` `TypeScript` `Python` `Java` `C` `C++` `C#` `Go` `Ruby` `Rust`
+`PHP` `Kotlin` `Swift` `Scala` `R` `SAS` `Elixir` `Makefile` `Lua` `Bash`
+`PowerShell` `Haskell` `Zig` `HTML` `XML` `HCL / Terraform` `CSS`
+<!-- languages:code:end -->
 
 CUDA (`.cu` / `.cuh`) is parsed with the C++ grammar, including kernel-launch
 syntax (`kernel<<<grid, block>>>(args)`), so host-to-kernel calls appear in the
 graph. Python stub files (`.pyi`) are parsed as Python.
 
-Also recognized as config and data formats: `YAML` `JSON` `TOML` `SQL`
-`Protocol Buffers` `Dockerfile` `Markdown` `LaTeX`
+Config and data formats are parsed too, into config keys, headings, SQL tables
+and views, proto messages and services, Dockerfile stages and LaTeX sections and
+labels ([what each one yields](docs-site/src/content/docs/reference/languages.md#config-and-data-formats)):
+
+<!-- languages:formats:start (generated from SupportedLanguages by ix-cli/scripts/check-language-docs.mjs --write) -->
+`YAML` `Dockerfile` `SQL` `JSON` `TOML` `Markdown` `LaTeX` `Protocol Buffers`
+<!-- languages:formats:end -->
 
 ---
 

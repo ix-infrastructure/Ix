@@ -158,10 +158,11 @@ describe.each(["head", "legacy"] as const)("an extractor change over the %s back
     }
   }
 
-  async function mapAsOld(home: string, endpoint: string): Promise<void> {
+  /** A run as the old extractor: `ix map` by default, `ix ingest` with `mapMode: false`. */
+  async function mapAsOld(home: string, endpoint: string, { mapMode = true }: { mapMode?: boolean } = {}): Promise<void> {
     old.on = true;
     try {
-      await run(home, endpoint);
+      await run(home, endpoint, { mapMode } as Parameters<typeof run>[2]);
     } finally {
       old.on = false;
     }
@@ -615,6 +616,81 @@ describe.each(["head", "legacy"] as const)("an extractor change over the %s back
       expect(ghosts(backend)).toEqual([]);
       // One read per file: the patch the recorded extractor wrote, not every candidate.
       expect(backend.patchReads).toBe(FILES.length);
+    } finally {
+      await backend.stop();
+    }
+  });
+
+  // Ix#965: a full run re-sends content the backend already holds under a
+  // full-mode id, so an extractor rebuild in full mode commits under it. The
+  // sweep must find the old extractor's patch whichever mode wrote it, and
+  // whichever mode the rebuild runs in.
+  for (const [before, after] of [["map", "full"], ["full", "map"]] as const) {
+    it(`retires the dropped kind when the old extractor's patch is ${before === "map" ? "ix map" : "a full ingest"}'s and the rebuild is ${after === "map" ? "ix map" : "a full ingest"}`, async () => {
+      const backend = newBackend();
+      const home = join(root, `home-mode-${before}-${after}-${semantics}`);
+      restoreAll();
+      try {
+        const endpoint = await backend.start();
+        await mapAsOld(home, endpoint, { mapMode: before === "map" });
+        expect(ghosts(backend)).toHaveLength(FILES.length);
+        backend.patchReads = 0;
+        const log = await run(home, endpoint, { mapMode: after === "map" } as Parameters<typeof run>[2]);
+        expect(sweepNotices(log)).toEqual([]);
+        expect(ghosts(backend)).toEqual([]);
+        // The built id is read first, the full-mode one only where it is absent.
+        expect(backend.patchReads).toBeLessThanOrEqual(2 * FILES.length);
+      } finally {
+        await backend.stop();
+      }
+    });
+  }
+
+  for (const mode of ["map", "full"] as const) {
+    it(`a ${mode} run deleting a file reads both stored-patch candidates of the window under both ids, at once`, async () => {
+      const backend = newBackend();
+      const home = join(root, `home-delete-${mode}-${semantics}`);
+      restoreAll();
+      try {
+        const endpoint = await backend.start();
+        await run(home, endpoint, { mapMode: mode === "map" } as Parameters<typeof run>[2]);
+        rmSync(join(repoDir, "web/math.ts"));
+        execFileSync("git", ["add", "-A"], { cwd: repoDir, stdio: "ignore" });
+        backend.patchReads = 0;
+        await run(home, endpoint, { mapMode: mode === "map" } as Parameters<typeof run>[2]);
+        expect(backend.graphSignature().nodes.filter((line) => line.includes("math.ts"))).toEqual([]);
+        // The current extractor's patch is stored under the built id; the
+        // previous extractor's (merged where deletes go in bulk) under neither.
+        // Deletions read each candidate's two ids at once in either mode:
+        // 2 + 2, so a map deletion also removes chunks from a full manifest.
+        expect(backend.patchReads).toBe(4);
+      } finally {
+        await backend.stop();
+      }
+    });
+  }
+
+  it("retires the dropped kind on ix map after one file was ingested in full at the new extractor", async () => {
+    const backend = newBackend();
+    const home = join(root, `home-mixed-${semantics}`);
+    restoreAll();
+    try {
+      const endpoint = await backend.start();
+      await mapAsOld(home, endpoint);
+      expect(ghosts(backend)).toHaveLength(FILES.length);
+      // `ix ingest <file>` (or one `ix watch` save) at the new extractor: a
+      // scoped full run, which keeps the old extractor in the baseline.
+      process.env.HOME = home;
+      process.env.USERPROFILE = home;
+      process.env.IX_ENDPOINT = endpoint;
+      process.env.IX_LOCK_DIR = join(home, "locks");
+      await ingestFiles(join(repoDir, FILES[0]!), { format: "json", printSummary: false, suppressOutput: true, mapMode: false, force: true });
+      expect(ghosts(backend).length).toBeLessThan(FILES.length);
+
+      const log = await run(home, endpoint);
+      expect(log).toContain("[extractor changed]");
+      expect(sweepNotices(log)).toEqual([]);
+      expect(ghosts(backend)).toEqual([]);
     } finally {
       await backend.stop();
     }

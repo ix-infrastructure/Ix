@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import { applyIngestMode, ingestFiles, stripMapModeOps } from "../commands/ingest.js";
+import { fullModePatchId, patchForMode, ingestFiles, stripMapModeOps } from "../commands/ingest.js";
 import { mapModeForIngest } from "../commands/map.js";
 import { loadIngestionModules } from "../commands/ingestion-loader.js";
 import { loadIngestBaseline } from "../ingest-baseline.js";
@@ -38,16 +38,16 @@ describe("stripMapModeOps", () => {
       ],
     } as unknown as GraphPatchPayload;
 
-    const kept = stripMapModeOps(patch).ops.map((op) => String(op.id ?? op.type));
+    const kept = stripMapModeOps(patch).ops.map((op) => String("id" in op ? op.id : op.type));
 
     expect(kept).toEqual(["file", "fn", "e4"]);
-    const full = applyIngestMode(patch, false);
-    const map = applyIngestMode(patch, true);
+    const full = patchForMode(patch, false, { held: true });
+    const map = patchForMode(patch, true);
     expect(map.patchId).not.toBe(full.patchId);
-    expect(map.patchId).not.toBe(patch.patchId);
+    expect(map.patchId).toBe(patch.patchId);
     expect(full.patchId).not.toBe(patch.patchId);
-    expect(applyIngestMode(patch, true)).toEqual(map);
-    expect(applyIngestMode(patch, false)).toEqual(full);
+    expect(patchForMode(patch, true)).toEqual(map);
+    expect(patchForMode(patch, false, { held: true })).toEqual(full);
     expect(full.ops).toEqual(patch.ops);
     expect(map.ops).toEqual(stripMapModeOps(patch).ops);
   });
@@ -100,6 +100,7 @@ describe("map/full ingestion identity (#965)", () => {
         expect(backend.lastPatchIds.get("a.ts")).not.toBe(mapId);
         expect(loadIngestBaseline(repo)!.fileModes.get(join(repo, "a.ts"))).toBe("full");
         expect(loadIngestBaseline(repo)!.replayedFiles).toEqual([]);
+        const fullId = backend.lastPatchIds.get("a.ts")!;
         const fullGraph = backend.graphSignature();
         await ingest(true, force);
         expect(backend.graphSignature()).toEqual(fullGraph);
@@ -111,7 +112,7 @@ describe("map/full ingestion identity (#965)", () => {
         backend = new FakeBackend({ semantics });
         vi.stubEnv("IX_ENDPOINT", await backend.start());
         await ingest(false);
-        const fullId = backend.lastPatchIds.get("a.ts");
+        const fullId = backend.lastPatchIds.get("a.ts")!;
         const fullGraph = backend.graphSignature();
         expect(backend.graphSignature().nodes.some(n => n.includes(" chunk "))).toBe(true);
         expect(fullGraph.edges.some(e => e.includes(" CONTAINS_CHUNK "))).toBe(true);
@@ -119,7 +120,7 @@ describe("map/full ingestion identity (#965)", () => {
 
         await ingest(mapModeForIngest("0"), force);
         expect(backend.graphSignature()).toEqual(fullGraph);
-        expect(backend.lastPatchIds.get("a.ts")).toBe(fullId);
+        expect(backend.lastPatchIds.get("a.ts")).toBe(force ? fullModePatchId(fullId) : fullId);
         expect(loadIngestBaseline(repo)!.fileModes.get(join(repo, "a.ts"))).toBe("full");
         await ingest(false, force);
         expect(backend.graphSignature()).toEqual(fullGraph);
@@ -162,16 +163,26 @@ describe("map/full ingestion identity (#965)", () => {
         const [, builder] = await loadIngestionModules();
         const workspaceId = backend.sourceWorkspaceIds[0]!;
         const sourceHash = createHash("sha256").update(readFileSync(join(repo, "a.ts"))).digest("hex");
-        const patch = applyIngestMode({
+        const built = {
           patchId: builder.sourcePatchIdCandidates("a.ts", sourceHash, workspaceId)[0]!,
           source: { uri: "a.ts", workspaceId, sourceHash },
           ops: backend.lastOps.get("a.ts")!,
-        } as GraphPatchPayload, true);
-        const seeded = await fetch(`${endpoint}/v1/patches/bulk`, {
+          replaces: [],
+        } as unknown as GraphPatchPayload;
+        await backend.stop();
+        backend = new FakeBackend({ semantics: "head" });
+        backend.bulkManifests = bulkManifests;
+        const replayEndpoint = await backend.start();
+        vi.stubEnv("IX_ENDPOINT", replayEndpoint);
+        const seeded = await fetch(`${replayEndpoint}/v1/patches/bulk`, {
           method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ patches: [patch] }),
+          body: JSON.stringify({ patches: [
+            patchForMode(built, false, { held: true }),
+            patchForMode(built, true),
+          ] }),
         });
         expect(seeded.ok).toBe(true);
+        expect(backend.lastOps.get("a.ts")!.some(op => op.kind === "chunk")).toBe(false);
         const baselinePath = ingestMtimeCachePath(repo);
         const baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
         baseline.fileModes[join(repo, "a.ts")] = "map";
@@ -216,6 +227,7 @@ describe("map/full ingestion identity (#965)", () => {
         const baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
         delete baseline.fileModes;
         writeFileSync(baselinePath, JSON.stringify(baseline));
+        const fullId = backend.lastPatchIds.get("a.ts")!;
         const fullGraph = backend.graphSignature();
         expect(fullGraph.edges.some(e => e.includes(" CONTAINS_CHUNK "))).toBe(true);
         expect(fullGraph.edges.some(e => e.includes(" DEFINES "))).toBe(true);

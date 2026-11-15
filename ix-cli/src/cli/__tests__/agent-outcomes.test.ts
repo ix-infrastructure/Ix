@@ -752,15 +752,15 @@ describe("subsystems and around carry the same outcome codes as their slugs", ()
     expect(exitFor({ error: "ambiguous_target", target_query: "api", candidates: [] })).toBe(1);
   });
 
-  it("around: a file not in the graph exits 3, a bad argument 1", async () => {
-    const { reportError } = await import("../commands/around.js");
+  it("reportFailure (around's failures): a file not in the graph exits 3, a bad argument 1", async () => {
+    const { reportFailure } = await import("../ui.js");
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       process.exitCode = undefined;
-      reportError("unresolved_target", "not in the graph", "llm", [["reason", "file_not_in_graph"]]);
+      reportFailure("unresolved_target", "not in the graph", "llm", [["reason", "file_not_in_graph"]]);
       expect(process.exitCode).toBe(3);
       process.exitCode = undefined;
-      reportError("invalid_line_range", "bad range", "llm");
+      reportFailure("invalid_line_range", "bad range", "llm");
       expect(process.exitCode).toBe(1);
     } finally {
       log.mockRestore();

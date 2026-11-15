@@ -125,21 +125,40 @@ const EXT_MAP: Record<string, SupportedLanguages> = {
   '.latex':SupportedLanguages.LaTeX,
 };
 
+/**
+ * Whole file names (lowercased) that are parsed although their extension says
+ * nothing: `path.extname('.bashrc')` is `''`. ix-cli's discovery keeps the same
+ * list as `SUPPORTED_FILE_NAMES` (supported-extensions.ts); the
+ * extension-parity test fails if the two differ, so a name added here is also
+ * walked by `ix map`.
+ */
+export const FILE_NAME_MAP: Readonly<Record<string, SupportedLanguages>> = {
+  'dockerfile':    SupportedLanguages.Dockerfile,
+  'makefile':      SupportedLanguages.Makefile,
+  'gnumakefile':   SupportedLanguages.Makefile,
+  // Common extensionless shell config scripts (dotfiles have no real extension).
+  '.bashrc':       SupportedLanguages.Bash,
+  '.bash_profile': SupportedLanguages.Bash,
+  '.bash_aliases': SupportedLanguages.Bash,
+  '.bash_logout':  SupportedLanguages.Bash,
+  '.zshrc':        SupportedLanguages.Bash,
+  '.zprofile':     SupportedLanguages.Bash,
+  '.zshenv':       SupportedLanguages.Bash,
+  '.profile':      SupportedLanguages.Bash,
+};
+
 export function languageFromPath(filePath: string): SupportedLanguages | null {
   const normalized = filePath.replace(/\\/g, '/');
   const fileName = normalized.slice(normalized.lastIndexOf('/') + 1);
   const lowerFileName = fileName.toLowerCase();
-  if (lowerFileName === 'dockerfile' || lowerFileName.endsWith('.dockerfile')) {
+  if (Object.prototype.hasOwnProperty.call(FILE_NAME_MAP, lowerFileName)) {
+    return FILE_NAME_MAP[lowerFileName];
+  }
+  if (lowerFileName.endsWith('.dockerfile')) {
     return SupportedLanguages.Dockerfile;
   }
-  if(lowerFileName === 'makefile' || lowerFileName === 'makefile.mk' || lowerFileName.endsWith('.makefile') || lowerFileName.endsWith('.mk') || lowerFileName === 'gnumakefile') {
+  if (lowerFileName.endsWith('.makefile') || lowerFileName.endsWith('.mk')) {
     return SupportedLanguages.Makefile;
-  }
-  // Common extensionless shell config scripts (dotfiles have no real extension).
-  if (lowerFileName === '.bashrc' || lowerFileName === '.bash_profile' || lowerFileName === '.bash_aliases'
-    || lowerFileName === '.zshrc' || lowerFileName === '.zprofile' || lowerFileName === '.profile'
-    || lowerFileName === '.zshenv' || lowerFileName === '.bash_logout') {
-    return SupportedLanguages.Bash;
   }
   const dotIndex = lowerFileName.lastIndexOf('.');
   if (dotIndex === -1) return null;

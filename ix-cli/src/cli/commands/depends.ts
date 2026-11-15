@@ -8,7 +8,7 @@ import { resolveFileOrReport, printResolved, isRawId } from "../resolve.js";
 import { walkTree, type TreeWalkResult } from "../tree-walk.js";
 import { compactTreeNode, relativePath, printJson } from "../format.js";
 import { llmLine, llmShortId } from "../llm.js";
-import { parsePickOption, STRICT_TARGET_HELP } from "../options.js";
+import { formatOption, kindOption, pathOption, pickOption, strictOption } from "../options.js";
 
 // ── Tree types ──────────────────────────────────────────────────────
 
@@ -74,6 +74,7 @@ export async function buildDependencyTree(
     maxNodes: opts?.maxNodes ?? MAX_NODES,
     predicates: activePredicates,
     expand: (nodeId, p) => client.expand(nodeId, { direction: "in", predicates: [p], hops: 1 }),
+    expandAll: (nodeId, ps) => client.expand(nodeId, { direction: "in", predicates: ps, hops: 1 }),
     // Rank before the cap, or the cap keeps whatever the graph returned
     // first. A node whose name is a raw id is a dangling reference nothing
     // can follow, and one with no path costs a `locate` before it can be
@@ -191,13 +192,13 @@ export function registerDependsCommand(program: Command): void {
   program
     .command("depends <symbol>")
     .description("Show upstream dependents of the given entity (full tree by default)")
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
     .option("--depth <n>", "Cap traversal depth")
     .option("--cap <n>", "Cap number of nodes visited")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .option("--include-tests", "Include test and fixture entities in results")
     .option("--tests-only", "Show only test and fixture entities")
     .addHelpText("after", `\nExamples:

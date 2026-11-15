@@ -7,12 +7,12 @@ import { execFileSync } from "node:child_process";
 import chalk from "chalk";
 import { createClient } from "../client/factory.js";
 import { renderBanner } from "./banner.js";
-import { canonicalWorkspacePath, getEndpoint, gitRootFor, loadConfig, loadWorkspaces, findWorkspaceForCwd, updateConfig, withConfigWriteLock, type IxConfig, type PendingPrune, type WorkspaceConfig } from "./config.js";
+import { canonicalWorkspacePath, DEFAULT_ENDPOINT, getEndpoint, gitRootFor, loadConfig, loadWorkspaces, findWorkspaceForCwd, updateConfig, withConfigWriteLock, type IxConfig, type PendingPrune, type WorkspaceConfig } from "./config.js";
 import { WorkspaceNotMappedError, workspaceNotMappedHint } from "./errors.js";
 import { ixHome } from "./ix-home.js";
 import { stderr } from "./stderr.js";
 import { workspaceIdForPath } from "./system.js";
-import { IX_CALLER_ENV } from "./next-step.js";
+import { currentCaller } from "./next-step.js";
 import { isLoopbackEndpoint, isManagedLocalBackend } from "./endpoint.js";
 
 export interface BootstrapResult {
@@ -35,7 +35,11 @@ export function ensureLocalConfig(): boolean {
     try {
       // 'wx' creates the file atomically and throws EEXIST if it already exists,
       // avoiding the existsSync-then-write TOCTOU (CodeQL js/file-system-race).
-      writeFileSync(configPath, `endpoint: ${getEndpoint()}\nformat: text\n`, { flag: "wx" });
+      // DEFAULT_ENDPOINT, not getEndpoint(): IX_ENDPOINT is a per-invocation
+      // override, and storing it here made a one-off run's backend the
+      // default for every later command (#952). With the variable unset this
+      // is the same value getEndpoint() would give for a missing config.
+      writeFileSync(configPath, `endpoint: ${DEFAULT_ENDPOINT}\nformat: text\n`, { flag: "wx" });
       return true;
     } catch (err: any) {
       if (err?.code === "EEXIST") return false;
@@ -413,7 +417,7 @@ export async function ensureBackendAvailable(): Promise<void> {
     // Never from inside `ix mcp`: a tool call would start Docker containers
     // on the user's machine without anyone asking, with the child's output
     // inherited onto the server's stdio. Say what to run instead.
-    if (process.env[IX_CALLER_ENV] === "mcp") {
+    if (currentCaller().hosted) {
       throw new Error(`Ix backend at ${endpoint} is not reachable (backend_unreachable). Start it with: ix docker start`);
     }
     try {
