@@ -9,7 +9,7 @@ import { buildDependencyTree } from "../commands/depends.js";
 import { getSystemPath } from "../hierarchy.js";
 import type { CommitRef } from "./history.js";
 import { isTestPath, type RelatedRef } from "./related-files.js";
-import { suggestedCommand } from "../next-step.js";
+import { hint, suggestedCommand } from "../next-step.js";
 import { TYPE_KINDS, type GraphKind, type KindSet } from "../graph-model.js";
 
 /** A related entity and where it is defined. */
@@ -618,7 +618,8 @@ export async function collectFacts(
     if (danglingCallees > 0) parts.push(`${danglingCallees} callee(s) could not be resolved to named entities.`);
     // Only dangling edges means a graph built before tree-sitter/1.28; the next
     // map rebuilds it. llm output prints no notes, so the hint lives here.
-    if (!unresolvedCalls) parts.push(`Run ${forMcp() ? "ix_map" : "`ix map`"} to improve coverage.`);
+    const mapStep = unresolvedCalls ? undefined : hint({ action: "map" });
+    if (mapStep) parts.push(`Run \`${mapStep}\` to improve coverage.`);
     diagnostics.push({ code: "unresolved_call_target", message: parts.join(" ") });
   }
 
