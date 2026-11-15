@@ -6,7 +6,8 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { nextReads, renderBundle, renderedNextReads } from "../commands/context.js";
+import { nextReads, renderedNextReads } from "../context/next.js";
+import { renderBundle } from "../context/render.js";
 import { readsOneSymbol, symbolReadChecker } from "../symbol-read-check.js";
 import { mcpCaller } from "../../mcp/hints.js";
 import { IX_MCP_CORE_TOOL_NAMES } from "../../mcp/server.js";

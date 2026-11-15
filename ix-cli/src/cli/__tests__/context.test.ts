@@ -16,10 +16,10 @@ import type { EntityFacts } from "../explain/facts.js";
 import { mcpCaller } from "../../mcp/hints.js";
 import { IX_MCP_CORE_TOOL_NAMES } from "../../mcp/server.js";
 import { CLI_CALLER, type Caller, withCaller } from "../next-step.js";
-import {
-  buildBundle, bundleFormat, bundleLlmLines, clampBudgets, llmNextByCut, llmNextLines, renderBundle, sanitizeId,
-  textEvidenceLines,
-} from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { sanitizeId } from "../context/investigations.js";
+import { bundleFormat, clampBudgets } from "../context/options.js";
+import { bundleLlmLines, llmNextByCut, llmNextLines, renderBundle, textEvidenceLines } from "../context/render.js";
 
 function makeFacts(overrides: Partial<EntityFacts> = {}): EntityFacts {
   return {

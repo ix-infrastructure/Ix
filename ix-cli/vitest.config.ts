@@ -73,7 +73,10 @@ export default defineConfig({
         // The files the ingest and retrieval lanes change most, each about two
         // points under its own baseline (statements / lines).
         "src/cli/commands/ingest.ts": { statements: 70, lines: 72 },
-        "src/cli/commands/context.ts": { statements: 72, lines: 72 },
+        // `ix context`: the command file and the modules it was split into
+        // (#928), measured together as the one file used to be. A glob key
+        // is checked against the files it matches combined, not each alone.
+        "src/cli/{commands/context.ts,context/*.ts}": { statements: 72, lines: 72 },
         "src/cli/resolve.ts": { statements: 75, lines: 77 },
         "src/client/api.ts": { statements: 51, lines: 55 },
       },
