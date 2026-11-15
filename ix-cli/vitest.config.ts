@@ -11,9 +11,8 @@ export default defineConfig({
     // vitest 4 dropped `dist/` from its built-in exclude list. Without this the
     // compiled `dist/**/*.test.js` copies emitted by `npm run build` get
     // collected and fail (they read sibling `.ts` sources that only exist under
-    // `src/`). Re-exclude it. parser.test.ts is run separately via
-    // `test/parser.smoke.mjs`, so keep it out of the default `vitest run`.
-    exclude: [...configDefaults.exclude, "dist/**", "test/parser.test.ts", "**/*.slow.test.ts"],
+    // `src/`). Re-exclude it.
+    exclude: [...configDefaults.exclude, "dist/**", "**/*.slow.test.ts"],
     // Sized for what this suite actually DOES, not for unit tests.
     //
     // Vitest defaults to 5s per test and 10s per hook, which suits pure
