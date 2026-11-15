@@ -402,6 +402,77 @@ describe("reconcileRemovedEntities", () => {
       ).rejects.toThrow("Previous source patch was not found");
     });
 
+    describe("a candidate stored under either of two ids (Ix#965)", () => {
+      /** getPatch whose answers wait until `release`, counting the reads in flight. */
+      const gated = (stored: Record<string, string[]>) => {
+        let inFlight = 0;
+        let maxInFlight = 0;
+        const waiting: Array<() => void> = [];
+        const getPatch = vi.fn(async (id: string) => {
+          inFlight++;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise<void>(resolve => waiting.push(resolve));
+          inFlight--;
+          if (!(id in stored)) throw notFound();
+          return ops(...stored[id]!);
+        });
+        const release = async () => {
+          for (let i = 0; i < 50 && getPatch.mock.calls.length > 0; i++) {
+            while (waiting.length > 0) waiting.shift()!();
+            await new Promise(resolve => setImmediate(resolve));
+          }
+        };
+        return { getPatch, release, maxInFlight: () => maxInFlight };
+      };
+
+      it("reads them one after another in map mode, up to the first found", async () => {
+        const { getPatch, release } = gated({ built: ["a", "b"], full: ["a", "b", "c"] });
+        const done = reconcileRemovedEntities({ getPatch, entity: liveEntity() }, patchWith([]), [["built", "full"]], undefined, true);
+        await release();
+        expect(deleted(await done)).toEqual(["a", "b"]);
+        expect(getPatch.mock.calls.map(c => c[0])).toEqual(["built"]);
+      });
+
+      it("reads both at once in a full run, and keeps the first in order whichever answers first", async () => {
+        const { getPatch, release, maxInFlight } = gated({ built: ["a", "b"], full: ["a", "b", "c"] });
+        const done = reconcileRemovedEntities({ getPatch, entity: liveEntity() }, patchWith([]), [["full", "built"]]);
+        await release();
+        expect(deleted(await done)).toEqual(["a", "b", "c"]);
+        expect(getPatch.mock.calls.map(c => c[0]).sort()).toEqual(["built", "full"]);
+        expect(maxInFlight()).toBe(2);
+      });
+
+      it("falls back to the second id in either mode, and fails on a read that fails before one is found", async () => {
+        for (const mapMode of [true, false]) {
+          const getPatch = vi.fn(async (id: string) => {
+            if (id === "second") return ops("a");
+            throw notFound();
+          });
+          const reconciled = await reconcileRemovedEntities({ getPatch, entity: liveEntity() }, patchWith([]), [["first", "second"]], undefined, mapMode);
+          expect(deleted(reconciled)).toEqual(["a"]);
+
+          const failing = vi.fn(async (id: string) => {
+            if (id === "second") return ops("a");
+            throw Object.assign(new Error("500: transaction begin timeout"), { status: 500 });
+          });
+          await expect(
+            reconcileRemovedEntities({ getPatch: failing, entity: liveEntity() }, patchWith([]), [["first", "second"]], undefined, mapMode),
+          ).rejects.toThrow("500");
+        }
+      });
+
+      it("walks the candidates past the window the same way, a full run's two ids at once", async () => {
+        const candidates = [["f0", "b0"], ["f1", "b1"], ["f2", "b2"], ["f3", "b3"]];
+        const getPatch = vi.fn(async (id: string) => {
+          if (id === "b2") return ops("a");
+          throw notFound();
+        });
+        const reconciled = await reconcileRemovedEntities({ getPatch, entity: liveEntity() }, patchWith([]), candidates);
+        expect(deleted(reconciled)).toEqual(["a"]);
+        expect(getPatch.mock.calls.map(c => c[0]).sort()).toEqual(["b0", "b1", "b2", "f0", "f1", "f2"]);
+      });
+    });
+
     it("leaves chunks alone in map mode, across merged manifests", async () => {
       const getPatch = vi.fn(async (id: string) => {
         if (id === "current@H") return ops("a");
@@ -507,6 +578,34 @@ describe("sweepOrphanNodes (IN-20 same-hash sweep)", () => {
     expect(nodes).toHaveBeenCalledTimes(1);
     expect(nodes.mock.calls[0]![1]).toBe("full");
     expect(budget.requests).toBe(3);
+  });
+
+  it("reads the other mode's id only when the first is not found, and never past the request budget", async () => {
+    const getPatch = vi.fn(async (pid: string) => {
+      if (pid === "this-mode") throw notFound();
+      return { data: { nodeIds: [A, B] } };
+    });
+    const nodes = vi.fn(async (ids: string[], _fields?: "full") => ({ rev: 1, nodes: ids.map(i => node(i)), missing: [] }));
+    const file = () => ({ ...fileWith([{ type: "UpsertNode", id: A, kind: "function" }]), previousPatchIds: [["this-mode", "other-mode"]] });
+
+    // Room for the fallback: both ids read, then one node read.
+    const roomy = orphanSweepBudget({});
+    expect(await sweepOrphanNodes({ getPatch, nodes }, [file()], { mapMode: false, budget: roomy })).toEqual([[B]]);
+    expect(getPatch.mock.calls.map(c => c[0])).toEqual(["this-mode", "other-mode"]);
+    expect(roomy.requests).toBe(3);
+
+    // A budget of one request covers the first read only: the fallback is not
+    // made, and the file is left unswept rather than swept on half its reads.
+    getPatch.mockClear();
+    nodes.mockClear();
+    const onUnswept = vi.fn();
+    const tight = orphanSweepBudget({ IX_ORPHAN_SWEEP_MAX_REQUESTS: "1" });
+    expect(await sweepOrphanNodes({ getPatch, nodes }, [file()], { mapMode: false, budget: tight, onUnswept })).toEqual([[]]);
+    expect(getPatch.mock.calls.map(c => c[0])).toEqual(["this-mode"]);
+    expect(nodes).not.toHaveBeenCalled();
+    expect(tight.requests).toBe(1);
+    expect(tight.skipped).toBe(1);
+    expect(onUnswept).toHaveBeenCalledTimes(1);
   });
 
   it("never deletes a node another file wrote last, one a patch of the batch upserts, an absent one, or a chunk in map mode", async () => {
