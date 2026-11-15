@@ -1,9 +1,14 @@
 # Ix Flag Reference
 
-Every flag the OSS CLI registers, per command. Load this when you need a flag
-that [commands.md](commands.md) does not show — that file routes a *goal* to a
-command and stays deliberately short, and the flags that shape the answer live
-here.
+Every flag the OSS CLI registers, per command. [commands.md](commands.md)
+routes a *goal* to a command and stays deliberately short; the flags that shape
+the answer live here.
+
+This file is about 18,000 tokens, so search it rather than load it. For one
+command, `ix <command> --help` prints the same flags, values and defaults in a
+few hundred tokens. What only this file has is
+[Flags with behaviour worth knowing](#flags-with-behaviour-worth-knowing):
+search that section for the flag you are about to use.
 
 Generated from the registered command tree, not written by hand:
 
