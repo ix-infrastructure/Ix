@@ -71,8 +71,8 @@ server previously offered to every install even though every call answered
 
 **Net:** codex and cursor can delegate with no change in what an agent can do.
 gemini loses `ix_query` (`ix_status` is served as `ix_health`), plus a verdict
-tool if its `ix_decide` turns out to be one. openclaw and opencode lose
-`ix_query`, `ix_docs_tool` and the pre-edit verdict.
+tool if its `ix_decide` turns out to be one. openclaw and opencode lose `ix_query`,
+`ix_docs_tool` and the pre-edit verdict.
 
 ## Structured results and tool annotations
 
