@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { httpError, LocalTokenRequiredError } from "../api.js";
@@ -157,7 +157,9 @@ describe("no status regexes over error messages", () => {
       lines.forEach((line, i) => {
         const code = line.replace(/^\s*(\/\/|\*).*$/, "");
         if (!STATUS_IN_REGEX.test(code) && !STATUS_STARTS_WITH.test(code)) return;
-        const where = `${relative(srcRoot, file)}:${i + 1}: ${line.trim()}`;
+        // Forward slashes on every OS, so the expectation below holds on Windows.
+        const rel = relative(srcRoot, file).split(sep).join("/");
+        const where = `${rel}:${i + 1}: ${line.trim()}`;
         (lines[i - 1]?.includes("ix-940-allow:") ? allowed : offenders).push(where);
       });
     }
