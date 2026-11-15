@@ -185,6 +185,9 @@ ix imported-by verify_token
 ```bash
 ix rank --by dependents --kind class --top 10
 ```
+Rank scores at most 2000 entities of the kind. When more exist it says so
+(`truncated=true` and a `candidates_truncated` diagnostic) and the ranking may
+miss entities: narrow with `--path`.
 
 **"List all functions in a file"**
 ```bash
