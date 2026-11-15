@@ -2,7 +2,17 @@
 
 import * as crypto from 'node:crypto';
 import * as nodePath from 'node:path';
-import type { GraphPatchPayload, PatchOp } from './types.js';
+import type { GraphPatchPayload } from './types.js';
+import type {
+  ChunkNodeAttrs,
+  EdgePredicate,
+  ExternalNodeAttrs,
+  FileNodeAttrs,
+  PatchOp,
+  ResolvedEdgeAttrs,
+  SymbolNodeAttrs,
+  UpsertEdgeOp,
+} from './schema.js';
 import { resolveEdges } from './index.js';
 import type { FileParseResult, ParsedEntity, ResolutionTier, ResolvedEdge } from './index.js';
 
@@ -39,7 +49,7 @@ function makeIds(workspaceId: string) {
     nodeId: (filePath: string, name: string): string =>
       deterministicId(`${ns}${normalizePath(filePath)}:${name}`),
 
-    edgeId: (filePath: string, src: string, dst: string, predicate: string): string =>
+    edgeId: (filePath: string, src: string, dst: string, predicate: EdgePredicate): string =>
       deterministicId(`${ns}${normalizePath(filePath)}:${src}:${dst}:${predicate}`),
 
     // Chunk id is keyed on file + kind + name + start line to survive minor edits.
@@ -120,7 +130,7 @@ function deduplicateUpsertEdges(ops: PatchOp[]): PatchOp[] {
       deduplicated.push(op);
       continue;
     }
-    const existing = deduplicated[existingIndex];
+    const existing = deduplicated[existingIndex] as UpsertEdgeOp;
     if (existing.src !== op.src || existing.dst !== op.dst || existing.predicate !== op.predicate) {
       throw new Error(`Conflicting UpsertEdge identity for deterministic id ${edgeId}`);
     }
@@ -234,10 +244,10 @@ function unresolvedCallRecorder(knownNodeIds: ReadonlySet<string>, fileNodeId: s
       if (byNode.size === 0) return;
       for (const op of ops) {
         if (op.type !== 'UpsertNode') continue;
-        const names = byNode.get(op.id as string);
+        const names = byNode.get(op.id);
         if (!names) continue;
         op.attrs = {
-          ...((op.attrs as Record<string, unknown> | undefined) ?? {}),
+          ...op.attrs,
           unresolved_calls: [...names].slice(0, UNRESOLVED_CALLS_CAP),
           unresolved_call_count: names.size,
         };
@@ -443,15 +453,16 @@ export function buildPatchWithResolution(
     const id = nodeId(idPath, qk);
     if (!seenNodeIds.has(id)) {
       seenNodeIds.add(id);
-      const roleAttrs = e.kind === 'file'
-        ? { role: result.fileRole.role, role_confidence: result.fileRole.role_confidence, role_signals: result.fileRole.role_signals, ...(result.hasParseErrors ? { parse_errors: true } : {}) }
-        : { role: result.fileRole.role, role_source: 'inherited_from_file' };
+      const lines = { line_start: e.lineStart, line_end: e.lineEnd, language: e.language };
+      const attrs: FileNodeAttrs | SymbolNodeAttrs = e.kind === 'file'
+        ? { ...lines, role: result.fileRole.role, role_confidence: result.fileRole.role_confidence, role_signals: result.fileRole.role_signals, ...(result.hasParseErrors ? { parse_errors: true } : {}) }
+        : { ...lines, role: result.fileRole.role, role_source: 'inherited_from_file' };
       ops.push({
         type: 'UpsertNode',
         id,
         kind: e.kind,
         name: e.name,
-        attrs: { line_start: e.lineStart, line_end: e.lineEnd, language: e.language, ...roleAttrs },
+        attrs,
       });
     }
   }
@@ -462,23 +473,18 @@ export function buildPatchWithResolution(
     const cid = chunkId(idPath, chunk.chunkKind, chunk.name, chunk.lineStart);
     const chunkName = chunk.name ?? `file_body:${chunk.lineStart}`;
     const chunkNodeKind = chunk.chunkKind === 'section' ? 'section' : 'chunk';
-    ops.push({
-      type: 'UpsertNode',
-      id: cid,
-      kind: chunkNodeKind,
-      name: chunkName,
-      attrs: {
-        file_uri: filePath,
-        language: chunk.language,
-        chunk_kind: chunk.chunkKind,
-        start_line: chunk.lineStart,
-        end_line: chunk.lineEnd,
-        start_byte: chunk.startByte,
-        end_byte: chunk.endByte,
-        content_hash: chunk.contentHash,
-        parser_version: extractorName(),
-      },
-    });
+    const chunkAttrs: ChunkNodeAttrs = {
+      file_uri: filePath,
+      language: chunk.language,
+      chunk_kind: chunk.chunkKind,
+      start_line: chunk.lineStart,
+      end_line: chunk.lineEnd,
+      start_byte: chunk.startByte,
+      end_byte: chunk.endByte,
+      content_hash: chunk.contentHash,
+      parser_version: extractorName(),
+    };
+    ops.push({ type: 'UpsertNode', id: cid, kind: chunkNodeKind, name: chunkName, attrs: chunkAttrs });
     // File -[CONTAINS]-> Chunk
     ops.push({
       type: 'UpsertEdge',
@@ -526,7 +532,7 @@ export function buildPatchWithResolution(
   // UpsertEdge for each relationship -- only those with a node at both ends;
   // see `keepEdge`.
   const seenExternalNodes = new Set<string>();
-  const emittedEdgeIdentities = new Map<string, PatchOp>();
+  const emittedEdgeIdentities = new Map<string, UpsertEdgeOp>();
   /** CALLS dropped for want of a destination node; recorded on their caller. */
   const unresolvedCalls = unresolvedCallRecorder(seenNodeIds, fileNodeId);
   const relationshipShapeCounts = new Map<string, number>();
@@ -589,7 +595,7 @@ export function buildPatchWithResolution(
   const relationshipDstKey = (r: (typeof relationships)[number]): string =>
     r.predicate === 'CONTAINS' ? resolveKey(r.dstName, r.srcName) : resolveKey(r.dstName);
 
-  const edgeIdTuple = (srcKey: string, edgeDstKey: string, predicate: string): string =>
+  const edgeIdTuple = (srcKey: string, edgeDstKey: string, predicate: EdgePredicate): string =>
     `${srcKey}\x00${edgeDstKey}\x00${predicate}`;
 
   /**
@@ -642,12 +648,13 @@ export function buildPatchWithResolution(
     }
     if (externalPkg && !seenExternalNodes.has(dstNodeId)) {
       seenExternalNodes.add(dstNodeId);
+      const externalAttrs: ExternalNodeAttrs = { package: externalPkg.pkgName, external: true, language: result.language };
       ops.push({
         type: 'UpsertNode',
         id: dstNodeId,
         kind: 'function',
         name: externalPkg.funcName,
-        attrs: { package: externalPkg.pkgName, external: true, language: result.language },
+        attrs: externalAttrs,
       });
     }
 
@@ -673,15 +680,16 @@ export function buildPatchWithResolution(
     const idDstKey = collidingIdTuples.has(edgeIdTuple(srcKey, edgeDstKey, r.predicate))
       ? `${edgeDstKey}\x00${dstNodeId}`
       : edgeDstKey;
-    const edgeOp: PatchOp = {
+    const edgeAttrs: ResolvedEdgeAttrs = resolution
+      ? { confidence: resolution.confidence, ...(resolution.tier ? { tier: resolution.tier } : {}) }
+      : {};
+    const edgeOp: UpsertEdgeOp = {
       type: 'UpsertEdge',
       id: edgeId(idPath, srcKey, idDstKey, r.predicate),
       src: nodeId(idPath, srcKey),
       dst: dstNodeId,
       predicate: r.predicate,
-      attrs: resolution
-        ? { confidence: resolution.confidence, ...(resolution.tier ? { tier: resolution.tier } : {}) }
-        : {},
+      attrs: edgeAttrs,
     };
     emittedEdgeIdentities.set(edgeIdentity, edgeOp);
     ops.push(edgeOp);

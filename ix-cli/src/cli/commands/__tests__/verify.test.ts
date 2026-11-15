@@ -8,13 +8,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { FakeBackend } from "../../__tests__/helpers/fake-backend.js";
-import { runCommand } from "../../__tests__/helpers/run-command.js";
+import { runInProcess } from "../../__tests__/helpers/run-command.js";
 import { loadIngestionModules } from "../ingestion-loader.js";
 import { saveIngestBaseline } from "../../ingest-baseline.js";
 import { verifyRecordPath } from "../../config.js";
 
 /**
- * CL-24A: `ix verify` end to end, through `runCommand`, against the shared
+ * CL-24A: `ix verify` end to end, through `runInProcess`, against the shared
  * `FakeBackend` holding what the parser would have committed. Every verdict
  * exits 0; only a usage error or an unreachable backend exits 1, the way
  * `ix status` does.
@@ -72,7 +72,8 @@ async function mapped(opts: { dropFunction?: boolean; staleHash?: boolean } = {}
   saveIngestBaseline(repo, new Map([[join(repo, "a.ts"), 1]]), 3, new Date(), new Map(), extractorName());
 }
 
-const verify = (...args: string[]) => runCommand(["verify", ...args], backend, { cwd: repo });
+const verify = (...args: string[]) =>
+  runInProcess(["verify", ...args], { endpoint: backend.url!, cwd: repo, env: { IX_HOME: home } });
 
 describe("ix verify output", () => {
   it("clean: one llm record, exit 0", async () => {
@@ -180,7 +181,9 @@ describe("ix verify errors", () => {
     await new Promise<void>((r) => closed.listen(0, "127.0.0.1", r));
     const port = (closed.address() as { port: number }).port;
     await new Promise<void>((r) => closed.close(() => r()));
-    const { stdout, exitCode } = await runCommand(["verify", "--format", "llm"], `http://127.0.0.1:${port}`, { cwd: repo });
+    const { stdout, exitCode } = await runInProcess(["verify", "--format", "llm"], {
+      endpoint: `http://127.0.0.1:${port}`, cwd: repo, env: { IX_HOME: home },
+    });
     expect(exitCode).toBe(1);
     expect(stdout).toMatch(/^error code=backend_unreachable message=/m);
   });

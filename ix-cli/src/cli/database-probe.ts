@@ -81,6 +81,8 @@ export async function probeDatabase(
   if (health.database === "unreachable") return "unreachable";
   if (health.database === "reachable") return "reachable";
   // A backend older than 1.0.33: health says nothing about the database.
+  // Removable once MIN_BACKEND_VERSION reaches 1.0.33 (`databaseHealth` in
+  // client/features.ts).
   try {
     await reads.currentRevision(timeoutMs);
     return "reachable";

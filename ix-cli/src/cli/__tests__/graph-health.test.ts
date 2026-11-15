@@ -150,7 +150,8 @@ describe("checkGraphHealth", () => {
     return {
       endpoint: "http://backend.test",
       currentRevision: vi.fn(async () => revisions[Math.min(call++, revisions.length - 1)]),
-      stats: vi.fn(async () => statsBody),
+      // Any body at all: `checkGraphHealth` must cope with whatever comes back.
+      stats: vi.fn(async () => statsBody as never),
     };
   }
 

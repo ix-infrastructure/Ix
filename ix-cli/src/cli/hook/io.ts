@@ -1,21 +1,27 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { claudeCodeAdapter } from "./hosts/claude.js";
+
 /**
  * The hook's process contract, kept free of the CLI's imports: this module is
  * loaded on every hooked tool call, most of which change nothing.
+ *
+ * Every `ix hook` subcommand keeps it: it exits 0 whatever happens, prints
+ * nothing or exactly the host's JSON ({@link HostAdapter.writeContext}), keeps
+ * its state under `<IX_HOME>/hook-state` (`session.ts`), and has one deadline
+ * for the whole run, IX_HOOK_TIMEOUT_MS ({@link runHookMain}).
  */
 
 export const DEFAULT_HOOK_TIMEOUT_MS = 3000;
 
 /**
- * The one place the hook's stdout contract lives: Claude Code reads
+ * claude-post-edit's stdout: Claude Code reads
  * `hookSpecificOutput.additionalContext` off a PostToolUse hook's JSON and
- * hands it to the model after the tool result.
+ * hands it to the model after the tool result. The shape itself lives in the
+ * Claude Code adapter (`hosts/claude.ts`).
  */
 export function postToolUseOutput(additionalContext: string): string {
-  return JSON.stringify({
-    hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext },
-  });
+  return claudeCodeAdapter.writeContext("PostToolUse", additionalContext);
 }
 
 export function hookTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
@@ -34,6 +40,34 @@ export function readStdin(timeoutMs: number, stdin: NodeJS.ReadStream = process.
     stdin.on("end", () => done(Buffer.concat(chunks).toString("utf-8")));
     stdin.on("error", () => done(""));
   });
+}
+
+/**
+ * The whole process of one hook run: read stdin, let `answer` reply within
+ * what is left of the deadline, print its reply, exit 0. Exits at once so a
+ * request still in flight past the deadline can neither hold the agent nor
+ * surface later as an unhandled rejection. `answer` gets the milliseconds
+ * left and must not take longer ({@link withDeadline}).
+ */
+export async function runHookMain(
+  answer: (raw: string, msLeft: number, debug: (msg: string) => void) => Promise<string | undefined>,
+): Promise<void> {
+  const started = Date.now();
+  const timeout = hookTimeoutMs();
+  const debugOn = process.env.IX_HOOK_DEBUG === "1";
+  const debug = (msg: string) => { if (debugOn) process.stderr.write(`[ix hook] ${msg}\n`); };
+  let out: string | undefined;
+  try {
+    const raw = await readStdin(timeout);
+    const left = Math.max(0, timeout - (Date.now() - started));
+    out = await answer(raw, left, debug);
+  } catch (err) {
+    debug(`failed: ${err instanceof Error ? err.message : String(err)}`);
+    out = undefined;
+  }
+  debug(`${out ? "reported" : "nothing"} in ${Date.now() - started} ms`);
+  if (out) process.stdout.write(`${out}\n`, () => process.exit(0));
+  else process.exit(0);
 }
 
 /**

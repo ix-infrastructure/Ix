@@ -12,7 +12,7 @@ import { WorkspaceNotMappedError, workspaceNotMappedHint } from "./errors.js";
 import { ixHome } from "./ix-home.js";
 import { stderr } from "./stderr.js";
 import { workspaceIdForPath } from "./system.js";
-import { IX_CALLER_ENV } from "./next-step.js";
+import { currentCaller } from "./next-step.js";
 import { isLoopbackEndpoint, isManagedLocalBackend } from "./endpoint.js";
 
 export interface BootstrapResult {
@@ -417,7 +417,7 @@ export async function ensureBackendAvailable(): Promise<void> {
     // Never from inside `ix mcp`: a tool call would start Docker containers
     // on the user's machine without anyone asking, with the child's output
     // inherited onto the server's stdio. Say what to run instead.
-    if (process.env[IX_CALLER_ENV] === "mcp") {
+    if (currentCaller().hosted) {
       throw new Error(`Ix backend at ${endpoint} is not reachable (backend_unreachable). Start it with: ix docker start`);
     }
     try {

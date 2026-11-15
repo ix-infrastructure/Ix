@@ -1,13 +1,75 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { format } from "node:util";
+/**
+ * Run one `ix` command in-process, the way a plugin sees it, and capture what
+ * it printed and how it exited.
+ *
+ *   const backend = new FakeBackend();
+ *   backend.readGraph = SMALL_GRAPH;            // or any ReadGraph
+ *   const { stdout, stderr, exitCode } =
+ *     await runCommand(["locate", "paint", "--format", "json"], { backend });
+ *
+ * A test that owns its IX_HOME, workspace and on-disk state (and reads them
+ * back after the run) calls `runInProcess` instead: the same run, minus the
+ * scratch home, config, PATH and cleanup below.
+ *
+ * What it does, per call:
+ *
+ *   - builds a fresh commander program from `registerOssCommands()` (which
+ *     applies `applyOssSetup()`), as `mcp/runner.ts` `buildProgram` does, and
+ *     wires it to the error boundary exactly as `run-cli.ts` does: commander
+ *     usage errors are thrown (`throwCommanderExit` / `writeCommanderError`),
+ *     the `preAction` hook records the command's `--format` for failures,
+ *     `bindCommanderErrors` gives each command its usage-error format, and
+ *     anything `parseAsync` rejects with goes through `renderCliError`;
+ *   - gives the run a scratch IX_HOME whose config.yaml registers one temp
+ *     workspace (files from `opts.files`) and points IX_ENDPOINT at the
+ *     FakeBackend; cwd is that workspace unless `opts.cwd` says otherwise
+ *     (`"unmapped"` is a temp directory no workspace contains);
+ *   - strips every ambient `IX_*` variable and points PATH at an empty
+ *     directory, then applies `opts.env`, so a developer's IX_FORMAT or
+ *     IX_STRICT_TARGETS cannot change a snapshot, and neither can whether
+ *     ripgrep or git happens to be installed (see Limits);
+ *   - runs the command under its own run signal (`runWithSignal`), as
+ *     `mcp/runner.ts` does, so per-run budgets such as the miss probe's start
+ *     at zero for every call, as they do in a fresh `ix` process. The signal
+ *     is never aborted;
+ *   - captures console.*, process.stdout.write and process.stderr.write,
+ *     turns process.exit() into a throw, and reads process.exitCode;
+ *   - restores every one of those globals, plus env, cwd, chalk's colour level
+ *     and the TTY flags, in a `finally`, and resets the CLI's per-process
+ *     memos before and after so one run cannot leak into the next.
+ *
+ * Limits (what this is NOT):
+ *
+ *   - No Pro. `tryLoadProCommands` is not called and no Pro stubs are
+ *     registered, so only OSS commands exist. The plugin-facing contract under
+ *     test is the OSS one.
+ *   - Not a child process. `main.ts`'s Node-version check, the compile cache,
+ *     the lazy command table (`planStartup`), the update check and the
+ *     `unhandledRejection` / `uncaughtException` handlers are not exercised.
+ *     A command that leaves work running after its action resolves can still
+ *     write after this returns; that output is lost, not attributed.
+ *   - No external tools by default. PATH is an empty directory, so `rg` and
+ *     `git` are not found and commands take their documented no-ripgrep paths
+ *     (the miss probe and the callers text fallback answer nothing; the
+ *     not-mapped hint names no git root). That is the same on every OS, which
+ *     is the point; pass `env: { PATH: process.env.PATH! }` to run with them.
+ *   - Output is not a TTY and chalk is at level 0, which is what a plugin
+ *     capturing the stream gets. Colour and progress-bar output are not covered.
+ *   - Runs are not concurrency-safe: they patch process globals. Call it from
+ *     one test at a time (vitest runs a file's tests sequentially by default).
+ *   - The help text (`ix --help`) is commander's default, not `buildHelpText`.
+ */
+
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { format as formatArgs } from "node:util";
+import chalk from "chalk";
 import { Command } from "commander";
 
 import { registerOssCommands } from "../../register/oss.js";
-import { registerOssFallbacks } from "../../register/oss-fallbacks.js";
-import { registerProStubs } from "../../register/pro-stubs.js";
-import { readConfiguredFormat } from "../../config.js";
-import { resetReadScope } from "../../resolve.js";
 import {
   bindCommanderErrors,
   commandFormat,
@@ -18,7 +80,74 @@ import {
   throwCommanderExit,
   writeCommanderError,
 } from "../../errors.js";
+import { readConfiguredFormat, resetConfigMemo, saveConfig } from "../../config.js";
+import { resetReadScope } from "../../resolve.js";
+import { resetResolutionNotices } from "../../format.js";
+import { resetGraphHealthMemo } from "../../graph-health.js";
+import { resetWorkspaceIdMemosForTests } from "../../bootstrap.js";
+import { runWithSignal } from "../../../client/run-signal.js";
 import type { FakeBackend } from "./fake-backend.js";
+
+/** The workspace id registered in the scratch config. */
+export const RUN_WORKSPACE_ID = "ws000001";
+
+export interface RunCommandOptions {
+  /** The backend IX_ENDPOINT points at. Started here if it is not running; the caller stops it. */
+  backend: FakeBackend;
+  /** Extra environment for this run, applied after ambient IX_* is stripped. */
+  env?: Record<string, string>;
+  /**
+   * Files to write into the workspace, by workspace-relative path. They should
+   * match what the backend's graph claims, for commands that read source.
+   */
+  files?: Record<string, string>;
+  /** Where the command runs: the workspace (default) or an unmapped directory. */
+  cwd?: "workspace" | "unmapped";
+}
+
+export interface RunCommandResult extends CommandResult {
+  /** The temp root every path in the run lives under, for normalising. */
+  tempRoot: string;
+}
+
+/** Thrown in place of process.exit() while a run owns the process. */
+class ExitSignal extends Error {
+  constructor(readonly code: number) {
+    super(`process.exit(${code})`);
+  }
+}
+
+const CONSOLE_METHODS = [
+  ["log", "stdout"],
+  ["info", "stdout"],
+  ["debug", "stdout"],
+  ["warn", "stderr"],
+  ["error", "stderr"],
+] as const;
+
+function resetCliMemos(): void {
+  resetConfigMemo();
+  resetReadScope();
+  resetResolutionNotices();
+  resetGraphHealthMemo();
+  resetWorkspaceIdMemosForTests();
+  setErrorFormat(undefined);
+  setErrorFormatFallback(undefined);
+}
+
+function buildProgram(): Command {
+  const program = new Command();
+  program
+    .name("ix")
+    .version("0.0.0-test")
+    .exitOverride(throwCommanderExit)
+    .configureOutput({ outputError: writeCommanderError });
+  program.hook("preAction", (_thisCommand, actionCommand) => {
+    setErrorFormat(commandFormat(actionCommand));
+  });
+  registerOssCommands(program);
+  return program;
+}
 
 /** What one `ix` invocation printed, and the code it would have exited with. */
 export interface CommandResult {
@@ -27,143 +156,154 @@ export interface CommandResult {
   exitCode: number;
 }
 
-export interface RunCommandOptions {
-  /** Directory to run in, as a user's shell would be. Restored afterwards. */
-  cwd?: string;
-  /** Extra environment for this run only (`undefined` unsets). Restored afterwards. */
-  env?: Record<string, string | undefined>;
-}
-
-/** Thrown in place of `process.exit`, so the run unwinds instead of ending the worker. */
-class ExitSignal extends Error {
-  constructor(readonly code: number) {
-    super(`process.exit(${code})`);
-  }
+export interface RunInProcessOptions {
+  /** IX_ENDPOINT for the run. Nothing need listen there (a backend that is down, say). */
+  endpoint: string;
+  /** The directory the command runs in. */
+  cwd: string;
+  /** Extra environment for this run, applied after ambient IX_* is stripped. */
+  env?: Record<string, string>;
+  /** Called once env is applied and the CLI's memos are reset, before the command runs. */
+  setup?: () => void;
 }
 
 /**
- * Run `ix <argv>` in process against `backend`, the way `run-cli.ts` runs it,
- * and return what it printed and its exit code.
- *
- * The command tree, the error boundary and the format a failure is answered
- * in are the CLI's own (OSS commands, the no-Pro fallbacks and stubs), so a
- * test reads the same stdout, stderr and exit code a user or an agent plugin
- * would. `backend` is a started `FakeBackend`, or an endpoint URL (for a
- * backend that is down, say); it becomes `IX_ENDPOINT` for the run.
- *
- * Each run starts as a fresh process would: no exit code, no recorded error
- * format, no cached read scope. Process state it changes (stdout/stderr and
- * console, `process.exit`, `process.exitCode`, the cwd, the env) is restored
- * before it returns. Runs must not overlap; vitest runs a file's tests one at
- * a time, which is enough.
- *
- * Prefer this to a per-file `parseAsync` harness and a hand-written client
- * fake: the backend answers come from `FakeBackend`, which follows the real
- * routes, so a response-shape change has one place to land.
+ * The core `runCommand` is built on: run `ix <argv>` in-process with the
+ * caller's own IX_HOME, workspace and cwd (pass IX_HOME in `opts.env`), for a
+ * test that sets up its own config and on-disk state and reads it back after
+ * the run. Same command tree, error boundary, capture and restore as
+ * `runCommand`; it writes no scratch config, does not touch PATH unless
+ * `opts.env` does, and deletes nothing.
  */
-export async function runCommand(
-  argv: readonly string[],
-  backend: FakeBackend | string,
-  opts: RunCommandOptions = {},
-): Promise<CommandResult> {
-  const endpoint = typeof backend === "string" ? backend : backend.url;
-  const args = [...argv];
-  const stdout: string[] = [];
-  const stderr: string[] = [];
+export async function runInProcess(argv: string[], opts: RunInProcessOptions): Promise<CommandResult> {
+  const { endpoint } = opts;
 
-  const env = { IX_ENDPOINT: endpoint, ...opts.env };
-  const savedEnv = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]));
+  // ── Save every global the run touches ──────────────────────────────────
+  const savedEnv = { ...process.env };
   const savedCwd = process.cwd();
   const savedExitCode = process.exitCode;
-  const saved = {
-    stdoutWrite: process.stdout.write,
-    stderrWrite: process.stderr.write,
-    exit: process.exit,
-    log: console.log,
-    info: console.info,
-    debug: console.debug,
-    warn: console.warn,
-    error: console.error,
-  };
+  const savedExit = process.exit;
+  const savedStdoutWrite = process.stdout.write;
+  const savedStderrWrite = process.stderr.write;
+  const savedConsole = CONSOLE_METHODS.map(([m]) => [m, console[m]] as const);
+  const savedChalkLevel = chalk.level;
+  const savedStdoutTTY = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+  const savedStderrTTY = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
 
-  const capture = (sink: string[]) =>
-    ((chunk: string | Uint8Array, encoding?: unknown, cb?: unknown): boolean => {
-      sink.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+  const out: string[] = [];
+  const err: string[] = [];
+  let exitCode: number | undefined;
+
+  try {
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith("IX_")) delete process.env[key];
+    }
+    process.env.IX_ENDPOINT = endpoint;
+    for (const [k, v] of Object.entries(opts.env ?? {})) process.env[k] = v;
+
+    resetCliMemos();
+    opts.setup?.();
+
+    process.chdir(opts.cwd);
+    process.exitCode = undefined;
+    chalk.level = 0;
+    Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true, writable: true });
+    Object.defineProperty(process.stderr, "isTTY", { value: false, configurable: true, writable: true });
+
+    const sink = (into: string[]) => ((chunk: unknown, encoding?: unknown, cb?: unknown): boolean => {
+      into.push(typeof chunk === "string" ? chunk : Buffer.from(chunk as Uint8Array).toString("utf8"));
       const done = typeof encoding === "function" ? encoding : cb;
       if (typeof done === "function") (done as () => void)();
       return true;
-    }) as typeof process.stdout.write;
-  // console formats its arguments as Node's does, then writes a line.
-  const line = (sink: string[]) => (...a: unknown[]): void => {
-    sink.push(`${format(...a)}\n`);
-  };
-
-  let exitCode: number | undefined;
-  try {
-    for (const [k, v] of Object.entries(env)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
+    });
+    process.stdout.write = sink(out) as typeof process.stdout.write;
+    process.stderr.write = sink(err) as typeof process.stderr.write;
+    for (const [method, stream] of CONSOLE_METHODS) {
+      const into = stream === "stdout" ? out : err;
+      console[method] = (...parts: unknown[]): void => { into.push(`${formatArgs(...parts)}\n`); };
     }
-    if (opts.cwd !== undefined) process.chdir(opts.cwd);
-    process.exitCode = undefined;
-    resetReadScope();
-    setErrorFormat(undefined);
-    setErrorFormatFallback(() => resolveErrorFormat(args, process.env, readConfiguredFormat));
-
-    process.stdout.write = capture(stdout);
-    process.stderr.write = capture(stderr);
-    console.log = line(stdout);
-    console.info = line(stdout);
-    console.debug = line(stdout);
-    console.warn = line(stderr);
-    console.error = line(stderr);
-    process.exit = ((code?: number | string | null) => {
-      throw new ExitSignal(code === undefined || code === null ? 0 : Number(code));
+    process.exit = ((code?: number) => {
+      throw new ExitSignal(code ?? 0);
     }) as typeof process.exit;
 
-    // As run-cli.ts builds it, minus the Pro probe: a test never loads Pro.
-    const program = new Command()
-      .name("ix")
-      .exitOverride(throwCommanderExit)
-      .configureOutput({ outputError: writeCommanderError });
-    program.hook("preAction", (_this, actionCommand) => {
-      setErrorFormat(commandFormat(actionCommand));
-    });
-    registerOssCommands(program);
-    await registerOssFallbacks(program);
-    registerProStubs(program);
-    bindCommanderErrors(program, args);
+    // What run-cli.ts sets before parsing: until a command is parsed, a
+    // failure is answered in the typed --format, IX_FORMAT, or config.format.
+    setErrorFormatFallback(() => resolveErrorFormat(argv, process.env, readConfiguredFormat));
 
+    const program = buildProgram();
+    bindCommanderErrors(program, argv);
     try {
-      await program.parseAsync(args, { from: "user" });
-    } catch (err) {
-      if (err instanceof ExitSignal) throw err;
-      // The boundary run-cli.ts puts around parseAsync; it always exits.
-      renderCliError(err, false, endpoint);
+      try {
+        const signal = new AbortController().signal;
+        await runWithSignal(signal, () => program.parseAsync(argv, { from: "user" }));
+      } catch (thrown) {
+        if (thrown instanceof ExitSignal) throw thrown;
+        // run-cli.ts's boundary. It always ends in process.exit().
+        renderCliError(thrown, false, endpoint);
+      }
+    } catch (thrown) {
+      if (!(thrown instanceof ExitSignal)) throw thrown;
+      exitCode = thrown.code;
     }
-  } catch (err) {
-    if (!(err instanceof ExitSignal)) throw err;
-    exitCode = err.code;
+    if (exitCode === undefined) exitCode = Number(process.exitCode ?? 0);
   } finally {
-    const finalCode = process.exitCode;
-    process.stdout.write = saved.stdoutWrite;
-    process.stderr.write = saved.stderrWrite;
-    process.exit = saved.exit;
-    console.log = saved.log;
-    console.info = saved.info;
-    console.debug = saved.debug;
-    console.warn = saved.warn;
-    console.error = saved.error;
-    setErrorFormat(undefined);
-    setErrorFormatFallback(undefined);
-    resetReadScope();
-    if (process.cwd() !== savedCwd) process.chdir(savedCwd);
-    for (const [k, v] of Object.entries(savedEnv)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
+    process.exit = savedExit;
+    process.stdout.write = savedStdoutWrite;
+    process.stderr.write = savedStderrWrite;
+    for (const [method, original] of savedConsole) console[method] = original;
+    if (savedStdoutTTY) Object.defineProperty(process.stdout, "isTTY", savedStdoutTTY);
+    else delete (process.stdout as { isTTY?: boolean }).isTTY;
+    if (savedStderrTTY) Object.defineProperty(process.stderr, "isTTY", savedStderrTTY);
+    else delete (process.stderr as { isTTY?: boolean }).isTTY;
+    chalk.level = savedChalkLevel;
     process.exitCode = savedExitCode;
-    exitCode ??= typeof finalCode === "number" ? finalCode : finalCode ? Number(finalCode) : 0;
+    process.chdir(savedCwd);
+    for (const key of Object.keys(process.env)) {
+      if (!(key in savedEnv)) delete process.env[key];
+    }
+    Object.assign(process.env, savedEnv);
+    resetCliMemos();
   }
-  return { stdout: stdout.join(""), stderr: stderr.join(""), exitCode };
+
+  return { stdout: out.join(""), stderr: err.join(""), exitCode };
+}
+
+export async function runCommand(argv: string[], opts: RunCommandOptions): Promise<RunCommandResult> {
+  const { backend } = opts;
+  const endpoint = backend.url ?? await backend.start();
+
+  const tempRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ix-run-command-")));
+  const home = path.join(tempRoot, "home");
+  const workspace = path.join(tempRoot, "repo");
+  const unmapped = path.join(tempRoot, "elsewhere");
+  const emptyBin = path.join(tempRoot, "bin");
+  fs.mkdirSync(emptyBin, { recursive: true });
+  fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.mkdirSync(unmapped, { recursive: true });
+  for (const [rel, content] of Object.entries(opts.files ?? {})) {
+    const abs = path.join(workspace, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, content);
+  }
+
+  try {
+    const result = await runInProcess(argv, {
+      endpoint,
+      cwd: opts.cwd === "unmapped" ? unmapped : workspace,
+      env: { IX_HOME: home, PATH: emptyBin, ...opts.env },
+      setup: () => {
+        saveConfig({
+          endpoint,
+          // The built-in default; every snapshot passes --format anyway.
+          format: "text",
+          workspaces: [{ workspace_id: RUN_WORKSPACE_ID, workspace_name: "repo", root_path: workspace, default: true }],
+        });
+        resetConfigMemo();
+      },
+    });
+    return { ...result, tempRoot };
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
 }
