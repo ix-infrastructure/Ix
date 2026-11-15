@@ -9,21 +9,40 @@ import { llmLine } from "../llm.js";
 import { normalizeForPathMatch, normalizePathSeparators } from "../path-match.js";
 import { printJson } from "../format.js";
 import { mapLimit } from "../../client/request-memo.js";
+import { featureOff, markFeatureOff, routeMissing } from "../../client/features.js";
 import { formatOption } from "../options.js";
-import { httpStatusOf } from "../../client/http-error.js";
 
 type Metric = "dependents" | "callers" | "importers" | "members";
 
-/** Render `ix rank` as llm records: a header line then one `entity` row per result (rank = line order). */
+/**
+ * How many entities of the kind `ix rank` scores. `/v1/list` has no offset and
+ * no ordering by degree, so entities past this are never candidates: a ranking
+ * over a full window is a ranking of that window, not of the workspace.
+ */
+export const RANK_LIST_LIMIT = 2000;
+
+function rankTruncationMessage(kind: string): string {
+  return `More than ${RANK_LIST_LIMIT} ${kind} entities exist; only the first ${RANK_LIST_LIMIT} the server returned were ranked, `
+    + "so entities that belong in this ranking may be missing. Narrow with --path (or a more specific --kind).";
+}
+
+/**
+ * Render `ix rank` as llm records: a header line then one `entity` row per result (rank = line order).
+ * `truncated` is the candidate window having come back full, not `--top` cutting the results.
+ */
 export function renderRankLlm(
   metric: string, kind: string, scope: string | null,
   results: Array<{ name: string; kind: string; score: number }>,
-  evaluated: number, diagnostics: string[],
+  evaluated: number, diagnostics: string[], truncated = false,
 ): string[] {
   const lines = [llmLine("rank", [
     ["metric", metric], ["kind", kind], ["scope", scope ?? undefined],
     ["evaluated", evaluated], ["returned", results.length],
+    ["truncated", truncated || undefined],
   ])];
+  if (truncated) {
+    lines.push(llmLine("diagnostic", [["code", "candidates_truncated"], ["message", rankTruncationMessage(kind)]]));
+  }
   for (const d of diagnostics) lines.push(llmLine("diagnostic", [["message", d]]));
   for (const r of results) {
     lines.push(llmLine("entity", [["name", r.name], ["kind", r.kind], ["score", r.score]]));
@@ -178,23 +197,14 @@ const EXPAND_DEFAULT_LIMIT = 1000;
 export const DEGREE_UNUSABLE_TTL_MS = 10 * 60_000;
 
 /**
- * Backends (by endpoint) not to score through `POST /v1/degree` again until
- * the time stored (epoch ms): the route answered 404 or 405 (it predates them,
- * Ix-memory < v1.0.33), or it counted fewer neighbours than expand lists for
- * some node.
+ * Stop scoring through `POST /v1/degree` against this backend for
+ * `DEGREE_UNUSABLE_TTL_MS`: the route is missing (Ix-memory < v1.0.33; the
+ * expand fallback is removable once MIN_BACKEND_VERSION reaches 1.0.33, see
+ * `degree` in client/features.ts), or it counted fewer neighbours than expand
+ * lists for some node. The memo itself lives in client/features.ts.
  */
-const degreeUnusable = new Map<string, number>();
-
 function markDegreeUnusable(endpoint: string): void {
-  degreeUnusable.set(endpoint, Date.now() + DEGREE_UNUSABLE_TTL_MS);
-}
-
-function isDegreeUnusable(endpoint: string): boolean {
-  const until = degreeUnusable.get(endpoint);
-  if (until === undefined) return false;
-  if (Date.now() < until) return true;
-  degreeUnusable.delete(endpoint);
-  return false;
+  markFeatureOff("degree", endpoint, DEGREE_UNUSABLE_TTL_MS);
 }
 
 /** The `n`th largest of `values` (1-based); `Infinity` when `n` is 0. */
@@ -247,7 +257,7 @@ export async function scoreViaDegree(
   top = 0,
 ): Promise<ScoredEntity[] | null> {
   const endpoint = String(client.endpoint);
-  if (isDegreeUnusable(endpoint)) return null;
+  if (featureOff("degree", endpoint)) return null;
 
   const counts = new Map<string, number>();
   const ids = [...new Set<string>(candidates.map((node: any) => node.id))];
@@ -261,8 +271,7 @@ export async function scoreViaDegree(
         timeoutMs: DEGREE_TIMEOUT_MS,
       });
     } catch (err) {
-      const status = httpStatusOf(err);
-      if (status === 404 || status === 405) markDegreeUnusable(endpoint);
+      if (routeMissing("degree", err)) markDegreeUnusable(endpoint);
       return null;
     }
     if (!res || typeof res.counts !== "object" || res.counts === null) return null;
@@ -402,7 +411,11 @@ export function registerRankCommand(program: Command): void {
         // kept as typed: a current backend lowercases both sides itself, and
         // an older, case-sensitive one still matches the case the user gave.
         const scopeNeedle = opts.path ? normalizePathSeparators(opts.path) : undefined;
-        const allNodes = await client.listByKind(opts.kind, { limit: 2000, scope: scopeNeedle, ...activeReadScope() });
+        // One row past the window: the only way to tell a full window from a cut one.
+        const listed = await client.listByKind(opts.kind, { limit: RANK_LIST_LIMIT + 1, scope: scopeNeedle, ...activeReadScope() });
+        const truncated = listed.length > RANK_LIST_LIMIT;
+        const allNodes = truncated ? listed.slice(0, RANK_LIST_LIMIT) : listed;
+        const truncation = truncated ? [rankTruncationMessage(opts.kind)] : [];
 
         if (allNodes.length === 0) {
           if (opts.format === "llm") {
@@ -436,18 +449,18 @@ export function registerRankCommand(program: Command): void {
             excludeKinds.length > 0 ? `exclude-kind "${excludeKinds.join(",")}"` : null,
           ].filter(Boolean).join(", ");
           if (opts.format === "llm") {
-            for (const line of renderRankLlm(metric, opts.kind, opts.path ?? null, [], 0, [`No entities matched filters: ${filterDesc}.`])) console.log(line);
+            for (const line of renderRankLlm(metric, opts.kind, opts.path ?? null, [], 0, [`No entities matched filters: ${filterDesc}.`], truncated)) console.log(line);
           } else if (isJson) {
             printJson({
               metric,
               kind: opts.kind,
               scope: opts.path ?? null,
               results: [],
-              summary: { evaluated: 0, totalCandidates: 0, returned: 0 },
-              diagnostics: [`No entities matched filters: ${filterDesc}.`],
+              summary: { evaluated: 0, totalCandidates: 0, returned: 0, ...(truncated ? { truncated: true } : {}) },
+              diagnostics: [...truncation, `No entities matched filters: ${filterDesc}.`],
             });
           } else {
-            console.log(chalk.dim(`No entities matched filters: ${filterDesc}.`));
+            console.log(chalk.dim([`No entities matched filters: ${filterDesc}.`, ...truncation].join("\n")));
           }
           return;
         }
@@ -465,15 +478,15 @@ export function registerRankCommand(program: Command): void {
 
         // 7. Output
         if (opts.format === "llm") {
-          for (const line of renderRankLlm(metric, opts.kind, opts.path ?? null, results.map(r => ({ name: r.name, kind: r.kind, score: r.score })), candidates.length, diagnostics)) console.log(line);
+          for (const line of renderRankLlm(metric, opts.kind, opts.path ?? null, results.map(r => ({ name: r.name, kind: r.kind, score: r.score })), candidates.length, diagnostics, truncated)) console.log(line);
         } else if (isJson) {
           printJson({
             metric,
             kind: opts.kind,
             scope: scopeNeedle,
             results: results.map(r => ({ name: r.name, kind: r.kind, score: r.score })),
-            summary: { evaluated: candidates.length, returned: results.length },
-            diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
+            summary: { evaluated: candidates.length, returned: results.length, ...(truncated ? { truncated: true } : {}) },
+            diagnostics: truncation.length + diagnostics.length > 0 ? [...truncation, ...diagnostics] : undefined,
           });
         } else {
           console.log(chalk.bold(`Top ${results.length} ${pluralize(opts.kind)} by ${metric}:`));
@@ -484,8 +497,8 @@ export function registerRankCommand(program: Command): void {
             const name = r.name.padEnd(maxNameLen);
             console.log(`${rank}. ${name}  ${r.score}`);
           }
-          if (diagnostics.length > 0) {
-            console.log(chalk.dim(`\n${diagnostics.join("\n")}`));
+          if (truncation.length + diagnostics.length > 0) {
+            console.log(chalk.dim(`\n${[...truncation, ...diagnostics].join("\n")}`));
           }
         }
       }

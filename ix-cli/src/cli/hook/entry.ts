@@ -2,7 +2,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { hookTimeoutMs, readStdin, withDeadline } from "./io.js";
+import { claudeCodeAdapter } from "./hosts/claude.js";
+import { runHookMain, withDeadline } from "./io.js";
 import {
   fingerprint, gitDiffHead, gitTopLevel, loadState, parseUnifiedDiff, saveState, statePath,
 } from "./session.js";
@@ -69,17 +70,17 @@ async function runPostEditHookInner(
 ): Promise<string | undefined> {
   const debug = deps.debug ?? (() => {});
   try {
-    let input: PostToolUseInput;
-    try { input = JSON.parse(raw) as PostToolUseInput; } catch { debug("stdin is not JSON"); return undefined; }
-    if (!input || typeof input !== "object") return undefined;
-    record.session = input.session_id;
-    record.tool = input.tool_name;
-    const base = input.cwd && path.isAbsolute(input.cwd) ? input.cwd : process.cwd();
+    const event = claudeCodeAdapter.readEvent(raw);
+    if (!event) { debug("stdin is not a Claude Code hook payload"); return undefined; }
+    const input = event.payload as PostToolUseInput;
+    record.session = event.sessionId;
+    record.tool = event.toolName;
+    const base = event.cwd && path.isAbsolute(event.cwd) ? event.cwd : process.cwd();
     const worktree = path.resolve(opts.worktree ?? base);
     const repoRoot = (deps.gitTopLevel ?? gitTopLevel)(worktree);
 
     if (!repoRoot) {
-      const file = statePath(input.session_id, worktree, env);
+      const file = statePath(event.sessionId, worktree, env);
       const state = loadState(file);
       const heavy = await import("./claude-post-edit.js");
       const outcome = await heavy.reportToolEdit(input, new Set(state.reported), opts, deps);
@@ -92,7 +93,7 @@ async function runPostEditHookInner(
     const diff = (deps.gitDiffHead ?? gitDiffHead)(repoRoot);
     if (!diff.trim()) { record.path = "no_changes"; debug("no tracked changes"); return undefined; }
     const fp = fingerprint(diff);
-    const file = statePath(input.session_id, repoRoot, env);
+    const file = statePath(event.sessionId, repoRoot, env);
     const state = loadState(file);
     if (state.fingerprint === fp) { record.path = "diff_unchanged"; debug("diff unchanged since last report"); return undefined; }
 
@@ -152,25 +153,9 @@ export function parseHookArgs(argv: string[]): HookOptions {
 }
 
 /**
- * The whole process: read stdin, answer within the deadline, print, exit 0.
- * Exits at once so a request still in flight past the deadline can neither
- * hold the agent nor surface later as an unhandled rejection.
+ * The whole process: read stdin, answer within the deadline, print, exit 0
+ * ({@link runHookMain}).
  */
 export async function runHookProcess(opts: HookOptions): Promise<void> {
-  const started = Date.now();
-  const timeout = hookTimeoutMs();
-  const debugOn = process.env.IX_HOOK_DEBUG === "1";
-  const debug = (msg: string) => { if (debugOn) process.stderr.write(`[ix hook] ${msg}\n`); };
-  let out: string | undefined;
-  try {
-    const raw = await readStdin(timeout);
-    const left = Math.max(0, timeout - (Date.now() - started));
-    out = await answerWithin(raw, opts, left, { debug });
-  } catch (err) {
-    debug(`failed: ${err instanceof Error ? err.message : String(err)}`);
-    out = undefined;
-  }
-  debug(`${out ? "reported" : "nothing"} in ${Date.now() - started} ms`);
-  if (out) process.stdout.write(`${out}\n`, () => process.exit(0));
-  else process.exit(0);
+  await runHookMain((raw, left, debug) => answerWithin(raw, opts, left, { debug }));
 }

@@ -26,6 +26,7 @@ const scope = {
   mapCompleted: true,
   cloudReady: false,
   databaseDown: false,
+  release: undefined as string | undefined,
 };
 
 vi.mock("../../client/api.js", () => ({
@@ -104,7 +105,7 @@ vi.mock("../commands/upgrade.js", async (orig) => ({
   // backend saying ArangoDB is down.
   readBackendHealth: async () => {
     if (scope.databaseDown) throw new IxHttpError(503, '{"status":"degraded","database":"unreachable","schema_version":3}');
-    return { status: "ok", schema_version: 3, database: "reachable" };
+    return { status: "ok", schema_version: 3, database: "reachable", release_version: scope.release };
   },
 }));
 
@@ -122,6 +123,7 @@ beforeEach(() => {
   scope.mapCompleted = true;
   scope.cloudReady = false;
   scope.databaseDown = false;
+  scope.release = undefined;
   // Belt and braces with the mocks above: nothing in this test may depend on a
   // backend being reachable, or on how quickly a given OS refuses a connection.
   savedEndpoint = process.env.IX_ENDPOINT;
@@ -191,6 +193,25 @@ describe("ix doctor", () => {
     expect(lines).toContain(
       'check name="Completed map for this workspace" status=ok detail="recorded at revision 42"',
     );
+  });
+
+  it("warns, without failing, about a backend older than MIN_BACKEND_VERSION (Ix#942)", async () => {
+    scope.release = "1.0.20";
+
+    const lines = await runDoctor();
+
+    expect(lines[0]).toContain("healthy=true");
+    expect(process.exitCode).not.toBe(1);
+    expect(lines.find((l) => l.includes('name="Backend release supported"')))
+      .toMatch(/status=warn .*backend 1\.0\.20 is older than 1\.0\.30/);
+  });
+
+  it("passes a backend at or above MIN_BACKEND_VERSION, and does not judge one that reports no release", async () => {
+    scope.release = "1.0.34";
+    expect((await runDoctor()).find((l) => l.includes('name="Backend release supported"'))).toMatch(/status=ok detail="1\.0\.34/);
+
+    scope.release = undefined;
+    expect((await runDoctor()).find((l) => l.includes('name="Backend release supported"'))).toMatch(/status=ok detail="not checked/);
   });
 
   it("fails, naming the database, when the backend reports ArangoDB unreachable", async () => {

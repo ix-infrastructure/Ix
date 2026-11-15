@@ -39,6 +39,8 @@ beforeAll(async () => {
         res.end(JSON.stringify({ proFeaturesEnabled: false, local_auth: "bearer-v1", local_auth_enforcing: true }));
       } else if (req.url?.startsWith("/v1/reset")) {
         res.end(JSON.stringify({ ok: true, message: "reset" }));
+      } else if (req.url?.startsWith("/v1/search")) {
+        res.end("[]"); // the client checks this route's shape: an array of nodes
       } else {
         res.end(JSON.stringify({ status: "ok", exists: true, nodes: [], results: [] }));
       }
@@ -147,7 +149,7 @@ describe("which token goes where", () => {
     const sent: Array<string | null> = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
       sent.push(new Headers(init?.headers).get("authorization"));
-      return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
     });
     const { createClient } = await import("../../client/factory.js");
     const client = createClient({ endpoint: "https://ix.example.com" });
@@ -166,7 +168,7 @@ describe("which token goes where", () => {
     const sent: Array<string | null> = [];
     const inner = async (_input: unknown, init?: RequestInit) => {
       sent.push(new Headers(init?.headers).get("authorization"));
-      return new Response(JSON.stringify({ results: [] }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
     };
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const headers = new Headers(init?.headers);
