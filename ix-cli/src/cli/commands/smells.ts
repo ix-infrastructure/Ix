@@ -10,6 +10,7 @@ import { printJson, relativePath, rowLocation, sliceRanked, truncationHint, type
 import { formatOption, MAX_WAIT_SECONDS, parseWaitSecondsOption } from "../options.js";
 import { currentCaller } from "../next-step.js";
 import { canRenderProgress } from "../stderr.js";
+import { httpStatusOf, isIxHttpError } from "../../client/http-error.js";
 
 // The `/v1/smells` response types live with the client; exported from here as
 // well, where they were first defined.
@@ -172,6 +173,8 @@ type StaleReason = "timeout" | "not_permitted";
  */
 function isHeadersTimeout(err: unknown): boolean {
   for (let e: unknown = err, hops = 0; e && hops < 5; hops++) {
+    // The server answered: its body's `code` is not undici's.
+    if (isIxHttpError(e)) return false;
     if ((e as { code?: unknown }).code === "UND_ERR_HEADERS_TIMEOUT") return true;
     e = (e as { cause?: unknown }).cause;
   }
@@ -188,7 +191,7 @@ function staleReasonOf(err: unknown): StaleReason | undefined {
   const e = err as { name?: unknown; message?: unknown } | null;
   const message = typeof e?.message === "string" ? e.message : "";
   if (e?.name === "TimeoutError" || /aborted due to timeout/i.test(message) || isHeadersTimeout(err)) return "timeout";
-  if (/^403:/.test(message)) return "not_permitted";
+  if (httpStatusOf(err) === 403) return "not_permitted";
   return undefined;
 }
 
