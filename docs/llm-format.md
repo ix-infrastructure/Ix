@@ -786,18 +786,23 @@ item name=parseFile kind=method
 `ix context <target>`:
 
 ```
-context target=Widget target_kind=class target_path=src/widget.ts stale=false classification=current entities=2 relationships=1 claims=1 decisions=0 conflicts=0 intents=0 evidence=7 truncated_entities=0 truncated_relationships=0 truncated_evidence=0 truncated_chars=0
-evidence score=0 kind=target title="Widget (class)" path=src/widget.ts
-evidence score=2000 kind=structural title="member render" path=src/widget.ts lines=12-40
-evidence score=3000 kind=claim title="renders to DOM"
-evidence score=4000 kind=relationship title="Widget --calls--> mount"
+context target=Widget target_kind=class target_path=src/widget.ts stale=false classification=current entities=2 relationships=1 claims=1 evidence=7
+evidence kind=target title="Widget (class)" path=src/widget.ts
+evidence kind=structural title="member render" path=src/widget.ts lines=12-40
+evidence kind=claim title="renders to DOM"
+evidence kind=relationship title="Widget --calls--> mount"
 ```
 
-One header record, then the ranked evidence. `score` is `tier * 1000` plus the
-row's place in its tier, tiers in order target, issue, structural, claims,
-relationships, provenance, so a tier never runs into the next. Each entity gets
-one row: a relationship that restates a member, import or caller row is left
-out. A target's callers and dependents share one row, titled with how many of
+One header record, then the ranked evidence. The header always carries
+`entities`, `relationships` and `evidence`; `claims`, `decisions`,
+`conflicts`, `intents` and the four `truncated_*` counters appear only when
+they are not zero. The rows are printed in rank order and carry no `score=`:
+the score (`--format json` has it) is `tier * 1000` plus the row's place in its
+tier, tiers in order target, issue, structural, claims, relationships,
+provenance, so a tier never runs into the next. Each entity gets one row: a
+relationship that restates a member, import or caller row is left out, and
+edges whose titles would read the same (overloads sharing a name and a path)
+are one row ending ` (n edges)`. A target's callers and dependents share one row, titled with how many of
 how many (`used by (3 of 214): ...`); `--format json` carries the two numbers
 as `count: { shown, total }`. The entity, relationship and claim
 lists stay counts here — `llm` is the token-minimal surface and the ranked
@@ -827,7 +832,8 @@ claim change=added id=c-8f31a2 entity=entity-1 status=active statement="mounts t
 The counts keep their zeros: "nothing was added" is the answer `--diff` was
 asked for, not a default worth dropping. Added and removed share one record
 kind and separate on `change=`, so a consumer routing on `entity` sees both
-sides of the comparison.
+sides of the comparison. Diff `evidence` rows keep `score=`: added and removed
+rows come from two rankings, and the score is what says where each one stood.
 
 `saved_at` is when the baseline snapshot was taken. `freshness_previous` says
 whether it was fresh *then*, not how long ago that was, so a snapshot from five
@@ -885,9 +891,11 @@ investigation id=auth-path saved_at=2026-01-02T17:03:11.882Z target=verify_token
 `skipped` counts saved files that did not match the contract and is present
 only when it is non-zero — it is the one thing about a listing that cannot be
 seen from the records themselves. Note that `stale=` and the four `truncated_*`
-fields are *not* dropped when zero or false: `llmField` omits only nullish and
-empty-string values, and these say "measured, and it was none", which a missing
-field does not.
+fields are *not* dropped when zero or false here: a listing compares saved
+bundles side by side, and these say "measured, and it was none", which a
+missing field does not. The `context` header drops its zero counters instead:
+it is the first thing an agent reads on every bundle, and there an absent
+counter means none.
 
 `id` is the id `--resume` and `--diff` take, not necessarily the file name on
 disk; the two differ whenever an id contains a character outside
@@ -900,8 +908,8 @@ and `ix context --resume <id>` fetches one:
 
 ```
 resumed id=widget saved_at=2026-01-03T09:12:44.108Z
-context target=Widget target_kind=class stale=false classification=current entities=2 relationships=1 claims=1 decisions=0 conflicts=0 intents=0 evidence=7 truncated_entities=0 truncated_relationships=0 truncated_evidence=0 truncated_chars=0
-evidence score=0 kind=target title="Widget (class)"
+context target=Widget target_kind=class stale=false classification=current entities=2 relationships=1 claims=1 evidence=7
+evidence kind=target title="Widget (class)"
 ```
 
 `resumed`, not `investigation`: the record kinds are distinct because the

@@ -323,20 +323,34 @@ function relationshipEvidence(
   // does: `config.ts --CONTAINS--> getEndpoint` under a `member getEndpoint`
   // row restates it, and so does an edge to an entity an earlier edge named.
   const label = entityLabeller(input.entities);
+  // Edges whose endpoints label the same (overloads: one name, one path) would
+  // print the same title once per edge, which says nothing the first row did
+  // not. They fold into the first row, which counts them and keeps every id.
+  const byTitle = new Map<string, { item: EvidenceItem; edges: number }>();
   let relationshipIndex = 0;
   for (const edge of input.relationships.slice(0, 50)) {
     const ends = [...new Set([edge.src, edge.dst])].filter((id) => id !== target.id);
     if (ends.length === 0 || !ends.every((id) => fresh(id))) continue;
     show(ends);
-    items.push({
+    const title = `${label(edge.src)} --${edge.predicate}--> ${label(edge.dst)}`;
+    const folded = byTitle.get(title);
+    if (folded) {
+      folded.edges += 1;
+      folded.item.title = `${title} (${folded.edges} edges)`;
+      for (const id of [edge.src, edge.dst]) if (!folded.item.refs.includes(id)) folded.item.refs.push(id);
+      continue;
+    }
+    const item: EvidenceItem = {
       id: `relationship:${edge.src}:${edge.dst}:${edge.predicate}`,
       kind: "relationship",
       source: "context.edges",
-      title: `${label(edge.src)} --${edge.predicate}--> ${label(edge.dst)}`,
+      title,
       score: tierScore(TIER.relationships, relationshipIndex++),
       reason: "graph relationship from the context service",
       refs: [edge.src, edge.dst],
-    });
+    };
+    byTitle.set(title, { item, edges: 1 });
+    items.push(item);
   }
   return items;
 }

@@ -87,17 +87,21 @@ export function bundleLlmLines(bundle: ContextBundle, next: string[] = llmNextLi
         graph: bundle.graph ? String(bundle.graph.status) : undefined,
         stale: bundle.graph ? undefined : bundle.freshness.stale,
         classification: bundle.freshness.classification,
+        // The bundle's own size, always. The counters after it are dropped at
+        // zero: on most bundles every one of them is, and an absent counter
+        // reads the same as a zero one. (`ix context --list` keeps its
+        // `truncated_*` zeros; see docs/llm-format.md.)
         entities: bundle.entities.length,
         relationships: bundle.relationships.length,
-        claims: bundle.claims.length,
-        decisions: bundle.decisions.length,
-        conflicts: bundle.conflicts.length + bundle.truncation.conflictsTruncated,
-        intents: bundle.intents.length,
+        claims: bundle.claims.length || undefined,
+        decisions: bundle.decisions.length || undefined,
+        conflicts: bundle.conflicts.length + bundle.truncation.conflictsTruncated || undefined,
+        intents: bundle.intents.length || undefined,
         evidence: bundle.evidence.length,
-        truncated_entities: bundle.truncation.entitiesTruncated,
-        truncated_relationships: bundle.truncation.relationshipsTruncated,
-        truncated_evidence: bundle.truncation.evidenceTruncated,
-        truncated_chars: bundle.truncation.charactersTruncated,
+        truncated_entities: bundle.truncation.entitiesTruncated || undefined,
+        truncated_relationships: bundle.truncation.relationshipsTruncated || undefined,
+        truncated_evidence: bundle.truncation.evidenceTruncated || undefined,
+        truncated_chars: bundle.truncation.charactersTruncated || undefined,
       }),
       // First after the header: everything below is drawn from this graph.
       bundle.graph ? llmLine("graph", {
