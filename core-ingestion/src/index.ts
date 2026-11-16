@@ -335,6 +335,13 @@ export interface FileParseResult {
    */
   phpNamespaceBlocks?: number;
   /**
+   * PHP only: the lowercase local names an aliased class `use` binds
+   * (`use A\B as C`, `use A\{B as C}`), sorted. Resolution does not follow
+   * aliases, so it must not read such a name as a type of the file's
+   * namespace. Absent when the file has none.
+   */
+  phpUseAliases?: string[];
+  /**
    * The tree has ERROR or MISSING nodes: tree-sitter recovered, and whatever
    * sat in the broken region may be missing from `entities`. Absent when the
    * file parsed cleanly.
@@ -2948,6 +2955,21 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     const classRanges: Array<{ name: string; start: number; end: number }> = [];
     // PHP class name → the class it `extends`, for `parent::method()`.
     const phpParentClass = new Map<string, string>();
+    // PHP `extends` and `use Trait` bases as written, with the class's
+    // namespace, and the file's `use` imports (lowercase local -> FQCN, null
+    // when two disagree): `phpReceiverHeritage` resolves the one with the other.
+    const phpHeritageBases: PhpHeritageBase[] = [];
+    const phpUseLocals = new Map<string, string | null>();
+    // Lowercase local names an aliased class `use` binds (`use A\B as C`):
+    // resolution does not track aliases, so it must not read `C` as a type of
+    // this namespace.
+    const phpUseAliases = new Set<string>();
+    const recordPhpUse = (local: string, importRaw: string, aliased: boolean): void => {
+      const key = local.toLowerCase();
+      const fqcn = importRaw.replace(/^\\+/, '').toLowerCase();
+      phpUseLocals.set(key, phpUseLocals.has(key) && phpUseLocals.get(key) !== fqcn ? null : fqcn);
+      if (aliased) phpUseAliases.add(key);
+    };
     // class name → the bases it extends. A `super` call is rewritten to the
     // base only when there is exactly one and it is a plain name: with several
     // bases, or a dotted one, the target is not known here.
@@ -3213,6 +3235,13 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         if (language === SupportedLanguages.PHP && heritageExtends.name === 'heritage.extends' && heritageExtends.node.type === 'name') {
           phpParentClass.set(heritageClass.node.text, heritageExtends.node.text);
         }
+        if (language === SupportedLanguages.PHP) {
+          phpHeritageBases.push({
+            cls: heritageClass.node.text,
+            base: heritageExtends.node.text,
+            namespace: trimPhpNamespace(phpNamespaceForNode(heritageClass.node, phpNamespaces.spans)),
+          });
+        }
         if (heritageExtends.name === 'heritage.extends') {
           const bases = classBases.get(heritageClass.node.text) ?? [];
           bases.push(heritageExtends.node.text);
@@ -3406,12 +3435,17 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       const phpGroupPrefix = match.captures.find((c: any) => c.name === 'import.prefix')?.node.text;
       const phpGroupClauses = match.captures.filter((c: any) => c.name === 'import.clause');
       if (language === SupportedLanguages.PHP && phpGroupClauses.length > 0) {
+        const groupBindsTypes = !/^use\s+(?:function|const)\b/i.test(match.captures.find((c: any) => c.name === 'import')?.node.text ?? '');
         for (const clause of phpGroupClauses) {
-          const firstName = clause.node.namedChildren.find((c: any) => c.type === 'name');
+          const names = clause.node.namedChildren.filter((c: any) => c.type === 'name');
+          const firstName = names[0];
           if (!firstName) continue;
           const fqcn = phpGroupPrefix ? `${phpGroupPrefix}\\${firstName.text}` : firstName.text;
           const modName = normalizeCapturedImport(fqcn, language);
           const importRaw = unwrapImportSpecifier(fqcn);
+          if (groupBindsTypes && !/^(?:function|const)\b/i.test(clause.node.text)) {
+            recordPhpUse(names[names.length - 1].text, importRaw, names.length > 1);
+          }
           entities.push({ name: modName, kind: 'module', lineStart: firstName.startPosition.row + 1, lineEnd: firstName.startPosition.row + 1, language });
           relationships.push({ srcName: fileName, dstName: modName, predicate: 'IMPORTS', importRaw });
         }
@@ -3475,6 +3509,12 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           const phpImportAliased = language === SupportedLanguages.PHP
             && phpUseClause?.type === 'namespace_use_clause'
             && phpUseClause.namedChildCount > 1;
+          if (language === SupportedLanguages.PHP && !importKind) {
+            const local = phpImportAliased
+              ? phpUseClause.namedChild(phpUseClause.namedChildCount - 1)?.text
+              : importRaw.split('\\').pop();
+            if (local) recordPhpUse(local, importRaw, phpImportAliased);
+          }
           entities.push({ name: modName, kind: 'module', lineStart: importSource.node.startPosition.row + 1, lineEnd: importSource.node.startPosition.row + 1, language });
           relationships.push({
             srcName: fileName,
@@ -3943,6 +3983,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     }
     const tsGlobalTypes = isTsSource ? tsGlobalTypeNames(tree.rootNode) : [];
     const tsModule = isTsSource && isTsModule(tree.rootNode);
+    const receiverHeritage = language === SupportedLanguages.PHP
+      ? phpReceiverHeritage(phpHeritageBases, phpUseLocals, phpNamespaces.blocks)
+      : receiverFacts?.heritage ?? [];
 
     return {
       filePath,
@@ -3957,10 +4000,11 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       // file. A key that is present-but-undefined still serializes, which would
       // rewrite every checked-in parseFile snapshot for no behavioural reason.
       ...(phpNamespaces.blocks > 0 ? { phpNamespaceBlocks: phpNamespaces.blocks } : {}),
+      ...(phpUseAliases.size > 0 ? { phpUseAliases: [...phpUseAliases].sort() } : {}),
       // Absent unless true, for the same reason.
       ...(tree.rootNode.hasError ? { hasParseErrors: true as const } : {}),
       ...(receiverFacts?.factories.length ? { receiverFactories: receiverFacts.factories } : {}),
-      ...(receiverFacts?.heritage.length ? { receiverHeritage: receiverFacts.heritage } : {}),
+      ...(receiverHeritage.length ? { receiverHeritage } : {}),
       ...(receiverFacts?.package ? { receiverPackage: receiverFacts.package } : {}),
       ...(receiverTypedCalls.length ? { receiverTypedCalls } : {}),
       ...(tsGlobalTypes.length ? { tsGlobalTypes } : {}),
@@ -4027,6 +4071,55 @@ function phpTypeFqcn(entity: ParsedEntity): string | undefined {
   }
   const namespace = trimPhpNamespace(entity.packageScope);
   return `${namespace ? `${namespace}\\` : ''}${entity.name}`.toLowerCase();
+}
+
+/** A PHP class's `extends` or `use Trait` base as written, and the class's namespace. */
+interface PhpHeritageBase {
+  cls: string;
+  base: string;
+  namespace: string;
+}
+
+/**
+ * PHP `[class, base FQCN]` for each `extends` and `use Trait`, the base in the
+ * lowercase form `phpTypes` keys on, so resolution can walk from a class to
+ * the members it inherits (#999). The base is resolved here, where the file's
+ * `use` imports are known: `\A\B` is already qualified, a name whose first
+ * segment a `use` binds goes through that import, anything else is relative
+ * to the class's namespace. A `use` is scoped to its namespace block, so a
+ * file with several blocks gets none, as `phpFqcnImportsByLocal` skips it.
+ * A `namespace\X` base, or a name two imports disagree on, is left out.
+ */
+function phpReceiverHeritage(
+  bases: PhpHeritageBase[],
+  useLocals: Map<string, string | null>,
+  namespaceBlocks: number,
+): Array<[string, string]> {
+  if (namespaceBlocks > 1) return [];
+  const out: Array<[string, string]> = [];
+  const seen = new Set<string>();
+  for (const { cls, base, namespace } of bases) {
+    let fqcn: string | undefined;
+    if (base.startsWith('\\')) {
+      fqcn = trimPhpNamespace(base).toLowerCase();
+    } else {
+      const [head, ...rest] = base.split('\\');
+      const lowered = head.toLowerCase();
+      if (lowered === 'namespace') continue;
+      if (useLocals.has(lowered)) {
+        const imported = useLocals.get(lowered);
+        if (!imported) continue;
+        fqcn = [imported, ...rest].join('\\').toLowerCase();
+      } else {
+        fqcn = `${namespace ? `${namespace}\\` : ''}${base}`.toLowerCase();
+      }
+    }
+    const key = `${cls}\0${fqcn}`;
+    if (!fqcn || seen.has(key)) continue;
+    seen.add(key);
+    out.push([cls, fqcn]);
+  }
+  return out;
 }
 
 function ambiguousPhpTypeNames(entities: ParsedEntity[]): Set<string> {
@@ -5424,6 +5517,11 @@ export function resolveEdges(
   function findReceiverProviders(context: string, rawType: string): Array<{ fp: string; type: string }> {
     const summary = summaries.get(context);
     const language = summary?.language ?? languageFromPath(context);
+    // PHP names a type by its lowercase FQCN (`phpReceiverHeritage`,
+    // `phpInheritedMember`): the files that declare that type.
+    if (language === SupportedLanguages.PHP) {
+      return (phpFqcnToTypes.get(rawType.toLowerCase()) ?? []).map(entry => ({ fp: entry.filePath, type: entry.typeName }));
+    }
     const parts = rawType.split('.');
     let type = parts.pop()!;
     if (language === SupportedLanguages.Scala) {
@@ -5805,6 +5903,7 @@ export function resolveEdges(
   function importedPhpType(srcFilePath: string, rel: ParsedRelationship): {
     entries: Array<{ filePath: string; typeName: string }>;
     memberName?: string;
+    fqcn?: string;
   } | undefined {
     if (rel.predicate === 'IMPORTS' && (rel.importKind === 'function' || rel.importKind === 'const')) {
       return undefined;
@@ -5821,7 +5920,48 @@ export function resolveEdges(
     return {
       entries: phpFqcnToTypes.get(fqcn) ?? [],
       memberName: parts.length > 1 ? parts[parts.length - 1] : undefined,
+      fqcn,
     };
+  }
+
+  /**
+   * PHP: the one `member` the type `fqcn` inherits from a class it extends or
+   * a trait it uses, walking `receiverHeritage` (#999). None when the type is
+   * not exactly one file's, or when several bases declare the member: PHP
+   * prefers a trait's method to the parent's, which is not modelled, so that
+   * case stays unconnected rather than guessed.
+   */
+  function phpInheritedMember(srcFilePath: string, fqcn: string, member: string): { fp: string; key: string } | undefined {
+    const targets = receiverMembers(srcFilePath, fqcn, member);
+    return targets.length === 1 ? targets[0] : undefined;
+  }
+
+  /**
+   * PHP `Type.member` from `$this->member()`, `Type::member()` or a typed
+   * `$t->member()` where no file declares `Type.member` itself: the member
+   * `Type` inherits (#999). `Type` is a plain name no `use` imported (an
+   * imported one resolves in `importedPhpType`'s branch), so it names a type
+   * of the caller's namespace. A `Type` an aliased `use` binds (`use A\B as
+   * Type`, not tracked here), a file with several namespace blocks, and a file
+   * whose namespace is not known from its entities are left out.
+   */
+  const phpFileNamespace = new Map<FileParseResult, string | undefined>();
+  function phpInheritedCall(result: FileParseResult, qualifier: string, member: string): { fp: string; key: string } | undefined {
+    if (qualifier.includes('\\') || qualifier.includes('.')) return undefined;
+    const blocks = result.phpNamespaceBlocks ?? 0;
+    if (blocks > 1) return undefined;
+    if (result.phpUseAliases?.includes(qualifier.toLowerCase())) return undefined;
+    // No file may declare `Type.member` itself: then the existing tiers decide.
+    const declared = (qualifiedToFiles.get(`${qualifier}.${member}`) ?? [])
+      .some(fp => importLanguageCompatible(SupportedLanguages.PHP, fileLanguage.get(fp) ?? languageFromPath(fp)));
+    if (declared) return undefined;
+    if (!phpFileNamespace.has(result)) {
+      const scoped = blocks === 1 ? result.entities.find(e => e.packageScope !== undefined) : undefined;
+      phpFileNamespace.set(result, blocks === 0 ? '' : scoped ? trimPhpNamespace(scoped.packageScope) : undefined);
+    }
+    const namespace = phpFileNamespace.get(result);
+    if (namespace === undefined) return undefined;
+    return phpInheritedMember(result.filePath, `${namespace ? `${namespace}\\` : ''}${qualifier}`, member);
   }
 
   const resolved: ResolvedEdge[] = [];
@@ -6007,7 +6147,24 @@ export function resolveEdges(
             ? `${entry.typeName}.${phpType.memberName}`
             : entry.typeName;
           const dstQualifiedKey = bestPhpQKey(fileQKeys, entry.filePath, plainName, preferredQKey);
-          if (dstQualifiedKey !== null) {
+          // Not declared on the imported type itself: a member it inherits (#999).
+          const inherited = dstQualifiedKey === null && phpType.memberName && phpType.fqcn && rel.predicate === 'CALLS'
+            ? phpInheritedMember(srcFilePath, phpType.fqcn, phpType.memberName)
+            : undefined;
+          if (inherited) {
+            resolved.push({
+              srcFilePath,
+              srcName: rel.srcName,
+              dstFilePath: inherited.fp,
+              dstName: rel.dstName,
+              dstQualifiedKey: inherited.key,
+              predicate: rel.predicate,
+              confidence: 0.9,
+              tier: 'binding',
+              ...(rel.phpCallKind ? { phpCallKind: rel.phpCallKind } : {}),
+            });
+            stats.resolvedQualifier++;
+          } else if (dstQualifiedKey !== null) {
             resolved.push({
               srcFilePath,
               srcName: rel.srcName,
@@ -6312,6 +6469,17 @@ export function resolveEdges(
               } else if (reexportMatches.length === 1) {
                 resolved.push({ srcFilePath, srcName, dstFilePath: reexportMatches[0], dstName: origDstName, dstQualifiedKey: memberPart, predicate: rel.predicate, confidence: 0.8, tier: 'qualifier' });
               }
+              continue;
+            }
+          }
+          // PHP: a member the type inherits from a class it extends or a trait
+          // it uses (#999). Only when no file declares `Type.member` itself, so
+          // every call that resolved before resolves as it did.
+          if (srcLanguage === SupportedLanguages.PHP && rel.predicate === 'CALLS') {
+            const inherited = phpInheritedCall(result, qualifierPart, memberPart);
+            if (inherited) {
+              resolved.push({ srcFilePath, srcName, dstFilePath: inherited.fp, dstName: origDstName, dstQualifiedKey: inherited.key, predicate: rel.predicate, confidence: 0.9, tier: 'qualifier', ...(rel.phpCallKind ? { phpCallKind: rel.phpCallKind } : {}) });
+              stats.resolvedQualifier++;
               continue;
             }
           }

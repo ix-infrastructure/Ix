@@ -34,6 +34,12 @@ export interface FileSummary {
   phpTypes?: Array<[string, string]>;
   /** Receiver inference facts needed across incremental batches. */
   receiverFactories?: Array<[string, string]>;
+  /**
+   * `[type, base]` per type a type inherits from. PHP lists a class's
+   * `extends` and `use Trait` bases, each as the lowercase FQCN `phpTypes`
+   * keys on (`app\models\base`), resolved through the file's namespace and
+   * `use` imports.
+   */
   receiverHeritage?: Array<[string, string]>;
   receiverPackage?: string;
   importAliases?: Record<string, string>;
@@ -91,7 +97,7 @@ export function summaryBindings(s: Partial<BindingFields> | undefined): Map<stri
   }
   if (s.receiverHeritage?.length) {
     const imports = heritageImportsKey(s.imports);
-    for (const [name, base] of s.receiverHeritage) out.set(`h\0${pkg}\0${name}\0${base}\0${imports}`, [name]);
+    for (const [name, base] of s.receiverHeritage) out.set(`h\0${pkg}\0${name}\0${base}\0${imports}`, [name, ...phpFqcns(s, name)]);
   }
   // JS/TS `export * as ns from './a'` (key `export:ns`): what an importer's
   // `import { ns }` resolves `ns.Base` through. A file's own namespace import
@@ -102,6 +108,14 @@ export function summaryBindings(s: Partial<BindingFields> | undefined): Map<stri
   // TypeScript globals an unimported heritage base may name.
   for (const name of s.tsGlobalTypes ?? []) out.set(`g\0${name}`, [name]);
   return out;
+}
+
+/**
+ * The FQCNs of a PHP type named `name` in the summary: what a subclass's
+ * PHP `receiverHeritage` names it by, so a change to the type reaches it.
+ */
+function phpFqcns(s: Partial<BindingFields>, name: string): string[] {
+  return (s.phpTypes ?? []).filter(([, typeName]) => typeName === name).map(([fqcn]) => fqcn);
 }
 
 /** `[Class.method, method]` for a Java method result, else `[name]`. */
@@ -242,6 +256,8 @@ export function findDependents(
     for (const [child, parent] of s.receiverHeritage ?? []) {
       dependsOn(parent, child);
       if (s.receiverPackage) dependsOn(parent, `${s.receiverPackage}.${child}`);
+      // A PHP subclass's own subclasses name it by FQCN.
+      for (const fqcn of phpFqcns(s, child)) dependsOn(parent, fqcn);
     }
     for (const [factory, type] of s.receiverFactories ?? []) if (type) for (const name of javaMember(s, factory)) dependsOn(type, name);
   }

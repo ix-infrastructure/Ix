@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { buildGlobalResolutionIndex, parseFile, resolveEdges, summarizeParseResult } from '../index.js';
 import { SupportedLanguages } from '../languages.js';
 import {
   changedNames, definedNames, findDependents, importsChanged, summaryBindings, summarySignature,
@@ -267,5 +268,147 @@ describe('dependents (IN-11)', () => {
     // Only an __init__.py counts, and only when passed as one that came or went.
     expect(findDependents(table, new Set(), [], new Set(), ['tools/helpers.py'])).toEqual([]);
     expect(findDependents(table, new Set(), ['tools/__init__.py'], new Set())).toEqual([]);
+  });
+});
+
+describe('PHP calls to inherited and trait members (#999)', () => {
+  const issueRepo = (): Record<string, string> => ({
+    '/repo/src/Base.php': '<?php\nnamespace App;\nclass Base { public function inherited(): void {} }\n',
+    '/repo/src/Loud.php': '<?php\nnamespace App;\ntrait Loud { public function shout(): void {} }\n',
+    '/repo/src/Child.php': [
+      '<?php',
+      'namespace App;',
+      'class Child extends Base {',
+      '  use Loud;',
+      '  public function own(): void {}',
+      '  public function go(): void { $this->shout(); $this->inherited(); self::inherited(); }',
+      '}',
+      '',
+    ].join('\n'),
+    '/repo/src/Svc.php': [
+      '<?php',
+      'namespace App;',
+      'class Svc { public function run(Child $c): void { $c->inherited(); $c->shout(); $c->own(); } }',
+      '',
+    ].join('\n'),
+  });
+  const parseAll = (files: Record<string, string>) => Object.entries(files).map(([fp, src]) => parseFile(fp, src)!);
+  const calls = (edges: ReturnType<typeof resolveEdges>) => edges
+    .filter(edge => edge.predicate === 'CALLS')
+    .map(edge => `${edge.srcName} -> ${edge.dstFilePath.split('/').pop()}:${edge.dstQualifiedKey} @${edge.confidence} ${edge.tier}`)
+    .sort();
+  const summaryIndex = (files: Record<string, string>) => buildGlobalResolutionIndex(
+    Object.keys(files),
+    new Map(Object.entries(files).map(([fp, src]) => [fp, summarizeParseResult(parseFile(fp, src)!)])),
+  );
+
+  it("summarizes each class's extends and use Trait bases as FQCNs", () => {
+    const child = parseFile('/repo/src/Child.php', [
+      '<?php',
+      'namespace App\\Models;',
+      'use App\\{Base, Loud, Tool as Grouped};',
+      'use Lib\\Thing as Other, Lib\\Plain;',
+      'use function Lib\\helper;',
+      'class A extends Other { use Loud, \\Q\\T, Grouped; }',
+      'class B extends Base { use Plain\\Sub, Local, helper; }',
+      '',
+    ].join('\n'))!;
+    expect(new Set(child.receiverHeritage!.map(h => h.join(' ')))).toEqual(new Set([
+      'A lib\\thing', 'A app\\loud', 'A q\\t', 'A app\\tool', 'B app\\base', 'B lib\\plain\\sub', 'B app\\models\\local',
+      // A `use function` binds no type name.
+      'B app\\models\\helper',
+    ]));
+    expect(child.phpUseAliases).toEqual(['grouped', 'other']);
+    expect(summarizeParseResult(child).receiverHeritage).toEqual(child.receiverHeritage);
+    // No namespace: the global one.
+    expect(parseFile('/repo/G.php', '<?php class G extends Base {}')!.receiverHeritage).toEqual([['G', 'base']]);
+    // A `use` is per namespace block, so a file with several has none.
+    expect(parseFile('/repo/M.php', '<?php namespace A { class X extends Y {} } namespace B { class Z extends Y {} }')!.receiverHeritage)
+      .toBeUndefined();
+    // No bases, no field: the parse output of other PHP files is unchanged.
+    expect(parseFile('/repo/P.php', '<?php namespace A; class P {}')!).not.toHaveProperty('receiverHeritage');
+  });
+
+  it('resolves $this, self:: and typed calls to a parent or trait method, leaving direct calls as they were', () => {
+    // `$this->inherited()` and `self::inherited()` are two call kinds: an edge each.
+    expect(calls(resolveEdges(parseAll(issueRepo())))).toEqual([
+      'Child.go -> Base.php:Base.inherited @0.9 qualifier',
+      'Child.go -> Base.php:Base.inherited @0.9 qualifier',
+      'Child.go -> Loud.php:Loud.shout @0.9 qualifier',
+      'Svc.run -> Base.php:Base.inherited @0.9 qualifier',
+      'Svc.run -> Child.php:Child.own @0.7 qualifier',
+      'Svc.run -> Loud.php:Loud.shout @0.9 qualifier',
+    ]);
+  });
+
+  it('resolves the same when the bases and the class are only in the index', () => {
+    const files = issueRepo();
+    const svc = parseFile('/repo/src/Svc.php', files['/repo/src/Svc.php'])!;
+    const batched = calls(resolveEdges([svc], undefined, summaryIndex(files)));
+    expect(batched).toEqual(calls(resolveEdges(parseAll(files))).filter(edge => edge.startsWith('Svc.run')));
+  });
+
+  it('follows imports and fully qualified bases across namespaces, through several levels', () => {
+    const files: Record<string, string> = {
+      '/repo/src/Core/Model.php': '<?php\nnamespace App\\Core;\nclass Model { public function save(): void {} }\n',
+      '/repo/src/Other/Model.php': '<?php\nnamespace Other;\nclass Model { public function save(): void {} public function touch(): void {} }\n',
+      '/repo/src/Concerns/HasName.php': '<?php\nnamespace App\\Concerns;\ntrait HasName { public function name(): string { return ""; } }\n',
+      '/repo/src/Models/Base.php': '<?php\nnamespace App\\Models;\nclass Base extends \\App\\Core\\Model {}\n',
+      '/repo/src/Models/User.php': [
+        '<?php',
+        'namespace App\\Models;',
+        'use App\\Concerns\\HasName;',
+        'class User extends Base { use HasName; }',
+        '',
+      ].join('\n'),
+      '/repo/src/Http/Controller.php': [
+        '<?php',
+        'namespace App\\Http;',
+        'use App\\Models\\User;',
+        'class Controller { public function store(User $u): void { $u->save(); $u->name(); $u->touch(); User::save(); } }',
+        '',
+      ].join('\n'),
+    };
+    // `$u->touch()` is only declared on an unrelated Other\Model: no edge.
+    expect(calls(resolveEdges(parseAll(files)))).toEqual([
+      'Controller.store -> HasName.php:HasName.name @0.9 binding',
+      'Controller.store -> Model.php:Model.save @0.9 binding',
+      'Controller.store -> Model.php:Model.save @0.9 binding',
+    ]);
+    const edges = resolveEdges(parseAll(files)).filter(edge => edge.dstQualifiedKey === 'Model.save');
+    expect(new Set(edges.map(edge => edge.dstFilePath))).toEqual(new Set(['/repo/src/Core/Model.php']));
+  });
+
+  it('connects nothing when the member is ambiguous, unknown, or the type is aliased', () => {
+    const files: Record<string, string> = {
+      '/repo/Base.php': '<?php\nnamespace App;\nclass Base { public function shout(): void {} }\n',
+      '/repo/Loud.php': '<?php\nnamespace App;\ntrait Loud { public function shout(): void {} }\n',
+      // PHP would pick the trait's shout; that order is not modelled.
+      '/repo/Child.php': '<?php\nnamespace App;\nclass Child extends Base { use Loud; public function go(): void { $this->shout(); } }\n',
+      // The parent is not in the repository.
+      '/repo/Ext.php': '<?php\nnamespace App;\nclass Ext extends \\Vendor\\Lib { public function go(): void { $this->missing(); } }\n',
+      // `Child` here is Lib\\Thing, not App\\Child.
+      '/repo/Aliased.php': '<?php\nnamespace App;\nuse Lib\\Thing as Child;\nfunction run(Child $c): void { $c->shout(); }\n',
+      '/repo/Grouped.php': '<?php\nnamespace App;\nuse Lib\\{Thing as Child};\nfunction walk(Child $c): void { $c->shout(); }\n',
+    };
+    expect(calls(resolveEdges(parseAll(files)))).toEqual([]);
+  });
+
+  it('re-resolves callers of a PHP subclass when a base up its chain changes', () => {
+    const php = SupportedLanguages.PHP;
+    const before = signed(summary('Base.php', { language: php, phpTypes: [['app\\base', 'Base']], qkeys: [['Base', 'Base']] }));
+    const after = signed({ ...before, receiverHeritage: [['Base', 'app\\grand']] });
+    expect(changedNames(before, after)).toEqual(new Set(['Base', 'app\\base']));
+    const table = new Map([
+      ['Base.php', entry(after)],
+      ['Child.php', entry(summary('Child.php', { language: php, phpTypes: [['app\\child', 'Child']], receiverHeritage: [['Child', 'app\\base']], refs: [] }))],
+      ['Leaf.php', entry(summary('Leaf.php', { language: php, phpTypes: [['app\\leaf', 'Leaf']], receiverHeritage: [['Leaf', 'app\\child']], refs: [] }))],
+      ['UseChild.php', entry(summary('UseChild.php', { language: php, refs: ['Child', 'Child.shout'] }))],
+      ['UseLeaf.php', entry(summary('UseLeaf.php', { language: php, refs: ['Leaf.shout'] }))],
+      ['Other.php', entry(summary('Other.php', { language: php, refs: ['Other.shout'] }))],
+    ]);
+    // Leaf names Child by FQCN, so the change reaches Leaf's callers too.
+    expect(findDependents(table, changedNames(before, after), [], new Set(['Base.php'])))
+      .toEqual(['UseChild.php', 'UseLeaf.php']);
   });
 });
