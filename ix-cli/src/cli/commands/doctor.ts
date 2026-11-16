@@ -459,7 +459,8 @@ export const GRAMMAR_CHECK_NAME = "Language grammars loaded";
  * "Language grammars loaded": which tree-sitter grammars this install can use.
  *
  * Never a failure or a warning. An optional grammar with no prebuild for this
- * platform (tree-sitter-sas on Windows) cannot be fixed by the user, and a
+ * platform whose install-time compile failed (tree-sitter-kotlin anywhere,
+ * tree-sitter-sas on linux-arm64 or Windows) cannot be fixed by the user, and a
  * permanent warning on every such install would teach people to ignore the
  * yellow line. What was missing was the information: a missing grammar's files
  * went unparsed with no language named anywhere. So the detail names each one
