@@ -379,6 +379,19 @@ describe('PHP calls to inherited and trait members (#999)', () => {
     expect(new Set(edges.map(edge => edge.dstFilePath))).toEqual(new Set(['/repo/src/Core/Model.php']));
   });
 
+  it('walks to the inherited member when only a same-named class of another namespace declares it', () => {
+    const files: Record<string, string> = {
+      '/repo/App/Base.php': '<?php\nnamespace App;\nclass Base { public function shout(): void {} }\n',
+      '/repo/App/Child.php': '<?php\nnamespace App;\nclass Child extends Base { public function go(): void { $this->shout(); } }\n',
+      '/repo/Other/Child.php': '<?php\nnamespace Other;\nclass Child { public function shout(): void {} }\n',
+    };
+    // Not the global fallback to Other\\Child::shout.
+    expect(calls(resolveEdges(parseAll(files)))).toEqual(['Child.go -> Base.php:Base.shout @0.9 qualifier']);
+    // The caller's own class declaring it still resolves as before.
+    const own = { ...files, '/repo/App/Child.php': '<?php\nnamespace App;\nclass Child extends Base { public function shout(): void {} public function go(): void { $this->shout(); } }\n' };
+    expect(calls(resolveEdges(parseAll(own))).every(edge => !edge.includes('Base.php'))).toBe(true);
+  });
+
   it('connects nothing when the member is ambiguous, unknown, or the type is aliased', () => {
     const files: Record<string, string> = {
       '/repo/Base.php': '<?php\nnamespace App;\nclass Base { public function shout(): void {} }\n',

@@ -5938,7 +5938,7 @@ export function resolveEdges(
 
   /**
    * PHP `Type.member` from `$this->member()`, `Type::member()` or a typed
-   * `$t->member()` where no file declares `Type.member` itself: the member
+   * `$t->member()` where the caller's `Type` does not declare `member` itself: the member
    * `Type` inherits (#999). `Type` is a plain name no `use` imported (an
    * imported one resolves in `importedPhpType`'s branch), so it names a type
    * of the caller's namespace. A `Type` an aliased `use` binds (`use A\B as
@@ -5951,17 +5951,24 @@ export function resolveEdges(
     const blocks = result.phpNamespaceBlocks ?? 0;
     if (blocks > 1) return undefined;
     if (result.phpUseAliases?.includes(qualifier.toLowerCase())) return undefined;
-    // No file may declare `Type.member` itself: then the existing tiers decide.
-    const declared = (qualifiedToFiles.get(`${qualifier}.${member}`) ?? [])
-      .some(fp => importLanguageCompatible(SupportedLanguages.PHP, fileLanguage.get(fp) ?? languageFromPath(fp)));
-    if (declared) return undefined;
     if (!phpFileNamespace.has(result)) {
       const scoped = blocks === 1 ? result.entities.find(e => e.packageScope !== undefined) : undefined;
       phpFileNamespace.set(result, blocks === 0 ? '' : scoped ? trimPhpNamespace(scoped.packageScope) : undefined);
     }
     const namespace = phpFileNamespace.get(result);
     if (namespace === undefined) return undefined;
-    return phpInheritedMember(result.filePath, `${namespace ? `${namespace}\\` : ''}${qualifier}`, member);
+    const fqcn = `${namespace ? `${namespace}\\` : ''}${qualifier}`;
+    // When the caller's own `Type` declares `Type.member`, or that type is not
+    // exactly one file's, the existing tiers decide. A same-named type of
+    // another namespace that declares it does not stop the walk (its global
+    // fallback edge would be the wrong class).
+    const declaring = (qualifiedToFiles.get(`${qualifier}.${member}`) ?? [])
+      .filter(fp => importLanguageCompatible(SupportedLanguages.PHP, fileLanguage.get(fp) ?? languageFromPath(fp)));
+    if (declaring.length) {
+      const providers = receiverProviders(result.filePath, fqcn);
+      if (providers.length !== 1 || declaring.includes(providers[0].fp)) return undefined;
+    }
+    return phpInheritedMember(result.filePath, fqcn, member);
   }
 
   const resolved: ResolvedEdge[] = [];
@@ -6473,8 +6480,8 @@ export function resolveEdges(
             }
           }
           // PHP: a member the type inherits from a class it extends or a trait
-          // it uses (#999). Only when no file declares `Type.member` itself, so
-          // every call that resolved before resolves as it did.
+          // it uses (#999). Only when the caller's `Type` does not declare
+          // `member` itself, so a call to its own member resolves as before.
           if (srcLanguage === SupportedLanguages.PHP && rel.predicate === 'CALLS') {
             const inherited = phpInheritedCall(result, qualifierPart, memberPart);
             if (inherited) {
