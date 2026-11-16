@@ -13,6 +13,15 @@ import {
   type MultiRepoContext,
 } from '../patch-builder.js';
 import type { GraphPatchPayload } from '../types.js';
+import {
+  compareExtractorOutput,
+  extractorOutputFailure,
+  outputDigest,
+  readExtractorOutputRecord,
+  UPDATE_ENV,
+  writeExtractorOutputRecord,
+} from './helpers/extractor-output.js';
+import { parserDependencyVersions } from './helpers/grammars.js';
 
 /**
  * Golden output of the patch builder the CLI calls (`buildPatchWithResolution`)
@@ -24,10 +33,16 @@ import type { GraphPatchPayload } from '../types.js';
  * The extractor name is masked, and the patch id is checked against
  * `sourcePatchIdCandidates` rather than snapshotted, so an extractor version
  * bump does not rewrite this file.
+ *
+ * A snapshot can be refreshed with `-u` under the same extractor name, so the
+ * last test also checks a digest of each case, and the lockfile version of
+ * every grammar, against test-fixtures/extractor-output.json: either changing
+ * under the name recorded there fails until the name is bumped (#964).
  */
 
 const repoRoot = path.resolve(import.meta.dirname, '../../..');
 const fixtureRoot = path.join(repoRoot, 'core-ingestion/test-fixtures');
+const recordFile = path.join(fixtureRoot, 'extractor-output.json');
 
 function sourceFiles(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir).sort()) {
@@ -65,49 +80,86 @@ function buildRepo(results: FileParseResult[], workspaceOf: (filePath: string) =
   ));
 }
 
-describe('buildPatchWithResolution golden output (the CLI path)', () => {
-  const repos = readdirSync(fixtureRoot)
-    .filter((name) => statSync(path.join(fixtureRoot, name)).isDirectory())
-    .sort();
+const repos = readdirSync(fixtureRoot)
+  .filter((name) => statSync(path.join(fixtureRoot, name)).isDirectory())
+  .sort();
 
+function fixtureRepo(repo: string): Record<string, unknown>[] | null {
+  const results = parseRepo(path.join(fixtureRoot, repo), repoRoot);
+  return results.length === 0 ? null : buildRepo(results, () => 'ws');
+}
+
+function coIngest(): Record<string, unknown>[] {
+  // Paths repo-prefixed, as a system ingest passes them; each member keeps
+  // its own workspace id, so cross-repo dsts fold the other member's id.
+  const members = ['mini-repo', 'scala-repo'];
+  const results = members.flatMap((m) => parseRepo(path.join(fixtureRoot, m), fixtureRoot));
+  const workspaceOf = (filePath: string) => `ws-${filePath.split('/')[0]}`;
+  const multiRepo = (filePath: string): MultiRepoContext => ({
+    systemId: 'sys',
+    repoId: filePath.split('/')[0],
+    repoWorkspaceOf: workspaceOf,
+  });
+  return buildRepo(results, workspaceOf, multiRepo);
+}
+
+function phpCallKinds(): Record<string, unknown>[] {
+  const source = [
+    '<?php',
+    'class Foo {',
+    '  function handle() { return 1; }',
+    '  function run($obj) { handle(); $obj->handle(); Foo::handle(); }',
+    '}',
+    'function handle() {}',
+    '',
+  ].join('\n');
+  const result = parseFile('src/Foo.php', source, { budgetMs: 0 });
+  expect(result).not.toBeNull();
+  return buildRepo([result!], () => 'ws');
+}
+
+/** Every golden case by the name extractor-output.json records it under. */
+const CASES: ReadonlyArray<readonly [string, () => Record<string, unknown>[] | null]> = [
+  ...repos.map((repo) => [repo, () => fixtureRepo(repo)] as const),
+  ['co-ingest of mini-repo and scala-repo', coIngest],
+  ['PHP calls that differ only in call kind', phpCallKinds],
+];
+
+describe('buildPatchWithResolution golden output (the CLI path)', () => {
   it('covers every fixture repo that has source', () => {
     expect(repos).toEqual(expect.arrayContaining(['java-receivers', 'mini-repo', 'scala-repo', 'typescript']));
   });
 
   for (const repo of repos) {
     it(`is unchanged for ${repo}`, () => {
-      const results = parseRepo(path.join(fixtureRoot, repo), repoRoot);
-      if (results.length === 0) return;
-      expect(buildRepo(results, () => 'ws')).toMatchSnapshot();
+      const output = fixtureRepo(repo);
+      if (output === null) return;
+      expect(output).toMatchSnapshot();
     });
   }
 
   it('is unchanged for a co-ingest of two fixture repos', () => {
-    // Paths repo-prefixed, as a system ingest passes them; each member keeps
-    // its own workspace id, so cross-repo dsts fold the other member's id.
-    const members = ['mini-repo', 'scala-repo'];
-    const results = members.flatMap((m) => parseRepo(path.join(fixtureRoot, m), fixtureRoot));
-    const workspaceOf = (filePath: string) => `ws-${filePath.split('/')[0]}`;
-    const multiRepo = (filePath: string): MultiRepoContext => ({
-      systemId: 'sys',
-      repoId: filePath.split('/')[0],
-      repoWorkspaceOf: workspaceOf,
-    });
-    expect(buildRepo(results, workspaceOf, multiRepo)).toMatchSnapshot();
+    expect(coIngest()).toMatchSnapshot();
   });
 
   it('is unchanged for PHP calls that differ only in call kind', () => {
-    const source = [
-      '<?php',
-      'class Foo {',
-      '  function handle() { return 1; }',
-      '  function run($obj) { handle(); $obj->handle(); Foo::handle(); }',
-      '}',
-      'function handle() {}',
-      '',
-    ].join('\n');
-    const result = parseFile('src/Foo.php', source, { budgetMs: 0 });
-    expect(result).not.toBeNull();
-    expect(buildRepo([result!], () => 'ws')).toMatchSnapshot();
+    expect(phpCallKinds()).toMatchSnapshot();
+  });
+});
+
+describe('extractor output record (#964)', () => {
+  it('changes only together with the extractor name', () => {
+    const outputs: Record<string, string> = {};
+    for (const [name, build] of CASES) {
+      const output = build();
+      // stable() writes each op as a JSON string; digest the op itself.
+      if (output !== null) outputs[name] = outputDigest(output.map((p) => ({ ...p, ops: (p.ops as string[]).map((op) => JSON.parse(op)) })));
+    }
+    const current = { extractor: extractorName(), parserDependencies: parserDependencyVersions(), outputs };
+    const check = compareExtractorOutput(readExtractorOutputRecord(recordFile), current);
+    const updating = process.env[UPDATE_ENV] === '1';
+    const failure = extractorOutputFailure(check, updating);
+    if (failure === null && updating && check.stale.length > 0) writeExtractorOutputRecord(recordFile, current);
+    expect(failure, failure ?? '').toBeNull();
   });
 });

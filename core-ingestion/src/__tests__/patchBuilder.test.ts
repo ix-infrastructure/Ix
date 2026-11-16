@@ -1,5 +1,9 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import { parseFile, resolveEdges } from '../index.js';
@@ -11,6 +15,13 @@ import {
   PREVIOUS_EXTRACTORS,
   sourcePatchIdCandidates,
 } from '../patch-builder.js';
+import {
+  compareExtractorOutput,
+  extractorOutputFailure,
+  outputDigest,
+  type ExtractorOutputRecord,
+} from './helpers/extractor-output.js';
+import { parserDependencyVersions } from './helpers/grammars.js';
 
 describe('patch-builder extractor policy', () => {
   it('tracks the immediate predecessor when the extractor version is bumped', () => {
@@ -51,6 +62,93 @@ describe('patch-builder extractor policy', () => {
     expect(patch.source.sourceHash).not.toBe(sourceHash);
     expect(patch.ops).toEqual(ops);
     expect(patch.replaces).toEqual(candidates);
+  });
+});
+
+describe('extractor output record (#964)', () => {
+  const record: ExtractorOutputRecord = {
+    extractor: 'tree-sitter/1.30',
+    parserDependencies: { 'tree-sitter': '0.25.1', 'tree-sitter-java': '0.23.5' },
+    outputs: { 'mini-repo': 'aaa', typescript: 'bbb' },
+  };
+  const withChanges = (changes: Partial<ExtractorOutputRecord>): ExtractorOutputRecord => ({ ...record, ...changes });
+
+  it('passes when nothing changed', () => {
+    const check = compareExtractorOutput(record, withChanges({}));
+    expect(check).toEqual({ needsBump: [], stale: [] });
+    expect(extractorOutputFailure(check, false)).toBeNull();
+  });
+
+  it('needs a bump when a grammar version changes, even with every digest unchanged', () => {
+    const check = compareExtractorOutput(record, withChanges({
+      parserDependencies: { ...record.parserDependencies, 'tree-sitter-java': '0.23.6' },
+    }));
+    expect(check.needsBump).toEqual(['parser dependency tree-sitter-java changed from 0.23.5 to 0.23.6']);
+    // Asking to rewrite the record does not get past it.
+    expect(extractorOutputFailure(check, true)).toMatch(/cannot be rewritten under the old name/);
+  });
+
+  it('needs a bump when a case produces different output under the same name', () => {
+    const check = compareExtractorOutput(record, withChanges({ outputs: { ...record.outputs, typescript: 'ccc' } }));
+    expect(check.needsBump).toEqual(['golden case "typescript" produces different output']);
+    expect(extractorOutputFailure(check, true)).toMatch(/bumps `extractorName\(\)`/);
+  });
+
+  it('only asks for a rewrite once the name is bumped, whatever else changed', () => {
+    const check = compareExtractorOutput(record, withChanges({
+      extractor: 'tree-sitter/1.31',
+      parserDependencies: { ...record.parserDependencies, 'tree-sitter-java': '0.23.6' },
+      outputs: { ...record.outputs, typescript: 'ccc' },
+    }));
+    expect(check).toEqual({ needsBump: [], stale: ['the record is for tree-sitter/1.30, the extractor is now tree-sitter/1.31'] });
+    expect(extractorOutputFailure(check, false)).toMatch(/out of date/);
+    expect(extractorOutputFailure(check, true)).toBeNull();
+  });
+
+  it('treats an added grammar or a case added or removed as a stale record, not a bump', () => {
+    const check = compareExtractorOutput(record, withChanges({
+      parserDependencies: { ...record.parserDependencies, 'tree-sitter-zig': '1.1.2' },
+      outputs: { typescript: 'bbb', php: 'ddd' },
+    }));
+    expect(check.needsBump).toEqual([]);
+    expect(check.stale).toEqual([
+      'parser dependency tree-sitter-zig added',
+      'golden case mini-repo removed',
+      'golden case php added',
+    ]);
+  });
+
+  it('asks for a record when there is none', () => {
+    expect(compareExtractorOutput(null, record)).toEqual({ needsBump: [], stale: ['no record yet'] });
+  });
+
+  it('digests output independently of object key order', () => {
+    expect(outputDigest([{ a: 1, b: { c: 2, d: 3 } }])).toBe(outputDigest([{ b: { d: 3, c: 2 }, a: 1 }]));
+    expect(outputDigest([{ a: 1 }])).not.toBe(outputDigest([{ a: 2 }]));
+  });
+
+  it('reads parser dependency versions from the lockfile, not node_modules', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'ix-parser-deps-'));
+    try {
+      writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+        dependencies: { 'tree-sitter-java': '^0.23.5', 'tree-sitter': '^0.25.1' },
+        optionalDependencies: { 'tree-sitter-sas': '^0.4.2' },
+        devDependencies: { vitest: '^4.0.0' },
+      }));
+      writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({ packages: {
+        'node_modules/tree-sitter': { version: '0.25.1' },
+        'node_modules/tree-sitter-java': { version: '0.23.5' },
+        'node_modules/tree-sitter-sas': { version: '0.4.2', optional: true },
+        'node_modules/vitest': { version: '4.1.12', dev: true },
+      } }));
+      expect(parserDependencyVersions(root)).toEqual({
+        'tree-sitter': '0.25.1', 'tree-sitter-java': '0.23.5', 'tree-sitter-sas': '0.4.2',
+      });
+      writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({ packages: {} }));
+      expect(() => parserDependencyVersions(root)).toThrow(/pins no version for tree-sitter/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 
@@ -65,4 +65,31 @@ export function optionalGrammarExpected(pkg: string): boolean {
   if (!dir) return false;
   return existsSync(join(dir, 'prebuilds', `${process.platform}-${process.arch}`))
     || existsSync(join(dir, 'build', 'Release'));
+}
+
+const coreIngestionRoot = join(import.meta.dirname, '..', '..', '..');
+
+/**
+ * The version core-ingestion/package-lock.json pins for every package the
+ * parser loads at run time (package.json `dependencies` and
+ * `optionalDependencies`: tree-sitter and its grammars), by package name.
+ * Read from the lockfile rather than node_modules, so the answer is the same
+ * on every platform even where an optional grammar did not install.
+ */
+export function parserDependencyVersions(root: string = coreIngestionRoot): Record<string, string> {
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
+    dependencies?: Record<string, string>;
+    optionalDependencies?: Record<string, string>;
+  };
+  const lock = JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8')) as {
+    packages?: Record<string, { version?: string }>;
+  };
+  const names = [...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.optionalDependencies ?? {})].sort();
+  const versions: Record<string, string> = {};
+  for (const name of names) {
+    const version = lock.packages?.[`node_modules/${name}`]?.version;
+    if (!version) throw new Error(`package-lock.json pins no version for ${name}; run npm install in core-ingestion`);
+    versions[name] = version;
+  }
+  return versions;
 }
