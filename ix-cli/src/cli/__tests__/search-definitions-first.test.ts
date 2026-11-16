@@ -2,7 +2,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
-import { registerSearchCommand } from "../commands/search.js";
+import { rankScore, registerSearchCommand } from "../commands/search.js";
+import { setOutputShape } from "../output-shape.js";
 
 /**
  * `ix search <code name>` must lead with the code definition.
@@ -11,7 +12,8 @@ import { registerSearchCommand } from "../commands/search.js";
  * name (a `module` entity whose path is the IMPORTING file) came back instead
  * of the file that defines it, and code-like terms matched CSS selectors,
  * markdown headings, JSON keys and build output ahead of code. Those rows are
- * demoted, never removed.
+ * demoted, not removed — except an import of the term, which is folded away
+ * once the definition itself is listed (Ix#1017).
  */
 
 const { search } = vi.hoisted(() => ({ search: vi.fn() }));
@@ -79,16 +81,20 @@ describe("search: definitions rank above import entities", () => {
       n("file", "borderStylesReset.js", "file", "src/generators/borderStylesReset.js", 60, { line_end: 8 }),
     ]);
     const out = await run("borderStylesReset");
-    expect(ids(out)).toEqual(["file", "import"]);
-    expect(out.results[0].tier).toBeLessThan(out.results[1].tier);
+    // The import is folded behind the file it imports (Ix#1017); it still
+    // ranks in a lower tier, which is what orders it when nothing folds it.
+    expect(ids(out)).toEqual(["file"]);
+    const tierOf = (node: Node) => rankScore(node, "borderStylesReset", undefined, undefined).tier;
+    expect(tierOf(n("file", "borderStylesReset.js", "file", "src/generators/borderStylesReset.js", 60)))
+      .toBeLessThan(tierOf(imp("import", "borderStylesReset", "src/lib/generateUtilities.js")));
   });
 
-  it("ranks a same-named function above its import", async () => {
+  it("lists a same-named function and folds its import", async () => {
     dataset([
       imp("import", "parseConfig", "src/cli.ts"),
       n("fn", "parseConfig", "function", "src/config.ts", 100),
     ]);
-    expect(ids(await run("parseConfig"))).toEqual(["fn", "import"]);
+    expect(ids(await run("parseConfig"))).toEqual(["fn"]);
   });
 
   it("finds the defining file even when imports fill the candidate window", async () => {
@@ -98,9 +104,10 @@ describe("search: definitions rank above import entities", () => {
       ...Array.from({ length: 40 }, (_, i) => imp(`import-${i}`, "borderStylesReset", `src/lib/user${i}.js`)),
       n("file", "borderStylesReset.js", "file", "src/generators/borderStylesReset.js", 60),
     ]);
-    const out = await run("borderStylesReset");
-    expect(ids(out)[0]).toBe("file");
-    expect(out.results.length).toBe(10);
+    const out = await run("borderStylesReset") as Awaited<ReturnType<typeof run>> & { diagnostics: Array<{ code: string; message: string }> };
+    // Found, and then the imports that crowded it out are folded behind it.
+    expect(ids(out)).toEqual(["file"]);
+    expect(out.diagnostics.find((d) => d.code === "imports_folded")?.message).toMatch(/^\d+ import rows of borderStylesReset folded/);
   });
 
   it("looks for the defining file when the window holds only a map region of the name", async () => {
@@ -121,6 +128,76 @@ describe("search: definitions rank above import entities", () => {
     const out = await run("parseConfig");
     expect(ids(out)[0]).toBe("fn");
     expect(search).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("search: import rows fold once the definition is listed (Ix#1017)", () => {
+  beforeEach(() => { search.mockReset(); });
+  afterEach(() => vi.restoreAllMocks());
+
+  async function runLlm(term: string, args: string[] = []) {
+    const program = new Command().name("ix").exitOverride();
+    registerSearchCommand(program);
+    const output: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...parts) => { output.push(parts.join(" ")); });
+    vi.spyOn(process.stderr, "write").mockImplementation((() => true) as never);
+    await program.parseAsync(["search", term, ...args, "--format", "llm"], { from: "user" });
+    return output;
+  }
+
+  /** A Laravel class and every `use App\Models\Invoice;` of it. */
+  const phpRows = () => [
+    ...Array.from({ length: 12 }, (_, i) => imp(`use-${i}`, "Invoice", `app/Http/Controllers/C${i}.php`)),
+    n("cls", "Invoice", "class", "app/Models/Invoice.php", 100, { language: "php" }),
+    n("item", "InvoiceItem", "class", "app/Models/InvoiceItem.php", 60, { language: "php" }),
+  ];
+
+  it("lists the class and the next real match instead of a page of `use` rows", async () => {
+    dataset(phpRows());
+    const out = await run("Invoice");
+    expect(ids(out)).toEqual(["cls", "item"]);
+  });
+
+  it("says how many import rows it folded and where to find them", async () => {
+    dataset(phpRows());
+    const out = await run("Invoice") as unknown as { diagnostics: Array<{ code: string; message: string }> };
+    const folded = out.diagnostics.find((d) => d.code === "imports_folded");
+    expect(folded?.message).toContain("12 import");
+    expect(folded?.message).toContain("ix imported-by Invoice");
+  });
+
+  it("names the folded imports in llm output, and --quiet drops the note", async () => {
+    dataset(phpRows());
+    const lines = await runLlm("Invoice");
+    expect(lines.some((l) => l.includes("code=imports_folded"))).toBe(true);
+    expect(lines.filter((l) => l.startsWith("node "))).toHaveLength(2);
+    vi.restoreAllMocks();
+    setOutputShape({ quiet: true });
+    try {
+      const quiet = await runLlm("Invoice");
+      expect(quiet.some((l) => l.includes("imports_folded"))).toBe(false);
+      expect(quiet.filter((l) => l.startsWith("node "))).toHaveLength(2);
+    } finally {
+      setOutputShape({});
+    }
+  });
+
+  it("keeps the imports when no definition is in the answer", async () => {
+    dataset([
+      imp("use-a", "Invoice", "app/A.php"),
+      imp("use-b", "Invoice", "app/B.php"),
+    ]);
+    const out = await run("Invoice") as unknown as { results: Array<{ id: string }>; diagnostics: Array<{ code: string }> };
+    expect(ids(out).sort()).toEqual(["use-a", "use-b"]);
+    expect(out.diagnostics.some((d) => d.code === "imports_folded")).toBe(false);
+  });
+
+  it("keeps the imports when the only definition is hidden as a test", async () => {
+    dataset([
+      n("cls", "Invoice", "class", "tests/Invoice.php", 100, { role: "test" }),
+      imp("use-a", "Invoice", "app/A.php"),
+    ]);
+    expect(ids(await run("Invoice"))).toEqual(["use-a"]);
   });
 });
 
@@ -178,8 +255,8 @@ describe("search: code definitions rank above non-code and generated matches", (
       n("fn", "generate_metadata", "function", "src/pip/_internal/operations/build/metadata.py", 100),
     ]);
     const out = await run("generate_metadata");
-    expect(ids(out)).toEqual(["fn", "import"]);
-    expect(out.results[0].tier).toBeLessThan(out.results[1].tier);
+    // The build/ function counts as the definition, so its import folds.
+    expect(ids(out)).toEqual(["fn"]);
   });
 
   it("keeps a demoted row when it is the only match", async () => {
