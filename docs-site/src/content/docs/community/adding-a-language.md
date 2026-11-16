@@ -99,3 +99,9 @@ extracted until the extractor version changes. When it changes, the next `ix map
 
 The extractor version is the maintainers' decision. Don't change it in your pull request. Say in the description
 that the change alters existing output and needs a new extractor version.
+
+CI enforces this. `core-ingestion/test-fixtures/extractor-output.json` records a digest of the golden patch output and
+the lockfile version of every grammar under the current extractor version. If either changes while the version stays
+the same, `patchBuilder.golden.test.ts` fails, and refreshing its snapshots with `-u` does not get past it. A maintainer
+bumps the version and then rewrites the record with
+`IX_UPDATE_EXTRACTOR_OUTPUT=1 npx vitest run src/__tests__/patchBuilder.golden.test.ts` in `core-ingestion/`.

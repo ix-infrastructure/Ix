@@ -157,6 +157,12 @@ function deduplicateUpsertEdges(ops: PatchOp[]): PatchOp[] {
  * `ix map` skips files whose mtime or source hash is unchanged, which would
  * keep the old extractor's edges on them, so the ingest baseline records this
  * name and a run that finds a different one re-ingests every file once.
+ *
+ * test-fixtures/extractor-output.json records, under this name, a digest of
+ * the golden output and the lockfile version of every grammar.
+ * patchBuilder.golden.test.ts fails when either changes while the name stays
+ * the same, so a grammar upgrade or an output change cannot ship without a
+ * bump (#964).
  */
 /**
  * Actor stamped on ingestion patches. A kOS cloud backend binds a patch's actor
