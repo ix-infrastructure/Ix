@@ -56,9 +56,11 @@ function installedPackageDir(pkg: string): string | null {
 /**
  * Whether an optional grammar should load on this machine: npm installed it
  * and it carries a native binary for this platform, either a prebuild or one
- * compiled at install time. npm drops an optional dependency whose install
- * failed, and a package with no prebuild for this OS/arch (tree-sitter-sas on
- * Windows) has nothing to load. Anything else that fails to load is a bug.
+ * compiled at install time. Most grammars ship prebuilds for every platform;
+ * tree-sitter-kotlin ships none and tree-sitter-sas none for linux-arm64 or
+ * Windows, so those are compiled at install. npm drops an optional dependency
+ * whose compile failed, so it has nothing to load. Anything else that fails to
+ * load is a bug.
  */
 export function optionalGrammarExpected(pkg: string): boolean {
   const dir = installedPackageDir(pkg);
