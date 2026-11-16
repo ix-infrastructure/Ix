@@ -1318,6 +1318,13 @@ export const PHP_QUERIES = `
     (use_declaration
       [(name) (qualified_name)] @heritage.trait))) @heritage
 
+; ── Heritage: a trait using another trait ────────────────────────────────────
+(trait_declaration
+  name: (name) @heritage.class
+  body: (declaration_list
+    (use_declaration
+      [(name) (qualified_name)] @heritage.trait))) @heritage
+
 ; ── Type references ───────────────────────────────────────────────────────────
 (named_type (name) @reference.type)
 `;

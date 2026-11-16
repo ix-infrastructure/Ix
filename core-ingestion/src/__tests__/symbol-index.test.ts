@@ -392,6 +392,23 @@ describe('PHP calls to inherited and trait members (#999)', () => {
     expect(calls(resolveEdges(parseAll(own))).every(edge => !edge.includes('Base.php'))).toBe(true);
   });
 
+  it('follows a trait that uses another trait', () => {
+    const files: Record<string, string> = {
+      '/repo/T1.php': '<?php\nnamespace App;\ntrait T1 { public function hello(): void {} }\n',
+      '/repo/T2.php': '<?php\nnamespace App;\nuse Lib\\Mixins\\T3;\ntrait T2 { use T1, T3; }\n',
+      '/repo/T3.php': '<?php\nnamespace Lib\\Mixins;\ntrait T3 { public function wave(): void {} }\n',
+      '/repo/Child.php': '<?php\nnamespace App;\nclass Child { use T2; public function go(): void { $this->hello(); $this->wave(); } }\n',
+    };
+    const t2 = parseFile('/repo/T2.php', files['/repo/T2.php'])!;
+    expect(t2.receiverHeritage).toEqual([['T2', 'app\\t1'], ['T2', 'lib\\mixins\\t3']]);
+    expect(t2.relationships.filter(rel => rel.predicate === 'EXTENDS').map(rel => `${rel.srcName} ${rel.dstName}`))
+      .toEqual(['T2 T1', 'T2 T3']);
+    expect(calls(resolveEdges(parseAll(files)))).toEqual([
+      'Child.go -> T1.php:T1.hello @0.9 qualifier',
+      'Child.go -> T3.php:T3.wave @0.9 qualifier',
+    ]);
+  });
+
   it('connects nothing when the member is ambiguous, unknown, or the type is aliased', () => {
     const files: Record<string, string> = {
       '/repo/Base.php': '<?php\nnamespace App;\nclass Base { public function shout(): void {} }\n',
