@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { dropIncidentalMatches, foldChunkTwins, tierRelevance } from "../commands/search.js";
+import { dropIncidentalMatches, foldChunkTwins, foldImportRows, importsFoldedMessage, tierRelevance } from "../commands/search.js";
 
 function row(node: Record<string, unknown>, tier: number) {
   return { node, rank: { tier, score: -tier, matchSource: "test" } };
@@ -87,5 +87,50 @@ describe("dropIncidentalMatches", () => {
     ];
     const shown = dropIncidentalMatches(scored).slice(0, 2);
     expect(shown.map((s) => s.node.name)).toEqual(["a", "b"]);
+  });
+});
+
+describe("foldImportRows", () => {
+  /** An import entity: a single-line `module` in the importing file. */
+  function use(name: string, path: string) {
+    return { name, kind: "module", provenance: { sourceUri: path }, attrs: { line_start: 4, line_end: 4 } };
+  }
+  const cls = { name: "Invoice", kind: "class", provenance: { sourceUri: "app/Models/Invoice.php" }, attrs: { line_start: 8, line_end: 90 } };
+
+  it("folds every exact-name import once the definition is listed, and counts them", () => {
+    const { kept, folded } = foldImportRows([
+      row(cls, 0),
+      row(use("Invoice", "app/Http/A.php"), 2),
+      row(use("invoice", "app/Http/B.php"), 2),
+    ], "Invoice");
+    expect(kept.map((s) => s.node.kind)).toEqual(["class"]);
+    expect(folded).toBe(2);
+  });
+
+  it("keeps an import of a longer name (InvoiceItem for Invoice)", () => {
+    const { kept, folded } = foldImportRows([
+      row(cls, 0),
+      row(use("InvoiceItem", "app/Http/A.php"), 3),
+    ], "Invoice");
+    expect(kept).toHaveLength(2);
+    expect(folded).toBe(0);
+  });
+
+  it("keeps a multi-line module of the name: it is a definition, not an import", () => {
+    const mod = { name: "Invoice", kind: "module", provenance: { sourceUri: "lib/invoice.rb" }, attrs: { line_start: 1, line_end: 40 } };
+    const { kept } = foldImportRows([row(cls, 0), row(mod, 0)], "Invoice");
+    expect(kept).toHaveLength(2);
+  });
+
+  it("leaves imports alone when no definition of the term is present", () => {
+    const rows = [row(use("Invoice", "app/Http/A.php"), 2), row(use("Invoice", "app/Http/B.php"), 2)];
+    expect(foldImportRows(rows, "Invoice")).toEqual({ kept: rows, folded: 0 });
+  });
+
+  it("names the count and the command that lists the importers", () => {
+    expect(importsFoldedMessage(1, "Invoice")).toBe(
+      "1 import row of Invoice folded behind its definition. Use ix imported-by Invoice to list the importers.",
+    );
+    expect(importsFoldedMessage(3, "Invoice")).toMatch(/^3 import rows of Invoice/);
   });
 });
