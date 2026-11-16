@@ -11,26 +11,27 @@ class Ix < Formula
   depends_on "node@22"
 
   def install
-    # core-ingestion must be built first — the CLI build depends on it
+    # Build what the release job (.github/workflows/release.yml) builds: npm ci
+    # from the lockfiles, `npm run build`, then dev dependencies pruned. Any
+    # other recipe ships a different artefact from the release archives (#977).
     cd "core-ingestion" do
-      system "npm", "install", "--silent"
-      system "npm", "run", "build"
+      # Installs and compiles the native tree-sitter bindings. ix-cli's
+      # `npm run build` below then builds core-ingestion's dist/; its
+      # build-core-ingestion.mjs skips its own `npm ci` because node_modules
+      # already exists, so nothing is compiled twice.
+      system "npm", "ci", "--silent"
     end
 
-    # Install core-ingestion runtime (parser + tree-sitter grammars)
-    # The CLI loads these at runtime via a relative path from dist/cli/commands/
-    (prefix/"core-ingestion").install Dir["core-ingestion/dist", "core-ingestion/node_modules", "core-ingestion/package.json"]
-
     cd "ix-cli" do
-      system "npm", "install", "--silent"
+      system "npm", "ci", "--silent"
+      # Builds core-ingestion, compiles with tsconfig.build.json (the test files
+      # stay out of dist/) and copies the backend compose file that
+      # `ix docker start` writes out into dist/.
+      system "npm", "run", "build"
       # Sync package.json version with the formula version
       system "npm", "version", version.to_s, "--no-git-tag-version", "--allow-same-version"
-      # Run tsc directly — npm run build would redundantly rebuild core-ingestion
-      # via build-core-ingestion.mjs, which triggers native module compilation
-      system "npx", "tsc"
-      # The backend compose file `ix docker start` writes to ~/.ix/backend/.
-      # npm run build copies it into dist/; this build skips npm run build.
-      cp "../docker-compose.standalone.yml", "dist/docker-compose.standalone.yml"
+      # The build has used the toolchain; ship the runtime dependencies only.
+      system "npm", "prune", "--omit=dev"
 
       # Install the compiled CLI and its dependencies
       libexec.install "dist", "node_modules", "package.json"
@@ -56,6 +57,22 @@ class Ix < Formula
         exec "#{Formula["node@22"].opt_bin}/node" "#{libexec}/dist/cli/main.js" "$@"
       EOS
     end
+
+    # Only now that ix-cli has built. `install` moves files, and ix-cli's
+    # `npm run build` builds core-ingestion in place from its node_modules, so
+    # moving or pruning core-ingestion any earlier breaks that build (the
+    # review of #1073 found the same order bug).
+    cd "core-ingestion" do
+      system "npm", "prune", "--omit=dev"
+      # tree-sitter-cli arrives transitively as a runtime dependency but is
+      # grammar-authoring tooling that nothing runs at run time. The release
+      # job deletes it too.
+      rm_r Dir["node_modules/tree-sitter-cli", "node_modules/.bin/tree-sitter"]
+    end
+
+    # Install core-ingestion runtime (parser + tree-sitter grammars)
+    # The CLI loads these at runtime via a relative path from dist/cli/commands/
+    (prefix/"core-ingestion").install Dir["core-ingestion/dist", "core-ingestion/node_modules", "core-ingestion/package.json"]
   end
 
   def caveats
@@ -66,6 +83,13 @@ class Ix < Formula
 
       This requires Docker Desktop to be running.
       The backend runs as two containers: ArangoDB + Memory Layer.
+
+      The graph visualizer used by `ix view` (System Compass) is not part of
+      this formula. Fetch it into ~/.ix/cli/compass with:
+
+        ix upgrade
+
+      That also updates the backend. The CLI itself stays with `brew upgrade ix`.
     EOS
   end
 
@@ -76,5 +100,21 @@ class Ix < Formula
     # package.json to the formula version, so this proves the built CLI runs
     # *and* that it is the version brew thinks it installed.
     assert_match version.to_s, shell_output("#{bin}/ix --version")
+
+    # --version never loads core-ingestion: the CLI reaches it through a dynamic
+    # import on the first `ix map`. So parse something, as the release job does
+    # after its prune, to prove the pruned grammars still load.
+    (testpath/"parse.mjs").write <<~EOS
+      const { parseFile } = await import("#{prefix}/core-ingestion/dist/index.js");
+      await import("#{prefix}/core-ingestion/dist/patch-builder.js");
+      if (!parseFile("smoke.ts", "export const smoke = 1;\\n")) throw new Error("core-ingestion parsed nothing");
+      console.log("parsed");
+    EOS
+    assert_equal "parsed", shell_output("#{Formula["node@22"].opt_bin}/node #{testpath}/parse.mjs").strip
+
+    # npm run build compiles with tsconfig.build.json, so no tests ship...
+    assert_empty Dir["#{libexec}/dist/**/__tests__"]
+    # ...and copies in the compose file `ix docker start` writes out.
+    assert_path_exists libexec/"dist/docker-compose.standalone.yml"
   end
 end

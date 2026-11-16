@@ -383,7 +383,9 @@ export function shouldOfferCompassUpgradeFor(
   installed: CompassStamp & { present: boolean },
 ): boolean {
   if (!compassLatest) return false;
-  if (!installed.present) return true; // missing or gutted — repair.
+  // Missing or gutted: repair. A Homebrew install ships no compass at all, and
+  // the formula's caveats send the user here to fetch one.
+  if (!installed.present) return true;
   if (installed.source === "release") return false;
   return isNewer(compassLatest, installed.version);
 }
