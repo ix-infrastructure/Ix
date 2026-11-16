@@ -41,11 +41,17 @@ export function entityRecord(change: RecordChange) {
     });
 }
 
+/**
+ * `score=` only on a `--diff` row. A plain bundle prints its evidence sorted by
+ * score, so the number restates the row's place on every row; `--format json`
+ * still carries it. Added and removed rows are two lists taken out of two
+ * rankings, and there the score is what says where a row stood.
+ */
 export function evidenceRecord(change: RecordChange) {
   return (e: EvidenceItem): string =>
     llmLine("evidence", {
       change,
-      score: e.score,
+      score: change === undefined ? undefined : e.score,
       kind: e.kind,
       title: e.title,
       path: e.location?.path,

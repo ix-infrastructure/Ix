@@ -368,7 +368,7 @@ function budgetEvidence(bundle: ContextBundle, evidence: EvidenceItem[], budgets
   const fullChars = keptSize[sizedEvidence.length]!;
   // Every counter the llm header prints is set here, including
   // `truncated_chars`, so each measurement below sees the digits that will
-  // actually be emitted for that cut.
+  // actually be emitted for that cut (or the field's absence, at zero).
   const applyCut = (count: number): void => {
     bundle.evidence = evidence.slice(0, count);
     bundle.truncation.evidenceTruncated = evidence.length - count;

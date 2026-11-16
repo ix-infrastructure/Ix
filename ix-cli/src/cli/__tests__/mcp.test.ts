@@ -224,7 +224,7 @@ describe("ix mcp", () => {
     const calls: string[][] = [];
     const client = await connect(async (args) => {
       calls.push(args);
-      return { ok: true, stdout: "context target=Widget entities=2\nevidence score=0 kind=target title=Widget", stderr: "" };
+      return { ok: true, stdout: "context target=Widget entities=2\nevidence kind=target title=Widget", stderr: "" };
     });
 
     const result = await client.callTool({
@@ -240,7 +240,7 @@ describe("ix mcp", () => {
     // two copies of a bundle that can run to 20 KB.
     expect(result.structuredContent).toBeUndefined();
     expect(result.content).toEqual([
-      { type: "text", text: "context target=Widget entities=2\nevidence score=0 kind=target title=Widget" },
+      { type: "text", text: "context target=Widget entities=2\nevidence kind=target title=Widget" },
     ]);
   });
 
