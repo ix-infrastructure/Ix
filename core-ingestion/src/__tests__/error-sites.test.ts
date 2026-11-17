@@ -43,7 +43,7 @@ describe('error-site index', () => {
     const repeated = parseFile('fail.py', fixture('fail.py').replace('    raise', '    if value:\n        raise')
       .replace('\n\nfail', '\n    raise ValueError("Cannot decode empty record")\n\nfail'))!;
     const patch = buildPatch(repeated, 'hash', 'ws');
-    const raises = patch.ops.filter(op => op.predicate === 'RAISES');
+    const raises = patch.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'RAISES');
     expect(raises).toHaveLength(1);
     expect((raises[0].attrs as { sites: unknown[] }).sites).toHaveLength(2);
   });

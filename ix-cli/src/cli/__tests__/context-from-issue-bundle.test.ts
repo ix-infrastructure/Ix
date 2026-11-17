@@ -6,7 +6,10 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { buildBundle, clampBudgets, issueRankedFiles, renderBundle } from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { issueRankedFiles } from "../context/issue.js";
+import { clampBudgets } from "../context/options.js";
+import { renderBundle } from "../context/render.js";
 import { contextBundleSchema } from "../context-bundle-schema.js";
 import type { ContextFacts, EntityLocation } from "../explain/facts.js";
 import type { RankedFile, StartingPoint } from "../explain/issue.js";
@@ -160,8 +163,11 @@ describe("ix context --from-issue bundle", () => {
   it("renders both rows in llm and text output", () => {
     const b = build(issue());
     const llm = captureLog(() => renderBundle(b, "llm")).join("\n");
-    expect(llm).toMatch(/^evidence score=1000 kind=target title="starting points: listByKind/m);
-    expect(llm).toMatch(/^evidence score=1001 kind=structural title="ranked files: src\/client\/api.ts, /m);
+    expect(llm).toMatch(/^evidence kind=target title="starting points: listByKind/m);
+    expect(llm).toMatch(/^evidence kind=structural title="ranked files: src\/client\/api.ts, /m);
+    // In rank order: the score is not printed, so the order is what says it.
+    expect(llm.indexOf("starting points: listByKind")).toBeLessThan(llm.indexOf("ranked files: src/client/api.ts"));
+    expect(llm).not.toContain("score=");
     expect(llm).not.toContain("issue_fallback");
 
     const text = captureLog(() => renderBundle(b, "text")).join("\n");

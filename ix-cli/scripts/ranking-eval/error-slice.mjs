@@ -7,7 +7,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { loadCorpus, goldFiles } from './corpus.mjs';
+import { goldFiles } from './gold-files.mjs';
 import { defSearch } from './defs.mjs';
 
 export async function evaluateErrorSlice(rows, before, after, load, makeIndex) {
@@ -48,6 +48,7 @@ export async function evaluateErrorSlice(rows, before, after, load, makeIndex) {
 }
 
 async function main() {
+  const { loadCorpus } = await import('./corpus.mjs');
   const args = process.argv.slice(2);
   const option = name => { const i = args.indexOf(`--${name}`); return i < 0 ? undefined : args[i + 1]; };
   const dataset = option('dataset'), repos = option('repos'), beforePath = option('before');

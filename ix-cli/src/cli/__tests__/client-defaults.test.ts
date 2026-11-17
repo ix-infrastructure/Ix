@@ -97,6 +97,15 @@ describe("one retry for a read, none for a write", () => {
     expect(requests).toHaveLength(2);
   });
 
+  it("a 503 on the batched node read is retried too", async () => {
+    let n = 0;
+    handler = () => (n++ === 0
+      ? { status: 503, body: '{"error":"restarting"}' }
+      : { status: 200, body: '{"rev":1,"nodes":[],"missing":["a"]}' });
+    await expect(createClient({ endpoint }).nodes(["a"], "full")).resolves.toEqual({ rev: 1, nodes: [], missing: ["a"] });
+    expect(requests).toEqual(["POST /v1/nodes", "POST /v1/nodes"]);
+  });
+
   it("never retries a write", async () => {
     handler = () => ({ status: 503, body: '{"error":"restarting"}' });
     await expect(createClient({ endpoint }).deleteWorkspace("ws")).rejects.toThrow(/^503:/);
@@ -161,6 +170,23 @@ describe("a read deadline per command", () => {
     const client = createClient({ endpoint });
     await client.scoreSubsystems({ workspaceId: "ws" });
     await expect(client.listSubsystems({ workspaceId: "ws" })).resolves.toEqual({ scores: [] });
+  });
+
+  it("the batched node read is a read: cut off at the deadline, and it does not move the deadline on", async () => {
+    // `ix explain` reads its callees with POST /v1/nodes beside other reads.
+    // Taken for a write, a hung backend held it for 2 minutes, and its
+    // answer gave the reads after it a fresh deadline.
+    handler = () => "hang";
+    process.env.IX_READ_DEADLINE_MS = "300";
+    const t0 = Date.now();
+    await expect(createClient({ endpoint }).nodes(["a"], "full")).rejects.toThrow();
+    expect(Date.now() - t0).toBeLessThan(2_000);
+
+    handler = () => ({ status: 200, body: '{"rev":1,"nodes":[],"missing":[]}', delayMs: 150 });
+    process.env.IX_READ_DEADLINE_MS = "250";
+    const client = createClient({ endpoint });
+    await client.nodes(["a"]);
+    await expect(client.search("b")).rejects.toThrow();
   });
 
   it("the deadline still bounds the reads together, not each read", async () => {

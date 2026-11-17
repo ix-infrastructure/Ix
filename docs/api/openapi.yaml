@@ -32,6 +32,11 @@ tags:
   - name: patches
   - name: analysis
   - name: stats
+  - name: notes
+    description: >-
+      Notes and sessions in the memory layer, read and written by `ix note`
+      and `ix session`. Served by the OSS backend; with Ix Pro installed the
+      same commands go to the active cloud org instead.
   - name: reset
 
 paths:
@@ -90,30 +95,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/StructuredContext"
-
-  /v1/ingest:
-    post:
-      tags: [ingestion]
-      summary: Ingest a path into the graph (long-running, up to 30 min)
-      operationId: ingest
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [path]
-              properties:
-                path: { type: string, description: Absolute path to ingest }
-                recursive: { type: boolean }
-                force: { type: boolean, description: Re-ingest unchanged files }
-      responses:
-        "200":
-          description: Ingestion result
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/IngestResult"
 
   /v1/map:
     post:
@@ -966,6 +947,270 @@ paths:
         "200":
           description: Reset confirmation
 
+  /v1/note:
+    post:
+      tags: [notes]
+      summary: Create a note
+      operationId: createNote
+      description: >-
+        `sessionId` may be a session name; the backend resolves it to the id.
+        `tag` defaults to `note`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateNoteRequest"
+      responses:
+        "200":
+          description: The created note
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Note"
+
+  /v1/note/{id}:
+    get:
+      tags: [notes]
+      summary: Fetch one note
+      operationId: getNote
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The note, with its session and lifecycle
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NoteSearchResult"
+        "404":
+          description: "No such note: `{ error: not_found, message }`"
+
+  /v1/note/{id}/supersede:
+    post:
+      tags: [notes]
+      summary: Replace a note, linking the new one to it
+      operationId: supersedeNote
+      description: >-
+        Not idempotent: every call creates a new note. Only the note's author
+        (or an org admin) may supersede it.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateNoteRequest"
+      responses:
+        "200":
+          description: The old note's id and the new note
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SupersedeNoteResult"
+
+  /v1/note/{id}/retract:
+    post:
+      tags: [notes]
+      summary: Soft-delete a note
+      operationId: retractNote
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                actor: { type: string }
+      responses:
+        "200":
+          description: Retraction confirmation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetractNoteResult"
+
+  /v1/notes:
+    get:
+      tags: [notes]
+      summary: List or search notes
+      operationId: listNotes
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: tag, in: query, schema: { type: string } }
+        - { name: actor, in: query, schema: { type: string } }
+        - { name: since, in: query, schema: { type: string, description: ISO timestamp } }
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: includeSuperseded, in: query, schema: { type: boolean, default: true } }
+      responses:
+        "200":
+          description: Matching notes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/NoteSearchResult"
+
+  /v1/session:
+    post:
+      tags: [notes]
+      summary: Create a session
+      operationId: createSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+      responses:
+        "200":
+          description: The created session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfo"
+
+  /v1/session/{nameOrId}:
+    get:
+      tags: [notes]
+      summary: Fetch a session by name, then by id
+      operationId: getSession
+      parameters:
+        - name: nameOrId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfo"
+        "404":
+          description: "No such session: `{ error: not_found, message }`"
+    delete:
+      tags: [notes]
+      summary: Delete a session's metadata (its notes are kept)
+      operationId: deleteSession
+      parameters:
+        - name: nameOrId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Deletion confirmation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteSessionResult"
+
+  /v1/session/{nameOrId}/join:
+    post:
+      tags: [notes]
+      summary: Add an actor to a session
+      operationId: joinSession
+      parameters:
+        - name: nameOrId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actor]
+              properties:
+                actor: { type: string }
+      responses:
+        "200":
+          description: The session, with the actor added
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionInfo"
+
+  /v1/session/{nameOrId}/pin:
+    post:
+      tags: [notes]
+      summary: Pin graph nodes to a session
+      operationId: pinSessionNodes
+      parameters:
+        - name: nameOrId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nodeIds]
+              properties:
+                nodeIds:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: How many nodes were pinned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PinSessionResult"
+
+  /v1/session/{nameOrId}/notes:
+    get:
+      tags: [notes]
+      summary: A session's notes
+      operationId: sessionNotes
+      parameters:
+        - name: nameOrId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The session's notes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Note"
+
+  /v1/sessions:
+    get:
+      tags: [notes]
+      summary: List sessions
+      operationId: listSessions
+      parameters:
+        - { name: actor, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionInfo"
+
   /v1/reset:
     post:
       tags: [reset]
@@ -1134,10 +1379,63 @@ components:
         attrs: { type: object, additionalProperties: true }
         createdRev: { type: integer }
         deletedRev: { type: integer }
+    Factor:
+      type: object
+      required: [value, reason]
+      properties:
+        value: { type: number }
+        reason: { type: string }
+    ConfidenceBreakdown:
+      type: object
+      description: >-
+        The factors behind a claim's confidence. The combined confidence is the
+        product of the six factor values, clamped to [0, 1]; it is not
+        serialized in this object (compactClaims[].confidence.score carries
+        it). ScoredClaim.finalScore is relevance × confidence, not confidence.
+      required: [baseAuthority, verification, recency, corroboration, conflictPenalty, intentAlignment]
+      properties:
+        baseAuthority: { $ref: "#/components/schemas/Factor" }
+        verification: { $ref: "#/components/schemas/Factor" }
+        recency: { $ref: "#/components/schemas/Factor" }
+        corroboration: { $ref: "#/components/schemas/Factor" }
+        conflictPenalty: { $ref: "#/components/schemas/Factor" }
+        intentAlignment: { $ref: "#/components/schemas/Factor" }
+    Claim:
+      type: object
+      required: [id, entityId, statement, status]
+      properties:
+        id: { type: string }
+        entityId: { type: string }
+        statement: { type: string }
+        status:
+          type: string
+          enum: [Active, Stale, Retracted]
+        value:
+          description: The claimed value (any JSON value)
+        confidence:
+          description: Confidence stored on the claim itself; the scored breakdown is ScoredClaim.confidence
+        provenance:
+          type: object
+          properties:
+            sourceUri: { type: string, description: Workspace-relative path }
+            sourceHash: { type: string }
+            extractor: { type: string }
+            sourceType: { type: string }
+            observedAt: { type: string, format: date-time }
+        createdRev: { type: integer }
+        deletedRev: { type: integer }
+    ScoredClaim:
+      type: object
+      required: [claim, confidence, relevance, finalScore]
+      properties:
+        claim: { $ref: "#/components/schemas/Claim" }
+        confidence: { $ref: "#/components/schemas/ConfidenceBreakdown" }
+        relevance: { type: number }
+        finalScore: { type: number, description: relevance × confidence }
     StructuredContext:
       type: object
       properties:
-        claims: { type: array, items: { type: object } }
+        claims: { type: array, items: { $ref: "#/components/schemas/ScoredClaim" } }
         compactClaims: { type: array, items: { type: object } }
         conflicts: { type: array, items: { type: object } }
         decisions: { type: array, items: { type: object } }
@@ -1152,28 +1450,83 @@ components:
             hopsExpanded: { type: integer }
             asOfRev: { type: integer }
             depth: { type: string }
-    IngestResult:
-      type: object
-      properties:
-        filesProcessed: { type: integer }
-        patchesApplied: { type: integer }
-        filesSkipped: { type: integer }
-        entitiesCreated: { type: integer }
-        latestRev: { type: integer }
-        skipReasons:
-          type: object
-          properties:
-            unchanged: { type: integer }
-            emptyFile: { type: integer }
-            parseError: { type: integer }
-            tooLarge: { type: integer }
-            minifiedLikely: { type: integer }
     NodeCreationResult:
       type: object
       properties:
         status: { type: string }
         nodeId: { type: string }
         rev: { type: integer }
+    CreateNoteRequest:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string }
+        tag: { type: string, enum: [finding, decision, reminder, note], default: note }
+        actor: { type: string }
+        nodeIds: { type: array, items: { type: string } }
+        sessionId: { type: string, description: Session name or id }
+    Note:
+      type: object
+      required: [id, text, tag, nodeIds, at, stale]
+      properties:
+        id: { type: string }
+        text: { type: string }
+        tag: { type: string }
+        actor: { type: string, nullable: true }
+        nodeIds: { type: array, items: { type: string } }
+        at: { type: string, description: ISO timestamp }
+        stale: { type: boolean }
+        staleReason: { type: string, nullable: true }
+    NoteSearchResult:
+      allOf:
+        - $ref: "#/components/schemas/Note"
+        - type: object
+          properties:
+            sessionId: { type: string, nullable: true }
+            sessionName: { type: string, nullable: true }
+            lifecycleStatus: { type: string, nullable: true }
+            supersedes: { type: array, nullable: true, items: { type: string } }
+            supersededBy: { type: array, nullable: true, items: { type: string } }
+    SupersedeNoteResult:
+      type: object
+      properties:
+        status: { type: string, enum: [superseded] }
+        oldNoteId: { type: string }
+        newNote: { $ref: "#/components/schemas/Note" }
+    RetractNoteResult:
+      type: object
+      properties:
+        status: { type: string, enum: [retracted] }
+        noteId: { type: string }
+    SessionInfo:
+      type: object
+      required: [sessionId, name, purpose, actor, actors, ttlHours, createdAt]
+      properties:
+        sessionId: { type: string }
+        name: { type: string }
+        purpose: { type: string }
+        actor: { type: string }
+        actors: { type: array, items: { type: string } }
+        ttlHours: { type: integer }
+        createdAt: { type: string }
+        lastLoadedAt: { type: string, nullable: true }
+    CreateSessionRequest:
+      type: object
+      required: [purpose, actor]
+      properties:
+        purpose: { type: string }
+        actor: { type: string }
+        ttlHours: { type: integer, default: 24 }
+        name: { type: string, description: Generated when absent }
+    PinSessionResult:
+      type: object
+      properties:
+        status: { type: string, enum: [pinned] }
+        count: { type: integer }
+    DeleteSessionResult:
+      type: object
+      properties:
+        status: { type: string, enum: [deleted] }
     PatchSummary:
       type: object
       properties:
@@ -1191,12 +1544,99 @@ components:
         extractor: { type: string }
         sourceType: { type: string }
         workspaceId: { type: string, description: SHA-256 of the workspace root path }
-    PatchOp:
+    # The op shapes, node kinds and edge predicates below mirror
+    # core-ingestion/src/schema.ts (copied to ix-cli/src/client/graph-schema.ts);
+    # ix-cli/src/client/__tests__/graph-schema.test.ts checks they agree.
+    NodeKind:
+      type: string
+      description: |
+        Every node kind a patch from the ix CLI writes. Symbol nodes come from
+        the parser, which writes struct, enum, record, union, impl, type alias
+        and annotation definitions as `class`.
+      enum:
+        [file, module, class, interface, trait, function, method, constant, macro, type,
+         table, view, label, config, config_entry, frontmatter, heading, section,
+         environment, chunk, intent, doc, decision]
+    EdgePredicate:
+      type: string
+      description: Every edge predicate a patch from the ix CLI writes.
+      enum: [CONTAINS, CALLS, IMPORTS, EXTENDS, REFERENCES, RAISES, CONTAINS_CHUNK, DEFINES, NEXT]
+    UpsertNodeOp:
       type: object
+      description: |
+        Create or replace a node. `attrs` is an open map. Symbol and file nodes
+        carry `line_start` / `line_end` / `language` / `role`; chunk nodes carry
+        `file_uri`, `chunk_kind`, `start_line` / `end_line`, `start_byte` /
+        `end_byte`, `content_hash` and `parser_version`.
+      required: [type, id, kind, name, attrs]
+      properties:
+        type: { type: string, enum: [UpsertNode] }
+        id: { type: string }
+        kind: { $ref: "#/components/schemas/NodeKind" }
+        name: { type: string }
+        attrs: { type: object, additionalProperties: true }
+    UpsertEdgeOp:
+      type: object
+      description: |
+        Create or replace an edge. `attrs` is an open map; an edge resolved to
+        another file carries `confidence` and `tier`.
+      required: [type, id, src, dst, predicate, attrs]
+      properties:
+        type: { type: string, enum: [UpsertEdge] }
+        id: { type: string }
+        src: { type: string, description: Source node id }
+        dst: { type: string, description: Destination node id }
+        predicate: { $ref: "#/components/schemas/EdgePredicate" }
+        attrs: { type: object, additionalProperties: true }
+    DeleteNodeOp:
+      type: object
+      description: Retire a node by id.
+      required: [type, id]
+      properties:
+        type: { type: string, enum: [DeleteNode] }
+        id: { type: string }
+    DeleteEdgeOp:
+      type: object
+      description: Retire an edge by id.
+      required: [type, id]
+      properties:
+        type: { type: string, enum: [DeleteEdge] }
+        id: { type: string }
+    AssertClaimOp:
+      type: object
+      description: Assert a fact about a node, for the confidence and conflict engine.
+      required: [type, entityId, field, value, confidence]
+      properties:
+        type: { type: string, enum: [AssertClaim] }
+        entityId: { type: string }
+        field: { type: string, description: "`<predicate in lower case>:<target name>`, e.g. `calls:render`" }
+        value: { description: The claimed value; the CLI sends the target name. }
+        confidence: { type: number, nullable: true, description: Null lets the backend score it }
+    RetractClaimOp:
+      type: object
+      description: Withdraw a claim. The ix CLI does not send one; only `type` is documented here.
       required: [type]
       properties:
-        type: { type: string }
+        type: { type: string, enum: [RetractClaim] }
       additionalProperties: true
+    PatchOp:
+      description: One op in a graph patch, told apart by `type`.
+      oneOf:
+        - $ref: "#/components/schemas/UpsertNodeOp"
+        - $ref: "#/components/schemas/UpsertEdgeOp"
+        - $ref: "#/components/schemas/DeleteNodeOp"
+        - $ref: "#/components/schemas/DeleteEdgeOp"
+        - $ref: "#/components/schemas/AssertClaimOp"
+        - $ref: "#/components/schemas/RetractClaimOp"
+      discriminator:
+        propertyName: type
+        mapping:
+          UpsertNode: "#/components/schemas/UpsertNodeOp"
+          UpsertEdge: "#/components/schemas/UpsertEdgeOp"
+          DeleteNode: "#/components/schemas/DeleteNodeOp"
+          DeleteEdge: "#/components/schemas/DeleteEdgeOp"
+          AssertClaim: "#/components/schemas/AssertClaimOp"
+          RetractClaim: "#/components/schemas/RetractClaimOp"
     GraphPatchPayload:
       type: object
       required: [patchId, actor, timestamp, source, baseRev, ops, replaces]

@@ -56,6 +56,4 @@ export function loadCorpus(repo, commit, root = REPOS) {
   };
 }
 
-export function goldFiles(patch) {
-  return [...new Set([...patch.matchAll(/^diff --git a\/(\S+) b\//gm)].map((m) => m[1]))];
-}
+export { goldFiles } from "./gold-files.mjs";

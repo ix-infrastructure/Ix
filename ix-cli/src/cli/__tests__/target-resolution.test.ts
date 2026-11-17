@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { printJson, resetResolutionNotices } from "../format.js";
 import { setOutputShape } from "../output-shape.js";
-import { resolveFileOrEntityFull, resolveFileOrReport } from "../resolve.js";
+import { dispatchCallers } from "../commands/callers.js";
+import { displayNameOf, resolveFileOrEntityFull, resolveFileOrReport, shownTarget } from "../resolve.js";
+import { overrideFamily } from "../type-walk.js";
 
 // Same stand-in as resolver-definitions-first: the checkout is not a registered
 // workspace, and this suite is about resolution, not scoping.
@@ -262,7 +264,9 @@ describe("acceptance 5: Class.method, Class#method and Class::method", () => {
       const [a, b] = await inBothOrders(nodes, (c) => full(c, `IxClient${sep}expand`));
       for (const r of [a, b]) {
         expect(r.resolved && r.entity.id).toBe("m-api");
-        expect(r.resolved && r.entity.name).toBe(`IxClient${sep}expand`);
+        expect(r.resolved && displayNameOf(r.entity)).toBe(`IxClient${sep}expand`);
+        // The entity keeps its own name: members are matched by it.
+        expect(r.resolved && r.entity.name).toBe("expand");
       }
       expect(process.exitCode).toBeUndefined();
     });
@@ -313,7 +317,8 @@ describe("acceptance 5: Class.method, Class#method and Class::method", () => {
       }
       const picked = await full(client(twoClasses), `Config${sep}load`, { pick: 2 });
       expect(picked.resolved && picked.entity.id).toBe("lb");
-      expect(picked.resolved && picked.entity.name).toBe(`Config${sep}load`);
+      expect(picked.resolved && displayNameOf(picked.entity)).toBe(`Config${sep}load`);
+      expect(picked.resolved && picked.entity.name).toBe("load");
     });
 
     it(`Config${sep}load resolves when only one of the Config classes has it`, async () => {
@@ -325,7 +330,7 @@ describe("acceptance 5: Class.method, Class#method and Class::method", () => {
       const [a, b] = await inBothOrders(oneHas, (c) => full(c, `Config${sep}load`));
       for (const r of [a, b]) {
         expect(r.resolved && r.entity.id).toBe("lb");
-        expect(r.resolved && r.entity.name).toBe(`Config${sep}load`);
+        expect(r.resolved && displayNameOf(r.entity)).toBe(`Config${sep}load`);
       }
     });
   }
@@ -353,7 +358,7 @@ describe("acceptance 5: Class.method, Class#method and Class::method", () => {
       const [c1, c2] = await inBothOrders(withExact, (c) => full(c, `Config${sep}load`));
       for (const r of [c1, c2]) {
         expect(r.resolved && r.entity.id).toBe("lb");
-        expect(r.resolved && r.entity.name).toBe(`Config${sep}load`);
+        expect(r.resolved && displayNameOf(r.entity)).toBe(`Config${sep}load`);
       }
     });
 
@@ -410,7 +415,7 @@ describe("Class.method must be a member of the class (round 4)", () => {
         full(Object.assign(c, { expand: clientWithContains(nodes, { ca: ["own"] }).expand }), `Config${sep}load`));
       for (const r of [...viaFile, ...viaGraph]) {
         expect(r.resolved && r.entity.id).toBe("own");
-        expect(r.resolved && r.entity.name).toBe(`Config${sep}load`);
+        expect(r.resolved && displayNameOf(r.entity)).toBe(`Config${sep}load`);
       }
     });
 
@@ -529,7 +534,7 @@ describe("a method whose name ends in a file extension (review round 5)", () => 
       const [a, b] = await inBothOrders(nodes, (c) => full(c, target));
       for (const r of [a, b]) {
         expect(r.resolved && r.entity.id).toBe("m");
-        expect(r.resolved && r.entity.name).toBe(target);
+        expect(r.resolved && displayNameOf(r.entity)).toBe(target);
       }
       expect(process.exitCode).toBeUndefined();
     });
@@ -669,5 +674,65 @@ describe("modes and notices", () => {
     expect(lines[0]).toMatch(/^diagnostic code=ambiguous_target target=index.ts .*shown=3 total=3/);
     expect(lines.filter((l) => l.startsWith("candidate "))).toHaveLength(3);
     expect(lines.some((l) => l.startsWith("hint ") && l.includes("--pick"))).toBe(true);
+  });
+});
+
+describe("a qualified target is matched by the member's own name", () => {
+  /** The fake backend plus `expand`, answered from `"<id> <direction> <predicates>"` keys. */
+  function graphClient(nodes: Node[], edges: Record<string, string[]>) {
+    const c = client(nodes);
+    c.expand = vi.fn(async (id: string, opts: { direction: string; predicates: string[] }) => ({
+      nodes: (edges[`${id} ${opts.direction} ${opts.predicates.join(",")}`] ?? []).map((m) => nodes.find((n) => n.id === m)),
+      edges: [],
+    }));
+    return c;
+  }
+  const noSource = { lines: () => null };
+
+  for (const sep of [".", "#", "::"]) {
+    it(`Child${sep}run finds the Base.run it overrides`, async () => {
+      const nodes = [
+        node("base", "Base", "class", "src/base.ts", 1),
+        node("child", "Child", "class", "src/child.ts", 2),
+        node("base-run", "run", "method", "src/base.ts", 2),
+        node("child-run", "run", "method", "src/child.ts", 3),
+      ];
+      const c = graphClient(nodes, {
+        "base out CONTAINS": ["base-run"], "base-run in CONTAINS": ["base"],
+        "child out CONTAINS": ["child-run"], "child-run in CONTAINS": ["child"],
+        "child out EXTENDS": ["base"], "base in EXTENDS": ["child"],
+      });
+      const r = await full(c, `Child${sep}run`);
+      if (!r.resolved) throw new Error("expected resolved");
+      expect(r.entity).toMatchObject({ id: "child-run", name: "run", displayName: `Child${sep}run` });
+      const family = await overrideFamily(c, r.entity, noSource);
+      expect(family.rows.map((row) => [row.relation, row.owner.name, row.name])).toEqual([["overrides", "Base", "run"]]);
+    });
+  }
+
+  it("Circle.area finds the caller that goes through Shape.area (Java)", async () => {
+    const nodes = [
+      node("shape", "Shape", "interface", "src/Shape.java", 2),
+      node("circle", "Circle", "class", "src/Circle.java", 2),
+      node("shape-area", "area", "method", "src/Shape.java", 3),
+      node("circle-area", "area", "method", "src/Circle.java", 3),
+      node("total", "total", "method", "src/App.java", 3),
+    ];
+    const c = graphClient(nodes, {
+      "shape out CONTAINS": ["shape-area"],
+      "circle out CONTAINS": ["circle-area"], "circle-area in CONTAINS": ["circle"],
+      "circle out EXTENDS": ["shape"],
+      "shape-area in CALLS": ["total"],
+    });
+    const r = await full(c, "Circle.area");
+    if (!r.resolved) throw new Error("expected resolved");
+    const { rows } = await dispatchCallers(c, r.entity);
+    expect(rows.map((row) => [row.id, row.dispatchVia])).toEqual([["total", "Shape.area"]]);
+  });
+
+  it("shownTarget carries the qualified form as the name, for output", async () => {
+    expect(shownTarget({ id: "m", kind: "method", name: "run", displayName: "Child.run" }))
+      .toEqual({ id: "m", kind: "method", name: "Child.run" });
+    expect(shownTarget({ id: "m", kind: "method", name: "run" })).toEqual({ id: "m", kind: "method", name: "run" });
   });
 });

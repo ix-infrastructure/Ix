@@ -3,6 +3,7 @@
 import type { Command } from "commander";
 import { createClient } from "../config.js";
 import { formatPatches } from "../format.js";
+import { formatOption } from "../options.js";
 
 /**
  * `ix patches`.
@@ -13,7 +14,7 @@ import { formatPatches } from "../format.js";
  * it. OSS users got a paywall message for a command this repo implements (#371).
  *
  * `@ix/pro` also registers a `patches`. Commander throws on a duplicate command
- * name and Pro's `tryRegister` swallows the throw, so on a Kartr install the
+ * name and Pro's `tryRegister` swallows the throw, so on a Pro install the
  * OSS registration (which runs first, from `registerOssCommands`) is the one
  * that survives. That is the intended outcome — this version additionally
  * supports `--format llm` — but it makes the two implementations' behaviour
@@ -25,7 +26,7 @@ export function registerPatchesCommand(program: Command): void {
     .command("patches")
     .description("List recent patches")
     .option("--limit <n>", "Maximum patches to return", "50")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .action(async (opts: { limit: string; format: string }) => {
       const client = await createClient();
       const patches = await client.listPatches({ limit: parseInt(opts.limit, 10) });

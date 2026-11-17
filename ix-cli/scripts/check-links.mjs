@@ -36,7 +36,9 @@
 // (`<LinkCard href="/reference/commands/">`, `<a href="/…">`) is an ERROR:
 // MDX parses those tags as JSX, which base-links-plugin.mjs cannot rewrite,
 // so the link would ship without the site's /oss base. Use a page-relative
-// link there instead.
+// link there instead. The same holds for a root-relative path value in a
+// docs-site page's front matter (a hero action `link:`, say): front matter is
+// not Markdown, so the plugin never sees it, and it is an ERROR too.
 //
 // Fenced code blocks are scanned like prose for absolute URLs: install
 // instructions and documented endpoints live in fences
@@ -168,6 +170,22 @@ function extractRelativeTargets(text) {
   for (const m of prose.matchAll(/^\[[^\]]*\]:\s*(\S+)/gm)) take(m[1]);
   for (const m of prose.matchAll(/<[a-zA-Z][^>]*?\s(src|href)\s*=\s*["']([^"']+)["']/g)) take(m[2], m[1] === 'src', true);
   return targets;
+}
+// Root-relative path values in a page's YAML front matter (`link: /guide/`,
+// `- /guide/`, quoted or not). Front matter is not Markdown, so
+// base-links-plugin.mjs never sees it and such a link would ship without the
+// /oss base. Only a value that is a whole path counts, so prose such as a
+// description mentioning `/v1/list` mid-sentence is not flagged.
+function frontMatterRootLinks(text) {
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/);
+  if (!m) return [];
+  const found = [];
+  const VALUE = /^\s*(?:-\s+)?(?:[\w.-]+\s*:\s+)?(["']?)(\/(?!\/)[^\s"'#]*(?:#[^\s"']*)?)\1\s*$/;
+  for (const line of m[1].split(/\r?\n/)) {
+    const v = line.match(VALUE);
+    if (v) found.push(v[2]);
+  }
+  return found;
 }
 function isExternal(t) {
   // Protocol-relative (//host) and scheme URLs (https:, mailto:, …) are not
@@ -542,6 +560,13 @@ for (const file of mdFiles) {
       errors.push(`${url} (in ${file})`);
     } else if (res.network || (res.status >= 400 && !allowed)) {
       warnings.push(`${url} — ${res.network ? `network: ${res.error}` : `HTTP ${res.status}`} (in ${file})`);
+    }
+  }
+
+  if (file.startsWith(DOCS_CONTENT)) {
+    for (const target of frontMatterRootLinks(text)) {
+      checked++;
+      errors.push(`${target} (root-relative link in front matter, in ${file}) — base-links-plugin.mjs cannot add the /oss base to front matter; use a page-relative link`);
     }
   }
 

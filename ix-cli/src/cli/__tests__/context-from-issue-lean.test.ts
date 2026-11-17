@@ -2,11 +2,8 @@
 
 import { describe, expect, it } from "vitest";
 
-import {
-  detectContextModeConflict,
-  renderLeanIssueLlm,
-  renderLeanIssueText,
-} from "../commands/context.js";
+import { renderLeanIssueLlm, renderLeanIssueText } from "../context/issue.js";
+import { detectContextModeConflict } from "../context/options.js";
 import {
   isGenericIdentifier,
   issueConfidence,
@@ -98,6 +95,16 @@ describe("lean rendering", () => {
     expect(text).toContain("src/b.ts:10-40  JsonWriter (class) — the issue names `JsonWriter`");
     expect(text).toContain("Then, by the issue's text: src/a.ts, src/c.ts, src/d.ts, src/e.ts");
     expect(text.length / 4).toBeLessThan(150);
+  });
+
+  it.each([
+    ["error message", "Invalid record sample: missing field", "error message matches"],
+    ["traceback frame", "src/fail.ts:2", "traceback frame"],
+  ] as const)("explains a %s start in text and llm output", (via, token, why) => {
+    const view = leanIssueView(plan([ident(token, "src/fail.ts", { name: "fail", kind: "function", via })]));
+    const explanation = `${why} \`${token}\``;
+    expect(renderLeanIssueText(view)).toContain(explanation);
+    expect(renderLeanIssueLlm(view).find((line) => line.startsWith("start "))).toContain(explanation);
   });
 
   it("says so in one line when there is no confident start", () => {

@@ -2,9 +2,9 @@
 
 /**
  * What `registerOssCommands()` does to the commands once they are registered:
- * option choices, the configured default `--format`, the shared
- * `--pretty`/`--quiet`/`--fields` options, and the `preAction` hook that
- * applies them and validates option values.
+ * the option choices each command declares (`choiceOption`), the configured
+ * default `--format`, the shared `--pretty`/`--quiet`/`--fields` options, and
+ * the `preAction` hook that applies them and validates option values.
  *
  * Its own module so the CLI's fast path (`register/oss-table.ts`), which
  * registers only the command being run, applies exactly the same setup
@@ -12,7 +12,7 @@
  */
 
 import type { Command } from "commander";
-import { validateCliOptions } from "../options.js";
+import { declaredChoices, validateCliOptions } from "../options.js";
 import { setPrettyJson } from "../format.js";
 import { setOutputShape } from "../output-shape.js";
 import {
@@ -22,15 +22,6 @@ import {
 } from "../default-format.js";
 import { readConfiguredFormat } from "../config.js";
 import { stderrDim } from "../stderr.js";
-
-const OPTION_CHOICES: Record<string, Record<string, string[]>> = {
-  query: { depth: ["shallow", "standard", "deep"], format: ["text", "json"] },
-  map: { format: [...DEFAULT_FORMAT_CHOICES, "silent"], sort: ["importance", "confidence", "size", "alpha"] },
-  subsystems: { sort: ["importance", "confidence", "size", "alpha"] },
-  savings: { model: ["opus", "sonnet", "haiku", "gpt-4o"] },
-  context: { depth: ["compact", "standard", "full", "shallow", "deep"] },
-  mcp: { tools: ["core", "all"] },
-};
 
 /**
  * Every command this file registered, so the preAction hook below can tell an
@@ -61,13 +52,16 @@ function configureOssOptions(root: Command): void {
 
   const visit = (command: Command): void => {
     ossCommands.add(command);
-    const commandChoices = OPTION_CHOICES[command.name()] ?? {};
     let rendersRows = false;
     let rendersJson = false;
     for (const option of command.options) {
-      const choices = commandChoices[option.attributeName()]
-        ?? (option.long === "--format" ? [...DEFAULT_FORMAT_CHOICES] : undefined);
-      if (choices) option.choices(choices);
+      // A command declares an option's values where it declares the option
+      // (`choiceOption`, `formatOption`); a `--format` that declares none
+      // takes the shared ones.
+      const declared = declaredChoices(option);
+      if (declared) option.choices([...declared]);
+      else if (option.long === "--format" && !option.argChoices) option.choices([...DEFAULT_FORMAT_CHOICES]);
+      const choices = option.argChoices;
       applyDefaultFormat(command, option, choices, defaultFormat);
       if (option.long === "--format") rendersRows = true;
       if (option.long === "--format" && (choices ?? []).includes("json")) rendersJson = true;

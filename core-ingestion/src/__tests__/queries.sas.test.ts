@@ -1,8 +1,13 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { describe, it, expect } from 'vitest';
-import { parseFile, buildGlobalResolutionIndex } from '../index.js';
+import { parseFile, buildGlobalResolutionIndex, summarizeParseResult } from '../index.js';
 import { SupportedLanguages } from '../languages.js';
+
+/** Per-file summaries, as the CLI hands them to `buildGlobalResolutionIndex`. */
+function summariesOf(sources: Map<string, string>) {
+  return new Map([...sources].map(([fp, src]) => [fp, summarizeParseResult(parseFile(fp, src)!)]));
+}
 
 describe('SAS queries', () => {
   it('detects language as SAS', () => {
@@ -304,18 +309,18 @@ des='SAS Packages Framework internal macro.';
     const sources = new Map([
       ['/repo/macros.sas', ' %MACRO MDX(FMT);\n  %put &FMT;\n %MEND MDX;\n\n %MACRO MDX1(FMT);\n %MEND MDX1;\n'],
     ]);
-    const index = buildGlobalResolutionIndex(['/repo/macros.sas'], sources);
+    const index = buildGlobalResolutionIndex(['/repo/macros.sas'], summariesOf(sources));
     expect(index.symbolToFiles.get('MDX')).toContain('/repo/macros.sas');
     expect(index.symbolToFiles.get('MDX1')).toContain('/repo/macros.sas');
   });
 
-  // Finding E1 — the cross-batch index is parser-derived, so it captures forms
+  // Finding E1 — the cross-batch index comes from the parser's summary, so it captures forms
   // the old regex missed, e.g. a block comment between %macro and the name.
   it('indexes %macro with a comment between keyword and name (regex→parser)', () => {
     const sources = new Map([
       ['/repo/macros.sas', '%macro /* helper */ withComment(arg);\n  %put &arg;\n%mend withComment;\n'],
     ]);
-    const index = buildGlobalResolutionIndex(['/repo/macros.sas'], sources);
+    const index = buildGlobalResolutionIndex(['/repo/macros.sas'], summariesOf(sources));
     expect(index.symbolToFiles.get('withComment')).toContain('/repo/macros.sas');
   });
 

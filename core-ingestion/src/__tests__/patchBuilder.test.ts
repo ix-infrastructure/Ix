@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { parseFile } from '../index.js';
+import { parseFile, resolveEdges } from '../index.js';
 import {
   buildPatch,
   buildPatchWithResolution,
@@ -51,6 +51,30 @@ describe('patch-builder extractor policy', () => {
     expect(patch.source.sourceHash).not.toBe(sourceHash);
     expect(patch.ops).toEqual(ops);
     expect(patch.replaces).toEqual(candidates);
+  });
+});
+
+describe('buildPatch', () => {
+  // One builder emits every op (#962): buildPatch is the resolution builder run
+  // over the file alone, so tests that call it exercise the code the CLI runs.
+  it.each([
+    ['PHP calls that differ only in call kind', 'src/Foo.php', [
+      '<?php',
+      'class Foo {',
+      '  function handle() { return 1; }',
+      '  function run($obj) { handle(); $obj->handle(); Foo::handle(); }',
+      '}',
+      'function handle() {}',
+    ].join('\n')],
+    ['an R package-qualified call', 'src/f.R', 'f <- function(x) { dplyr::filter(x); g(x) }\ng <- function(x) x\n'],
+    ['a TypeScript typed receiver', 'src/b.ts', 'class A { m() { return 1 } }\nclass B { run() { const a = new A(); a.m(); } }\n'],
+  ])('emits what buildPatchWithResolution emits for %s', (_name, filePath, source) => {
+    const result = parseFile(filePath, source);
+    expect(result).not.toBeNull();
+    const strip = ({ timestamp: _t, ...rest }: ReturnType<typeof buildPatch>) => rest;
+    expect(strip(buildPatch(result!, 'hash', 'ws', 'prev'))).toEqual(
+      strip(buildPatchWithResolution(result!, 'hash', 'ws', resolveEdges([result!]), 'prev')),
+    );
   });
 });
 

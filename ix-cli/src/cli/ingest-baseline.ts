@@ -1,8 +1,17 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { ingestMtimeCachePath, ingestOrphanSweepPath, ingestRebuildPath } from "./config.js";
+import { readState, writeStateAtomic } from "./workspace-state.js";
+
+/**
+ * Format versions of the three files this module keeps (see
+ * `workspace-state.ts`). A file without one is version 0 and is read with the
+ * presence rules below; bump a version when its shape or meaning changes.
+ */
+const BASELINE_VERSION = 1;
+const REBUILD_VERSION = 1;
+const ORPHANS_VERSION = 1;
 
 interface SerializedIngestBaseline {
   root: string;
@@ -109,8 +118,8 @@ export function isRev(value: unknown): value is number {
 
 export function loadIngestBaseline(projectRoot: string): IngestBaseline | null {
   const cachePath = ingestMtimeCachePath(projectRoot);
-  try {
-    const data = JSON.parse(fs.readFileSync(cachePath, "utf-8")) as SerializedIngestBaseline;
+  return readState(cachePath, { version: BASELINE_VERSION, validate: (raw) => {
+    const data = raw as Partial<SerializedIngestBaseline>;
     if (data.root !== projectRoot || !data.files || typeof data.files !== "object") return null;
 
     const files = new Map<string, number>();
@@ -144,9 +153,7 @@ export function loadIngestBaseline(projectRoot: string): IngestBaseline | null {
       parseTimeouts: stringList(data.parseTimeouts),
       ...(Array.isArray(data.pythonPackageEntries) ? { pythonPackageEntries: stringList(data.pythonPackageEntries) } : {}),
     };
-  } catch {
-    return null;
-  }
+  } });
 }
 
 export function saveIngestBaseline(
@@ -186,20 +193,9 @@ export function saveIngestBaseline(
       // Written when known, even empty: no packages is a state, absent is unknown.
       ...(pythonPackageEntries ? { pythonPackageEntries: [...new Set(pythonPackageEntries)].sort() } : {}),
     };
-    const target = ingestMtimeCachePath(projectRoot);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    // Via a temp file and rename: a process killed mid-write left a truncated
-    // baseline, which reads as none, and the next map re-ingested everything.
-    const tmp = `${target}.${process.pid}.tmp`;
-    try {
-      fs.writeFileSync(tmp, JSON.stringify(data));
-      fs.renameSync(tmp, target);
-    } catch (err) {
-      // A failed rename (a locked target on Windows, say) must not leave the
-      // temp file behind; one would pile up per failing run.
-      fs.rmSync(tmp, { force: true });
-      throw err;
-    }
+    // Atomically: a process killed mid-write left a truncated baseline,
+    // which reads as none, and the next map re-ingested everything.
+    writeStateAtomic(ingestMtimeCachePath(projectRoot), BASELINE_VERSION, data);
   } catch {
     // The cache is an optimization and freshness hint. Ingestion itself succeeded.
   }
@@ -228,10 +224,8 @@ export function extractorChanged(baseline: IngestBaseline | null, current: strin
  * Recording progress as files land lets the next run skip what is done.
  */
 export function loadRebuildProgress(projectRoot: string, extractor: string): Map<string, number> | null {
-  try {
-    const data = JSON.parse(fs.readFileSync(ingestRebuildPath(projectRoot), "utf-8")) as {
-      root?: unknown; extractor?: unknown; files?: Record<string, unknown>;
-    };
+  return readState(ingestRebuildPath(projectRoot), { version: REBUILD_VERSION, validate: (raw) => {
+    const data = raw as { root?: unknown; extractor?: unknown; files?: Record<string, unknown> };
     if (data.root !== projectRoot || data.extractor !== extractor || !data.files || typeof data.files !== "object") {
       return null;
     }
@@ -240,20 +234,14 @@ export function loadRebuildProgress(projectRoot: string, extractor: string): Map
       if (typeof mtime === "number" && Number.isFinite(mtime)) files.set(filePath, mtime);
     }
     return files;
-  } catch {
-    return null;
-  }
+  } });
 }
 
 export function saveRebuildProgress(projectRoot: string, extractor: string, files: Map<string, number>): void {
   try {
-    const target = ingestRebuildPath(projectRoot);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    // Via a temp file and rename: a process killed mid-write would otherwise
-    // leave a truncated file, and the next run would start over.
-    const tmp = `${target}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ root: projectRoot, extractor, files: Object.fromEntries(files) }));
-    fs.renameSync(tmp, target);
+    // Atomically: a process killed mid-write would otherwise leave a
+    // truncated file, and the next run would start over.
+    writeStateAtomic(ingestRebuildPath(projectRoot), REBUILD_VERSION, { root: projectRoot, extractor, files: Object.fromEntries(files) });
   } catch {
     // Progress is an optimization; losing it costs a longer re-ingest, not data.
   }
@@ -276,20 +264,17 @@ export function clearRebuildProgress(projectRoot: string): void {
 export type OrphanSweepPending = Map<string, Set<string> | null>;
 
 export function loadOrphanSweepPending(projectRoot: string): OrphanSweepPending {
-  const pending: OrphanSweepPending = new Map();
-  try {
-    const data = JSON.parse(fs.readFileSync(ingestOrphanSweepPath(projectRoot), "utf-8")) as {
-      root?: unknown; pending?: Record<string, unknown>;
-    };
+  // None recorded, or unreadable: a repair falls back to its default.
+  return readState(ingestOrphanSweepPath(projectRoot), { version: ORPHANS_VERSION, validate: (raw) => {
+    const data = raw as { root?: unknown; pending?: Record<string, unknown> };
+    const pending: OrphanSweepPending = new Map();
     if (data.root !== projectRoot || !data.pending || typeof data.pending !== "object") return pending;
     for (const [extractor, files] of Object.entries(data.pending)) {
       if (files === null) pending.set(extractor, null);
       else if (Array.isArray(files)) pending.set(extractor, new Set(stringList(files)));
     }
-  } catch {
-    // None recorded, or unreadable: a repair falls back to its default.
-  }
-  return pending;
+    return pending;
+  } }) ?? new Map();
 }
 
 export function saveOrphanSweepPending(projectRoot: string, pending: OrphanSweepPending): void {
@@ -300,11 +285,8 @@ export function saveOrphanSweepPending(projectRoot: string, pending: OrphanSweep
       fs.rmSync(target, { force: true });
       return;
     }
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    const tmp = `${target}.${process.pid}.tmp`;
     const serialized = Object.fromEntries(entries.map(([extractor, files]) => [extractor, files === null ? null : [...files].sort()]));
-    fs.writeFileSync(tmp, JSON.stringify({ root: projectRoot, pending: serialized }));
-    fs.renameSync(tmp, target);
+    writeStateAtomic(target, ORPHANS_VERSION, { root: projectRoot, pending: serialized });
   } catch {
     // Losing it costs a repair that reads the default patch, not data.
   }

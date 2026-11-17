@@ -12,7 +12,9 @@ import {
   formatTextResults, renderEdgeResultsLlm, renderTextResultsLlm, sliceEdgeResults, sliceRanked, truncationHint,
   type TextResult,
 } from "../format.js";
-import { IX_CALLER_ENV } from "../next-step.js";
+import { mcpCaller } from "../../mcp/hints.js";
+import { IX_MCP_CORE_TOOL_NAMES } from "../../mcp/server.js";
+import { withCaller } from "../next-step.js";
 import { nextPageCommand, shellQuote } from "../paging.js";
 import { LIST_MAX_ROWS, registerInventoryCommand, renderInventoryLlm } from "../commands/inventory.js";
 import { compareTextResults, keepTopK, SCAN_WINDOW_MAX, scanWindow, textResultPriority } from "../commands/text.js";
@@ -200,14 +202,8 @@ describe("nextPageCommand", () => {
 
   it("over MCP names the tool's offset input, not a CLI command", () => {
     const cmd = parsed(["--kind", "method", "x"]);
-    const prev = process.env[IX_CALLER_ENV];
-    process.env[IX_CALLER_ENV] = "mcp";
-    try {
-      expect(nextPageCommand(cmd, ["x"], 50)).toBe("offset=50");
-    } finally {
-      if (prev === undefined) delete process.env[IX_CALLER_ENV];
-      else process.env[IX_CALLER_ENV] = prev;
-    }
+    const page = withCaller(mcpCaller(IX_MCP_CORE_TOOL_NAMES), () => nextPageCommand(cmd, ["x"], 50));
+    expect(page).toBe("offset=50");
   });
 });
 
