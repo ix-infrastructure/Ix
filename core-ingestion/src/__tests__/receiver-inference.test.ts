@@ -32,7 +32,7 @@ describe('typed local receivers', () => {
       srcFilePath: files[2].filePath, dstFilePath: files[1].filePath, dstQualifiedKey: 'Target.Run', tier: 'type',
     }));
     const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
+    const index = buildGlobalResolutionIndex([...summaries.keys()], summaries);
     expect(resolveEdges([files[2]], undefined, index)).toEqual(edges.filter(e => e.srcFilePath === files[2].filePath));
     expect(buildPatchWithResolution(files[2], 'hash', 'workspace', edges).ops).toContainEqual(
       expect.objectContaining({ type: 'UpsertEdge', predicate: 'CALLS', attrs: { confidence: 0.95, tier: 'type' } }),
@@ -86,7 +86,7 @@ describe('typed local receivers', () => {
       expect.objectContaining({ srcName: 'factory', dstFilePath: files[1].filePath, dstQualifiedKey: 'Target.Run' }),
     ]);
     const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
+    const index = buildGlobalResolutionIndex([...summaries.keys()], summaries);
     expect(resolveEdges([files[2]], undefined, index).filter(e => e.tier === 'type')).toEqual(calls);
   });
 
@@ -356,7 +356,7 @@ describe('typed local receivers', () => {
     const fresh = resolveEdges([base, child, caller]);
     expect(fresh).toContainEqual(expect.objectContaining({ dstFilePath: base.filePath, dstQualifiedKey: 'Base.run', tier: 'type' }));
     const summaries = new Map([base, child, caller].map(r => [r.filePath, summarizeParseResult(r)]));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
+    const index = buildGlobalResolutionIndex([...summaries.keys()], summaries);
     expect(resolveEdges([caller], undefined, index)).toEqual(fresh.filter(e => e.srcFilePath === caller.filePath));
   });
 
@@ -415,7 +415,7 @@ describe('typed local receivers', () => {
     const fresh = resolveEdges(files).filter(e => e.tier === 'type');
     expect(fresh).toEqual([expect.objectContaining({ dstFilePath: target.filePath, dstQualifiedKey: 'Target.run' })]);
     const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
+    const index = buildGlobalResolutionIndex([...summaries.keys()], summaries);
     expect(resolveEdges([caller], undefined, index).filter(e => e.tier === 'type')).toEqual(fresh);
   });
 
@@ -434,7 +434,7 @@ describe('typed local receivers', () => {
     const fresh = resolveEdges(files).filter(e => e.tier === 'type');
     expect(fresh).toEqual(expected ? [expect.objectContaining({ dstFilePath: target.filePath, dstQualifiedKey: 'Target.run' })] : []);
     const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
+    const index = buildGlobalResolutionIndex([...summaries.keys()], summaries);
     expect(resolveEdges([use], undefined, index).filter(e => e.tier === 'type')).toEqual(fresh);
   });
 
@@ -460,7 +460,7 @@ describe('typed local receivers', () => {
     const fresh = resolveEdges(files).filter(e => e.srcFilePath === caller.filePath);
     expect(fresh).toContainEqual(expect.objectContaining({ dstFilePath: target.filePath, dstQualifiedKey: ext === 'go' ? 'Target.Run' : 'Target.run', tier: 'type' }));
     const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
+    const index = buildGlobalResolutionIndex([...summaries.keys()], summaries);
     expect(resolveEdges([caller], undefined, index)).toEqual(fresh);
   });
 });
@@ -541,7 +541,7 @@ describe('summaries stored before receiver inference', () => {
       const { receiverFactories: _f, receiverHeritage: _h, receiverPackage: _p, ...summary } = summarizeParseResult(r);
       return [r.filePath, summary];
     }));
-    const index = buildGlobalResolutionIndex([...stale.keys()], undefined, undefined, stale);
+    const index = buildGlobalResolutionIndex([...stale.keys()], stale);
     const edges = resolveEdges([files[2]], undefined, index).filter(e => e.predicate === 'CALLS');
     expect(edges).toContainEqual(expect.objectContaining({ dstFilePath: files[1].filePath, dstQualifiedKey: 'Target.Run', tier: 'qualifier' }));
     const fresh = resolveEdges(files).filter(e => e.predicate === 'CALLS' && e.srcFilePath === files[2].filePath);

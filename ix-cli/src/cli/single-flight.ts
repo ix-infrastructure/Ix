@@ -283,7 +283,7 @@ function makeHandle(path: string, meta: LockMeta): LockHandle {
  * `ix map` takes its lock and leaves it to process exit, which was the end of
  * the command until `ix mcp` began running commands in-process. There, the
  * holder PID is the server's own and stays alive, so the lock never reads as
- * stale: the first ix_map works and every later one coalesces into an empty
+ * stale: the first MCP map call works and every later one coalesces into an empty
  * success while the graph is never refreshed. The MCP runner calls this when a
  * command finishes, restoring the boundary the process used to provide.
  *

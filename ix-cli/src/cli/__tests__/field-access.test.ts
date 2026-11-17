@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import { Command } from "commander";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { loadIngestionModules } from "../commands/ingestion-loader.js";
-import { changedNames, definedNames, findDependents } from "../ingest-symbols.js";
 import { registerFieldAccessCommands } from "../commands/field-access.js";
 
 const mocks = vi.hoisted(() => ({ expand: vi.fn(), resolve: vi.fn() }));
@@ -66,19 +65,28 @@ describe("field queries from real parser fixtures", () => {
     await program.parseAsync(["readers", "Missing.field"], { from: "user" });
     expect(mocks.expand).not.toHaveBeenCalled();
   });
-  it("invalidates field users when a definition is removed", async () => {
-    const [{ parseFile, summarizeParseResult }] = await loadIngestionModules();
-    const source = readFileSync(new URL("../../../../core-ingestion/test-fixtures/field-access/order.ts", import.meta.url), "utf8");
-    const useSource = readFileSync(new URL("../../../../core-ingestion/test-fixtures/field-access/use.ts", import.meta.url), "utf8");
-    const model = parseFile("order.ts", source)!;
-    const before = summarizeParseResult(model);
-    const after = summarizeParseResult({ ...model, entities: model.entities.filter((e: any) => e.kind !== "field") });
-    expect(before.sig).not.toBe(after.sig);
-    expect(changedNames(before, after)).toContain("Order.status");
-    expect(definedNames(before)).toContain("Order.status");
-    const user = summarizeParseResult(parseFile("use.ts", useSource)!);
-    const table = new Map([["use.ts", { hash: "hash", summary: user }]]);
-    expect(findDependents(table, changedNames(before, after), ["order.ts"], new Set())).toEqual(["use.ts"]);
+  it("reports an invalid limit through the shared error handler", async () => {
+    const previousExitCode = process.exitCode;
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = JSON.parse(await run("writers", "json", ["--limit", "invalid"]));
+      expect(result.error).toBe("invalid_limit");
+      expect(process.exitCode).toBe(1);
+      expect(err).toHaveBeenCalled();
+    } finally {
+      process.exitCode = previousExitCode;
+    }
   });
 
+  it("reads source paths from graph provenance", async () => {
+    const saved = nodes;
+    try {
+      nodes = nodes.map(node => ({ ...node, attrs: {}, provenance: { source_uri: "src/order.ts" } }));
+      const result = JSON.parse(await run("writers", "json"));
+      expect(result.rows).toHaveLength(3);
+      expect(result.rows.every((row: any) => row.path === "src/order.ts")).toBe(true);
+    } finally {
+      nodes = saved;
+    }
+  });
 });

@@ -1,30 +1,34 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import type { Command } from "commander";
+import { PRO_COMMANDS, PRO_RETIRED, PRO_STUB } from "./pro-surface.js";
 
-const PRO_COMMANDS: { name: string; desc: string }[] = [
-  { name: "briefing", desc: "Session-resume briefing" },
-  { name: "bug", desc: "Manage bugs" },
-  { name: "decide", desc: "Record a design decision" },
-  { name: "decisions", desc: "List recorded design decisions" },
-  { name: "goal", desc: "Manage project goals" },
-  { name: "goals", desc: "List all goals" },
-  // `patches` is deliberately absent: ix-cli owns the real implementation
-  // (commands/patches.ts, registered by `registerOssCommands` in oss.ts and
-  // listed in oss-table.ts). It sat in this list while never
-  // being registered, so `ix patches` answered "requires Ix Pro" on OSS and
-  // shadowed a working command — see #371.
-  { name: "plan", desc: "Manage plans and plan tasks" },
-  { name: "task", desc: "Manage tasks" },
-  { name: "plans", desc: "List all plans" },
-  { name: "tasks", desc: "List all tasks across plans" },
-  { name: "truth", desc: "Manage project intents (truth)" },
-  { name: "workflow", desc: "Attach, show, validate, or run staged workflows" },
-];
-
+/**
+ * Register a hidden stand-in for every Pro command, and every retired Pro
+ * name, that is not already registered. The names come from the one table in
+ * pro-surface.ts (#932).
+ */
 export function registerProStubs(program: Command): void {
   const registered = new Set(program.commands.map((c: Command) => c.name()));
-  for (const { name, desc } of PRO_COMMANDS) {
+  const stubs: { name: string; desc: string; lines: string[] }[] = [
+    ...PRO_COMMANDS.map(({ name, description }) => ({
+      name,
+      desc: description,
+      lines: [`The '${name}' command requires Ix Pro.`],
+    })),
+    // A retired name is not a command anywhere, Pro included. Its replacement
+    // is a Pro command, so say both: the sentinel agents stop on (naming the
+    // command that exists) and the form to use once Pro is installed.
+    ...Object.entries(PRO_RETIRED).map(([old, now]) => {
+      const current = now.split(" ")[0];
+      return {
+        name: old,
+        desc: `Retired: use 'ix ${now}'`,
+        lines: [`The '${current}' command requires Ix Pro.`, `'ix ${old}' is now 'ix ${now}'.`],
+      };
+    }),
+  ];
+  for (const { name, desc, lines } of stubs) {
     if (registered.has(name)) continue;
     const stub = program
       .command(name)
@@ -41,10 +45,11 @@ export function registerProStubs(program: Command): void {
       .allowUnknownOption(true)
       .allowExcessArguments(true)
       .action(() => {
-        console.error(`The '${name}' command requires Ix Pro.`);
+        for (const line of lines) console.error(line);
         console.error(`Install @ix/pro to enable premium features.`);
         process.exitCode = 1;
       });
     (stub as any).hidden = true;
+    (stub as unknown as Record<symbol, unknown>)[PRO_STUB] = true;
   }
 }

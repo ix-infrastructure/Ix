@@ -3,7 +3,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { NodeSummary } from "../../client/types.js";
-import { buildBundle, clampBudgets } from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { clampBudgets } from "../context/options.js";
 import type { ContextFacts, EntityLocation } from "../explain/facts.js";
 
 /**

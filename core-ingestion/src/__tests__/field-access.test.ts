@@ -1,8 +1,9 @@
 // Copyright 2026 Ix Infrastructure Inc.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { parseFile, resolveCallEdges, resolveEdges, summarizeParseResult, buildGlobalResolutionIndex } from '../index.js';
-import { buildPatchWithResolution } from '../patch-builder.js';
+import { parseFile, resolveEdges, summarizeParseResult, buildGlobalResolutionIndex } from '../index.js';
+import { buildPatch, buildPatchWithResolution } from '../patch-builder.js';
+import { changedNames, definedNames, findDependents, summarySignature } from '../symbol-index.js';
 
 const fixture = (file: string) => parseFile(file, readFileSync(new URL(`../../test-fixtures/field-access/${file}`, import.meta.url), 'utf8'))!;
 const access = (p: string) => p === 'READS' || p === 'WRITES';
@@ -23,7 +24,7 @@ describe('field def-use', () => {
     expect(uses.every(op => Array.isArray((op.attrs as any).sites) && (op.attrs as any).sites.every((s: any) => s.line > 0))).toBe(true);
     expect(JSON.stringify(uses)).toContain('SHIPPED');
     const summaries = new Map([[parsed.filePath, summarizeParseResult(parsed)]]);
-    const index = buildGlobalResolutionIndex([parsed.filePath], undefined, undefined, summaries);
+    const index = buildGlobalResolutionIndex([parsed.filePath], summaries);
     expect(resolveEdges([parsed], undefined, index).filter(e => access(e.predicate))).toEqual(edges);
   });
 });
@@ -37,7 +38,7 @@ describe('conservative field resolution', () => {
     expect(edges).toHaveLength(2);
     expect(edges.every(e => e.dstFilePath === model.filePath && e.dstQualifiedKey === 'Order.status')).toBe(true);
     const summaries = new Map([model, use].map(p => [p.filePath, summarizeParseResult(p)]));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
+    const index = buildGlobalResolutionIndex([...summaries.keys()], summaries);
     expect(resolveEdges([use], undefined, index).filter(e => access(e.predicate))).toEqual(edges);
     const writes = buildPatchWithResolution(use, 'hash', 'ws', edges).ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'WRITES');
     expect(writes).toHaveLength(1);
@@ -81,7 +82,7 @@ describe('conservative field resolution', () => {
     expect(edges.map(e => e.predicate).sort()).toEqual(['READS', 'WRITES']);
     expect(edges.every(e => e.dstQualifiedKey === key && e.dstFilePath === model.filePath)).toBe(true);
     const summaries = new Map([model, use].map(p => [p.filePath, summarizeParseResult(p)]));
-    const index = buildGlobalResolutionIndex([...summaries.keys()], undefined, undefined, summaries);
+    const index = buildGlobalResolutionIndex([...summaries.keys()], summaries);
     expect(resolveEdges([use], undefined, index).filter(e => access(e.predicate))).toEqual(edges);
   });
   it('fields never become call targets and same-line methods keep their own accesses', () => {
@@ -105,8 +106,13 @@ describe('conservative field resolution', () => {
     expect(parsed.entities).toContainEqual(expect.objectContaining({ kind: 'field', container: 'Child', name: 'label' }));
   });
 
-  it('the deprecated call-only API never presents field accesses as calls', () => {
-    expect(resolveCallEdges([fixture('order.ts')]).some(e => /\.(status|count)$/.test(e.calleeQualifiedKey))).toBe(false);
+  it('the single-file builder preserves resolved field sites', () => {
+    const parsed = fixture('order.ts');
+    const accesses = (ops: ReturnType<typeof buildPatch>['ops']) =>
+      ops.filter(op => op.type === 'UpsertEdge' && access(op.predicate));
+    const actual = accesses(buildPatch(parsed, 'hash', 'ws').ops);
+    expect(actual.length).toBeGreaterThan(0);
+    expect(actual).toEqual(accesses(buildPatchWithResolution(parsed, 'hash', 'ws', resolveEdges([parsed])).ops));
   });
 
   it('merges sites when two type aliases resolve to the same field edge', () => {
@@ -131,4 +137,29 @@ describe('conservative field resolution', () => {
     ]);
   });
 
+});
+
+
+describe('field summary invalidation', () => {
+  it('invalidates field users when a definition is removed', () => {
+    const model = fixture('order.ts');
+    const before = summarizeParseResult(model);
+    const after = summarizeParseResult({ ...model, entities: model.entities.filter(e => e.kind !== 'field') });
+    expect(before.sig).not.toBe(after.sig);
+    expect(changedNames(before, after)).toContain('Order.status');
+    expect(definedNames(before)).toContain('Order.status');
+    const user = summarizeParseResult(fixture('use.ts'));
+    const table = new Map([['use.ts', { summary: user }]]);
+    expect(findDependents(table, changedNames(before, after), ['order.ts'], new Set())).toEqual(['use.ts']);
+  });
+
+  it('invalidates inherited field users when their owner changes base', () => {
+    const before = summarizeParseResult(fixture('inherited.ts'));
+    const after = { ...before, fieldHeritage: [['Child', 'OtherBase']] as Array<[string, string]> };
+    after.sig = summarySignature(after);
+    expect(after.sig).not.toBe(before.sig);
+    expect(changedNames(before, after)).toContain('Child');
+    const table = new Map([['use.ts', { summary: { refs: ['Child.status'] } }]]);
+    expect(findDependents(table, changedNames(before, after), [], new Set())).toEqual(['use.ts']);
+  });
 });

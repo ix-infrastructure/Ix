@@ -3,11 +3,12 @@ import type { Command } from "commander";
 import { createClient } from "../../client/factory.js";
 import { expandCapped, printJson, relativePath } from "../format.js";
 import { llmLine } from "../llm.js";
-import { parseCountOption, parsePickOption, STRICT_TARGET_HELP } from "../options.js";
-import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
+import { formatOption, pageOffsetOption, parseCountOption, parsePickOption, strictOption } from "../options.js";
+import { nextPageCommand, parseOffset } from "../paging.js";
 import { resolveFileOrReport } from "../resolve.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
-import { reportError } from "./around.js";
+import { reportFailure } from "../ui.js";
+import { fileUri } from "../file-node.js";
 
 /** Uses stored sites, never a grep reconstruction or a name-only query. */
 export function registerFieldAccessCommands(program: Command): void {
@@ -16,15 +17,15 @@ export function registerFieldAccessCommands(program: Command): void {
       .description(`Show functions that ${name === "writers" ? "write" : "read"} Type.field, with access sites`)
       .option("--path <path>", "Restrict the field's defining path")
       .option("--pick <n>", "Pick Nth target candidate (1-based)", parsePickOption)
-      .option("--strict", STRICT_TARGET_HELP)
+      .addOption(strictOption())
       .option("--limit <n>", "Max access sites to show", "50")
-      .option("--offset <n>", OFFSET_FLAG, "0")
-      .option("--format <fmt>", "Output format (text|json|llm)", "text")
+      .addOption(pageOffsetOption())
+      .addOption(formatOption())
       .addHelpText("after", `\nExamples:\n  ix ${name} Order.status --format llm\n  ix ${name} Order.status --path src/order.ts\n\nLiteral values retain their source spelling. Symbolic members use value_kind=member.\n${EXIT_CODES_HELP}`)
       .action(async (field: string, opts, cmd: Command) => {
         let limit: number;
         try { limit = parseCountOption(opts.limit, "50"); }
-        catch { reportError("invalid_limit", "--limit must be a non-negative integer.", opts.format); return; }
+        catch { reportFailure("invalid_limit", "--limit must be a non-negative integer.", opts.format); return; }
         const offset = parseOffset(opts.offset);
         const client = createClient();
         const target = await resolveFileOrReport(client, field, {
@@ -39,7 +40,8 @@ export function registerFieldAccessCommands(program: Command): void {
           if (edge.predicate !== predicate || edge.dst !== target.id) continue;
           const node = nodes.get(edge.src);
           if (!node || !["function", "method"].includes(node.kind)) continue;
-          const path = relativePath(node.path ?? node.attrs?.path ?? node.provenance?.sourceUri);
+          const sourcePath = typeof node.attrs?.path === "string" ? node.attrs.path : fileUri(node);
+          const path = relativePath(sourcePath);
           for (const site of Array.isArray(edge.attrs?.sites) ? edge.attrs.sites : []) {
             if (!Number.isInteger(site.line) || site.line < 1) continue;
             rows.push({ function: node.name, ...(path ? { path } : {}), line: site.line,
