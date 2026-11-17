@@ -9,8 +9,8 @@ import { buildDependencyTree } from "../commands/depends.js";
 import { getSystemPath } from "../hierarchy.js";
 import type { CommitRef } from "./history.js";
 import { isTestPath, type RelatedRef } from "./related-files.js";
-import { suggestedCommand } from "../next-step.js";
-import { TYPE_KINDS } from "../graph-model.js";
+import { hint, suggestedCommand } from "../next-step.js";
+import { TYPE_KINDS, type GraphKind, type KindSet } from "../graph-model.js";
 import { featureOff, markFeatureOff, routeMissing } from "../../client/features.js";
 
 /** A related entity and where it is defined. */
@@ -212,7 +212,7 @@ const MEMBER_USE_CONCURRENCY = 6;
 const USE_PREDICATES = ["CALLS", "REFERENCES", "IMPORTS"];
 
 /** Kinds a reader navigates by. Everything else ranks after them. */
-const PRIMARY_MEMBER_KINDS = new Set([
+const PRIMARY_MEMBER_KINDS: KindSet = new Set<GraphKind>([
   "class", "interface", "function", "method", "type", "enum", "trait", "struct", "object", "module",
 ]);
 
@@ -475,9 +475,11 @@ async function batchReadCallees(client: IxClient, ids: string[]): Promise<Map<st
 /**
  * The target's callees by name, in edge order. Read in one batched read when
  * the backend serves it, and one entity read each for whatever that leaves out
- * (Ix#931); either way each callee is described from the same node.
+ * (Ix#931); either way each callee is described from the same node. A callee
+ * with no usable name, or one that cannot be read, is listed unresolved with a
+ * text-search suggestion. `ix explain` and `collectFacts` both use this one.
  */
-async function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRef[]> {
+export async function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRef[]> {
   const batched = await batchReadCallees(
     client,
     [...new Set(calleeEdges.map((e: any) => e.dst).filter((id: unknown): id is string => typeof id === "string"))],
@@ -661,6 +663,10 @@ export async function collectFacts(
       parts.push(`${unresolvedCalls.total} called name(s) have no definition in the graph: ${unresolvedCallNames(unresolvedCalls)}.`);
     }
     if (danglingCallees > 0) parts.push(`${danglingCallees} callee(s) could not be resolved to named entities.`);
+    // Only dangling edges means a graph built before tree-sitter/1.28; the next
+    // map rebuilds it. llm output prints no notes, so the hint lives here.
+    const mapStep = unresolvedCalls ? undefined : hint({ action: "map" });
+    if (mapStep) parts.push(`Run \`${mapStep}\` to improve coverage.`);
     diagnostics.push({ code: "unresolved_call_target", message: parts.join(" ") });
   }
 

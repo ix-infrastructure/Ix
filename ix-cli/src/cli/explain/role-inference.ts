@@ -1,6 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import type { EntityFacts } from "./facts.js";
+import type { GraphKind, KindSet } from "../graph-model.js";
 
 export type RoleLabel =
   | "test"
@@ -140,7 +141,7 @@ export function inferRole(facts: EntityFacts): RoleInference {
 
   // ── 5. Registration function ─────────────────────────────────────────
   if (role === "unknown") {
-    const callableKinds = new Set(["function", "method"]);
+    const callableKinds: KindSet = new Set<GraphKind>(["function", "method"]);
     if (
       callableKinds.has(kind) &&
       tokens[0] === "register"
@@ -158,7 +159,7 @@ export function inferRole(facts: EntityFacts): RoleInference {
     const selectionNames = ["pick", "best", "select", "choose", "rank", "filter"];
     const hasSelectionName = tokens.some((t) => selectionNames.includes(t));
     const selectionPathSignals = pathContains(facts, "resolve", "select", "pick", "rank", "match");
-    const callableKinds = new Set(["function", "method"]);
+    const callableKinds: KindSet = new Set<GraphKind>(["function", "method"]);
 
     if (callableKinds.has(kind) && hasSelectionName) {
       role = "selection-helper";
@@ -173,7 +174,7 @@ export function inferRole(facts: EntityFacts): RoleInference {
     const scoringNames = ["score", "weight", "rank", "rate", "evaluate"];
     const hasScoringName = tokens.some((t) => scoringNames.includes(t));
     const scoringFilePath = pathContains(facts, "importance", "ranking", "score", "weight");
-    const callableKinds = new Set(["function", "method"]);
+    const callableKinds: KindSet = new Set<GraphKind>(["function", "method"]);
 
     if (callableKinds.has(kind) && (hasScoringName || scoringFilePath)) {
       role = "scoring-helper";
@@ -188,7 +189,7 @@ export function inferRole(facts: EntityFacts): RoleInference {
       ["resolve", "resolver", "lookup", "match"].includes(t),
     );
     const resolvePathSignals = pathContains(facts, "resolve", "resolver", "match", "lookup");
-    const callableKinds = new Set(["function", "method"]);
+    const callableKinds: KindSet = new Set<GraphKind>(["function", "method"]);
 
     if (
       callableKinds.has(kind) &&
@@ -219,7 +220,7 @@ export function inferRole(facts: EntityFacts): RoleInference {
 
   // ── 10. Entry point ──────────────────────────────────────────────────
   if (role === "unknown") {
-    const callableKinds = new Set(["function", "method"]);
+    const callableKinds: KindSet = new Set<GraphKind>(["function", "method"]);
     if (
       facts.callerCount === 0 &&
       facts.calleeCount > 0 &&
@@ -236,7 +237,7 @@ export function inferRole(facts: EntityFacts): RoleInference {
 
   // ── 11. Service ──────────────────────────────────────────────────────
   if (role === "unknown") {
-    const containerKindSet = new Set(["class", "object"]);
+    const containerKindSet: KindSet = new Set<GraphKind>(["class", "object"]);
     const serviceTerms = ["service", "manager", "provider", "handler", "controller", "coordinator"];
     if (
       containerKindSet.has(kind) &&
@@ -251,7 +252,7 @@ export function inferRole(facts: EntityFacts): RoleInference {
 
   // ── 12. Service method (container-aware) ─────────────────────────────
   if (role === "unknown") {
-    const callableKinds = new Set(["function", "method"]);
+    const callableKinds: KindSet = new Set<GraphKind>(["function", "method"]);
     const serviceTerms = ["service", "manager", "provider", "handler", "controller", "coordinator"];
     const containerIsService =
       containerKind === "class" &&
@@ -284,7 +285,7 @@ export function inferRole(facts: EntityFacts): RoleInference {
 
   // ── 15. Container ───────────────────────────────────────────────────
   if (role === "unknown") {
-    const containerKindSet = new Set(["file", "module"]);
+    const containerKindSet: KindSet = new Set<GraphKind>(["file", "module"]);
     if (containerKindSet.has(kind) && facts.memberCount > 0) {
       role = "container";
       confidence = "high";
@@ -307,7 +308,7 @@ export function inferRole(facts: EntityFacts): RoleInference {
 
   // ── 17. Localized helper ────────────────────────────────────────────
   if (role === "unknown") {
-    const callableKinds = new Set(["function", "method"]);
+    const callableKinds: KindSet = new Set<GraphKind>(["function", "method"]);
     if (
       callableKinds.has(kind) &&
       facts.callerCount >= 1 &&
@@ -322,7 +323,7 @@ export function inferRole(facts: EntityFacts): RoleInference {
 
   // ── 18. Context-aware fallback (no more "role could not be determined") ──
   if (role === "unknown") {
-    const callableKinds = new Set(["function", "method"]);
+    const callableKinds: KindSet = new Set<GraphKind>(["function", "method"]);
 
     if (callableKinds.has(kind) && containerName) {
       // Method/function inside a known container

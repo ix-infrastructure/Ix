@@ -3,15 +3,16 @@
 import chalk from "chalk";
 import { printJson } from "../output/json.js";
 import { confidenceColor } from "../output/rows.js";
+import type { ContextView } from "../output/types.js";
 
-export function formatContext(result: any, format: string): void {
+export function formatContext(result: ContextView, format: string): void {
   if (format === "json") {
     printJson(result);
     return;
   }
 
   // Text format
-  const { claims, conflicts, decisions, intents, metadata } = result;
+  const { conflicts, decisions, intents, metadata } = result;
 
   console.log(
     "\n" + chalk.bold.cyan(`--- Ix Context: "${metadata.query}" ---`)
@@ -22,27 +23,32 @@ export function formatContext(result: any, format: string): void {
     )
   );
 
-  const useCompact = result.compactClaims?.length > 0;
-  const displayClaims = useCompact ? result.compactClaims : (claims || []);
+  // The compact claims when the backend sent any, else the full ones.
+  const compact = result.compactClaims ?? [];
+  const claims = result.claims ?? [];
+  const useCompact = compact.length > 0;
+  const total = useCompact ? compact.length : claims.length;
   const maxShow = 10;
 
-  if (displayClaims.length > 0) {
+  if (total > 0) {
     console.log(chalk.bold("\nClaims:"));
-    displayClaims.slice(0, maxShow).forEach((c: any) => {
-      if (useCompact) {
+    if (useCompact) {
+      for (const c of compact.slice(0, maxShow)) {
         const pct = Math.round((c.score ?? 0) * 100);
         const color = confidenceColor(c.score ?? 0);
         const loc = c.lineRange ? `:${c.lineRange[0]}-${c.lineRange[1]}` : '';
         const pathStr = c.path ? chalk.dim(` (${c.path}${loc})`) : '';
         console.log(`  ${color(`[${pct}%]`)} ${c.field}${pathStr}`);
-      } else {
+      }
+    } else {
+      for (const c of claims.slice(0, maxShow)) {
         const pct = Math.round((c.finalScore ?? 0) * 100);
         const color = confidenceColor(c.finalScore ?? 0);
         console.log(`  ${color(`[${pct}%]`)} ${c.claim?.statement || 'unknown'}`);
       }
-    });
-    if (displayClaims.length > maxShow) {
-      console.log(chalk.dim(`  ... and ${displayClaims.length - maxShow} more`));
+    }
+    if (total > maxShow) {
+      console.log(chalk.dim(`  ... and ${total - maxShow} more`));
     }
   }
 

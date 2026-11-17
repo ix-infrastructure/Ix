@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import { describeCommitOutcome, describeStitchFailure, describeStitchSkipped, ingestCompletedCleanly, isStitchUnsupported, shouldPrintStitchSkipped } from "../commands/ingest.js";
+import { IxHttpError } from "../../client/http-error.js";
 
 describe("describeCommitOutcome", () => {
   it("says nothing when every patch committed", () => {
@@ -240,7 +241,7 @@ describe("describeCommitOutcome with a commit cutoff", () => {
 
 describe("describeStitchFailure", () => {
   it("reports incomplete cross-repository relationships without dumping an HTML response", () => {
-    const message = describeStitchFailure(new Error("504: <html>\nlarge proxy response"));
+    const message = describeStitchFailure(new IxHttpError(504, "<html>\nlarge proxy response"));
 
     expect(message).toContain("Cross-workspace stitch failed");
     expect(message).toContain("HTTP 504");
@@ -371,11 +372,11 @@ describe("describeStitchSkipped", () => {
 
 describe("isStitchUnsupported", () => {
   it.each([404, 501])("treats %d as a backend that does not implement stitch", (status) => {
-    expect(isStitchUnsupported(new Error(`${status}: Not Found`))).toBe(true);
+    expect(isStitchUnsupported(new IxHttpError(status, "Not Found"))).toBe(true);
   });
 
   it.each([500, 502, 504])("treats %d as a real failure worth surfacing", (status) => {
-    expect(isStitchUnsupported(new Error(`${status}: upstream timeout`))).toBe(false);
+    expect(isStitchUnsupported(new IxHttpError(status, "upstream timeout"))).toBe(false);
   });
 
   it("treats a transport error with no status as a real failure", () => {

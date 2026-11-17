@@ -3,7 +3,7 @@
 import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
-import { resolveFileOrReport, printResolved } from "../resolve.js";
+import { resolveFileOrReport, printResolved, shownTarget } from "../resolve.js";
 import { getEffectiveSystemPath, getSystemPath, hasMapData, noSystemMap } from "../hierarchy.js";
 import { humanizeLabel } from "../impact/risk-semantics.js";
 import { relativePath, printJson } from "../format.js";
@@ -56,8 +56,9 @@ Examples:
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; strict?: boolean; format: string }) => {
       const client = createClient({ query: true });
       const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict };
-      const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
-      if (!target) return;
+      const found = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
+      if (!found) return;
+      const target = shownTarget(found);
 
       if (opts.format === "text") printResolved(target);
 

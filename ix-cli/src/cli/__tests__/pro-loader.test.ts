@@ -103,3 +103,22 @@ it("proIsAbsent is true only where tryLoadProCommands reports absence", () => {
   expect(proIsAbsentIn(installPro({ ".": "./register.js" }, "export const unrelated=true;"))).toBe(false);
   expect(proIsAbsentIn(installPro(undefined, undefined))).toBe(false);
 });
+
+// `ix capabilities` reports this state to plugins. A Pro whose `exports` still
+// maps ./register but whose register.js was deleted must read "broken", not
+// "installed": `import.meta.resolve` alone does not notice the missing file.
+function proInstallStateIn(setup: (pro: string) => void | undefined): string {
+  const root = mkdtempSync(join(tmpdir(), "ix-pro-loader-")); roots.push(root);
+  writeFileSync(join(root, "loader.mjs"), loader);
+  writeFileSync(join(root, "probe.mjs"), "import {proInstallState} from './loader.mjs'; console.log(JSON.stringify(proInstallState()));\n");
+  setup(join(root, "node_modules", "@ix", "pro"));
+  const r = spawnSync(process.execPath, [join(root, "probe.mjs")], { cwd: root, encoding: "utf8", timeout: 15000 });
+  expect(r.error).toBeUndefined(); expect(r.status, r.stderr).toBe(0);
+  return JSON.parse(r.stdout) as string;
+}
+it("proInstallState reads the real install, including a deleted register.js", () => {
+  expect(proInstallStateIn(() => undefined)).toBe("absent");
+  expect(proInstallStateIn(installPro({ "./register": "./register.js" }, "export function registerProCommands(){}"))).toBe("installed");
+  expect(proInstallStateIn(installPro({ "./register": "./register.js" }, undefined))).toBe("broken");
+  expect(proInstallStateIn(installPro({ ".": "./register.js" }, "export const unrelated=true;"))).toBe("broken");
+});

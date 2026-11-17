@@ -5,6 +5,7 @@ import type { RoleLabel } from "./role-inference.js";
 import type { HierarchySemantics } from "./hierarchy-semantics.js";
 import type { ImportanceInference } from "./importance.js";
 import { hint } from "../next-step.js";
+import type { GraphKind, KindSet } from "../graph-model.js";
 
 export interface SystemMeaning {
   archetype: "foundation" | "boundary" | "flow" | "general";
@@ -14,7 +15,7 @@ export interface SystemMeaning {
   importanceNarrative?: string;
 }
 
-const FOUNDATION_KINDS = new Set(["enum", "interface", "type", "trait", "data_class"]);
+const FOUNDATION_KINDS: KindSet = new Set<GraphKind>(["enum", "interface", "type", "trait", "data_class"]);
 const BOUNDARY_ROLES = new Set<RoleLabel>(["api-client", "adapter"]);
 const FLOW_ROLES = new Set<RoleLabel>([
   "selection-helper", "resolution-helper", "scoring-helper",

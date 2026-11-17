@@ -23,7 +23,8 @@ import { isBackendUnreachable } from "./errors.js";
 import { findTargetCandidates, rowsInclude } from "./target-suggestions.js";
 import { isFileStemMatch } from "./candidate-origin.js";
 import { normalizeForPathMatch } from "./path-match.js";
-import { STRUCTURAL_KINDS } from "./graph-model.js";
+import { STRUCTURAL_KINDS, type GraphKind } from "./graph-model.js";
+import { httpStatusOf } from "../client/http-error.js";
 import { hasDefinitionOf, looksTypeLikeSymbol } from "./resolve/score.js";
 import {
   AMBIGUOUS_HINT, allCandidatesOf, applyPick as pickAmong, buildAmbiguous, candidateOf, cmpStr,
@@ -659,13 +660,24 @@ export function printAmbiguous(symbol: string, result: AmbiguousResult, opts?: {
  * Print the resolved target before showing results (text mode only).
  * Callers should skip this when format === "json" to keep JSON strict.
  */
+/** The name to show for a resolved target: as the user qualified it, else its own name. */
+export function displayNameOf(target: { name: string; displayName?: string }): string {
+  return target.displayName ?? target.name;
+}
+
+/** A resolved target for output: `name` is the name to show, and `displayName` is gone. */
+export function shownTarget<T extends { name: string; displayName?: string }>(target: T): Omit<T, "displayName"> {
+  const { displayName, ...rest } = target;
+  return { ...rest, name: displayName ?? target.name };
+}
+
 export function printResolved(target: ResolvedEntity): void {
   if (isQuiet()) return;
   const shortId = target.id.slice(0, 8);
   const modeStr = target.resolutionMode !== "exact"
     ? chalk.dim(` (${target.resolutionMode})`)
     : "";
-  stderr(`${chalk.dim("Resolved:")} ${chalk.cyan(target.kind)} ${chalk.dim(shortId)} ${chalk.bold(target.name)}${modeStr}\n`);
+  stderr(`${chalk.dim("Resolved:")} ${chalk.cyan(target.kind)} ${chalk.dim(shortId)} ${chalk.bold(displayNameOf(target))}${modeStr}\n`);
 }
 
 /** Check if a string looks like a raw UUID (not a human-readable name). */
@@ -848,7 +860,7 @@ async function rankFileOrEntity(
   // just sorts last among equal-scoring candidates. `constant` is here so a
   // module-level constant is not ranked behind every config entry and heading
   // that happens to share its name (Ix#679).
-  const allKinds = ["file", "class", "object", "trait", "interface", "module", "method", "function", "constant"];
+  const allKinds: GraphKind[] = ["file", "class", "object", "trait", "interface", "module", "method", "function", "constant"];
   if (scoped) {
     // `Class.method` / `Class#method`: a name stored with a dot (`os.path`)
     // resolves literally, so the qualified reading is tried only when the
@@ -951,10 +963,10 @@ async function resolveQualified(
   };
   const result = await rankEntity(client, scoped.methodName, ['method', 'function'], scopedOpts);
   if (result.resolved) {
-    // Rewrite the display name to show the full scoped form, as the user typed it
+    // Show the full scoped form, as the user typed it
     return {
       ...result,
-      entity: { ...result.entity, name: `${scoped.className}${scoped.sep}${scoped.methodName}` },
+      entity: { ...result.entity, displayName: `${scoped.className}${scoped.sep}${scoped.methodName}` },
     };
   }
   return result;
@@ -1031,7 +1043,7 @@ async function resolveInClasses(
     const only = ordered[0];
     return {
       resolved: true,
-      entity: { id: only.id, kind: only.kind, name: display, path: only.path, resolutionMode: "scored" },
+      entity: { id: only.id, kind: only.kind, name: only.name, displayName: display, path: only.path, resolutionMode: "scored" },
     };
   }
   const qualifiedResult: AmbiguousResult = {
@@ -1046,7 +1058,7 @@ async function resolveInClasses(
   rememberAll(qualifiedResult, qualifiedResult.candidates, ordered);
   const ambiguous: ResolveResult = { resolved: false, ambiguous: true, result: qualifiedResult };
   const picked = applyPick(ambiguous, opts);
-  if (picked?.resolved) return { ...picked, entity: { ...picked.entity, name: display } };
+  if (picked?.resolved) return { ...picked, entity: { ...picked.entity, displayName: display } };
   return picked ?? ambiguous;
 }
 
@@ -1401,14 +1413,15 @@ function candidateSet(owner: AmbiguousResult | ResolutionNotice, total?: number,
 
 /**
  * Whether an id lookup failed because the id names nothing: the backend's
- * 400/404/410 (`<status>: ...`, see `httpError`) or `resolvePrefix`'s own
+ * 400/404/410 (`IxHttpError.status`, see `httpError`) or `resolvePrefix`'s own
  * no-match and ambiguous-prefix errors. Anything else -- a refused
  * connection, a 5xx, a 401 -- is not evidence about the id.
  */
 export function isLookupMiss(err: unknown): boolean {
+  const status = httpStatusOf(err);
+  if (status === 400 || status === 404 || status === 410) return true;
   const message = err instanceof Error ? err.message : String(err);
-  return /^(400|404|410):/.test(message)
-    || message.startsWith("No entity found for prefix:")
+  return message.startsWith("No entity found for prefix:")
     || message.startsWith("Ambiguous prefix ");
 }
 

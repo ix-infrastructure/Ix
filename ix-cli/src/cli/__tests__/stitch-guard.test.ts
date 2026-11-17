@@ -18,6 +18,8 @@ import * as net from "node:net";
 import { createServer } from "node:http";
 import { IxClient } from "../../client/api.js";
 import { namedLockPath } from "../single-flight.js";
+import { httpStatusOf } from "../../client/http-error.js";
+import { describeStitchFailure } from "../commands/ingest.js";
 
 const ENDPOINT = "http://localhost:8090";
 const OTHER = "http://localhost:9999";
@@ -478,6 +480,36 @@ describe("connectionNeverEstablished", () => {
     }
   });
 
+  it("is FALSE for a proxy that answered with a socket code in its body", async () => {
+    // A proxy in front of a dead upstream may answer `{"code":"ECONNREFUSED"}`.
+    // Something answered, so the request was sent and the join may be running:
+    // reading the body's code as a socket's would clear the marker (#568).
+    for (const code of ["ECONNREFUSED", "ENOTFOUND", "ENETUNREACH", "EHOSTUNREACH", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]) {
+      const server = createServer((_req, res) => {
+        res.writeHead(504, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ code, message: "upstream unreachable" }));
+      });
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+      const port = (server.address() as net.AddressInfo).port;
+      try {
+        let caught: unknown;
+        try {
+          await new IxClient(`http://127.0.0.1:${port}`, undefined)
+            .stitch({ workspaceId: "w", provides: [], consumes: [], exports: [], symbolConsumes: [] } as never);
+        } catch (err) {
+          caught = err;
+        }
+        expect((caught as { code?: unknown }).code, code).toBe(code);
+        expect(httpStatusOf(caught), code).toBe(504);
+        const neverConnected = connectionNeverEstablished(caught);
+        expect(neverConnected, code).toBe(false);
+        expect(outcomeProvesNothingRunning({ ok: false, elapsedMs: 5, status: 504, neverConnected }), code).toBe(false);
+      } finally {
+        await new Promise<void>(resolve => server.close(() => resolve()));
+      }
+    }
+  });
+
   it("clears the marker, so a backend that went down mid-run is not blamed for 15 minutes", () => {
     const a = admitStitch(ENDPOINT);
     expect(a.admitted).toBe(true);
@@ -509,8 +541,10 @@ describe("a 2xx that still failed", () => {
       } catch (err) {
         caught = err;
       }
-      // The status is in the message, which is what makes this decidable at all.
+      // The error carries the status, which is what makes this decidable at all.
       expect(String(caught)).toContain("200: response body is not JSON");
+      expect(httpStatusOf(caught)).toBe(200);
+      expect(describeStitchFailure(caught)).toContain("HTTP 200 with an unreadable body");
       expect(outcomeProvesNothingRunning({ ok: false, elapsedMs: 5, status: 200 })).toBe(false);
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()));

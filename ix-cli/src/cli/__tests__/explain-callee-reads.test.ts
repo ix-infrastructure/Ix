@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { IxClient } from "../../client/api.js";
+import { IxHttpError } from "../../client/http-error.js";
 import { collectFacts } from "../explain/facts.js";
 
 /**
@@ -74,7 +75,11 @@ function graph(endpoint: string, batch: BatchBehaviour, rec: Recorder): IxClient
   if (batch !== "absent") {
     client.nodes = async (ids: string[], fields?: string) => {
       rec.batchReads.push({ ids: [...ids], fields });
-      if (typeof batch === "object" && "throws" in batch) throw new Error(batch.throws);
+      if (typeof batch === "object" && "throws" in batch) {
+        // As IxClient fails: a typed error carrying the status (#940), which is what `routeMissing` reads.
+        const [status, body = ""] = batch.throws.split(": ");
+        throw new IxHttpError(Number(status), body);
+      }
       if (typeof batch === "object" && "answer" in batch) return batch.answer;
       const strip = typeof batch === "object" && "strip" in batch ? batch.strip : [];
       const live = ids.filter((id) => NODES[id]);

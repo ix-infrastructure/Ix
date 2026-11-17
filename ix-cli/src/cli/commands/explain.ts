@@ -4,9 +4,9 @@ import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import { formatExplain, relativePath, printJson, type ExplainResult, type EntityRef, type Diagnostic } from "../format.js";
-import { resolveFileOrReport, isRawId, activeReadScope } from "../resolve.js";
+import { resolveFileOrReport, activeReadScope, shownTarget } from "../resolve.js";
 import { isFileStale } from "../stale.js";
-import { collectFacts, unresolvedCallNames, unresolvedCallsOf } from "../explain/facts.js";
+import { collectFacts, resolveCallList, unresolvedCallNames, unresolvedCallsOf } from "../explain/facts.js";
 import { inferRole } from "../explain/role-inference.js";
 import { inferImportance } from "../explain/importance.js";
 import { renderExplanation } from "../explain/render.js";
@@ -36,8 +36,9 @@ export function registerExplainCommand(program: Command): void {
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; strict?: boolean; suggest?: boolean; format: string; raw?: boolean }) => {
       const client = createClient({ query: true });
       const resolveOpts = { suggest: opts.suggest, suggestCommand: "explain", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict };
-      const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
-      if (!target) return;
+      const found = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
+      if (!found) return;
+      const target = shownTarget(found);
 
       if (opts.raw) {
         await rawExplain(client, target, opts.format);
@@ -177,38 +178,7 @@ async function rawExplain(
   const diagnostics: Diagnostic[] = [];
   let callList: EntityRef[] | undefined;
   if (calleeEdges.length > 0 && calleeEdges.length <= 20) {
-    const refs = await Promise.all(
-      calleeEdges.map(async (e: any): Promise<EntityRef> => {
-        try {
-          const callee = await client.entity(e.dst);
-          const calleeNode = callee.node as any;
-          const name = calleeNode.name || calleeNode.attrs?.name || "";
-          if (!name || isRawId(name)) {
-            return {
-              name: name || e.dst,
-              kind: calleeNode.kind,
-              resolved: false,
-              ...suggestedCommand({ action: "text", pattern: e.dst.slice(0, 8), quote: true }),
-            };
-          }
-          return {
-            name,
-            kind: calleeNode.kind,
-            id: e.dst,
-            resolved: true,
-            path: relativePath(calleeNode.provenance?.source_uri ?? calleeNode.provenance?.sourceUri),
-            ...suggestedCommand({ action: "explain", symbol: name, quote: true }),
-          };
-        } catch {
-          return {
-            name: e.dst,
-            resolved: false,
-            diagnostic: "unresolved_call_target",
-            ...suggestedCommand({ action: "text", pattern: e.dst.slice(0, 8), quote: true }),
-          } as EntityRef;
-        }
-      })
-    );
+    const refs = await resolveCallList(client, calleeEdges);
     callList = refs;
     const unresolvedCount = refs.filter(r => !r.resolved).length;
     if (unresolvedCount > 0) {
