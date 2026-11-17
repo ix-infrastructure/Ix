@@ -450,7 +450,9 @@ function buildBehaviorAtRisk(facts: ImpactFacts, category: RiskCategory): string
       if (tokens.some((t) => ["pick", "select", "best", "filter", "choose"].includes(t))) {
         behaviors.push(`Selection during ${flowLabel}`);
       } else if (tokens.some((t) => ["resolve", "lookup", "match"].includes(t))) {
-        behaviors.push(`Reference resolution during ${flowLabel}`);
+        behaviors.push(
+          flowLabel === "resolution" ? "Reference resolution logic" : `Reference resolution during ${flowLabel}`,
+        );
       } else if (tokens.some((t) => ["conflict", "merge"].includes(t))) {
         behaviors.push(`Conflict handling logic`);
       } else {

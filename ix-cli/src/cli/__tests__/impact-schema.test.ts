@@ -557,7 +557,7 @@ describe("inferRiskSemantics: common verbs outside Ix", () => {
     expect(risk.category).toBe("flow");
     const text = [risk.riskSummary, ...risk.behaviorAtRisk].join(" ");
     expect(text).not.toMatch(/entity resolution|file ingestion|candidate/);
-    expect(risk.behaviorAtRisk).toContain("Reference resolution during resolution");
+    expect(risk.behaviorAtRisk).toContain("Reference resolution logic");
 
     const ingest = inferRiskSemantics(makeFacts({ name: "ingestEvents", kind: "function" }));
     expect(ingest.riskSummary).toBe("Medium risk to data ingestion in the ingestion flow.");
