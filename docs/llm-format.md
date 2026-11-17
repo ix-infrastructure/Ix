@@ -751,6 +751,19 @@ importers and dependents.
 For a container target the `counts` record is
 `counts members=<n> importers=<n> dependents=<n> member_callers=<n> dependents_total=<n>`;
 its `dependents=` is the `CALLS`/`REFERENCES` expand alone (`summary.directDependents`).
+A container target's `impact` record carries its own `path=` right after `kind=`, and a
+`member` row leaves `path=` off when it is in that same file, so a file's members print the
+path once, not on every row. A member somewhere else (a class whose member lives in another
+file) keeps its own `path=`; a target with no path gets no header `path=`, and every row keeps
+its own. `lines=` stays on every row, and the json `topImpactedMembers` rows keep `path`.
+A leaf target's `impact` record has no `path=`.
+
+```
+impact target=auth.ts kind=file path=src/auth.ts risk=low category=unknown summary="Low risk to dependent code."
+counts members=2 importers=2 dependents=2 member_callers=3 dependents_total=3
+member name=verify kind=function callers=2 lines=1-20
+member name=Session kind=class callers=1 lines=22-80
+```
 
 **Dependents: the one count.** `dependents_total=` on the `counts` record, and
 `summary.dependents` in `--format json`, is how many distinct entities depend on the target. Read it instead of combining the other counts,
