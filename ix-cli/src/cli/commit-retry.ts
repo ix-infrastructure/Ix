@@ -40,6 +40,8 @@
 // bounds the transient waits (0: no transient retries).
 // ---------------------------------------------------------------------------
 
+import { httpStatusOf } from "../client/http-error.js";
+
 /** Lock contention, as opposed to the transport failures below. Kept separate
   * only so each group's reason for being retryable stays readable. */
 const COMMIT_CONFLICT_RETRY_PATTERNS = [
@@ -87,16 +89,8 @@ export function isRetryableCommitConflict(err: unknown): boolean {
 /** Statuses that mean "not now" rather than "no". */
 const TRANSIENT_COMMIT_STATUSES = new Set([429, 502, 503, 504]);
 
-/**
- * The HTTP status of a failed request: the `status` `httpError` puts on the
- * error when it has the headers, else the `<status>:` its message starts with.
- */
-function statusOf(err: unknown): number | undefined {
-  const status = (err as { status?: unknown } | null)?.status;
-  if (typeof status === "number") return status;
-  const m = /^(\d{3}):/.exec((err as Error | null)?.message ?? "");
-  return m ? Number(m[1]) : undefined;
-}
+/** The HTTP status of a failed request (`IxHttpError.status`); undefined for any other failure. */
+const statusOf = httpStatusOf;
 
 /** A 502, 503, 504 or 429: worth one more try after a wait. Never an abort. */
 export function isTransientCommitStatus(err: unknown): boolean {

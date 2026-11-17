@@ -1,8 +1,16 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { describe, expect, it } from "vitest";
+import { Command } from "commander";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const listByKind = vi.hoisted(() => vi.fn());
+vi.mock("../../client/factory.js", () => ({ createClient: () => ({ listByKind }) }));
+vi.mock("../resolve.js", () => ({ resolveReadSystemId: async () => undefined }));
+vi.mock("../bootstrap.js", () => ({ resolveWorkspaceId: () => "ws" }));
+
+import { registerInventoryCommand } from "../commands/inventory.js";
 import { applyPathFilters } from "../commands/rank.js";
-import { normalizePathSeparators } from "../path-match.js";
+import { normalizeForPathMatch, normalizePathSeparators } from "../path-match.js";
 
 /**
  * Ix#636: `--path` accepted only POSIX separators in `rank` and `inventory`,
@@ -10,9 +18,10 @@ import { normalizePathSeparators } from "../path-match.js";
  * (`ingest.ts` → `toWorkspaceRelative` → `rel.split(nodePath.sep).join('/')`).
  * So on Windows the natural `--path src\cli` matched nothing at all, silently.
  *
- * These pin the separator half only. Case is deliberately NOT normalized here:
- * the resolver lowercases and rank/inventory/backend do not, and reconciling
- * that is a separate product decision tracked in the same issue.
+ * The same issue settled case: `--path` is case-insensitive everywhere, so
+ * rank/inventory compare with `normalizeForPathMatch`, the resolver's rule.
+ * `normalizePathSeparators` itself still leaves case alone: it is what gets
+ * sent to the backend, which lowercases for itself.
  */
 const node = (sourceUri: string) => ({ provenance: { sourceUri } });
 
@@ -29,6 +38,17 @@ describe("normalizePathSeparators", () => {
   it("treats null and undefined as empty", () => {
     expect(normalizePathSeparators(undefined)).toBe("");
     expect(normalizePathSeparators(null)).toBe("");
+  });
+});
+
+describe("normalizeForPathMatch", () => {
+  it("normalizes separators and lowercases", () => {
+    expect(normalizeForPathMatch("IX-Memory\\Src")).toBe("ix-memory/src");
+  });
+
+  it("treats null and undefined as empty", () => {
+    expect(normalizeForPathMatch(undefined)).toBe("");
+    expect(normalizeForPathMatch(null)).toBe("");
   });
 });
 
@@ -58,9 +78,37 @@ describe("rank --path separator handling", () => {
     expect(applyPathFilters([node("legacy\\src\\cli\\old.ts")], "src/cli")).toHaveLength(1);
   });
 
-  it("leaves case-sensitivity unchanged (still case-SENSITIVE here)", () => {
-    // Pins the deliberate non-change: flipping this is the open half of #636.
-    expect(applyPathFilters([node("IX-Memory/src/a.ts")], "ix-memory")).toHaveLength(0);
+  it("matches case-insensitively, like the resolver (#636)", () => {
+    expect(applyPathFilters([node("IX-Memory/src/a.ts")], "ix-memory")).toHaveLength(1);
     expect(applyPathFilters([node("IX-Memory/src/a.ts")], "IX-Memory")).toHaveLength(1);
+    expect(applyPathFilters([node("ix-memory/src/a.ts")], "IX-MEMORY\\SRC")).toHaveLength(1);
+    expect(applyPathFilters([node("IX-Memory/src/a.ts")], undefined, "ix-memory")).toHaveLength(0);
+  });
+});
+
+describe("inventory --path", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    listByKind.mockReset();
+  });
+
+  async function run(path: string): Promise<any> {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const program = new Command();
+    registerInventoryCommand(program);
+    await program.parseAsync(["inventory", "--kind", "class", "--path", path, "--format", "json"], { from: "user" });
+    return JSON.parse(String(log.mock.calls[0][0]));
+  }
+
+  it("sends separators normalized and case as typed, and filters case-insensitively", async () => {
+    // A current backend lowercases the scope itself; an older one matches it
+    // case-sensitively, so the CLI must not lowercase what it sends.
+    listByKind.mockResolvedValue([
+      { name: "A", kind: "class", provenance: { source_uri: "IX-Memory/src/A.scala" } },
+      { name: "B", kind: "class", provenance: { source_uri: "lib/B.scala" } },
+    ]);
+    const json = await run("ix-memory\\SRC");
+    expect(listByKind).toHaveBeenCalledWith("class", expect.objectContaining({ scope: "ix-memory/SRC" }));
+    expect(json.byFile).toEqual([{ path: "IX-Memory/src/A.scala", items: ["A"] }]);
   });
 });

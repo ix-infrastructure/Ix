@@ -41,7 +41,7 @@ describe("ids in URL paths", () => {
   });
 
   it("path-encodes entity ids", async () => {
-    const b = await server(() => ({ status: 200, body: JSON.stringify({ node: {}, claims: [], edges: [] }) }));
+    const b = await server(() => ({ status: 200, body: JSON.stringify({ node: { id: "../health", kind: "file" }, claims: [], edges: [] }) }));
     await new IxClient(`http://127.0.0.1:${b.port}`).entity("../health");
     expect(b.seen).toEqual(["/v1/entity/..%2Fhealth"]);
   });

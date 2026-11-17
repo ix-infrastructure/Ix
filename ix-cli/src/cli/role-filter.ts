@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { forMcp } from "./next-step.js";
+import { leverSentence } from "./next-step.js";
 
 export type EntityRole = 'production' | 'test' | 'fixture' | 'generated' | 'external' | 'tooling';
 
@@ -48,7 +48,5 @@ export function applyRoleFilter<T>(
 export function roleHint(hiddenTestCount: number): string | null {
   if (hiddenTestCount === 0) return null;
   const s = hiddenTestCount === 1 ? 'candidate' : 'candidates';
-  return forMcp()
-    ? `${hiddenTestCount} test/fixture ${s} hidden. Pass include_tests=true to include.`
-    : `${hiddenTestCount} test/fixture ${s} hidden. Use --include-tests to include.`;
+  return `${hiddenTestCount} test/fixture ${s} hidden. ${leverSentence(["include_tests"], "to include")}`;
 }

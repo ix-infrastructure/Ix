@@ -82,6 +82,19 @@ export function strictTargets(opts?: { strict?: boolean }): boolean {
   return !!opts?.strict || envSwitch(STRICT_TARGETS_ENV);
 }
 
+/**
+ * The outcome a failure's error slug stands for, when it is one of the three
+ * that have their own exit code; undefined for every other failure (exit 1).
+ */
+export function outcomeForCode(code: string): MissOutcome | undefined {
+  switch (code) {
+    case "ambiguous_target": return "ambiguous";
+    case "unresolved_target": return "not_found";
+    case "workspace_not_mapped": return "not_mapped";
+    default: return undefined;
+  }
+}
+
 /** The exit code for an outcome, honouring the legacy switch. */
 export function exitCodeFor(outcome: MissOutcome): number {
   return legacyExitCodes() ? EXIT_ERROR : CODES[outcome];

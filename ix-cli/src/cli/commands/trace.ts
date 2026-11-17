@@ -4,7 +4,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
-import { answerAmbiguous, resolveFileOrEntityFull, resolveFileOrReport, activeReadScope, ensureReadScope } from "../resolve.js";
+import { answerAmbiguous, resolveFileOrEntityFull, resolveFileOrReport, shownTarget, activeReadScope, ensureReadScope } from "../resolve.js";
 import type { ResolvedEntity } from "../resolve.js";
 import {
   renderSection,
@@ -18,7 +18,7 @@ import {
 import { compactTreeNode, relativePath, printJson } from "../format.js";
 import { llmLine, llmShortId, type LlmValue } from "../llm.js";
 import { traversalHint } from "./depends.js";
-import { parseCountOption, parsePickOption, STRICT_TARGET_HELP } from "../options.js";
+import { formatOption, parseCountOption, pathOption, pickOption, strictOption } from "../options.js";
 import { createLimiter, EXPAND_CONCURRENCY, walkTree, type Limiter, type TreeWalkResult } from "../tree-walk.js";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -186,9 +186,11 @@ async function buildTraceTree(
     rootId,
     maxDepth,
     maxNodes,
-    // One call per predicate (matches depends.ts behaviour — order and dedup are stable)
+    // One call per node for all predicates, split by edge predicate (as in
+    // depends.ts — order and dedup are stable)
     predicates,
     expand: (nodeId, p) => client.expand(nodeId, { direction, predicates: [p], hops: 1 }),
+    expandAll: (nodeId, ps) => client.expand(nodeId, { direction, predicates: ps, hops: 1 }),
     makeNode: (n, _p, { name, resolved, cycle }) => ({
       id: n.id,
       name: resolved ? name : n.id.slice(0, 8),
@@ -519,10 +521,10 @@ export function registerTraceCommand(program: Command): void {
     .option("--kind <kind>", "Relationship kind: calls|imports|depends|contains")
     .option("--depth <n>", "Cap traversal depth in edges (also applies to --to)")
     .option("--cap <n>", "Cap nodes visited per direction, or across the --to search (including the source)")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--strict", STRICT_TARGET_HELP)
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(pickOption())
+    .addOption(strictOption())
+    .addOption(pathOption())
+    .addOption(formatOption())
     .option("--include-tests", "Include test and fixture entities")
     .option("--tests-only", "Show only test and fixture entities")
     .addHelpText(
@@ -590,8 +592,8 @@ export function registerTraceCommand(program: Command): void {
             }
             return;
           }
-          const fromTarget = fromResult.entity;
-          const toTarget = toResult.entity;
+          const fromTarget = shownTarget(fromResult.entity);
+          const toTarget = shownTarget(toResult.entity);
           for (const r of [fromResult, toResult]) {
             if (r.notices?.length) reportResolutionNotices(r.notices, opts.format, resolveOpts);
           }
@@ -692,7 +694,7 @@ export function registerTraceCommand(program: Command): void {
         // ── Directional mode ────────────────────────────────────────
         const resolvedTarget = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
         if (!resolvedTarget) return;
-        let target: ResolvedEntity = resolvedTarget;
+        let target: ResolvedEntity = shownTarget(resolvedTarget);
 
         const predicates = kindToPredicates(opts.kind);
         const relKind = opts.kind ?? "mixed";

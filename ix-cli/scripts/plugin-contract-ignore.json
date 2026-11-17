@@ -11,11 +11,6 @@
       "why": "argv resolution test with a non-ix command"
     },
     {
-      "where": "ix-codex-plugin/tests/test_lookup_exit_codes.py:",
-      "match": "common.run_ix_lookup([\"ix\", command, \"x\", \"--format\", \"json\"]",
-      "why": "parameterized command is omitted by the string-only scanner, which mistakes the positional lookup argument x for the command"
-    },
-    {
       "where": "ix-openclaw-plugin/tests/cli-argv.test.mjs",
       "match": "--limit",
       "why": "asserts runIx is never called with `locate --limit`"
@@ -24,6 +19,16 @@
       "where": "ix-openclaw-plugin/tests/cli-argv.test.mjs",
       "match": "--path",
       "why": "asserts runIx is never called with `smells --path`"
+    },
+    {
+      "where": "ix-codex-plugin/tests/test_lookup_exit_codes.py",
+      "match": "command, \"x\"",
+      "why": "parameterized exit-code test: the command is a variable and \"x\" a placeholder symbol"
+    },
+    {
+      "where": "ix-codex-plugin/tests/test_plugin_guidance.py",
+      "match": "ix invented",
+      "why": "asserts that unknown commands and flags survive extraction"
     },
     {
       "where": "ix-cursor-plugin/mcp/lib/parser.ts",
@@ -59,6 +64,11 @@
       "where": "ix-opencode-plugin/tests/real-ix.test.ts",
       "match": "ix rejected an argv",
       "why": "error message prose in a test assertion"
+    },
+    {
+      "where": "ix-openclaw-plugin/tools/base.ts",
+      "match": "ix did not answer",
+      "why": "error message text, not an ix invocation"
     }
   ]
 }

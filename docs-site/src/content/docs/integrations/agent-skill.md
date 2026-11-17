@@ -16,9 +16,16 @@ their own skills directory.
 From a checkout of the Ix repository:
 
 ```bash
+ix install                                # menu: pick agents, preview or apply, then confirm
 bash scripts/install-skill.sh             # deploy to every agent found on this machine
 bash scripts/install-skill.sh --dry-run   # preview where it would go
 ```
+
+`ix install` runs the same script. The menu lists what the script's `--dry-run --json` preview found,
+asks which agents to install to, whether to preview or apply and, if a different skill named `ix` is in
+the way, whether to overwrite it. Nothing is written until you confirm. With `--json`, stdout is the
+script's own report. Off a terminal there is no menu: `ix install --dry-run` and `ix install --yes`
+pass their options to the script, and anything else prints a hint and writes nothing.
 
 Start a new agent session so the skill is loaded, then ask:
 

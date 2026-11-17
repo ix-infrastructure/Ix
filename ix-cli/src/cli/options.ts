@@ -1,6 +1,8 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { InvalidArgumentError, type Command, type Option } from "commander";
+import { InvalidArgumentError, Option, type Command } from "commander";
+import { DEFAULT_FORMAT_CHOICES } from "./default-format.js";
+import { OFFSET_FLAG, parseOffset } from "./paging.js";
 
 /**
  * Parse a flag that must be a positive integer, rejecting anything else.
@@ -171,4 +173,144 @@ export function parseBudgetOption(value: string, example: string): number {
  */
 export function parseRevisionOption(value: string): number {
   return parsePositiveInt(value, "12");
+}
+
+/*
+ * The options most commands share, declared once.
+ *
+ * Each factory returns a fresh commander `Option`, so a command chain keeps its
+ * own declaration order with `.addOption(kindOption())`; the `add*Options`
+ * helpers below declare a whole group where a command takes the group as is.
+ * The help text, default and parser live here and nowhere else: a copy in a
+ * command file is how the same flag came to behave differently between two
+ * commands. A command whose flag genuinely means something else (`ix rank
+ * --kind`, `ix watch --path`) keeps its own declaration and its own words.
+ */
+
+/** `--kind` on a command that resolves one target. */
+export function kindOption(): Option {
+  return new Option("--kind <kind>", "Filter target entity by kind");
+}
+
+/** `--path` on a command that resolves one target. */
+export function pathOption(): Option {
+  return new Option("--path <path>", "Restrict to symbols from files matching this path substring");
+}
+
+/** `--no-suggest` on a command that offers did-you-mean candidates for an unresolved target. */
+export function noSuggestOption(): Option {
+  return new Option("--no-suggest", "Disable did-you-mean candidates on unresolved targets");
+}
+
+/** `--pick`: a 1-based candidate number, validated by commander at parse time. */
+export function pickOption(): Option {
+  return new Option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)").argParser(parsePickOption);
+}
+
+/**
+ * `--strict`. `help` is `STRICT_AMBIGUOUS_HELP` on a command that never
+ * answers with text matches.
+ */
+export function strictOption(help: string = STRICT_TARGET_HELP): Option {
+  return new Option("--strict", help);
+}
+
+/** `--limit` on a paged edge or row list. The default stays a string, as typed values are. */
+export function pageLimitOption(defaultLimit = "50"): Option {
+  return new Option("--limit <n>", "Max results to show").default(defaultLimit);
+}
+
+/** `--offset` on a paged list; `nextPageCommand` (paging.ts) writes the next page's value. */
+export function pageOffsetOption(): Option {
+  return new Option("--offset <n>", OFFSET_FLAG).default("0");
+}
+
+/**
+ * `--format`, its allowed values declared with it. The help names the same
+ * values the choices accept, so the two cannot disagree. The default is the
+ * built-in `text`, which `applyOssSetup` moves to a configured default where
+ * the command accepts it.
+ */
+export function formatOption(formats: readonly string[] = DEFAULT_FORMAT_CHOICES): Option {
+  return new Option("--format <fmt>", `Output format (${formats.join("|")})`)
+    .choices([...formats])
+    .default("text");
+}
+
+/** The values each `choiceOption` accepts, for `applyOssSetup` to enforce. */
+const SETUP_CHOICES = new WeakMap<Option, readonly string[]>();
+
+/**
+ * An option that accepts only `values`, declared on the command that owns it.
+ *
+ * The values are enforced by `applyOssSetup` (`register/oss-setup.ts`), on
+ * every OSS command it sets up -- the full registration and the startup fast
+ * path alike -- not by this declaration. That is where they were enforced
+ * when they lived in one table keyed by command name, and commander's
+ * `.choices()` replaces any parser the option declares: `ix context --depth`
+ * has its own, which a command registered on its own still runs.
+ */
+export function choiceOption(
+  flags: string,
+  description: string,
+  values: readonly string[],
+  defaultValue?: string,
+): Option {
+  const option = new Option(flags, description);
+  if (defaultValue !== undefined) option.default(defaultValue);
+  SETUP_CHOICES.set(option, values);
+  return option;
+}
+
+/** What `choiceOption` declared for `option`, if it came from there. */
+export function declaredChoices(option: Option): readonly string[] | undefined {
+  return SETUP_CHOICES.get(option);
+}
+
+/** What `addTargetOptions` declares, as the action receives it. */
+export interface TargetOptionValues {
+  kind?: string;
+  path?: string;
+  pick?: number;
+  strict?: boolean;
+}
+
+/**
+ * `--kind`, `--path`, `--pick`, `--strict`, in that order. `suggest` adds
+ * `--no-suggest` between `--path` and `--pick`, where the commands that offer
+ * candidates have always listed it.
+ */
+export function addTargetOptions(cmd: Command, opts: { suggest?: boolean; strictHelp?: string } = {}): Command {
+  cmd.addOption(kindOption()).addOption(pathOption());
+  if (opts.suggest) cmd.addOption(noSuggestOption());
+  return cmd.addOption(pickOption()).addOption(strictOption(opts.strictHelp));
+}
+
+/** The target options out of a command's parsed options, typed, and nothing else. */
+export function targetOptionValues(opts: TargetOptionValues): TargetOptionValues {
+  return { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict };
+}
+
+/** What `addPagingOptions` declares, as the action receives it: the raw strings commander stores. */
+export interface PagingOptionValues {
+  limit: string;
+  offset: string;
+}
+
+/** `--limit` (default `defaultLimit`) and `--offset` (default 0). */
+export function addPagingOptions(cmd: Command, defaultLimit = "50"): Command {
+  return cmd.addOption(pageLimitOption(defaultLimit)).addOption(pageOffsetOption());
+}
+
+/**
+ * `--limit` and `--offset` as numbers. The root option validator has already
+ * refused a typed value that is not a non-negative integer.
+ */
+export function pagingValues(opts: PagingOptionValues): { limit: number; offset: number } {
+  return { limit: parseInt(opts.limit, 10), offset: parseOffset(opts.offset) };
+}
+
+/** `--format` with `formats` as its allowed values (see `formatOption`). */
+export function addFormatOption(cmd: Command, formats: readonly string[] = DEFAULT_FORMAT_CHOICES): Command {
+  return cmd.addOption(formatOption(formats));
 }
