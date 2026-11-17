@@ -2,11 +2,10 @@
 
 // Writes the files that live at the root of the deployed site, above the docs.
 //
-// docs.ix-infra.com is meant to hold more than one set of docs — /oss/ now,
-// /kartr/ later — so this site builds into dist/oss/ and dist/ is the root of
-// the domain. Until there is a page at the root to choose between them, `/`
-// redirects to /oss/. It is a 302 so no browser caches it past the day a
-// chooser replaces it. The docs' 404 page is copied to the root too, so a
+// The docs are served under /oss/ on docs.ix-infra.com, so this site builds
+// into dist/oss/ and dist/ is the root of the domain. `/` redirects to /oss/.
+// It is a 302 so no browser caches it past the day a page at the root
+// replaces it. The docs' 404 page is copied to the root too, so a
 // mistyped URL outside /oss/ still lands on a page with a way back.
 
 import { copyFile, writeFile } from 'node:fs/promises'

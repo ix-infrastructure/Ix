@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { createHash } from "node:crypto";
-import type { buildBundle } from "./commands/context.js";
+import type { buildBundle } from "./context/bundle.js";
 import { isGenericIdentifier, type LeanIssueView, type StartingPoint } from "./explain/issue.js";
 import { isTestPath } from "./explain/related-files.js";
 import { llmLine } from "./llm.js";

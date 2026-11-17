@@ -1,9 +1,14 @@
 # Ix Flag Reference
 
-Every flag the OSS CLI registers, per command. Load this when you need a flag
-that [commands.md](commands.md) does not show — that file routes a *goal* to a
-command and stays deliberately short, and the flags that shape the answer live
-here.
+Every flag the OSS CLI registers, per command. [commands.md](commands.md)
+routes a *goal* to a command and stays deliberately short; the flags that shape
+the answer live here.
+
+This file is about 18,000 tokens, so search it rather than load it. For one
+command, `ix <command> --help` prints the same flags, values and defaults in a
+few hundred tokens. What only this file has is
+[Flags with behaviour worth knowing](#flags-with-behaviour-worth-knowing):
+search that section for the flag you are about to use.
 
 Generated from the registered command tree, not written by hand:
 
@@ -35,6 +40,12 @@ surfaces (#575).
 
 ## Flags with behaviour worth knowing
 
+- **`--path` is a case-insensitive substring match, in every command.**
+  `--path ix-memory` matches `IX-Memory/src/a.ts`, and `\` counts as `/`, so
+  `--path src\cli` works on Windows. One limit: `rank` and `inventory` pass
+  `--path` to the backend so it is applied before the row limit, and a backend
+  older than the Ix-memory release with case-insensitive `/v1/list` scopes
+  matches it case-sensitively. Against one of those, type the case as stored.
 - **`ix diff` refuses conflicting volume flags rather than picking a winner.**
   `--summary` ignores both `--limit` and `--full`, and `--full --limit` is
   rejected on its own; each combination errors with which flag to drop.
@@ -263,6 +274,17 @@ through a superclass or interface follow the direct ones, tagged
 | `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
 | `--quiet` | — | off | Drop headers, section titles and advisory hints |
 | `--fields` | `<list>` | — | Keep only these fields on each row, in this order (e.g. `name,path,lines`) |
+
+### `ix capabilities`
+
+What this installed CLI supports, for a plugin or script to read before it calls anything else. Needs no backend, and a missing or corrupt config cannot make it fail; Ix Pro is resolved, never loaded or initialized (in any form of the command, including its help), so it is not a Pro command run as a probe. `ix capabilities --format json` (with or without `--pretty`) is answered before the command tree loads and reads no config. Without an explicit `--format`, the output format defaults from `IX_FORMAT` or the config file like any other command, so pass `--format json` when a script parses it. It prints `{"schema":"ix-capabilities/1","version":"<semver>","pro":{"available":<bool>,"state":"absent|installed|broken"},"hooks":["claude-post-edit","auto-map"]}`. `version` is what `ix --version` prints and `hooks` lists the `ix hook` subcommands. `pro.available` is true only when `state` is `installed`; `broken` means the package is there but its entry point does not resolve, or resolves to a file that is missing (`ix upgrade` reinstalls it). `installed` comes from module resolution alone, so a Pro that resolves but then fails to initialize still reports `installed`: the next Pro command exits 1 with "could not initialize", and a plugin should treat that as Pro unavailable until `ix upgrade` reinstalls it. Ask again once per session instead of caching the answer across sessions: it is cheap (no backend, no config, Pro not loaded), and installing, breaking or repairing Ix Pro changes `pro.state` without touching the `ix` executable, so a cache keyed on the resolved `ix` path or its modification time goes stale. New fields may appear; a breaking change changes `schema`. Exits 0 whenever it answers.
+
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--format` | `text\|json\|llm` | `text` | Output format — see [output-formats.md](output-formats.md) |
+| `--pretty` | — | off | Indent JSON output; the default only when stdout is a terminal |
+| `--quiet` | — | off | Accepted for consistency; there are no headers or hints to drop |
+| `--fields` | `<list>` | — | Accepted for consistency; the answer is one object, not rows |
 
 ### `ix config`
 
@@ -530,6 +552,15 @@ Claude Code PostToolUse hook, matcher `Edit|MultiEdit|Write|Bash`. Reads the hoo
 | `--worktree` | `<dir>` | — | Checkout the agent edits (default: the git root of the hook's `cwd`); its paths map to the same relative paths in `--graph-root` |
 | `--budget` | `<tokens>` | `300` | Token budget for the context it adds (~4 chars a token) |
 
+#### `ix hook auto-map`
+
+Guarded, debounced automatic map for any agent host (Claude Code, Cursor, Gemini CLI, Codex): the one copy of the auto-map the agent plugins each used to implement. Reads the host's hook JSON on stdin for the project directory (`cwd`; Cursor's `workspace_roots`), else the host's project variable (`CLAUDE_PROJECT_DIR`, `CURSOR_PROJECT_DIR`, `GEMINI_PROJECT_DIR`), else the hook's cwd, and for its git root starts at most one detached `ix map <root> --silent` with `IX_AUTO_MAP=1`, then returns. Skips, in this order: a directory outside git; a git root that is `$HOME`; a root tried within `IX_MAP_DEBOUNCE_SECONDS` (default 300; the per-root stamp under `IX_HOOK_STATE_DIR`, default `<IX_HOME>/hook-state`, is written before the next check, so an unmapped project is asked once per window too); a root that is not a registered workspace with a completed graph ingest (`ix status`'s `graphCompleted`, read in process) -- an automatic map never creates a workspace. When a map of the root is already running it asks that map for one more pass instead of starting another. Prints nothing and always exits 0; `IX_HOOK_TIMEOUT_MS` (default 3000) bounds the hook, never the map. `IX_HOOK_DEBUG=1` says why on stderr; `IX_HOOK_LOG=<file>` appends one JSON line per call. Run it on the host's end-of-turn event: Claude Code and Codex `Stop`, Cursor `stop`, Gemini CLI `SessionEnd` (`ix hook auto-map --help` shows each manifest line).
+
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--host` | `claude\|cursor\|gemini\|codex` | `claude` | Whose hook payload is on stdin, for its field names |
+| `--root` | `<dir>` | — | Project directory to map from, over the payload's |
+
 ### `ix impact <target>`
 
 System risk analysis — what behavior is at risk if this changes.
@@ -611,6 +642,17 @@ Ingest source files or GitHub data into the knowledge graph.
 (deprecated) Initialize Ix — use ix map . instead.
 
 No flags.
+
+### `ix install [harness-ids...]`
+
+Install the Ix skill into this machine's agent harnesses. A menu over `bash scripts/install-skill.sh` on a terminal; off one, `--dry-run` and `--yes` pass straight through to the script and anything else prints a hint and writes nothing. Nothing is written before you confirm. Needs an Ix source checkout.
+
+| Flag | Value | Default | Effect |
+|---|---|---|---|
+| `--dry-run` | — | `false` | Show what would be written, write nothing |
+| `--force` | — | `false` | Overwrite a same-name skill that is not the Ix skill |
+| `--json` | — | `false` | Print the installer's per-host JSON report on stdout (prompts stay on stderr) |
+| `--yes` | — | `false` | Skip the menu and apply now (needed off a terminal); `-y` |
 
 ### `ix inventory`
 
@@ -871,6 +913,11 @@ Detect architecture smells in the codebase.
 | `--list` | — | off | List existing smell claims without rerunning |
 | `--limit` | `<n>` | 50 (text/llm); all (json) | Max candidates, highest confidence first; 0 = all, unfiltered. Otherwise non-source orphan files (docs, templates, data) are dropped before the cut. With `--list`, caps the stored claims (all when omitted) |
 | `--wait` | `<seconds>` | 20 (json/llm); 300 (text) | How long to wait for a fresh analysis, at most 300 (the HTTP client stops waiting for an answer after 5 minutes). `IX_SMELLS_WAIT` (whole seconds, capped at 300; ignored under MCP) sets it too; the flag wins. Past it, or when the backend refuses to run analysis (403), the stored results are shown instead, marked stale (exit 0); with none stored, the error stands (exit 1). Text prints a progress line on stderr every 10 s when stderr is a terminal. `--wait 120` restores the 2-minute wait json/llm had before |
+
+`file` is a basename. `--format json` also gives each candidate's `path` when
+the backend can read the file's node: relative to the current directory when
+the file is inside it, otherwise `~/...` or absolute. Filter by directory on
+`path` (a substring match), not on `file`.
 
 A stale answer is the stored claims shaped as a fresh run's output (`file`,
 `smell`, `confidence`, `signals` per candidate, plus the claim's `entity_id`),

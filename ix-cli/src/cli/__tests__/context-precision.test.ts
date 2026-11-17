@@ -3,7 +3,11 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { Command } from "commander";
 import { describe, expect, it, vi } from "vitest";
-import { buildBundle, clampBudgets, detectContextModeConflict, registerContextCommand, renderBundle, saveInvestigation } from "../commands/context.js";
+import { registerContextCommand } from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { clampBudgets, detectContextModeConflict } from "../context/options.js";
+import { saveInvestigation } from "../context/investigations.js";
+import { renderBundle } from "../precise-context-render.js";
 import type { ContextFacts } from "../explain/facts.js";
 import { bundleContextCandidates, leanContextCandidates, selectContextItems } from "../precise-context.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -21,7 +25,7 @@ const members = [...source.matchAll(/^export function (\w+).*?^}/gms)].map((m) =
   lineEnd: source.slice(0, m.index! + m[0].length).split("\n").length,
 }));
 
-function fixture() {
+function fixture(input: Partial<Parameters<typeof buildBundle>[0]> = {}) {
   const facts = {
     id: "math", name: "math.ts", kind: "file", path,
     members: members.map((m) => m.name), memberRefs: members, memberCount: members.length,
@@ -31,7 +35,7 @@ function fixture() {
   return buildBundle({
     resolved: { id: facts.id, name: facts.name, kind: facts.kind, resolutionMode: "exact" }, facts,
     context: { claims: [], conflicts: [], decisions: [], intents: [], nodes: [], edges: [], metadata: {} } as never,
-    provenance: {}, budgets: clampBudgets({}), isStale: () => false,
+    provenance: {}, budgets: clampBudgets({}), isStale: () => false, ...input,
   });
 }
 
@@ -67,6 +71,32 @@ describe("precise context output", () => {
       const items = lines.filter((l) => l.startsWith("item "));
       expect(items).toHaveLength(result.items.length);
       expect(items.every((l) => l.includes("reason=") && l.includes("confidence=") && l.includes("span="))).toBe(true);
+    } finally { out.mockRestore(); }
+  });
+
+  it("preserves a pinned issue start through bundle budgeting and compact/full rendering", () => {
+    const start = members[members.length - 1];
+    const bundle = fixture({
+      budgets: clampBudgets({ maxEntities: 2 }),
+      issue: {
+        startingPoints: [{ ...start, token: start.name, via: "identifier in issue" }],
+        unresolved: [], fallback: false,
+        rankedFiles: [{ path, score: 100, reason: "bm25" }],
+      },
+    });
+    expect(bundle.entities.map((entity) => entity.id)).toEqual(["math", start.id]);
+    const out = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      renderBundle(bundle, "json", { limit: 1 });
+      expect(JSON.parse(out.mock.calls.flat().join("\n"))).toMatchObject({
+        schema: "ix-context/1", items: [{ name: start.name, path }],
+        selection: { returned: 1 },
+      });
+      out.mockClear();
+      renderBundle(bundle, "json", { full: true });
+      expect(JSON.parse(out.mock.calls.flat().join("\n"))).toMatchObject({
+        schema: "ix-context-bundle/1", entities: bundle.entities,
+      });
     } finally { out.mockRestore(); }
   });
 

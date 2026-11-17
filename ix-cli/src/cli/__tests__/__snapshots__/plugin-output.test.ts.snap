@@ -1,0 +1,581 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ix callers: plugin-facing output > --format json > ambiguous target (default, then --strict) 1`] = `
+"$ ix callers draw --format json
+exit: 0
+--- stdout
+{"results":[],"resultSource":"graph","resolvedTarget":{"id":"00000005-0000-4000-8000-000000000000","kind":"function","name":"draw","path":"src/app.ts","resolutionMode":"scored"},"resolutionMode":"scored","diagnostics":[{"code":"no_edges","message":"No callers edges found for resolved entity."}],"summary":{"shown":0,"total":0,"resolved":0,"unresolved":0,"truncated":false,"offset":0},"resolutionNotices":[{"code":"ambiguous_target","target":"draw","message":"\\"draw\\" matches 2 candidates; using draw (src/app.ts).","chosen":{"id":"00000005-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/app.ts"},"candidates":[{"id":"00000005-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/app.ts","line":3,"score":-1,"rank":1},{"id":"00000004-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/geometry.ts","line":5,"score":-1,"rank":2}],"total":2}]}
+
+--- stderr
+
+
+$ ix callers draw --strict --format json
+exit: 2
+--- stdout
+{"error":"ambiguous_target","message":"Ambiguous symbol \\"draw\\".","candidates":[{"id":"00000005-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/app.ts","line":3,"score":-1,"rank":1},{"id":"00000004-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/geometry.ts","line":5,"score":-1,"rank":2}],"total":2,"diagnostics":[{"code":"ambiguous_resolution","message":"Use --pick <n> or --path to disambiguate."}]}
+
+--- stderr
+"
+`;
+
+exports[`ix callers: plugin-facing output > --format json > resolved target 1`] = `
+"$ ix callers paint --format json
+exit: 0
+--- stdout
+{"results":[{"name":"draw","kind":"function","id":"00000005-0000-4000-8000-000000000000","path":"src/app.ts","lineStart":3,"lineEnd":5,"site":{"path":"src/app.ts","line":4,"snippet":"paint(canvas);"}}],"resultSource":"graph","resolvedTarget":{"id":"00000006-0000-4000-8000-000000000000","kind":"function","name":"paint","path":"src/app.ts","resolutionMode":"exact"},"summary":{"shown":1,"total":1,"resolved":1,"unresolved":0,"truncated":false,"offset":0}}
+
+--- stderr
+"
+`;
+
+exports[`ix callers: plugin-facing output > --format json > unknown target 1`] = `
+"$ ix callers vanish --format json
+exit: 3
+--- stdout
+{"error":"unresolved_target","message":"No entity found matching \\"vanish\\".","didYouMean":[]}
+
+--- stderr
+"
+`;
+
+exports[`ix callers: plugin-facing output > --format json > unmapped workspace 1`] = `
+"$ ix callers paint --format json # from an unmapped directory
+exit: 4
+--- stdout
+{"error":"workspace_not_mapped","message":"<TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from.","dir":"<TMP>/elsewhere","next":"Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them)."}
+
+--- stderr
+
+  <TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from.
+
+  Next
+  Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them).
+
+"
+`;
+
+exports[`ix callers: plugin-facing output > --format llm > ambiguous target (default, then --strict) 1`] = `
+"$ ix callers draw --format llm
+exit: 0
+--- stdout
+diagnostic code=ambiguous_target target=draw chosen=draw shown=2 total=2 message="\\"draw\\" matches 2 candidates; using draw (src/app.ts)."
+candidate n=1 name=draw kind=function path=src/app.ts id=00000005
+candidate n=2 name=draw kind=function path=src/geometry.ts id=00000004
+hint text="Use --pick <n> or --path to choose another."
+callers target=draw shown=0 total=0 resolved=0
+diagnostic code=no_edges message="No callers edges found."
+
+--- stderr
+
+
+$ ix callers draw --strict --format llm
+exit: 2
+--- stdout
+error code=ambiguous_target message="Ambiguous symbol \\"draw\\"." count=2 shown=2 total=2
+candidate n=1 name=draw kind=function path=src/app.ts id=00000005
+candidate n=2 name=draw kind=function path=src/geometry.ts id=00000004
+hint text="Use --pick <n> or --kind or --path or --all to disambiguate."
+diagnostic code=ambiguous_resolution message="Use --pick <n> or --path to disambiguate."
+
+--- stderr
+"
+`;
+
+exports[`ix callers: plugin-facing output > --format llm > resolved target 1`] = `
+"$ ix callers paint --format llm
+exit: 0
+--- stdout
+callers target=paint shown=1 total=1 resolved=1
+ref name=draw kind=function path=src/app.ts lines=3-5 site=src/app.ts:4 snippet=paint(canvas);
+
+--- stderr
+"
+`;
+
+exports[`ix callers: plugin-facing output > --format llm > unknown target 1`] = `
+"$ ix callers vanish --format llm
+exit: 3
+--- stdout
+error code=unresolved_target message="No entity found matching \\"vanish\\"."
+
+--- stderr
+"
+`;
+
+exports[`ix callers: plugin-facing output > --format llm > unmapped workspace 1`] = `
+"$ ix callers paint --format llm # from an unmapped directory
+exit: 4
+--- stdout
+error code=workspace_not_mapped message="<TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from." dir=<TMP>/elsewhere hint="Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them)."
+
+--- stderr
+"
+`;
+
+exports[`ix callers: plugin-facing output > --format text > ambiguous target (default, then --strict) 1`] = `
+"$ ix callers draw --format text
+exit: 0
+--- stdout
+No callers found for "draw".
+
+--- stderr
+"draw" matches 2 candidates; using draw (src/app.ts).
+  1. function   00000005  draw in src/app.ts
+  2. function   00000004  draw in src/geometry.ts
+  Use --pick <n> or --path to choose another.
+Resolved: function 00000005 draw (scored)
+
+
+
+$ ix callers draw --strict --format text
+exit: 2
+--- stdout
+
+--- stderr
+Ambiguous symbol "draw":
+  1. function   00000005  draw in src/app.ts:3
+  2. function   00000004  draw in src/geometry.ts:5
+
+Use --pick <n> or --kind or --path or --all to disambiguate (--all answers for every candidate).
+"
+`;
+
+exports[`ix callers: plugin-facing output > --format text > resolved target 1`] = `
+"$ ix callers paint --format text
+exit: 0
+--- stdout
+callers of paint:
+  function    00000005  draw  src/app.ts:3-5
+      at src/app.ts:4  paint(canvas);
+
+--- stderr
+Resolved: function 00000006 paint
+
+"
+`;
+
+exports[`ix callers: plugin-facing output > --format text > unknown target 1`] = `
+"$ ix callers vanish --format text
+exit: 3
+--- stdout
+
+--- stderr
+No entity found matching "vanish".
+"
+`;
+
+exports[`ix callers: plugin-facing output > --format text > unmapped workspace 1`] = `
+"$ ix callers paint --format text # from an unmapped directory
+exit: 4
+--- stdout
+
+--- stderr
+
+  <TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from.
+
+  Next
+  Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them).
+
+"
+`;
+
+exports[`ix impact: plugin-facing output > --format json > ambiguous target (default, then --strict) 1`] = `
+"$ ix impact draw --format json
+exit: 0
+--- stdout
+{"resolvedTarget":{"kind":"function","name":"draw"},"depth":1,"riskSummary":"Low risk — localized impact with limited propagation.","riskLevel":"low","riskCategory":"localized","atRiskBehavior":["Limited to immediate callers"],"summary":{"callers":0,"callees":1,"dependents":0},"calleeList":[{"kind":"function","name":"paint","path":"src/app.ts","lineStart":7,"lineEnd":9}],"resolutionNotices":[{"code":"ambiguous_target","target":"draw","message":"\\"draw\\" matches 2 candidates; using draw (src/app.ts).","chosen":{"id":"00000005-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/app.ts"},"candidates":[{"id":"00000005-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/app.ts","line":3,"score":-1,"rank":1},{"id":"00000004-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/geometry.ts","line":5,"score":-1,"rank":2}],"total":2}]}
+
+--- stderr
+
+
+$ ix impact draw --strict --format json
+exit: 2
+--- stdout
+{"error":"ambiguous_target","message":"Ambiguous symbol \\"draw\\".","candidates":[{"id":"00000005-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/app.ts","line":3,"score":-1,"rank":1},{"id":"00000004-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/geometry.ts","line":5,"score":-1,"rank":2}],"total":2,"diagnostics":[{"code":"ambiguous_resolution","message":"Use --pick <n> or --path to disambiguate."}]}
+
+--- stderr
+"
+`;
+
+exports[`ix impact: plugin-facing output > --format json > resolved target 1`] = `
+"$ ix impact paint --format json
+exit: 0
+--- stdout
+{"resolvedTarget":{"kind":"function","name":"paint"},"depth":1,"riskSummary":"Low risk — localized impact with limited propagation.","riskLevel":"low","riskCategory":"localized","atRiskBehavior":["Limited to immediate callers"],"summary":{"callers":1,"callees":1,"dependents":1},"callerList":[{"kind":"function","name":"draw","path":"src/app.ts","lineStart":3,"lineEnd":5}],"calleeList":[{"kind":"function","name":"draw","path":"src/geometry.ts","lineStart":5,"lineEnd":7}]}
+
+--- stderr
+"
+`;
+
+exports[`ix impact: plugin-facing output > --format json > unknown target 1`] = `
+"$ ix impact vanish --format json
+exit: 3
+--- stdout
+{"error":"unresolved_target","message":"No entity found matching \\"vanish\\".","didYouMean":[]}
+
+--- stderr
+"
+`;
+
+exports[`ix impact: plugin-facing output > --format json > unmapped workspace 1`] = `
+"$ ix impact paint --format json # from an unmapped directory
+exit: 4
+--- stdout
+{"error":"workspace_not_mapped","message":"<TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from.","dir":"<TMP>/elsewhere","next":"Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them)."}
+
+--- stderr
+
+  <TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from.
+
+  Next
+  Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them).
+
+"
+`;
+
+exports[`ix impact: plugin-facing output > --format llm > ambiguous target (default, then --strict) 1`] = `
+"$ ix impact draw --format llm
+exit: 0
+--- stdout
+diagnostic code=ambiguous_target target=draw chosen=draw shown=2 total=2 message="\\"draw\\" matches 2 candidates; using draw (src/app.ts)."
+candidate n=1 name=draw kind=function path=src/app.ts id=00000005
+candidate n=2 name=draw kind=function path=src/geometry.ts id=00000004
+hint text="Use --pick <n> or --path to choose another."
+impact target=draw kind=function risk=low category=localized summary="Low risk — localized impact with limited propagation."
+behavior text="Limited to immediate callers"
+counts callers=0 callees=1 shown_callers=0 shown_callees=1 dependents_total=0
+callee name=paint kind=function path=src/app.ts lines=7-9
+
+--- stderr
+
+
+$ ix impact draw --strict --format llm
+exit: 2
+--- stdout
+error code=ambiguous_target message="Ambiguous symbol \\"draw\\"." count=2 shown=2 total=2
+candidate n=1 name=draw kind=function path=src/app.ts id=00000005
+candidate n=2 name=draw kind=function path=src/geometry.ts id=00000004
+hint text="Use --pick <n> or --kind or --path or --all to disambiguate."
+diagnostic code=ambiguous_resolution message="Use --pick <n> or --path to disambiguate."
+
+--- stderr
+"
+`;
+
+exports[`ix impact: plugin-facing output > --format llm > resolved target 1`] = `
+"$ ix impact paint --format llm
+exit: 0
+--- stdout
+impact target=paint kind=function risk=low category=localized summary="Low risk — localized impact with limited propagation."
+behavior text="Limited to immediate callers"
+counts callers=1 callees=1 shown_callers=1 shown_callees=1 dependents_total=1
+caller name=draw kind=function path=src/app.ts lines=3-5
+callee name=draw kind=function path=src/geometry.ts lines=5-7
+
+--- stderr
+"
+`;
+
+exports[`ix impact: plugin-facing output > --format llm > unknown target 1`] = `
+"$ ix impact vanish --format llm
+exit: 3
+--- stdout
+error code=unresolved_target message="No entity found matching \\"vanish\\"."
+
+--- stderr
+"
+`;
+
+exports[`ix impact: plugin-facing output > --format llm > unmapped workspace 1`] = `
+"$ ix impact paint --format llm # from an unmapped directory
+exit: 4
+--- stdout
+error code=workspace_not_mapped message="<TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from." dir=<TMP>/elsewhere hint="Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them)."
+
+--- stderr
+"
+`;
+
+exports[`ix impact: plugin-facing output > --format text > ambiguous target (default, then --strict) 1`] = `
+"$ ix impact draw --format text
+exit: 0
+--- stdout
+Resolved: function draw
+
+
+Risk summary
+  Low risk — localized impact with limited propagation.
+
+At-risk behavior
+  • Limited to immediate callers
+
+Supporting context
+  Direct callees:   1
+
+Calls
+  function   paint
+
+--- stderr
+"draw" matches 2 candidates; using draw (src/app.ts).
+  1. function   00000005  draw in src/app.ts
+  2. function   00000004  draw in src/geometry.ts
+  Use --pick <n> or --path to choose another.
+Resolved: function 00000005 draw (scored)
+
+
+
+$ ix impact draw --strict --format text
+exit: 2
+--- stdout
+
+--- stderr
+Ambiguous symbol "draw":
+  1. function   00000005  draw in src/app.ts:3
+  2. function   00000004  draw in src/geometry.ts:5
+
+Use --pick <n> or --kind or --path or --all to disambiguate (--all answers for every candidate).
+"
+`;
+
+exports[`ix impact: plugin-facing output > --format text > resolved target 1`] = `
+"$ ix impact paint --format text
+exit: 0
+--- stdout
+Resolved: function paint
+
+
+Risk summary
+  Low risk — localized impact with limited propagation.
+
+At-risk behavior
+  • Limited to immediate callers
+
+Most affected
+  • Callers: draw
+
+Supporting context
+  Direct callers:   1
+  Direct callees:   1
+
+Calls
+  function   draw
+
+--- stderr
+Resolved: function 00000006 paint
+
+"
+`;
+
+exports[`ix impact: plugin-facing output > --format text > unknown target 1`] = `
+"$ ix impact vanish --format text
+exit: 3
+--- stdout
+
+--- stderr
+No entity found matching "vanish".
+"
+`;
+
+exports[`ix impact: plugin-facing output > --format text > unmapped workspace 1`] = `
+"$ ix impact paint --format text # from an unmapped directory
+exit: 4
+--- stdout
+
+--- stderr
+
+  <TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from.
+
+  Next
+  Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them).
+
+"
+`;
+
+exports[`ix locate: plugin-facing output > --format json > ambiguous target (default, then --strict) 1`] = `
+"$ ix locate draw --format json
+exit: 0
+--- stdout
+{"resolvedTarget":{"id":"00000005-0000-4000-8000-000000000000","kind":"function","name":"draw","path":"src/app.ts"},"resolutionMode":"scored","lineRange":{"start":3,"end":5},"container":{"kind":"file","name":"app.ts","id":"00000002-0000-4000-8000-000000000000"},"systemPath":[{"name":"draw","kind":"function"}],"hasMapData":false,"diagnostics":["No system map. Run \`ix map\` to see hierarchy."],"resolutionNotices":[{"code":"ambiguous_target","target":"draw","message":"\\"draw\\" matches 2 candidates; using draw (src/app.ts).","chosen":{"id":"00000005-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/app.ts"},"candidates":[{"id":"00000005-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/app.ts","line":3,"score":-1,"rank":1},{"id":"00000004-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/geometry.ts","line":5,"score":-1,"rank":2}],"total":2}]}
+
+--- stderr
+
+
+$ ix locate draw --strict --format json
+exit: 2
+--- stdout
+{"code":"ambiguous_target","message":"Ambiguous symbol \\"draw\\".","resolvedTarget":null,"resolutionMode":"ambiguous","candidates":[{"id":"00000005-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/app.ts","line":3,"score":-1,"rank":1},{"id":"00000004-0000-4000-8000-000000000000","name":"draw","kind":"function","path":"src/geometry.ts","line":5,"score":-1,"rank":2}],"total":2,"systemPath":null,"diagnostics":[{"code":"ambiguous_resolution","message":"Use --pick <n> or --path to disambiguate."}]}
+
+--- stderr
+"
+`;
+
+exports[`ix locate: plugin-facing output > --format json > resolved target 1`] = `
+"$ ix locate paint --format json
+exit: 0
+--- stdout
+{"resolvedTarget":{"id":"00000006-0000-4000-8000-000000000000","kind":"function","name":"paint","path":"src/app.ts"},"lineRange":{"start":7,"end":9},"container":{"kind":"file","name":"app.ts","id":"00000002-0000-4000-8000-000000000000"},"systemPath":[{"name":"paint","kind":"function"}],"hasMapData":false,"diagnostics":["No system map. Run \`ix map\` to see hierarchy."]}
+
+--- stderr
+"
+`;
+
+exports[`ix locate: plugin-facing output > --format json > unknown target 1`] = `
+"$ ix locate vanish --format json
+exit: 3
+--- stdout
+{"resolvedTarget":null,"resolutionMode":"none","systemPath":null,"diagnostics":["No graph entity found."],"error":"unresolved_target","message":"No graph entity found for \\"vanish\\".","didYouMean":[]}
+
+--- stderr
+"
+`;
+
+exports[`ix locate: plugin-facing output > --format json > unmapped workspace 1`] = `
+"$ ix locate paint --format json # from an unmapped directory
+exit: 4
+--- stdout
+{"error":"workspace_not_mapped","message":"<TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from.","dir":"<TMP>/elsewhere","next":"Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them)."}
+
+--- stderr
+
+  <TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from.
+
+  Next
+  Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them).
+
+"
+`;
+
+exports[`ix locate: plugin-facing output > --format llm > ambiguous target (default, then --strict) 1`] = `
+"$ ix locate draw --format llm
+exit: 0
+--- stdout
+diagnostic code=ambiguous_target target=draw chosen=draw shown=2 total=2 message="\\"draw\\" matches 2 candidates; using draw (src/app.ts)."
+candidate n=1 name=draw kind=function path=src/app.ts id=00000005
+candidate n=2 name=draw kind=function path=src/geometry.ts id=00000004
+hint text="Use --pick <n> or --path to choose another."
+locate target=draw kind=function id=00000005 path=src/app.ts line_start=3 line_end=5 contained_in="file app.ts" mode=scored
+note text="No system map. Run \`ix map\` to see hierarchy."
+
+--- stderr
+
+
+$ ix locate draw --strict --format llm
+exit: 2
+--- stdout
+error code=ambiguous_target message="Ambiguous symbol \\"draw\\"." count=2 shown=2 total=2
+candidate n=1 name=draw kind=function path=src/app.ts id=00000005
+candidate n=2 name=draw kind=function path=src/geometry.ts id=00000004
+hint text="Use --pick <n> or --kind or --path to disambiguate."
+diagnostic code=ambiguous_resolution message="Use --pick <n> or --path to disambiguate."
+
+--- stderr
+"
+`;
+
+exports[`ix locate: plugin-facing output > --format llm > resolved target 1`] = `
+"$ ix locate paint --format llm
+exit: 0
+--- stdout
+locate target=paint kind=function id=00000006 path=src/app.ts line_start=7 line_end=9 contained_in="file app.ts"
+note text="No system map. Run \`ix map\` to see hierarchy."
+
+--- stderr
+"
+`;
+
+exports[`ix locate: plugin-facing output > --format llm > unknown target 1`] = `
+"$ ix locate vanish --format llm
+exit: 3
+--- stdout
+error code=unresolved_target message="No graph entity found for \\"vanish\\"."
+
+--- stderr
+"
+`;
+
+exports[`ix locate: plugin-facing output > --format llm > unmapped workspace 1`] = `
+"$ ix locate paint --format llm # from an unmapped directory
+exit: 4
+--- stdout
+error code=workspace_not_mapped message="<TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from." dir=<TMP>/elsewhere hint="Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them)."
+
+--- stderr
+"
+`;
+
+exports[`ix locate: plugin-facing output > --format text > ambiguous target (default, then --strict) 1`] = `
+"$ ix locate draw --format text
+exit: 0
+--- stdout
+
+Location
+  File:             src/app.ts
+  Lines:            3-5
+  Contained in:     app.ts
+  Note  No system map. Run \`ix map\` to see hierarchy.
+
+--- stderr
+"draw" matches 2 candidates; using draw (src/app.ts).
+  1. function   00000005  draw in src/app.ts
+  2. function   00000004  draw in src/geometry.ts
+  Use --pick <n> or --path to choose another.
+Resolved: function 00000005 draw (scored)
+
+
+
+$ ix locate draw --strict --format text
+exit: 2
+--- stdout
+
+--- stderr
+Ambiguous symbol "draw":
+  1. function   00000005  draw in src/app.ts:3
+  2. function   00000004  draw in src/geometry.ts:5
+
+Use --pick <n> or --kind or --path to disambiguate.
+"
+`;
+
+exports[`ix locate: plugin-facing output > --format text > resolved target 1`] = `
+"$ ix locate paint --format text
+exit: 0
+--- stdout
+
+Location
+  File:             src/app.ts
+  Lines:            7-9
+  Contained in:     app.ts
+  Note  No system map. Run \`ix map\` to see hierarchy.
+
+--- stderr
+Resolved: function 00000006 paint
+
+"
+`;
+
+exports[`ix locate: plugin-facing output > --format text > unknown target 1`] = `
+"$ ix locate vanish --format text
+exit: 3
+--- stdout
+No matches found.
+
+--- stderr
+No entity found matching "vanish".
+No graph entity found for "vanish".
+"
+`;
+
+exports[`ix locate: plugin-facing output > --format text > unmapped workspace 1`] = `
+"$ ix locate paint --format text # from an unmapped directory
+exit: 4
+--- stdout
+
+--- stderr
+
+  <TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from.
+
+  Next
+  Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them).
+
+"
+`;

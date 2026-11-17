@@ -3,12 +3,8 @@
 import { Command } from "commander";
 import { describe, expect, it } from "vitest";
 
-import {
-  CHARS_PER_TOKEN,
-  clampBudgets,
-  detectContextModeConflict,
-  registerContextCommand,
-} from "../commands/context.js";
+import { registerContextCommand } from "../commands/context.js";
+import { CHARS_PER_TOKEN, clampBudgets, detectContextModeConflict } from "../context/options.js";
 
 describe("--max-tokens", () => {
   it("is what bounds a default bundle, not 12,000 characters", () => {

@@ -3,7 +3,9 @@
 import { describe, expect, it } from "vitest";
 
 import type { GraphNode } from "../../client/types.js";
-import { buildBundle, clampBudgets, renderFullBundle as renderBundle } from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { clampBudgets } from "../context/options.js";
+import { renderBundle } from "../context/render.js";
 import type { ContextFacts } from "../explain/facts.js";
 
 /**
@@ -83,18 +85,19 @@ describe("ix context <symbol> is unchanged by --from-issue", () => {
   });
 });
 
-// CL-07: tier scores (tier * 1000 + place), the caller and dependent rows
-// merged into one "used by" row, and the `runRank --CALLS-->` relationship
-// dropped because the used-by row already names runRank.
+// CL-07: rows in tier order (tier * 1000 + place, not printed since #1015),
+// the caller and dependent rows merged into one "used by" row, and the
+// `runRank --CALLS-->` relationship dropped because the used-by row already
+// names runRank. #1015 also dropped the header's zero counters.
 const RECORDED_LLM: string[] = [
-  "context target=listByKind target_kind=method target_path=src/client/api.ts stale=false classification=current entities=5 relationships=1 claims=0 decisions=0 conflicts=0 intents=0 evidence=7 truncated_entities=0 truncated_relationships=0 truncated_evidence=0 truncated_chars=0",
-  "evidence score=0 kind=target title=\"listByKind (method)\" path=src/client/api.ts lines=141-152",
-  "evidence score=2000 kind=structural title=\"container IxClient (class)\" path=src/client/api.ts lines=20-400",
-  "evidence score=2001 kind=structural title=\"related files: src/cli/commands/smells.ts\"",
-  "evidence score=2002 kind=structural title=\"used by (2 of 2): runRank (rank.ts), inventory.ts\" path=src/cli/commands/rank.ts lines=30-90",
-  "evidence score=2003 kind=provenance title=\"recent commits to api.ts: abc1234 fix: scope listByKind\"",
-  "evidence score=2004 kind=structural title=\"calls post\" path=src/client/api.ts lines=500-520",
-  "evidence score=5000 kind=provenance title=\"history length 3, introduced rev 7\"",
+  "context target=listByKind target_kind=method target_path=src/client/api.ts stale=false classification=current entities=5 relationships=1 evidence=7",
+  "evidence kind=target title=\"listByKind (method)\" path=src/client/api.ts lines=141-152",
+  "evidence kind=structural title=\"container IxClient (class)\" path=src/client/api.ts lines=20-400",
+  "evidence kind=structural title=\"related files: src/cli/commands/smells.ts\"",
+  "evidence kind=structural title=\"used by (2 of 2): runRank (rank.ts), inventory.ts\" path=src/cli/commands/rank.ts lines=30-90",
+  "evidence kind=provenance title=\"recent commits to api.ts: abc1234 fix: scope listByKind\"",
+  "evidence kind=structural title=\"calls post\" path=src/client/api.ts lines=500-520",
+  "evidence kind=provenance title=\"history length 3, introduced rev 7\"",
   "next cmd=\"ix read src/client/api.ts:141-152\"",
   "next cmd=\"ix read src/client/api.ts:20-400\"",
   "next cmd=\"ix read src/cli/commands/rank.ts:30-90\"",

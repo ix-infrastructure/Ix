@@ -1,0 +1,8 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": ["src/parse-worker.ts"],
+  "project": ["src/**/*.ts"],
+  "includeEntryExports": true,
+  "ignoreExportsUsedInFile": true,
+  "include": ["files", "exports", "nsExports", "types", "nsTypes", "enumMembers", "duplicates"]
+}

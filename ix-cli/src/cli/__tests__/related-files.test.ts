@@ -2,7 +2,9 @@
 
 import { describe, expect, it } from "vitest";
 
-import { buildBundle, clampBudgets, renderFullBundle as renderBundle } from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { clampBudgets } from "../context/options.js";
+import { renderBundle } from "../context/render.js";
 import type { ContextFacts, EntityLocation } from "../explain/facts.js";
 import { collectRelatedFiles, isTestPath, type RelatedRef } from "../explain/related-files.js";
 
@@ -67,7 +69,8 @@ class Graph {
           frontier = next;
         }
         seen.delete(id);
-        return { nodes: [...seen].map((n) => this.nodes.get(n)!).filter(Boolean), edges };
+        // Partial nodes, as the code under test reads them: not full GraphNodes.
+        return { nodes: [...seen].map((n) => this.nodes.get(n)!).filter(Boolean), edges } as never;
       },
     };
   }

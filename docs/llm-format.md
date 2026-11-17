@@ -66,6 +66,16 @@ which value it ignored, on stderr, when a person is there to read it.
 - **Errors:** a uniform `error code=<slug> message="..."` line in the same
   format as data lines; the process still exits non-zero. A graph target that
   does not exist is always `unresolved_target`.
+  A failure no command handles itself (backend unreachable, a bad flag or
+  value as `usage_error`, a config that will not parse), and `ix status` /
+  `ix verify` failing to reach the backend, comes as one record on stdout in
+  the run's format, whether that was typed or set by `IX_FORMAT` or
+  `config.format`. In json it is `{"error": <slug>, "message": "...", "next": "..."}`,
+  and `next` appears only when there is a next step; the prose text would print
+  still goes to stderr alongside it. In llm the record replaces the prose. A bad
+  flag on a command that has no `--format` (`ix hook`, `ix mcp`) stays prose
+  whatever `IX_FORMAT` says. The exit code is the same as with text, where the
+  failure stays as prose on stderr.
   The graph commands (`locate`, `callers`, `callees`, `impact`, `explain` and
   the rest that resolve a target, `subsystems <region>` and `around` included)
   exit with a code per outcome, and json's `error` / llm's `error code=` carry
@@ -401,6 +411,22 @@ Two commands cannot know a true total and say so rather than inventing one:
   `offset_past_end`: more matches exist). `--format json` stays a bare array of matches with no
   paging fields; the next offset is the offset plus its length.
 
+`ix rank` scores at most 2000 entities of the kind, the first 2000 `/v1/list`
+returns. `/v1/list` has no offset and does not order by degree, so an entity
+past that window is never a candidate, whatever its score. When more than
+2000 exist the header carries `truncated=true` and a
+`diagnostic code=candidates_truncated` record follows it (json:
+`summary.truncated: true` and the message in `diagnostics`; text: the message
+under the ranking). `evaluated` is then the window, not the workspace, and the
+ranking is of that window only. `--path` is applied by the server before the
+cut, so narrowing with it (or a more specific `--kind`) brings the rest in.
+
+```
+rank metric=callers kind=function evaluated=2000 returned=3 truncated=true
+diagnostic code=candidates_truncated message="More than 2000 function entities exist; only the first 2000 the server returned were ranked, so entities that belong in this ranking may be missing. Narrow with --path (or a more specific --kind)."
+entity name=hotZ kind=function score=3
+```
+
 `ix read` caps a read at 400 lines and marks the `file` record with
 `truncated=true total_lines=<n> next=<target>`. `total_lines` is always a
 count, never a line number:
@@ -655,6 +681,15 @@ templates, data/config) are dropped; `filtered_non_source=<k>` appears when any
 were. Output stops at `--limit` (default 50, highest confidence first); when it
 cuts, a `diagnostic code=results_truncated` record follows the header.
 
+`file` is the file's name as the backend reports it, a basename that two files
+can share. `--format json` adds each candidate's `path` beside it, read from
+the file's node in one batched request; it is left out when the backend cannot
+serve that read or the file is no longer in the graph. `path` is written the
+way other rows write one: relative to the current directory when the file is
+inside it, otherwise `~/...` or absolute. The MCP tool `ix_smells` keeps the
+candidates whose `path` contains its `path` argument as a substring, and
+matches against `file` only when a candidate has no `path`.
+
 `ix smells` waits for a fresh analysis for 20 s in llm and json (`--wait
 <seconds>` or `IX_SMELLS_WAIT` changes it; text waits 5 minutes, which is
 also the most: Node's HTTP client stops waiting for a response there). When the analysis has not finished by then, or the backend refuses
@@ -699,7 +734,7 @@ and limits a stale answer's candidates as it does a fresh one's, and ignores
 ```
 impact target=verify_token kind=function risk=high category=boundary summary="Auth check; 14 call sites at risk"
 behavior text="Token validation across the request pipeline"
-counts callers=14 callees=3 shown_callers=10 shown_callees=3
+counts callers=14 callees=3 shown_callers=10 shown_callees=3 dependents_total=14
 bucket region="Auth Layer" kind=subsystem count=9
 caller name=handleLogin kind=method path=src/auth/login.ts lines=20-48
 diagnostic code=results_truncated message="14 callers; showing 10. Raise --limit to see them, or page them with ix callers verify_token"
@@ -712,6 +747,33 @@ printed after the `--limit` cut (the two lists share one header, so `shown`/`tot
 In `--format json` the same rows (`callerList`, `calleeList`, bucket `members`) carry `path`,
 `lineStart` and `lineEnd`, and a container target's JSON adds `dependentList`, its located
 importers and dependents.
+
+For a container target the `counts` record is
+`counts members=<n> importers=<n> dependents=<n> member_callers=<n> dependents_total=<n>`;
+its `dependents=` is the `CALLS`/`REFERENCES` expand alone (`summary.directDependents`).
+
+**Dependents: the one count.** `dependents_total=` on the `counts` record, and
+`summary.dependents` in `--format json`, is how many distinct entities depend on the target. Read it instead of combining the other counts,
+which overlap:
+
+- a leaf target (function, method, ...): its callers (`CALLS`/`REFERENCES`, to `--depth`), each
+  entity once; the target calling itself is not counted;
+- a container target (`class`, `module`, `file`, `object`, `trait`, `interface`): the union of its
+  importers (`IMPORTS`, to `--depth`), its direct dependents (`CALLS`/`REFERENCES`, to `--depth`)
+  and the direct callers of its members (`CALLS`/`REFERENCES`, the first 20 members, as
+  `memberLevelCallers` reads them), each entity once. The target, its own direct members and
+  what is nested deeper inside it are not counted, so code inside the target calling other code
+  inside it adds nothing. "Nested deeper" is read from locations: for a `file` target, any entity
+  in that file; for another container, an entity in the target's file whose lines fall within one
+  of its members (a method of a nested class). An entity with no path or lines is counted.
+  With more than 20 members the member callers come from the first 20 only, so the count is a
+  lower bound: an entity that reaches the target only through member 21 or later is missed.
+
+Entities are matched by graph id. A file that imports the target and a function in that file
+that calls one of its members are two entities. The other counts stay as they were:
+`memberLevelCallers` adds every member's callers up (one function calling three members counts
+three times), and `directImporters`/`directDependents` are the two expands before any dedup.
+A member whose callers could not be read (a `diagnostics` entry) adds nothing.
 
 `ix overview <container>`:
 
@@ -734,18 +796,23 @@ Every `item` has an exact span, a short selection reason and a numeric heuristic
 `ix context <target> --full`:
 
 ```
-context target=Widget target_kind=class target_path=src/widget.ts stale=false classification=current entities=2 relationships=1 claims=1 decisions=0 conflicts=0 intents=0 evidence=7 truncated_entities=0 truncated_relationships=0 truncated_evidence=0 truncated_chars=0
-evidence score=0 kind=target title="Widget (class)" path=src/widget.ts
-evidence score=2000 kind=structural title="member render" path=src/widget.ts lines=12-40
-evidence score=3000 kind=claim title="renders to DOM"
-evidence score=4000 kind=relationship title="Widget --calls--> mount"
+context target=Widget target_kind=class target_path=src/widget.ts stale=false classification=current entities=2 relationships=1 claims=1 evidence=7
+evidence kind=target title="Widget (class)" path=src/widget.ts
+evidence kind=structural title="member render" path=src/widget.ts lines=12-40
+evidence kind=claim title="renders to DOM"
+evidence kind=relationship title="Widget --calls--> mount"
 ```
 
-One header record, then the ranked evidence. `score` is `tier * 1000` plus the
-row's place in its tier, tiers in order target, issue, structural, claims,
-relationships, provenance, so a tier never runs into the next. Each entity gets
-one row: a relationship that restates a member, import or caller row is left
-out. A target's callers and dependents share one row, titled with how many of
+One header record, then the ranked evidence. The header always carries
+`entities`, `relationships` and `evidence`; `claims`, `decisions`,
+`conflicts`, `intents` and the four `truncated_*` counters appear only when
+they are not zero. The rows are printed in rank order and carry no `score=`:
+the score (`--format json` has it) is `tier * 1000` plus the row's place in its
+tier, tiers in order target, issue, structural, claims, relationships,
+provenance, so a tier never runs into the next. Each entity gets one row: a
+relationship that restates a member, import or caller row is left out, and
+edges whose titles would read the same (overloads sharing a name and a path)
+are one row ending ` (n edges)`. A target's callers and dependents share one row, titled with how many of
 how many (`used by (3 of 214): ...`); `--format json` carries the two numbers
 as `count: { shown, total }`. The entity, relationship and claim
 lists stay counts here — `llm` is the token-minimal surface and the ranked
@@ -775,7 +842,8 @@ claim change=added id=c-8f31a2 entity=entity-1 status=active statement="mounts t
 The counts keep their zeros: "nothing was added" is the answer `--diff` was
 asked for, not a default worth dropping. Added and removed share one record
 kind and separate on `change=`, so a consumer routing on `entity` sees both
-sides of the comparison.
+sides of the comparison. Diff `evidence` rows keep `score=`: added and removed
+rows come from two rankings, and the score is what says where each one stood.
 
 `saved_at` is when the baseline snapshot was taken. `freshness_previous` says
 whether it was fresh *then*, not how long ago that was, so a snapshot from five
@@ -833,9 +901,11 @@ investigation id=auth-path saved_at=2026-01-02T17:03:11.882Z target=verify_token
 `skipped` counts saved files that did not match the contract and is present
 only when it is non-zero — it is the one thing about a listing that cannot be
 seen from the records themselves. Note that `stale=` and the four `truncated_*`
-fields are *not* dropped when zero or false: `llmField` omits only nullish and
-empty-string values, and these say "measured, and it was none", which a missing
-field does not.
+fields are *not* dropped when zero or false here: a listing compares saved
+bundles side by side, and these say "measured, and it was none", which a
+missing field does not. The `context` header drops its zero counters instead:
+it is the first thing an agent reads on every bundle, and there an absent
+counter means none.
 
 `id` is the id `--resume` and `--diff` take, not necessarily the file name on
 disk; the two differ whenever an id contains a character outside
@@ -848,8 +918,8 @@ and `ix context --resume <id>` fetches one:
 
 ```
 resumed id=widget saved_at=2026-01-03T09:12:44.108Z
-context target=Widget target_kind=class stale=false classification=current entities=2 relationships=1 claims=1 decisions=0 conflicts=0 intents=0 evidence=7 truncated_entities=0 truncated_relationships=0 truncated_evidence=0 truncated_chars=0
-evidence score=0 kind=target title="Widget (class)"
+context target=Widget target_kind=class stale=false classification=current entities=2 relationships=1 claims=1 evidence=7
+evidence kind=target title="Widget (class)"
 ```
 
 `resumed`, not `investigation`: the record kinds are distinct because the

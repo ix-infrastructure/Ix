@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 
 import { ixHome } from "./ix-home.js";
+import { isLoopbackEndpoint } from "./endpoint.js";
 import type { IxClient } from "../client/api.js";
 import type { HealthResponse } from "../client/types.js";
 
@@ -150,22 +151,11 @@ export function recordBackendRelease(
  * record a different deployment's release into the file that governs the LOCAL
  * docker image notice — a newer remote silencing a genuinely stale local
  * backend, or an older one nagging about a current one.
+ *
+ * Kept under this name because `cli/*` is a package export; the rule itself
+ * lives in endpoint.ts, the one definition every caller shares.
  */
-export function isLocalEndpoint(endpoint: string): boolean {
-  try {
-    // A trailing dot is the fully-qualified form and resolvers accept it.
-    const host = new URL(endpoint).hostname.toLowerCase().replace(/\.$/, "");
-    return (
-      host === "localhost" ||
-      /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) || // 127.0.0.0/8, as an ADDRESS
-      // ...not a prefix: `127.0.0.1.evil.com` is a remote name that starts "127."
-      host === "0.0.0.0" || // what client/api.ts and errors.ts already accept
-      host === "[::1]" // new URL() always brackets IPv6, so bare "::1" is unreachable
-    );
-  } catch {
-    return false;
-  }
-}
+export const isLocalEndpoint = isLoopbackEndpoint;
 
 /**
  * Fetch `/v1/health` AND record the release it reports.
@@ -195,7 +185,7 @@ export async function fetchBackendHealth(
   // request that succeeded. Nothing more is claimed: status.ts dereferences
   // health.status unguarded moments later, so on a null body it fails either
   // way — the `?.` keeps the failure the caller's, not ours.
-  if (isLocalEndpoint(client.endpoint)) {
+  if (isLoopbackEndpoint(client.endpoint)) {
     recordBackendRelease(health?.release_version, knownLatest, isNewer);
   }
   return health;

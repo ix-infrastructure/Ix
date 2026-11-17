@@ -14,19 +14,18 @@ import type {
   ScoredClaim,
 } from "../../client/types.js";
 import type { EntityFacts } from "../explain/facts.js";
+import { buildBundle } from "../context/bundle.js";
+import { diffInvestigations, renderInvestigationDiff } from "../context/investigation-diff.js";
 import {
-  buildBundle,
-  diffInvestigations,
   listInvestigations,
   renderInvestigationList,
   loadInvestigation,
   mergeDiffOptions,
-  parseRequestedBudgets,
-  renderFullBundle as renderBundle,
-  renderInvestigationDiff,
   renderSavedInvestigation,
   saveInvestigation,
-} from "../commands/context.js";
+} from "../context/investigations.js";
+import { parseRequestedBudgets } from "../context/options.js";
+import { renderBundle } from "../context/render.js";
 
 let home: string;
 let priorExitCode: number | string | undefined;
@@ -166,7 +165,6 @@ function makeClaim(statement: string, relevance: number): ScoredClaim {
       corroboration: { value: 0.5, reason: "corroborate" },
       conflictPenalty: { value: 0.5, reason: "penalty" },
       intentAlignment: { value: 0.5, reason: "intent" },
-      score: 0.5,
     },
   };
 }
@@ -813,11 +811,12 @@ describe("ix context investigation state", () => {
       const evidence = lines.filter((l) => l.startsWith("evidence"));
       expect(evidence.length).toBeGreaterThan(0);
       for (const line of evidence) {
-        expect(line).toMatch(/^evidence score=\d+ kind=[a-z]+ title=/);
+        expect(line).toMatch(/^evidence kind=[a-z]+ title=/);
       }
-      // The exact record `--diff` would emit for the same item, minus `change=`.
+      // The record `--diff` would emit for the same item, minus `change=` and
+      // `score=`: the plain bundle's rows are already in score order (#1015).
       expect(lines).toContain(
-        'evidence score=4000 kind=relationship title="Widget --calls--> render"',
+        'evidence kind=relationship title="Widget --calls--> render"',
       );
       // And the header is a record too, not fifteen bare `key=value` lines
       // built by interpolation — `target=${name}` breaks on any name with a

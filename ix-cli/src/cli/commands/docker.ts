@@ -9,6 +9,7 @@ import { fileURLToPath } from "url";
 import { stampBackendVersionAfterPull } from "./upgrade.js";
 import { clearLocalToken, ensureLocalToken } from "../config.js";
 import { ixHome } from "../ix-home.js";
+import { DEFAULT_ENDPOINT } from "../endpoint.js";
 import { createClient } from "../../client/factory.js";
 import { backendComposeArgs, composeSupportsLocalToken, handSetLocalToken, parseArangoHealth } from "../backend-compose.js";
 
@@ -16,7 +17,7 @@ import { backendComposeArgs, composeSupportsLocalToken, handSetLocalToken, parse
 // rather than when this module was imported -- see `ixHome()`.
 const composeDir = (): string => join(ixHome(), "backend");
 const localCompose = (): string => join(composeDir(), "docker-compose.yml");
-const HEALTH_URL = "http://localhost:8090/v1/health";
+const HEALTH_URL = `${DEFAULT_ENDPOINT}/v1/health`;
 
 /**
  * The compose file this CLI release ships. `npm run build` copies the repo's
@@ -157,7 +158,7 @@ function isHealthy(composeFile: string | null): boolean {
 /** One line on whether the running backend requires the local token. Best-effort. */
 async function reportLocalAuth(): Promise<void> {
   try {
-    const caps = await createClient({ endpoint: "http://localhost:8090" }).fetchCapabilities();
+    const caps = await createClient({ endpoint: DEFAULT_ENDPOINT }).fetchCapabilities();
     if (caps.local_auth === undefined) {
       console.log("  Local token:  not supported by this backend image (run 'ix upgrade')");
     } else {
@@ -217,7 +218,7 @@ export function registerDockerCommand(program: Command): void {
 
       if (!changeToken && isHealthy(composeFile)) {
         console.log("[ok] Backend is already running and healthy");
-        console.log("  Memory Layer: http://localhost:8090");
+        console.log(`  Memory Layer: ${DEFAULT_ENDPOINT}`);
         await reportLocalAuth();
         return;
       }
@@ -262,7 +263,7 @@ export function registerDockerCommand(program: Command): void {
         if (isHealthy(composeFile)) {
           console.log("");
           console.log("[ok] Backend is ready!");
-          console.log("  Memory Layer: http://localhost:8090");
+          console.log(`  Memory Layer: ${DEFAULT_ENDPOINT}`);
           if (changeToken) await reportLocalAuth();
           return;
         }
@@ -371,7 +372,7 @@ export function registerDockerCommand(program: Command): void {
       console.log("");
       if (isHealthy(composeFile)) {
         console.log("[ok] Backend is healthy");
-        console.log("  Memory Layer: http://localhost:8090");
+        console.log(`  Memory Layer: ${DEFAULT_ENDPOINT}`);
         await reportLocalAuth();
       } else {
         console.log("[!!] Backend is not healthy");
