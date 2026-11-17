@@ -49,16 +49,6 @@ export function isRepairInvocation(argv: readonly string[]): boolean {
 }
 
 /**
- * True when `argv` (process.argv, whole) is `ix map --auto`: what an editor or
- * agent hook runs after every edit, promised to print nothing and exit 0. An
- * installed Pro that fails to initialize must not make it exit 1; with Pro
- * broken the remote check cannot be trusted, so it maps nothing instead.
- */
-export function isAutoMapInvocation(argv: readonly string[]): boolean {
-  return argv[2] === "map" && argv.slice(3).includes("--auto");
-}
-
-/**
  * Invocations that never load Ix Pro, even when it is installed: run-cli skips
  * `tryLoadProCommands` for them and registers the OSS-only command set.
  *
