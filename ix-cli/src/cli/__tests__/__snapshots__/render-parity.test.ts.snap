@@ -581,7 +581,7 @@ exports[`render parity with the pre-split format.ts (#950) > --format llm > form
 candidate n=1 name=callee kind=function path=src/z.ts id=99999999
 diagnostic code=results_truncated next_offset=2 message="3 callers; showing 2. next: ix callers callee --offset 2"
 diagnostic code=text_fallback_used message="Some rows came from text search."
-ref name=caller kind=function path=src/a.ts lines=10-24 site=src/a.ts:12 also=14 snippet=callee()
+ref name=caller kind=function path=src/a.ts lines=10-24 site=12 also=14 snippet=callee()
 ref kind=function id=0a0a0a0a resolved=false"
 `;
 
@@ -598,7 +598,7 @@ diagnostic code=offset_past_end message="3 callers; --offset 7 is past the end."
 exports[`render parity with the pre-split format.ts (#950) > --format llm > formatEdgeResults 4`] = `
 "imports target=y shown=3 total=3 resolved=2 unresolved=1
 diagnostic code=results_truncated message="At least 3 imports (the server returns at most 1000 edges); showing 3, the end of what it returned. Narrow the target with --kind or --path to see the rest."
-ref name=caller kind=function path=src/a.ts lines=10-24 site=src/a.ts:12 also=14 snippet=callee()
+ref name=caller kind=function path=src/a.ts lines=10-24 site=12 also=14 snippet=callee()
 ref kind=function id=0a0a0a0a resolved=false
 ref name=viaSuper kind=method path=src/a.ts lines=10-24 candidate=1 via=Base.run"
 `;
