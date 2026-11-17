@@ -107,6 +107,7 @@ System:
   status                Check status
   stats                 Show stats
   doctor                Diagnose issues
+  capabilities          What this CLI supports
   verify                Compare graph to a re-parse
   mcp [install|doctor]  Serve agent tools over MCP
   install               Install the Ix skill into agent harnesses

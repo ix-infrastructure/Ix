@@ -86,17 +86,16 @@ describe("ix mcp", () => {
     expect(result.tools.map((tool) => tool.name)).toEqual(IX_MCP_TOOL_NAMES);
   });
 
-  it("covers every plugin tool that is not a composite or deprecated", async () => {
+  it("serves the plugin tools that remain, including ix_neighbors", async () => {
     const client = await connect(async () => ({ ok: true, stdout: "ok", stderr: "" }), true);
     const names = (await client.listTools()).tools.map((tool) => tool.name);
 
-    // The union exposed by ix-codex/cursor/gemini/openclaw/opencode-plugin,
-    // less ix_query (deprecated), ix_neighbors and ix_docs_tool (composites of
-    // callers/callees/depends and of overview), and ix_status (gemini's name
-    // for ix_health). ix_decide here is the Pro decision recorder; the
+    // Dropped on purpose: ix_query (deprecated) and ix_docs_tool (a composite
+    // of ix_overview). ix_neighbors is served. ix_status is Gemini's name for
+    // ix_health. ix_decide here is the Pro decision recorder; the
     // openclaw/opencode `ix-decide` pre-edit verdict is a different tool and
     // is not served (#998, mcp-plugin-consolidation.test.ts).
-    for (const tool of ["ix_decide", "ix_ingest", "ix_health", "ix_locate", "ix_impact"]) {
+    for (const tool of ["ix_decide", "ix_ingest", "ix_health", "ix_locate", "ix_impact", "ix_neighbors"]) {
       expect(names).toContain(tool);
     }
   });
@@ -225,7 +224,7 @@ describe("ix mcp", () => {
     const calls: string[][] = [];
     const client = await connect(async (args) => {
       calls.push(args);
-      return { ok: true, stdout: "context target=Widget entities=2\nevidence score=0 kind=target title=Widget", stderr: "" };
+      return { ok: true, stdout: "context target=Widget entities=2\nevidence kind=target title=Widget", stderr: "" };
     });
 
     const result = await client.callTool({
@@ -241,7 +240,7 @@ describe("ix mcp", () => {
     // two copies of a bundle that can run to 20 KB.
     expect(result.structuredContent).toBeUndefined();
     expect(result.content).toEqual([
-      { type: "text", text: "context target=Widget entities=2\nevidence score=0 kind=target title=Widget" },
+      { type: "text", text: "context target=Widget entities=2\nevidence kind=target title=Widget" },
     ]);
   });
 

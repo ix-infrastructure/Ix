@@ -13,6 +13,7 @@ vi.mock("../resolve.js", () => ({ resolveReadSystemId: async () => undefined }))
 vi.mock("../bootstrap.js", () => ({ resolveWorkspaceId: () => "ws-test" }));
 
 import { registerSmellsCommand, type SmellReport } from "../commands/smells.js";
+import { IxHttpError } from "../../client/http-error.js";
 import { mcpCaller } from "../../mcp/hints.js";
 import { withCaller } from "../next-step.js";
 
@@ -157,7 +158,7 @@ describe("ix smells wait budget and stored-results fallback", () => {
     });
 
     it("falls back on a 403 with the not-permitted message", async () => {
-      fakeClient.runSmells.mockRejectedValue(new Error('403: {"error":"forbidden"}'));
+      fakeClient.runSmells.mockRejectedValue(new IxHttpError(403, '{"error":"forbidden"}'));
       const out = JSON.parse(await run(["--format", "json"]));
 
       expect(out.stale).toBe(true);
@@ -227,10 +228,20 @@ describe("ix smells wait budget and stored-results fallback", () => {
     });
 
     it("keeps today's error for any other failure, without reading stored results", async () => {
-      fakeClient.runSmells.mockRejectedValue(new Error("500: boom"));
+      fakeClient.runSmells.mockRejectedValue(new IxHttpError(500, "boom"));
       await run(["--format", "json"]);
       expect(process.exitCode).toBe(1);
       expect(errs.join("\n")).toContain("500: boom");
+      expect(fakeClient.listSmells).not.toHaveBeenCalled();
+    });
+
+    it("reads an answer whose body says UND_ERR_HEADERS_TIMEOUT as today's error, not a timeout", async () => {
+      // The server answered, so its body's `code` is not undici's headers timeout.
+      const body = JSON.stringify({ code: "UND_ERR_HEADERS_TIMEOUT", message: "upstream slow" });
+      fakeClient.runSmells.mockRejectedValue(new IxHttpError(500, body));
+      await run(["--format", "json"]);
+      expect(process.exitCode).toBe(1);
+      expect(errs.join("\n")).toContain("500: ");
       expect(fakeClient.listSmells).not.toHaveBeenCalled();
     });
   });
@@ -262,7 +273,7 @@ describe("ix smells wait budget and stored-results fallback", () => {
     });
 
     it("on a 403", async () => {
-      fakeClient.runSmells.mockRejectedValue(new Error("403: forbidden"));
+      fakeClient.runSmells.mockRejectedValue(new IxHttpError(403, "forbidden"));
       const lines = (await run(["--format", "llm"])).split("\n");
       expect(lines[1]).toContain("code=smells_stale reason=not_permitted");
       expect(lines[1]).toContain('message="not permitted to run a fresh analysis; showing stored results from rev 12');
@@ -292,7 +303,7 @@ describe("ix smells wait budget and stored-results fallback", () => {
 
     it("stored results that cannot be read: the error path, exit 1", async () => {
       fakeClient.runSmells.mockImplementation(neverAnswers());
-      fakeClient.listSmells.mockRejectedValue(new Error("503: unavailable"));
+      fakeClient.listSmells.mockRejectedValue(new IxHttpError(503, "unavailable"));
       const lines = (await run(["--format", "llm"], 20_000)).split("\n");
       expect(lines[0]).toMatch(/^error code=backend_error /);
       expect(lines[0]).toContain("503: unavailable");

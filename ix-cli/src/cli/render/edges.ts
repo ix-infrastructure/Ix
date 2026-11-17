@@ -115,6 +115,8 @@ export interface ResolvedEdgeTarget {
   id: string;
   kind: string;
   name: string;
+  /** The name to show, e.g. the qualified `Class.method` form; never emitted as its own JSON key. */
+  displayName?: string;
   resolutionMode?: string;
   path?: string;
 }
@@ -167,8 +169,10 @@ function edgeResultsJson({ slice, relation, resolvedTarget, source, diagnostics,
     resultSource: source ?? "graph",
   };
   if (resolvedTarget) {
+    const { displayName, ...shown } = resolvedTarget;
     output.resolvedTarget = {
-      ...resolvedTarget,
+      ...shown,
+      name: displayName ?? shown.name,
       path: relativePath(resolvedTarget.path),
     };
     if (resolvedTarget.resolutionMode && resolvedTarget.resolutionMode !== "exact") {

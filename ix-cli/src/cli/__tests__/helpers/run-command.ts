@@ -9,6 +9,10 @@
  *   const { stdout, stderr, exitCode } =
  *     await runCommand(["locate", "paint", "--format", "json"], { backend });
  *
+ * A test that owns its IX_HOME, workspace and on-disk state (and reads them
+ * back after the run) calls `runInProcess` instead: the same run, minus the
+ * scratch home, config, PATH and cleanup below.
+ *
  * What it does, per call:
  *
  *   - builds a fresh commander program from `registerOssCommands()` (which
@@ -101,10 +105,7 @@ export interface RunCommandOptions {
   cwd?: "workspace" | "unmapped";
 }
 
-export interface RunCommandResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
+export interface RunCommandResult extends CommandResult {
   /** The temp root every path in the run lives under, for normalising. */
   tempRoot: string;
 }
@@ -148,24 +149,34 @@ function buildProgram(): Command {
   return program;
 }
 
-export async function runCommand(argv: string[], opts: RunCommandOptions): Promise<RunCommandResult> {
-  const { backend } = opts;
-  const endpoint = backend.url ?? await backend.start();
+/** What one `ix` invocation printed, and the code it would have exited with. */
+export interface CommandResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
 
-  const tempRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ix-run-command-")));
-  const home = path.join(tempRoot, "home");
-  const workspace = path.join(tempRoot, "repo");
-  const unmapped = path.join(tempRoot, "elsewhere");
-  const emptyBin = path.join(tempRoot, "bin");
-  fs.mkdirSync(emptyBin, { recursive: true });
-  fs.mkdirSync(home, { recursive: true });
-  fs.mkdirSync(workspace, { recursive: true });
-  fs.mkdirSync(unmapped, { recursive: true });
-  for (const [rel, content] of Object.entries(opts.files ?? {})) {
-    const abs = path.join(workspace, rel);
-    fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.writeFileSync(abs, content);
-  }
+export interface RunInProcessOptions {
+  /** IX_ENDPOINT for the run. Nothing need listen there (a backend that is down, say). */
+  endpoint: string;
+  /** The directory the command runs in. */
+  cwd: string;
+  /** Extra environment for this run, applied after ambient IX_* is stripped. */
+  env?: Record<string, string>;
+  /** Called once env is applied and the CLI's memos are reset, before the command runs. */
+  setup?: () => void;
+}
+
+/**
+ * The core `runCommand` is built on: run `ix <argv>` in-process with the
+ * caller's own IX_HOME, workspace and cwd (pass IX_HOME in `opts.env`), for a
+ * test that sets up its own config and on-disk state and reads it back after
+ * the run. Same command tree, error boundary, capture and restore as
+ * `runCommand`; it writes no scratch config, does not touch PATH unless
+ * `opts.env` does, and deletes nothing.
+ */
+export async function runInProcess(argv: string[], opts: RunInProcessOptions): Promise<CommandResult> {
+  const { endpoint } = opts;
 
   // ── Save every global the run touches ──────────────────────────────────
   const savedEnv = { ...process.env };
@@ -187,21 +198,13 @@ export async function runCommand(argv: string[], opts: RunCommandOptions): Promi
     for (const key of Object.keys(process.env)) {
       if (key.startsWith("IX_")) delete process.env[key];
     }
-    process.env.IX_HOME = home;
     process.env.IX_ENDPOINT = endpoint;
-    process.env.PATH = emptyBin;
     for (const [k, v] of Object.entries(opts.env ?? {})) process.env[k] = v;
 
     resetCliMemos();
-    saveConfig({
-      endpoint,
-      // The built-in default; every snapshot passes --format anyway.
-      format: "text",
-      workspaces: [{ workspace_id: RUN_WORKSPACE_ID, workspace_name: "repo", root_path: workspace, default: true }],
-    });
-    resetConfigMemo();
+    opts.setup?.();
 
-    process.chdir(opts.cwd === "unmapped" ? unmapped : workspace);
+    process.chdir(opts.cwd);
     process.exitCode = undefined;
     chalk.level = 0;
     Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true, writable: true });
@@ -260,8 +263,47 @@ export async function runCommand(argv: string[], opts: RunCommandOptions): Promi
     }
     Object.assign(process.env, savedEnv);
     resetCliMemos();
-    fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 
-  return { stdout: out.join(""), stderr: err.join(""), exitCode, tempRoot };
+  return { stdout: out.join(""), stderr: err.join(""), exitCode };
+}
+
+export async function runCommand(argv: string[], opts: RunCommandOptions): Promise<RunCommandResult> {
+  const { backend } = opts;
+  const endpoint = backend.url ?? await backend.start();
+
+  const tempRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ix-run-command-")));
+  const home = path.join(tempRoot, "home");
+  const workspace = path.join(tempRoot, "repo");
+  const unmapped = path.join(tempRoot, "elsewhere");
+  const emptyBin = path.join(tempRoot, "bin");
+  fs.mkdirSync(emptyBin, { recursive: true });
+  fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.mkdirSync(unmapped, { recursive: true });
+  for (const [rel, content] of Object.entries(opts.files ?? {})) {
+    const abs = path.join(workspace, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, content);
+  }
+
+  try {
+    const result = await runInProcess(argv, {
+      endpoint,
+      cwd: opts.cwd === "unmapped" ? unmapped : workspace,
+      env: { IX_HOME: home, PATH: emptyBin, ...opts.env },
+      setup: () => {
+        saveConfig({
+          endpoint,
+          // The built-in default; every snapshot passes --format anyway.
+          format: "text",
+          workspaces: [{ workspace_id: RUN_WORKSPACE_ID, workspace_name: "repo", root_path: workspace, default: true }],
+        });
+        resetConfigMemo();
+      },
+    });
+    return { ...result, tempRoot };
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
 }

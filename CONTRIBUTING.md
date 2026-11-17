@@ -155,6 +155,19 @@ Breaking changes: use `feat!:` or `fix!:` prefix.
 | CLI code | `cd ix-cli && npm test` while you work |
 | Any change | Everything in [Before you open a PR](#before-you-open-a-pr) |
 
+New CLI tests go beside the code they test, in that directory's `__tests__/`
+(a command's tests in `ix-cli/src/cli/commands/__tests__/`). A test that runs
+a command uses `runCommand(argv, { backend })` from
+`ix-cli/src/cli/__tests__/helpers/run-command.ts`, which runs it through the
+CLI's own error boundary against the shared `FakeBackend`
+(`helpers/fake-backend.ts`) in a scratch home and workspace, and returns
+`{ stdout, stderr, exitCode }`. A test that sets up its own home, config and
+files, and reads them back afterwards, uses `runInProcess` from the same file
+instead. When a
+command reads a route the fake does not serve, add the route to `FakeBackend`,
+shaped as `docs/api/openapi.yaml` describes it, rather than writing a fake
+client in the test file.
+
 ## CLI Standards
 
 ### Adding a command

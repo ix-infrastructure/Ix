@@ -10,7 +10,8 @@ vi.mock("../resolve.js", async (importOriginal) => ({
   resolveFileOrReport,
 }));
 
-import { parseContextDepthOption, registerContextCommand } from "../commands/context.js";
+import { registerContextCommand } from "../commands/context.js";
+import { parseContextDepthOption } from "../context/options.js";
 
 async function runContext(args: string[]): Promise<{ error?: CommanderError; stderr: string }> {
   const stderr: string[] = [];

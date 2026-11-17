@@ -10,12 +10,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { IxClient } from "../../client/api.js";
 import type { GraphNode } from "../../client/types.js";
-import {
-  buildBundle,
-  clampBudgets,
-  registerContextCommand,
-  saveInvestigation,
-} from "../commands/context.js";
+import { registerContextCommand } from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { saveInvestigation } from "../context/investigations.js";
+import { clampBudgets } from "../context/options.js";
 import type { ContextFacts } from "../explain/facts.js";
 import { extractCandidates, pickStartingPoints, readIssueText } from "../explain/issue.js";
 import { findFileNode } from "../file-node.js";
