@@ -12,7 +12,8 @@ import { BASELINE } from "./impact-json-locations.baseline.js";
  * container dependent is, from the nodes the command already holds. Additive
  * only: the same JSON with the new keys taken out is what the command printed
  * before, and llm and text output do not change at all (`BASELINE` was
- * captured from the command before the location fields were added).
+ * captured from the command before the location fields were added; its llm
+ * strings were edited once since, for #1016's header `path=`).
  */
 
 const { expand, entity, state } = vi.hoisted(() => ({
@@ -96,12 +97,14 @@ function graphExpand(id: string, opts: { direction: string; predicates: string[]
   return { nodes: GRAPH[`${id} ${opts.direction} ${opts.predicates.join(",")}`] ?? [], edges: [] };
 }
 
-type Scenario = "leaf" | "file" | "class" | "all";
+type Scenario = "leaf" | "file" | "class" | "all" | "pathless";
 const SETS: Record<Scenario, unknown> = {
   leaf: { entities: [LEAF] },
   file: { entities: [FILE] },
   class: { entities: [CLASS] },
   all: { entities: [{ ...LEAF, n: 1 }, { ...CLASS, n: 2 }], all: { total: 2 } },
+  // The file target with no path on the resolved entity.
+  pathless: { entities: [{ ...FILE, path: undefined }] },
 };
 
 async function run(scenario: Scenario, args: string[]): Promise<{ out: string; exitCode: number | null }> {
@@ -395,5 +398,48 @@ describe("summary.dependents", () => {
   it("--all: every candidate carries it", async () => {
     const out = await json("all");
     expect(out.results.map((r: any) => r.summary.dependents)).toEqual([5, 3]);
+  });
+});
+
+// ── llm: a container's path once ─────────────────────────────────────────────
+
+describe("llm: a container target's path is printed once (#1016)", () => {
+  const lines = async (scenario: Scenario) => (await run(scenario, ["--format", "llm"])).out.split("\n");
+
+  it("file target: the header carries path=, members in that file leave it off", async () => {
+    const out = await lines("file");
+    expect(out[0]).toMatch(/^impact target=auth\.ts kind=file path=src\/auth\.ts risk=/);
+    expect(out.filter((l) => l.startsWith("member "))).toEqual([
+      "member name=verify kind=function callers=2 lines=1-20",
+      "member name=Session kind=class callers=1 lines=22-80",
+    ]);
+  });
+
+  it("class target: a member in another file than the class keeps its own path=", async () => {
+    const out = await lines("class");
+    expect(out[0]).toMatch(/^impact target=Session kind=class path=src\/session\.ts risk=/);
+    expect(out.filter((l) => l.startsWith("member "))).toEqual([
+      "member name=Session kind=class callers=1 path=src/auth.ts lines=22-80",
+    ]);
+  });
+
+  it("a target with no path: no header path=, every member keeps its own", async () => {
+    const out = await lines("pathless");
+    expect(out[0]).not.toMatch(/ path=/);
+    expect(out.filter((l) => l.startsWith("member "))).toEqual([
+      "member name=verify kind=function callers=2 path=src/auth.ts lines=1-20",
+      "member name=Session kind=class callers=1 path=src/auth.ts lines=22-80",
+    ]);
+  });
+
+  it("leaf target: the header is unchanged, with no path=", async () => {
+    const out = await lines("leaf");
+    expect(out[0]).toBe(BASELINE.llm.leaf.split("\n")[0]);
+    expect(out[0]).not.toMatch(/ path=/);
+  });
+
+  it("json is unchanged: topImpactedMembers rows keep their path", async () => {
+    const out = await json("file");
+    expect(out.topImpactedMembers.map((m: any) => m.path)).toEqual(["src/auth.ts", "src/auth.ts"]);
   });
 });

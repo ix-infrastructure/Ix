@@ -295,14 +295,21 @@ function capitalize(s: string): string {
 
 // ── llm rendering ────────────────────────────────────────────────────────────
 
+/**
+ * The `impact` record. `path` is a container target's own path: given once
+ * here, it is left off the `member` rows in that same file (`containerImpact`).
+ * A leaf target passes none, so its header is as it was.
+ */
 export function impactHeaderLlm(
   target: { kind: string; name: string },
   risk: RiskSemantics,
   systemPath: Array<{ name: string; kind: string }>,
+  path?: string,
 ): string[] {
   const lines = [llmLine("impact", [
     ["target", target.name],
     ["kind", target.kind],
+    ["path", path],
     ["risk", risk.riskLevel],
     ["category", risk.category],
     ["system_path", systemPath.length > 0 ? systemPath.map((n) => n.name).join(",") : undefined],
@@ -526,10 +533,15 @@ async function containerImpact(
       }),
     );
   } else if (format === "llm") {
+    // The target's path, relativized as `rowLocation` relativizes the members'
+    // paths so the two compare like for like. Printed once in the header; a
+    // member row repeats it only when it is somewhere else (a class whose
+    // members live in another file). No target path: every row keeps its own.
+    const headerPath = relativePath(target.path);
     const lines = [
       // With the answer, not before it (mapStaleLlm).
       ...mapStaleLlm(mapState),
-      ...impactHeaderLlm(target, risk, systemPathMapped),
+      ...impactHeaderLlm(target, risk, systemPathMapped, headerPath),
       llmLine("counts", [
         ["members", members.length],
         ["importers", directImporters.length],
@@ -542,7 +554,7 @@ async function containerImpact(
       // They named a symbol and left the caller to find it.
       ...topMembers.map((m) => llmLine("member", [
         ["name", m.name], ["kind", m.kind], ["callers", m.callerCount],
-        ["path", m.path], ["lines", lineSpan(m)],
+        ["path", headerPath !== undefined && m.path === headerPath ? undefined : m.path], ["lines", lineSpan(m)],
       ])),
       ...impactTailLlm(risk, decisions, tasks, bugs),
     ];
