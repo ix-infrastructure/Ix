@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { createHash } from 'node:crypto';
-import type { PatchOp } from './types.js';
+import type { PatchOp, UpsertEdgeOp } from './schema.js';
 
 /** Derive coverage evidence only from edges whose production destination resolved. */
 export function appendTestEdges(
@@ -9,7 +9,7 @@ export function appendTestEdges(
   productionIds: ReadonlySet<string>,
 ): void {
   if (!testFileId) return;
-  const tests = new Map<string, PatchOp>();
+  const tests = new Map<string, UpsertEdgeOp>();
   for (const op of ops) {
     if (op.type !== 'UpsertEdge' || (op.predicate !== 'CALLS' && op.predicate !== 'IMPORTS')
       || !productionIds.has(String(op.dst))) continue;

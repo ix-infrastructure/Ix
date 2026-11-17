@@ -187,4 +187,33 @@ fn make(b: Builder) {
       predicate: 'CALLS',
     });
   });
+  it('names a Self:: call by the impl type', () => {
+    const result = parseFile(
+      '/repo/counter.rs',
+      `
+pub struct Counter;
+
+impl Counter {
+    pub fn build() -> Self {
+        Self::fresh()
+    }
+    fn fresh() -> Self {
+        Counter
+    }
+}
+
+impl Default for Counter {
+    fn default() -> Self {
+        Self::build()
+    }
+}
+      `,
+    );
+
+    const callsOf = result!.relationships.filter(r => r.predicate === 'CALLS').map(r => [r.srcName, r.dstName]);
+    expect(callsOf).toContainEqual(['Counter.build', 'Counter.fresh']);
+    // A trait impl is not a container, so its method is named bare.
+    expect(callsOf).toContainEqual(['default', 'Counter.build']);
+    expect(callsOf.some(([, dst]) => dst.startsWith('Self.'))).toBe(false);
+  });
 });

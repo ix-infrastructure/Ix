@@ -30,7 +30,8 @@ const client = {
   expand: async (id: string, opts: { direction: string; predicates: string[] }) => {
     const key = `${id} ${opts.direction} ${opts.predicates.join(",")}`;
     graph.calls.push(key);
-    return { nodes: graph.value.get(key) ?? [], edges: [] };
+    // Partial nodes, as the code under test reads them: not full GraphNodes.
+    return { nodes: graph.value.get(key) ?? [], edges: [] } as never;
   },
   // Name search, as the backend answers it: fuzzy, so callers match the name exactly.
   search: async (term: string) => {
@@ -195,6 +196,15 @@ describe("ix overrides on a three-level hierarchy", () => {
     expect(text).toMatch(/ {2}overrides\n {4}Base\.m {2}pkg\/base\.py:3-5 {2}depth 1/);
     expect(text).toMatch(/ {2}overridden by\n {4}Leaf\.m {2}pkg\/leaf\.py:5-7 {2}depth 1/);
     expect(text).toMatch(/ {2}siblings \(via Base\.m\)\n {4}Other\.m {2}pkg\/other\.py:7-9 {2}depth 1/);
+  });
+
+  it("a target given as Mid.m is matched by m and shown as Mid.m", async () => {
+    target.value = { ...asTarget(MID_M), displayName: "Mid.m" };
+    const { out } = await run(["overrides", "Mid.m", "--format", "llm"]);
+    expect(out[0]).toBe("overrides target=Mid.m owner=Mid root=Base.m shown=3 total=3");
+    const body = json((await run(["overrides", "Mid.m", "--format", "json"])).out);
+    expect(body.resolvedTarget).toEqual({ id: MID_M.id, name: "Mid.m", kind: "method", path: "pkg/mid.py" });
+    expect(body.total).toBe(3);
   });
 
   it("answers under the implementations alias", async () => {

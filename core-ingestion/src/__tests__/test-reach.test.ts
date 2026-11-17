@@ -36,7 +36,7 @@ describe('TESTS edges from real source fixtures', () => {
     const checks = load('checks.ts');
     const driver = load('driver.test.ts');
     expect(checks.entities.find(e => e.kind === 'file')?.isTest).toBe(true);
-    const index = buildGlobalResolutionIndex([checks.filePath], undefined, undefined,
+    const index = buildGlobalResolutionIndex([checks.filePath],
       new Map([[checks.filePath, summarizeParseResult(checks)]]));
     const edges = resolveEdges([driver], undefined, index);
     expect(edges.some(e => e.dstFilePath === checks.filePath && e.dstIsTest)).toBe(true);

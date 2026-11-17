@@ -11,11 +11,12 @@ vi.mock("../resolve.js", () => ({
 }));
 
 import {
-  CONTAINER_KINDS, declarationLines, DEFAULT_CAPS, localityRank, estimateTokens, findUseInImporter, fitToBudget, gatherAround, importStatementText, isTestFile,
+  declarationLines, DEFAULT_CAPS, localityRank, estimateTokens, findUseInImporter, fitToBudget, gatherAround, importStatementText, isTestFile,
   outermostDefs, parseAroundTarget, placeDefs, selectEdited, type AroundResult, type FileDef,
 } from "../around.js";
 import { aroundJson, renderAroundLlm, renderAroundText } from "../around-render.js";
 import { SourceFiles } from "../edge-sites.js";
+import { TYPE_REFERENCE_KINDS } from "../graph-model.js";
 import { aroundRelPath } from "../commands/around.js";
 
 describe("parseAroundTarget", () => {
@@ -138,8 +139,8 @@ describe("declarationLines: an edit to a class outside its methods", () => {
   });
 
   it("covers the class-like kinds", () => {
-    for (const k of ["class", "interface", "enum", "struct", "trait"]) expect(CONTAINER_KINDS.has(k), k).toBe(true);
-    for (const k of ["function", "method", "constructor"]) expect(CONTAINER_KINDS.has(k), k).toBe(false);
+    for (const k of ["class", "interface", "enum", "struct", "trait"]) expect(TYPE_REFERENCE_KINDS.has(k), k).toBe(true);
+    for (const k of ["function", "method", "constructor"]) expect(TYPE_REFERENCE_KINDS.has(k), k).toBe(false);
   });
 
   it("renders as declarations, with the type's references counted, not listed", () => {

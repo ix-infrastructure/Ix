@@ -1,6 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { forMcp, suggest } from "../next-step.js";
+import { hint, type Hint } from "../next-step.js";
+import { CALLABLE_KINDS, CONTAINER_KINDS, CONTRACT_TYPE_KINDS } from "../graph-model.js";
 
 /**
  * Risk-semantics inference for ix impact.
@@ -160,21 +161,6 @@ export function humanizeLabel(raw: string): string {
   return `${parts[0]} layer`;
 }
 
-// ── Kind sets ────────────────────────────────────────────────────────────────
-
-const TYPE_KINDS = new Set([
-  "interface", "type", "type_alias", "enum", "sealed_trait",
-  "trait", "abstract_class",
-]);
-
-const CONTAINER_KINDS = new Set([
-  "class", "module", "file", "object", "trait", "interface",
-]);
-
-const CALLABLE_KINDS = new Set([
-  "function", "method", "def", "fun", "constructor",
-]);
-
 // ── Flow detection (reuses token patterns from flow-semantics.ts) ────────────
 
 interface FlowMatch {
@@ -274,7 +260,7 @@ function detectCategory(facts: ImpactFacts): { category: RiskCategory; reasons: 
   const tokens = allTokens(facts);
 
   // Foundation: type definitions, enums, interfaces, shared model files
-  if (TYPE_KINDS.has(kind)) {
+  if (CONTRACT_TYPE_KINDS.has(kind)) {
     return { category: "foundation", reasons: [`kind "${kind}" is a type-level construct`] };
   }
   if (kind === "file" && hasModelSignal(tokens) && facts.members > 0) {
@@ -513,39 +499,41 @@ function buildMostAffectedHint(facts: ImpactFacts, category: RiskCategory): stri
 
 // ── Next step ────────────────────────────────────────────────────────────────
 
-function buildNextStep(facts: ImpactFacts, category: RiskCategory): string | undefined {
-  if (forMcp()) return mcpNextStep(facts, category);
-  if ((category === "foundation" || category === "shared") && facts.directImporters >= 3) {
-    return `Understand its system role: ix explain ${facts.name}`;
-  }
-  if (category === "boundary" && facts.memberLevelCallers >= 10) {
-    return `Trace propagation: ix depends ${facts.name} --depth 2`;
-  }
-  if (category === "flow" && facts.callers >= 1) {
-    return `Trace flow propagation: ix depends ${facts.name} --depth 2`;
-  }
-  return undefined;
-}
-
 /**
- * {@link buildNextStep} for an MCP caller, who has neither `ix explain` nor
- * `ix depends` in the core toolset. The same three situations, each sent to
- * the one-hop list that names the files involved: importers for a foundation
- * type, callers for a boundary or a flow stage.
+ * The next step after an impact summary, as alternatives in order of
+ * preference: the first the reader can run is the one given. A shell runs
+ * every `ix` command, so the CLI always gets the first; an MCP session gets the
+ * first whose tool it was offered, which in the core toolset is the one-hop list
+ * that names the files involved (importers for a foundation type, callers for a
+ * boundary or a flow stage).
  */
-function mcpNextStep(facts: ImpactFacts, category: RiskCategory): string | undefined {
+function buildNextStep(facts: ImpactFacts, category: RiskCategory): string | undefined {
   const isFile = facts.kind.toLowerCase() === "file";
   // A file resolves by its path; a symbol by name, pinned to its file.
   const symbol = isFile ? (facts.targetPath ?? facts.name) : facts.name;
-  const pin = isFile ? {} : { path: facts.targetPath };
+  const path = isFile ? undefined : facts.targetPath;
+  let steps: Array<[label: string, step: Hint]>;
   if ((category === "foundation" || category === "shared") && facts.directImporters >= 3) {
-    return `List every importer, with path:lines: ${suggest.neighbors(symbol, "imported_by", pin)}`;
+    steps = [
+      ["Understand its system role", { action: "explain", symbol: facts.name }],
+      ["List every importer, with path:lines", { action: "neighbors", symbol, relation: "imported_by", path }],
+    ];
+  } else if (category === "boundary" && facts.memberLevelCallers >= 10) {
+    steps = [
+      ["Trace propagation", { action: "depends", symbol: facts.name, depth: 2 }],
+      ["List every caller, with path:lines", { action: "neighbors", symbol, relation: "callers", path }],
+    ];
+  } else if (category === "flow" && facts.callers >= 1) {
+    steps = [
+      ["Trace flow propagation", { action: "depends", symbol: facts.name, depth: 2 }],
+      ["List every caller, with path:lines", { action: "neighbors", symbol, relation: "callers", path }],
+    ];
+  } else {
+    return undefined;
   }
-  if (category === "boundary" && facts.memberLevelCallers >= 10) {
-    return `List every caller, with path:lines: ${suggest.neighbors(symbol, "callers", pin)}`;
-  }
-  if (category === "flow" && facts.callers >= 1) {
-    return `List every caller, with path:lines: ${suggest.neighbors(symbol, "callers", pin)}`;
+  for (const [label, step] of steps) {
+    const command = hint(step);
+    if (command !== undefined) return `${label}: ${command}`;
   }
   return undefined;
 }

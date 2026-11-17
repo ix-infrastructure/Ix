@@ -30,28 +30,49 @@ The plugins never shared one tool surface. Measured against `ix mcp`:
 | ix-codex-plugin | 23 | — |
 | ix-cursor-plugin | 23 | — |
 | ix-gemini-plugin | 23 | `ix_decide`, `ix_ingest`, `ix_query`, `ix_status` |
-| ix-openclaw-plugin | 17 | `ix_decide`, `ix_docs_tool`, `ix_ingest`, `ix_neighbors`, `ix_query` |
-| ix-opencode-plugin | 17 | `ix_decide`, `ix_docs_tool`, `ix_ingest`, `ix_neighbors`, `ix_query` |
+| ix-openclaw-plugin | 17 | `ix-decide` (pre-edit verdict), `ix_docs_tool`, `ix_ingest`, `ix_neighbors`, `ix_query` |
+| ix-opencode-plugin | 17 | `ix-decide` (pre-edit verdict), `ix_docs_tool`, `ix_ingest`, `ix_neighbors`, `ix_query` |
 | ix-claude-plugin | 0 (skills only) | — |
 
-`ix mcp` now closes that gap, with three deliberate exclusions:
+`ix mcp` now closes most of that gap. One gap stays open, and two tools are
+excluded on purpose.
+
+Not served: **the pre-edit verdict.** The openclaw and opencode plugins ship an
+`ix-decide` tool (`tools/ix-decide.ts`) that takes `touched_paths`, `intent` and
+`risk_tolerance` and answers ALLOW or REVIEW, computed from `ix impact`. It is
+read-only and needs no Pro. `ix mcp` has no equivalent. Its `ix_decide` shares
+the name and nothing else: it runs the Pro command `ix decide <title>` and
+records a design decision, which is a write. The verdict stays in those
+plugins' own tools and hooks until a read-only MCP tool exists for it, and that
+tool should not reuse the name.
+
+The deliberate exclusions:
 
 - **`ix_query`** — the deprecated command the CLI docs tell agents not to use
   ("produces oversized low-signal responses"). Dropped on purpose.
-- **`ix_neighbors`** — a composite of `ix_callers` + `ix_callees` + `ix_depends`,
-  all served individually. Callers lose one round-trip, not a capability.
-- **`ix_docs_tool`** — a composite over `ix_overview`, likewise served.
+- **`ix_docs_tool`** — a composite over `ix_overview`, which is served.
+
+`ix_neighbors` is served. It is one tool for callers, callees, imports,
+importers and overrides. The single-relation tools (`ix_callers`,
+`ix_callees`, `ix_imported_by`, `ix_imports`, `ix_overrides`) stay in the full
+catalog for `--tools=all`; the default session advertises `ix_neighbors` in
+their place. See [Toolsets](mcp.md#toolsets).
 
 And `ix_status` is Gemini's name for what `ix mcp` calls `ix_health`; both run
 `ix status`.
 
-`ix_decide` and `ix_ingest` were real gaps and are now served. `ix_decide` is a
-write and needs Pro, so it is advertised only when `@ix/pro` resolves — as are
-`ix_briefing` and `ix_decisions`, which this server previously offered to every
-install even though every call answered "requires Ix Pro".
+`ix_ingest` was a real gap and is now served, as is `ix_neighbors` (above).
+`ix_decide` is served too, but it is the Pro decision recorder; whether that is
+what gemini's own `ix_decide` does has not been re-checked here, so compare its
+parameters before migrating that plugin. `ix_decide` is a write and needs Pro,
+so it is advertised only when `@ix/pro` resolves — as are `ix_briefing` and `ix_decisions`, which this
+server previously offered to every install even though every call answered
+"requires Ix Pro".
 
 **Net:** codex and cursor can delegate with no change in what an agent can do.
-gemini, openclaw and opencode lose only `ix_query` and the two composites.
+gemini loses `ix_query` (`ix_status` is served as `ix_health`), plus a verdict
+tool if its `ix_decide` turns out to be one. openclaw and opencode lose `ix_query`,
+`ix_docs_tool` and the pre-edit verdict.
 
 ## Structured results and tool annotations
 
@@ -79,14 +100,20 @@ gemini, openclaw and opencode lose only `ix_query` and the two composites.
   the runner, and what a tool can reach is bounded by the command it runs, not by
   what it is advertised as.
 
-- **Structured content.** `ix_map`, `ix_ingest` and `ix_smells` return their
-  parsed JSON object as `structuredContent` (with an `outputSchema`) so agents
-  receive typed values instead of a string to re-parse. The schema asserts only
-  "an object": the real field shape is backend-defined and versioned, and
+- **Structured content.** `ix_map` and `ix_ingest` return their parsed JSON
+  object as `structuredContent`, with an `outputSchema`, so agents receive
+  typed values instead of a string to re-parse. The schema asserts only "an
+  object": the real field shape is backend-defined and versioned, and
   promising specific fields would break tool calls the moment the backend
   renames one. The human-readable text result is preserved for clients that
   prefer it. Most remaining tools return their `llm`-format text, which has no
   stable object shape worth promising.
+
+  `ix_smells` and `ix_context` return `structuredContent` only when the caller
+  passes `structured: true`. Neither declares an `outputSchema`: an output
+  schema is a promise that every result carries structured content, and an
+  opt-in copy cannot make that promise. Without the flag, `ix_smells` returns
+  compact JSON text and `ix_context` returns llm records.
 
   The Pro tools are the exception worth naming: they run in JSON too, but get
   neither an `outputSchema` nor `structuredContent`, because their shape cannot
@@ -102,6 +129,10 @@ gemini, openclaw and opencode lose only `ix_query` and the two composites.
    becomes a new floor.
 2. **Point each plugin's registration at `ix mcp`** instead of its own server,
    and delete that server. Start with codex and cursor — those two are lossless.
+   Before migrating openclaw or opencode, remove every prompt, skill or hook
+   text that tells an agent to call `ix-decide` before editing. Under `ix mcp`
+   the closest name an agent will find is `ix_decide`, which writes a decision
+   record instead of returning a verdict.
 3. **Leave agents, hooks, skills and commands where they are.** They are the
    plugins' remaining reason to exist.
 

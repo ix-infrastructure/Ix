@@ -9,7 +9,9 @@ import { buildDependencyTree } from "../commands/depends.js";
 import { getSystemPath } from "../hierarchy.js";
 import type { CommitRef } from "./history.js";
 import { isTestPath, type RelatedRef } from "./related-files.js";
-import { forMcp, toolCall } from "../next-step.js";
+import { hint, suggestedCommand } from "../next-step.js";
+import { TYPE_KINDS, type GraphKind, type KindSet } from "../graph-model.js";
+import { featureOff, markFeatureOff, routeMissing } from "../../client/features.js";
 
 /** A related entity and where it is defined. */
 export interface EntityLocation {
@@ -209,12 +211,8 @@ const MEMBER_USE_CAP = 50;
 const MEMBER_USE_CONCURRENCY = 6;
 const USE_PREDICATES = ["CALLS", "REFERENCES", "IMPORTS"];
 
-/** Kinds whose own members are worth one more hop: a class's methods are not
- * listed under its file. */
-const CONTAINER_KINDS = new Set(["class", "interface", "trait", "object", "struct", "enum"]);
-
 /** Kinds a reader navigates by. Everything else ranks after them. */
-const PRIMARY_MEMBER_KINDS = new Set([
+const PRIMARY_MEMBER_KINDS: KindSet = new Set<GraphKind>([
   "class", "interface", "function", "method", "type", "enum", "trait", "struct", "object", "module",
 ]);
 
@@ -291,7 +289,8 @@ async function collectNeighbourMembers(
       // `IxClient`, and `reset`, `resetCode` and `deleteWorkspace` -- three of
       // one task's four answers -- hang off that. One level down, for the
       // leading container only.
-      const container = direct.find(m => CONTAINER_KINDS.has(m.kind));
+      // Type kinds only: a file's nested module is not one more hop.
+      const container = direct.find(m => TYPE_KINDS.has(m.kind));
       let nested: EntityLocation[] = [];
       if (container) {
         try {
@@ -432,20 +431,70 @@ async function lookUpContainer(client: IxClient, containerId: string): Promise<E
   }
 }
 
-/** The target's callees by name, one entity read each, in edge order. */
-function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRef[]> {
+/**
+ * How long a backend that does not serve `POST /v1/nodes` is read one entity
+ * at a time before the batched read is tried again, so a long-lived `ix mcp`
+ * server picks it up after a backend upgrade.
+ */
+const BATCH_NODES_OFF_TTL_MS = 10 * 60_000;
+
+/**
+ * The callees in one `POST /v1/nodes` read (Ix-memory 1.0.33+), by id. Empty
+ * when the read is not used: the route is missing (remembered for this backend
+ * for `BATCH_NODES_OFF_TTL_MS`), the read fails, or the answer is not the
+ * expected shape. A node without a provenance object is left out, so it is
+ * read on its own and keeps the path the entity read gives it; so is every
+ * id the read does not return (`missing`: no live node behind it).
+ *
+ * Removable fallback: once MIN_BACKEND_VERSION reaches 1.0.33 (`batchNodes`
+ * in client/features.ts) the route-missing branch can go.
+ */
+async function batchReadCallees(client: IxClient, ids: string[]): Promise<Map<string, any>> {
+  const found = new Map<string, any>();
+  const endpoint = String(client.endpoint);
+  if (ids.length === 0 || featureOff("batchNodes", endpoint)) return found;
+  let answer: unknown;
+  try {
+    answer = await client.nodes(ids, "full");
+  } catch (err) {
+    if (routeMissing("batchNodes", err)) markFeatureOff("batchNodes", endpoint, BATCH_NODES_OFF_TTL_MS);
+    return found;
+  }
+  const nodes = (answer as { nodes?: unknown } | null)?.nodes;
+  if (!Array.isArray(nodes)) return found;
+  for (const n of nodes) {
+    if (n === null || typeof n !== "object") continue;
+    const node = n as any;
+    if (typeof node.id !== "string") continue;
+    if (node.provenance === null || typeof node.provenance !== "object") continue;
+    if (!found.has(node.id)) found.set(node.id, node);
+  }
+  return found;
+}
+
+/**
+ * The target's callees by name, in edge order. Read in one batched read when
+ * the backend serves it, and one entity read each for whatever that leaves out
+ * (Ix#931); either way each callee is described from the same node. A callee
+ * with no usable name, or one that cannot be read, is listed unresolved with a
+ * text-search suggestion. `ix explain` and `collectFacts` both use this one.
+ */
+export async function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRef[]> {
+  const batched = await batchReadCallees(
+    client,
+    [...new Set(calleeEdges.map((e: any) => e.dst).filter((id: unknown): id is string => typeof id === "string"))],
+  );
   return Promise.all(
     calleeEdges.map(async (e: any): Promise<EntityRef> => {
       try {
-        const callee = await client.entity(e.dst);
-        const calleeNode = callee.node as any;
+        const calleeNode = batched.get(e.dst) ?? ((await client.entity(e.dst)).node as any);
         const name = calleeNode.name || calleeNode.attrs?.name || "";
         if (!name || isRawId(name)) {
           return {
             name: name || e.dst,
             kind: calleeNode.kind,
             resolved: false,
-            suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
+            ...suggestedCommand({ action: "text", pattern: e.dst.slice(0, 8), quote: true }),
           };
         }
         return {
@@ -454,14 +503,14 @@ function resolveCallList(client: IxClient, calleeEdges: any[]): Promise<EntityRe
           id: e.dst,
           resolved: true,
           path: relativePath(calleeNode.provenance?.source_uri ?? calleeNode.provenance?.sourceUri),
-          suggestedCommand: forMcp() ? toolCall("ix_explain", { symbol: name }) : `ix explain "${name}"`,
+          ...suggestedCommand({ action: "explain", symbol: name, quote: true }),
         };
       } catch {
         return {
           name: e.dst,
           resolved: false,
           diagnostic: "unresolved_call_target",
-          suggestedCommand: forMcp() ? toolCall("ix_text", { pattern: e.dst.slice(0, 8) }) : `ix text "${e.dst.slice(0, 8)}"`,
+          ...suggestedCommand({ action: "text", pattern: e.dst.slice(0, 8), quote: true }),
         } as EntityRef;
       }
     }),
@@ -614,6 +663,10 @@ export async function collectFacts(
       parts.push(`${unresolvedCalls.total} called name(s) have no definition in the graph: ${unresolvedCallNames(unresolvedCalls)}.`);
     }
     if (danglingCallees > 0) parts.push(`${danglingCallees} callee(s) could not be resolved to named entities.`);
+    // Only dangling edges means a graph built before tree-sitter/1.28; the next
+    // map rebuilds it. llm output prints no notes, so the hint lives here.
+    const mapStep = unresolvedCalls ? undefined : hint({ action: "map" });
+    if (mapStep) parts.push(`Run \`${mapStep}\` to improve coverage.`);
     diagnostics.push({ code: "unresolved_call_target", message: parts.join(" ") });
   }
 

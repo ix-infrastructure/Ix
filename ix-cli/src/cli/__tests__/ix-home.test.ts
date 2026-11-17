@@ -7,7 +7,7 @@ import * as nodePath from "node:path";
 import { parse } from "yaml";
 
 import { ixHome } from "../ix-home.js";
-import { ingestMtimeCachePath, mapBaselinePath, saveConfig, stitchScopeCachePath } from "../config.js";
+import { DEFAULT_ENDPOINT, getEndpoint, ingestMtimeCachePath, mapBaselinePath, saveConfig, stitchScopeCachePath } from "../config.js";
 import { ensureLocalConfig } from "../bootstrap.js";
 
 // IX_HOME, not HOME. `os.homedir()` answers from the process environment that
@@ -154,5 +154,37 @@ describe("ensureLocalConfig under IX_HOME", () => {
     const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     expect(ensureLocalConfig()).toBe(false);
     expect(write).not.toHaveBeenCalled();
+  });
+});
+
+describe("ensureLocalConfig with IX_ENDPOINT set", () => {
+  // IX_ENDPOINT is a per-invocation override everywhere else. A one-off
+  // `IX_ENDPOINT=http://other-host:8090 ix map` on a fresh machine used to
+  // write that host into the new config.yaml, so every later command kept
+  // talking to it after the variable was unset (#952).
+  let savedEndpoint: string | undefined;
+
+  beforeEach(() => {
+    savedEndpoint = process.env.IX_ENDPOINT;
+    process.env.IX_ENDPOINT = "http://other-host.example:8090";
+  });
+
+  afterEach(() => {
+    if (savedEndpoint === undefined) delete process.env.IX_ENDPOINT;
+    else process.env.IX_ENDPOINT = savedEndpoint;
+  });
+
+  it("creates the config with the default endpoint, not the override", () => {
+    expect(ensureLocalConfig()).toBe(true);
+    const written = fs.readFileSync(nodePath.join(home, "config.yaml"), "utf8");
+    expect(written).not.toContain("other-host.example");
+    expect(parse(written)).toMatchObject({ endpoint: DEFAULT_ENDPOINT, format: "text" });
+  });
+
+  it("keeps the override for this run and drops it once the variable is unset", () => {
+    ensureLocalConfig();
+    expect(getEndpoint()).toBe("http://other-host.example:8090");
+    delete process.env.IX_ENDPOINT;
+    expect(getEndpoint()).toBe(DEFAULT_ENDPOINT);
   });
 });

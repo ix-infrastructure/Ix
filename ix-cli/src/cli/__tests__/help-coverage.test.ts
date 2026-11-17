@@ -60,9 +60,11 @@ describe("help coverage", () => {
 });
 
 /**
- * `ix --help` is a hand-written list, so a new command was easy to leave out:
- * `context`, the command agents are told to use first, was missing. Every
- * command the OSS build registers and does not hide has to be in it.
+ * `ix --help` was a hand-written list, so a new command was easy to leave out:
+ * `context`, the command agents are told to use first, was missing. It is
+ * built from the command manifest now (`register/commands.ts`); this checks
+ * the generator: every command the OSS build registers and does not hide has
+ * to be in it.
  */
 /** Registered but deliberately not listed: deprecated, or not a command people run. */
 const UNLISTED = new Set(["query", "init", "help", "hook"]);

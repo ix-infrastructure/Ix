@@ -10,31 +10,36 @@ import { Command } from "commander";
 import { registerProStubs } from "./register/pro-stubs.js";
 import { planStartup, registerForPlan } from "./register/oss-table.js";
 import { tryLoadProCommands } from "./register/pro-loader.js";
-import { isRepairInvocation } from "./register/pro-failure.js";
+import { registerOssFallbacks } from "./register/oss-fallbacks.js";
+import { isRepairInvocation, skipsProLoading } from "./register/pro-failure.js";
 import { buildHelpText } from "./help-text.js";
 import { stderrIsTerminal } from "./stderr.js";
-import { detectRequestedFormat, renderCliError, setErrorFormat } from "./errors.js";
-import { getEndpoint } from "./config.js";
+import {
+  bindCommanderErrors,
+  commandFormat,
+  renderCliError,
+  resolveErrorFormat,
+  setErrorFormat,
+  setErrorFormatFallback,
+  throwCommanderExit,
+  writeCommanderError,
+} from "./errors.js";
+import { getEndpoint, readConfiguredFormat } from "./config.js";
+import { readCliVersion } from "./cli-version.js";
 
-import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
-
-let cliVersion = "0.0.0";
-try {
-  const __dirname = dirname(fileURLToPath(import.meta.url));
-  const pkg = JSON.parse(readFileSync(join(__dirname, "../../package.json"), "utf-8"));
-  cliVersion = pkg.version || "0.0.0";
-} catch {}
+const cliVersion = readCliVersion();
 
 // Set IX_DEBUG=1 to append stack traces to any rendered error.
 const debug = process.env.IX_DEBUG === "1";
 
 // Before anything can throw. The handlers below are installed for
 // `unhandledRejection` and `uncaughtException`, which can fire before
-// commander has parsed a thing, so the error boundary gets the format from
-// argv rather than from a parsed command.
-setErrorFormat(detectRequestedFormat(process.argv.slice(2)));
+// commander has parsed a thing, so until a command is parsed the error
+// boundary resolves the format the way a command's default is resolved: the
+// typed `--format`, then IX_FORMAT, then config.format. Lazily -- a run that
+// never fails never reads config for it.
+setErrorFormatFallback(() =>
+  resolveErrorFormat(process.argv.slice(2), process.env, readConfiguredFormat));
 
 // Resolving the endpoint reads config off disk, which can itself fail. An
 // error renderer must never throw, so failure here just drops the endpoint
@@ -60,7 +65,20 @@ process.on("uncaughtException", (err: unknown) => {
 const program = new Command();
 program
   .name("ix")
-  .version(cliVersion);
+  .version(cliVersion)
+  // Set before any command is registered, so every subcommand inherits both:
+  // a usage error (unknown option, bad value) is thrown to the boundary below
+  // and answered in the caller's format, rather than commander printing prose
+  // and exiting on its own. Help and version still exit 0.
+  .exitOverride(throwCommanderExit)
+  .configureOutput({ outputError: writeCommanderError });
+
+// Registered first, so it runs before the option checks in `applyOssSetup`:
+// from here on a failure is answered in the format the payload would have
+// been -- the command's own `--format`, whatever set it.
+program.hook("preAction", (_thisCommand, actionCommand) => {
+  setErrorFormat(commandFormat(actionCommand));
+});
 
 // Start with OSS-only help; updated after Pro probe.
 program.helpInformation = () => buildHelpText();
@@ -77,13 +95,12 @@ const lazy = await registerForPlan(program, planStartup(process.argv.slice(2)));
   // OUTSIDE the parseAsync try/catch below — render the failure here rather
   // than letting it reach the unhandledRejection handler by accident.
   let proLoaded = false;
-  // `ix hook` runs inside an agent harness after every edit and must exit 0
-  // with nothing on stdout whenever it cannot help. A broken Pro install would
-  // otherwise make it exit 1 before its action runs, and it needs nothing Pro
-  // registers.
-  const isHook = process.argv[2] === "hook";
+  // `ix hook` and `ix capabilities` never load Pro (see skipsProLoading): a
+  // broken Pro install would otherwise make the hook exit 1 before its action
+  // runs, and capabilities promises to resolve Pro without initializing it.
+  const skipPro = skipsProLoading(process.argv);
   try {
-    if (!isHook && !lazy) proLoaded = await tryLoadProCommands(program);
+    if (!skipPro && !lazy) proLoaded = await tryLoadProCommands(program);
   } catch (err) {
     if (!isRepairInvocation(process.argv)) {
       renderCliError(err, debug, safeEndpoint()); // exits 1
@@ -105,6 +122,10 @@ const lazy = await registerForPlan(program, planStartup(process.argv.slice(2)));
 
     program.helpInformation = () => buildHelpText(proCommands);
   } else {
+    // `ix note` / `ix session` against the local backend, where Pro's would
+    // otherwise be. A lazy plan already registered the one this run needs, if
+    // any (see register/oss-fallbacks.ts).
+    if (!lazy) await registerOssFallbacks(program);
     registerProStubs(program);
   }
 
@@ -123,6 +144,11 @@ const lazy = await registerForPlan(program, planStartup(process.argv.slice(2)));
     // unhandledRejection handler then aborts a command that already succeeded.
     updates.checkForUpdate().catch(() => {});
   }
+
+  // Every command is registered now. Give each its own usage-error format, so
+  // only a command that takes --format answers a bad flag in records: `ix hook`
+  // and `ix mcp` print prose, whatever IX_FORMAT says.
+  bindCommanderErrors(program, args);
 
   // parseAsync (not parse) so rejections from async action handlers surface
   // here instead of floating off as unhandled rejections.

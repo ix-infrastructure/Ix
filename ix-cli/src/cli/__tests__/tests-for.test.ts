@@ -8,10 +8,10 @@ import { execFileSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createIxMcpServer } from "../../mcp/server.js";
-import { loadIngestionModules } from "../commands/ingestion-loader.js";
-import { gatherTestsFor, type TestNode, type TestEdge } from "../tests-for.js";
+import { loadIngestionModules, loadSymbolIndex } from "../commands/ingestion-loader.js";
+import { gatherTestsFor } from "../tests-for.js";
+import type { GraphNode, GraphEdge } from "../../client/types.js";
 import { inferTestCommand } from "../test-command.js";
-import { changedNames, findDependents, importsChanged } from "../ingest-symbols.js";
 
 const state = vi.hoisted(() => ({ client: {} as any, target: null as any }));
 vi.mock("../../client/factory.js", () => ({ createClient: () => state.client }));
@@ -42,14 +42,28 @@ async function graph(paths: string[], sources: Record<string, string> = {}) {
     )!,
   );
   const resolved = parser.resolveEdges(parsed);
-  const nodes: TestNode[] = [];
-  const edges: TestEdge[] = [];
+  const nodes: GraphNode[] = [];
+  const edges: GraphEdge[] = [];
   for (const file of parsed) {
     const patch = builder.buildPatchWithResolution(file, "hash", "ws", resolved);
     for (const op of patch.ops) {
       if (op.type === "UpsertNode")
-        nodes.push({ ...op, provenance: { source_uri: patch.source.uri } } as unknown as TestNode);
-      if (op.type === "UpsertEdge") edges.push(op as unknown as TestEdge);
+        nodes.push({
+          ...op,
+          attrs: op.attrs ?? {},
+          provenance: {
+            sourceUri: patch.source.uri,
+            source_uri: patch.source.uri,
+            sourceHash: patch.source.sourceHash,
+            extractor: patch.source.extractor,
+            sourceType: patch.source.sourceType,
+            observedAt: patch.timestamp,
+          },
+          createdRev: 1,
+          createdAt: patch.timestamp,
+          updatedAt: patch.timestamp,
+        });
+      if (op.type === "UpsertEdge") edges.push({ ...op, attrs: op.attrs ?? {}, createdRev: 1 });
     }
   }
   const expand = vi.fn(
@@ -58,7 +72,7 @@ async function graph(paths: string[], sources: Record<string, string> = {}) {
       opts: { direction?: string; predicates?: string[]; hops?: number; limit?: number } = {},
     ) => {
       let ids = new Set([id]);
-      const selected = new Set<TestEdge>();
+      const selected = new Set<GraphEdge>();
       for (let i = 0; i < (opts.hops ?? 1); i++) {
         const next = new Set<string>();
         for (const edge of edges) {
@@ -184,6 +198,7 @@ describe("tests-for real ingestion evidence", () => {
 
   it("re-resolves unchanged callers when a production file becomes framework test code", async () => {
     const [parser] = await loadIngestionModules();
+    const { changedNames, findDependents, importsChanged } = await loadSymbolIndex();
     const source = readFileSync(resolve(fixture, "checks.ts.fixture"), "utf8");
     const before = parser.summarizeParseResult(
       parser.parseFile(

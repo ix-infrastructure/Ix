@@ -20,6 +20,7 @@ import {
 } from "../backend-version.js";
 import { backendComposeArgs } from "../backend-compose.js";
 import { ixHome } from "../ix-home.js";
+import { DEFAULT_ENDPOINT } from "../endpoint.js";
 
 // Re-exported for the existing importers of this module (tests and call sites
 // that predate backend-version.ts). recordBackendRelease is deliberately NOT
@@ -1271,9 +1272,10 @@ export function updateCheckEnabled(
   env: NodeJS.ProcessEnv,
   stderrIsTerminal: boolean,
 ): boolean {
-  // `upgrade` reports versions itself, and `mcp` speaks JSON-RPC on stdio
-  // where a stray notice is a protocol error.
-  if (argv[0] === "upgrade" || argv[0] === "mcp") return false;
+  // `upgrade` reports versions itself, `mcp` speaks JSON-RPC on stdio
+  // where a stray notice is a protocol error, and `install` asks questions on
+  // stderr that a notice arriving mid-prompt would break up.
+  if (argv[0] === "upgrade" || argv[0] === "mcp" || argv[0] === "install") return false;
   if (env.IX_MCP_CHILD === "1") return false;
   if (isTruthyEnv(env.IX_NO_UPDATE_CHECK)) return false;
   if (!stderrIsTerminal) return false;
@@ -1741,7 +1743,7 @@ export function registerUpgradeCommand(program: Command): void {
           // Restart backend if running
           let backendRunning = false;
           try {
-            execFileSync("curl", ["-sf", "http://localhost:8090/v1/health"], {
+            execFileSync("curl", ["-sf", `${DEFAULT_ENDPOINT}/v1/health`], {
               stdio: "ignore",
               timeout: 3000,
             });

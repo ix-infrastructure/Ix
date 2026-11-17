@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import type { Command } from "commander";
-import { forMcp } from "./next-step.js";
+import { CLI_CALLER, hint, type Hint } from "./next-step.js";
 
 /** Help text for `--offset`, shared so the flag reads the same on every command. */
 export const OFFSET_FLAG = "Skip the first N results (use the next: hint to page)";
@@ -38,7 +38,13 @@ export function shellQuote(word: string, platform: NodeJS.Platform = process.pla
  * the hint is that input (`offset=50`).
  */
 export function nextPageCommand(cmd: Command, positionals: string[], nextOffset: number): string {
-  if (forMcp()) return `offset=${nextOffset}`;
+  const page: Hint = { action: "page", offset: nextOffset, argv: shellArgv(cmd, positionals, nextOffset) };
+  // Every reader can page; one that has no phrasing for it gets the command line.
+  return hint(page) ?? CLI_CALLER.command(page);
+}
+
+/** The shell words of {@link nextPageCommand}'s CLI form. */
+function shellArgv(cmd: Command, positionals: string[], nextOffset: number): string[] {
   const parts = ["ix", cmd.name()];
   for (const option of cmd.options) {
     const name = option.attributeName();
@@ -55,5 +61,5 @@ export function nextPageCommand(cmd: Command, positionals: string[], nextOffset:
   parts.push("--offset", String(nextOffset));
   if (positionals.some((p) => p.startsWith("-"))) parts.push("--");
   for (const p of positionals) parts.push(shellQuote(p));
-  return parts.join(" ");
+  return parts;
 }
