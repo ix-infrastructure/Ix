@@ -22,6 +22,8 @@
  * features in `/v1/capabilities`, which it does not do yet.
  */
 
+import { httpStatusOf } from "./http-error.js";
+
 /**
  * The oldest Ix-memory release this CLI supports. `ix doctor` warns about a
  * backend that reports an older one.
@@ -143,15 +145,13 @@ export const BACKEND_FEATURES: Readonly<Record<BackendFeature, BackendFeatureSpe
 };
 
 /**
- * The HTTP status `IxClient` put at the front of its `${status}: ${body}`
- * error, when there is one. Anchored, so a three-digit run anywhere else in the
- * message (a port, a byte count, a body that quotes "404: Not Found") is never
- * read as a status.
+ * The HTTP status of a request `IxClient` saw answered with an error (an
+ * `IxHttpError`), or null for any other failure. Read off the typed error,
+ * never out of the message (#940): a message that merely quotes a status (a
+ * port, a body titled "404: Not Found", a plain `Error("404: x")`) is not one.
  */
 export function httpStatus(error: unknown): number | null {
-  const text = error instanceof Error ? error.message : String(error);
-  const match = /^(?:Error:\s*)?(\d{3}):/.exec(text);
-  return match ? Number(match[1]) : null;
+  return httpStatusOf(error) ?? null;
 }
 
 /**

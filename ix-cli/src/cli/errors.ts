@@ -3,6 +3,7 @@
 import chalk from "chalk";
 import { CommanderError, type Command } from "commander";
 import { PRE_CONNECTION_CODES, RESET_RECONCILIATION_ERROR } from "../client/transport.js";
+import { isIxHttpError } from "../client/http-error.js";
 
 import { DEFAULT_ENDPOINT, isLoopbackEndpoint, isManagedLocalBackend } from "./endpoint.js";
 import { llmError } from "./llm.js";
@@ -243,16 +244,29 @@ export interface StructuredError {
 }
 
 /**
- * Attempt to parse a structured error from a backend HTTP error message.
- * Backend errors arrive as "${status}: ${jsonBody}" from the API client.
+ * The structured error (`{error, message, next?}`) a backend answered with.
+ *
+ * Given an `IxHttpError`, it reads the error's `body`. Given anything else, it
+ * reads the `<status>: <json body>` shape out of the message (or of the string
+ * itself): the form this function has always taken, kept for errors built
+ * outside `httpError` and for callers outside this package. Rendering only:
+ * nothing may classify a failure by its status this way (#940).
  */
-export function parseBackendError(errMessage: string): StructuredError | null {
-  // Match "NNN: {json}" pattern from api.ts error throwing
-  const match = errMessage.match(/^(\d{3}):\s*(.+)$/s);
-  if (!match) return null;
+export function parseBackendError(err: unknown): StructuredError | null {
+  let text: string;
+  if (isIxHttpError(err)) {
+    text = err.body;
+  } else {
+    const raw = typeof err === "string" ? err : (err as { message?: unknown } | null | undefined)?.message;
+    if (typeof raw !== "string") return null;
+    // ix-940-allow: legacy message form, see above.
+    const match = raw.match(/^(\d{3}):\s*(.+)$/s);
+    if (!match) return null;
+    text = match[2]!;
+  }
 
   try {
-    const body = JSON.parse(match[2]);
+    const body = JSON.parse(text);
     if (body.error && body.message) {
       return {
         error: body.error,
@@ -461,6 +475,8 @@ export function isBackendUnreachable(err: unknown): boolean {
   // otherwise render "start the backend, then check status" on top of a
   // "do not repeat this reset" warning — advising the retry it exists to stop.
   if (e?.name === RESET_RECONCILIATION_ERROR) return false;
+  // The server answered: its body's `code` is not a socket code.
+  if (isIxHttpError(err)) return false;
   if (isUnreachableCode(e)) return true;
   return isUnreachableCode(e?.cause as { code?: unknown } | null | undefined);
 }
@@ -510,6 +526,18 @@ export function configLockError(detail: string): StructuredError {
     error: "config_lock_timeout",
     message: `Ix could not lock its config to write it: ${detail}`,
     next: "Wait for the other ix command to finish and run this one again.",
+  };
+}
+
+/**
+ * A backend response of the wrong shape (`BackendContractError`): `message` is
+ * its own, which names the route and the field.
+ */
+export function backendContractError(message: string, endpoint?: string): StructuredError {
+  return {
+    error: "backend_contract_error",
+    message: message.replace(/^backend_contract_error:\s*/, `The Ix backend${endpoint ? ` at ${endpoint}` : ""} answered in a shape this CLI does not read: `),
+    next: "The backend and this CLI probably come from different releases. Run `ix doctor` to check the backend; `ix upgrade` updates the CLI and a local backend.",
   };
 }
 
@@ -607,7 +635,17 @@ export function renderCliError(err: unknown, debug = false, endpoint?: string): 
     process.exit(1);
   }
 
-  const structured = typeof e?.message === "string" ? parseBackendError(e.message) : null;
+  // A 2xx body of a shape this CLI does not read (client/contract.ts). Matched
+  // by name, like the token error above, so a copy of the class bundled
+  // elsewhere is recognised too.
+  if (e?.name === "BackendContractError" && typeof e.message === "string") {
+    const mismatch = backendContractError(e.message, endpoint);
+    if (!emitErrorRecord(mismatch.error, mismatch.message, mismatch.next)) renderStructuredError(mismatch);
+    if (debug) writeDebugDetail(err);
+    process.exit(1);
+  }
+
+  const structured = parseBackendError(err);
   if (structured) {
     if (!emitErrorRecord(structured.error, structured.message, structured.next)) {
       renderStructuredError(structured);

@@ -58,7 +58,7 @@ export const NODE_KINDS = [
   'environment',
   // A retrieval span of a file, written by the patch builder.
   'chunk',
-  // `ix ingest --github`: a repo (intent), an issue or PR (doc), a commit (decision).
+  // `ix ingest --github`: an issue (intent), a PR (decision), a comment or commit (doc).
   'intent',
   'doc',
   'decision',

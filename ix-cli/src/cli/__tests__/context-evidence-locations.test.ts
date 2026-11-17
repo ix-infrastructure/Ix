@@ -3,7 +3,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { GraphEdge, GraphNode } from "../../client/types.js";
-import { buildBundle, renderBundle } from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { renderBundle } from "../context/render.js";
 import { contextBundleSchema } from "../context-bundle-schema.js";
 import type { ContextFacts, EntityLocation } from "../explain/facts.js";
 
@@ -264,11 +265,11 @@ describe("ix context evidence says where things are", () => {
 
     const llm = captureLog(() => renderBundle(b, "llm"));
     expect(llm[0]).toContain("target_path=src/cli/config.ts");
-    // Score is tier + position, and the target's own members lead the
-    // structural facts: a file with many imports pushed all of its own members
-    // out of the evidence budget when they came last.
-    expect(llm).toContain(
-      'evidence score=2000 kind=structural title="member resolveWorkspaceRoot" path=src/cli/config.ts lines=322-342',
+    // The target's own members lead the structural facts: a file with many
+    // imports pushed all of its own members out of the evidence budget when
+    // they came last. Rows print in rank order, without their score (#1015).
+    expect(llm.find((l) => l.startsWith("evidence kind=structural "))).toBe(
+      'evidence kind=structural title="member resolveWorkspaceRoot" path=src/cli/config.ts lines=322-342',
     );
   });
 

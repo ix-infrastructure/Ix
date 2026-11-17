@@ -56,6 +56,7 @@ import { GRAPH_MAP_FIX, GRAPH_REBUILD_FIX } from "./graph-health.js";
 import { readState, writeStateAtomic } from "./workspace-state.js";
 import { isBackendUnreachable } from "./errors.js";
 import { loadIngestionModules } from "./commands/ingestion-loader.js";
+import type { GraphKind } from "./graph-model.js";
 
 export const DEFAULT_VERIFY_SAMPLE = 20;
 export const DEFAULT_VERIFY_SEED = 24;
@@ -66,7 +67,9 @@ export const VERIFY_LIST_LIMIT = 5000;
  * too (that list is what makes an extra node of any kind visible); these cover
  * a stats read that fails or lags.
  */
-export const VERIFY_DEFAULT_KINDS: readonly string[] = ["file", "function", "method", "class", "interface", "module", "constant", "variable", "trait", "enum", "type"];
+// Exported as `readonly string[]` (its public type); `satisfies` still makes a
+// kind that exists nowhere a compile error.
+export const VERIFY_DEFAULT_KINDS: readonly string[] = ["file", "function", "method", "class", "interface", "module", "constant", "variable", "trait", "enum", "type"] satisfies readonly GraphKind[];
 const VERIFY_CONCURRENCY = 4;
 /** Ingest skips files over this many bytes (`MAX_FILE_BYTES` in ingest.ts), so verify does too. */
 const VERIFY_MAX_FILE_BYTES = 1024 * 1024;

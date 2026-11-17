@@ -18,6 +18,10 @@ export const HOOK_SUBCOMMANDS: Readonly<Record<string, HookRunner>> = Object.fre
     const { parseHookArgs, runHookProcess } = await import("./entry.js");
     await runHookProcess(parseHookArgs(argv));
   },
+  "auto-map": async (argv: string[]) => {
+    const { parseAutoMapArgs, runAutoMapProcess } = await import("./auto-map.js");
+    await runAutoMapProcess(parseAutoMapArgs(argv));
+  },
 });
 
 /** The runner for `ix hook <name>`, or undefined when `name` is not a hook subcommand. */

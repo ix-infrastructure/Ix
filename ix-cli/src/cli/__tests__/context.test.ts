@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type {
   ConflictReport,
@@ -13,10 +13,13 @@ import type {
   ScoredClaim,
 } from "../../client/types.js";
 import type { EntityFacts } from "../explain/facts.js";
-import {
-  buildBundle, bundleFormat, bundleLlmLines, clampBudgets, llmNextByCut, llmNextLines, renderBundle, sanitizeId,
-  textEvidenceLines,
-} from "../commands/context.js";
+import { mcpCaller } from "../../mcp/hints.js";
+import { IX_MCP_CORE_TOOL_NAMES } from "../../mcp/server.js";
+import { CLI_CALLER, type Caller, withCaller } from "../next-step.js";
+import { buildBundle } from "../context/bundle.js";
+import { sanitizeId } from "../context/investigations.js";
+import { bundleFormat, clampBudgets } from "../context/options.js";
+import { bundleLlmLines, llmNextByCut, llmNextLines, renderBundle, textEvidenceLines } from "../context/render.js";
 
 function makeFacts(overrides: Partial<EntityFacts> = {}): EntityFacts {
   return {
@@ -484,16 +487,11 @@ describe("ix context budget is charged against the emitted text", () => {
     return lines.join("\n");
   };
 
-  const prevCaller = process.env.IX_CALLER;
-  afterEach(() => {
-    if (prevCaller === undefined) delete process.env.IX_CALLER;
-    else process.env.IX_CALLER = prevCaller;
-  });
+  // Each reader closes a bundle with different `next` lines.
+  const readers: Array<[string, Caller]> = [["cli", CLI_CALLER], ["mcp", mcpCaller(IX_MCP_CORE_TOOL_NAMES)]];
 
-  for (const caller of [undefined, "mcp"]) {
-    it(`emits within 10% of maxChars in llm when evidence was cut (IX_CALLER=${caller ?? "unset"})`, () => {
-      if (caller) process.env.IX_CALLER = caller;
-      else delete process.env.IX_CALLER;
+  for (const [reader, caller] of readers) {
+    it(`emits within 10% of maxChars in llm when evidence was cut (${reader})`, () => withCaller(caller, () => {
       const budgets = clampBudgets({ maxTokens: 600 }, "llm");
       const bundle = buildBundle({ ...manyMembers(), budgets, format: "llm" });
       expect(bundle.truncation.evidenceTruncated).toBeGreaterThan(0);
@@ -501,7 +499,7 @@ describe("ix context budget is charged against the emitted text", () => {
       expect(out.length).toBeLessThanOrEqual(budgets.maxChars);
       expect(out.length).toBeGreaterThanOrEqual(0.9 * budgets.maxChars);
       expect(bundle.budgets.format).toBe("llm");
-    });
+    }));
   }
 
   // A sample of budgets, each probed at its own boundary: the output it
@@ -510,7 +508,6 @@ describe("ix context budget is charged against the emitted text", () => {
   // overrun, so each sample tests the tightest budgets rather than hoping a
   // dense sweep lands on them. Every 25th value keeps this to ~120 builds.
   it("never emits past maxChars in llm once the truncated_chars header is final", () => {
-    delete process.env.IX_CALLER;
     const base = clampBudgets({ maxEvidence: 200 }, "llm");
     const build = (maxChars: number) => {
       const bundle = buildBundle({ ...manyMembers(), budgets: { ...base, maxChars }, format: "llm" });
@@ -536,10 +533,8 @@ describe("ix context budget is charged against the emitted text", () => {
   // rows looked up, not recomputed (#834 makes them read files). The lookup
   // must give the lines a fresh computation would at every cut, or the size
   // measured is not the size printed.
-  for (const caller of [undefined, "mcp"]) {
-    it(`looks up the same next lines a fresh computation gives, at every cut (IX_CALLER=${caller ?? "unset"})`, () => {
-      if (caller) process.env.IX_CALLER = caller;
-      else delete process.env.IX_CALLER;
+  for (const [reader, caller] of readers) {
+    it(`looks up the same next lines a fresh computation gives, at every cut (${reader})`, () => withCaller(caller, () => {
       const big = clampBudgets({ maxChars: 100000, maxEvidence: 200 }, "llm");
       const bundle = buildBundle({ ...readableMembers(), budgets: big, format: "llm" });
       const evidence = bundle.evidence;
@@ -552,7 +547,7 @@ describe("ix context budget is charged against the emitted text", () => {
         expect(nextAt(count), `cut at ${count}`).toEqual(llmNextLines(prefix));
         expect(bundleLlmLines(prefix, nextAt(count))).toEqual(bundleLlmLines(prefix));
       }
-    });
+    }));
   }
 
   it("keeps every row when the whole bundle fits exactly (no reserved diagnostic)", () => {
@@ -617,5 +612,78 @@ describe("ix context budget is charged against the emitted text", () => {
     expect(bundleFormat("llm")).toBe("llm");
     expect(bundleFormat("text")).toBe("text");
     expect(bundleFormat(undefined)).toBe("text");
+  });
+});
+
+// #1015: `--format llm` is the token-minimal surface, so the header drops the
+// counters that are zero, evidence rows drop the `score=` their order already
+// says, and edges that would print the same title are one row.
+describe("ix context --format llm spends no tokens on what carries no signal", () => {
+  const header = (bundle: ReturnType<typeof buildBundle>): string => bundleLlmLines(bundle, [])[0]!;
+
+  it("drops zero claim, decision, conflict, intent and truncated_* counters from the header", () => {
+    const bundle = buildBundle({ ...input(), context: makeContext({ claims: [] }), format: "llm" });
+    const line = header(bundle);
+    expect(line).toMatch(/^context target=Widget /);
+    for (const key of ["claims", "decisions", "conflicts", "intents",
+      "truncated_entities", "truncated_relationships", "truncated_evidence", "truncated_chars"]) {
+      expect(line, key).not.toContain(` ${key}=`);
+    }
+    // The bundle's own size stays, zero or not.
+    expect(line).toContain(" entities=");
+    expect(line).toContain(" relationships=");
+    expect(line).toContain(` evidence=${bundle.evidence.length}`);
+  });
+
+  it("keeps the counters that are not zero", () => {
+    const bundle = buildBundle({ ...input(), format: "llm" });
+    bundle.truncation.evidenceTruncated = 4;
+    bundle.truncation.charactersTruncated = 120;
+    const line = header(bundle);
+    expect(line).toContain(" claims=1 ");
+    expect(line).toContain(" truncated_evidence=4 ");
+    expect(line).toMatch(/ truncated_chars=120$/);
+    expect(line).not.toContain("truncated_entities=");
+  });
+
+  it("prints no score= on the evidence rows, which are already in rank order", () => {
+    const bundle = buildBundle({ ...input(), format: "llm" });
+    const rows = bundleLlmLines(bundle, []).filter((l) => l.startsWith("evidence "));
+    expect(rows.length).toBe(bundle.evidence.length);
+    for (const row of rows) {
+      expect(row).toMatch(/^evidence kind=[a-z]+ title=/);
+      expect(row).not.toContain("score=");
+    }
+    // JSON keeps the number for a caller that wants it.
+    expect(bundle.evidence.every((e) => typeof e.score === "number")).toBe(true);
+  });
+
+  it("folds relationships that would print the same title into one row", () => {
+    const overload = (id: string) => ({
+      id, kind: "method", name: "render", attrs: {},
+      provenance: { sourceUri: "src/widget.ts" }, createdRev: 3,
+      createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    });
+    const nodes = [overload("ov-1"), overload("ov-2"), overload("ov-3"), { ...overload("other"), name: "mount" }] as GraphNode[];
+    const edges = ["ov-1", "ov-2", "ov-3", "other"].map((dst, i) => ({
+      id: `e-${i}`, src: "entity-1", dst, predicate: "calls", attrs: {}, createdRev: 3,
+    })) as GraphEdge[];
+    const bundle = buildBundle({ ...input(), context: makeContext({ nodes, edges }), format: "llm" });
+    const rels = bundle.evidence.filter((e) => e.kind === "relationship");
+    expect(rels.map((e) => e.title)).toEqual([
+      "Widget --calls--> mount",
+      "Widget --calls--> render (src/widget.ts) (3 edges)",
+    ]);
+    // Every folded edge is still referenced, and the scores stay consecutive.
+    expect(rels[1]!.refs).toEqual(["entity-1", "ov-1", "ov-2", "ov-3"]);
+    expect(rels[1]!.score).toBe(rels[0]!.score + 1);
+    expect(new Set(bundle.evidence.map((e) => e.id)).size).toBe(bundle.evidence.length);
+  });
+
+  it("leaves a relationship whose title is unique as it was", () => {
+    const bundle = buildBundle({ ...input(), format: "llm" });
+    const rels = bundle.evidence.filter((e) => e.kind === "relationship");
+    expect(rels.map((e) => e.title)).toEqual(["Widget --calls--> render"]);
+    expect(rels[0]!.refs).toEqual(["entity-1", "entity-2"]);
   });
 });

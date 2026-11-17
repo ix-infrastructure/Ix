@@ -76,9 +76,14 @@ about a fifth of the payload. `--pretty` forces the indented shape anywhere.
   deprecation period before the old field goes.
 
 The shapes are TypeScript types in `ix-cli/src/cli/contracts/`, and a test pins
-the keys each one prints. Covered so far: the shared miss records, `ix locate`
-and `ix read`. The other commands' json is not typed yet; the rule applies to
-it all the same.
+the keys each one prints. Covered so far: the shared miss records, `ix locate`,
+`ix read` and `ix text` (a bare array of matches, no envelope). Their field
+paths are also published as data (`contracts/fields.ts`), together with the
+failure record (`error`, `message`, `dir`, `next`) and, for `ix locate a b`, the
+`{ targets: [{ target, exitCode, ... }], summary }` grouping
+(`contracts/envelope.ts`). The plugin contract check fails a plugin that reads
+a field not listed there. The other
+commands' json is not typed yet; the rule applies to it all the same.
 
 **Misses share one envelope.** A target that resolves to nothing, or to several
 entities when nothing is answered, prints a string `error` slug and a
@@ -143,6 +148,15 @@ one reached over `CALLS`/`REFERENCES` (a node reached both ways is an
 `importer`). `summary.directImporters` and `summary.directDependents` count the
 two expands before that dedup.
 
+`summary.dependents` (llm: `dependents_total=` on the `counts` record) is the one
+"how many things depend on this" number: distinct entities that call or reference
+a leaf target, or that import, call or reference a container or call one of its
+members, each counted once, the target and what is inside it left out. For a
+container with more than 20 members it is a lower bound (member callers are read
+from the first 20 members only). Use it
+rather than adding or taking the max of the other counts, which overlap. The
+definition is in `docs/llm-format.md` ("Dependents: the one count").
+
 `--limit` cuts `topImpactedMembers` and the `llm` caller/callee rows only.
 `callerList`, `calleeList` and `dependentList` are never cut;
 `propagationBuckets[].members` lists the first five of each bucket's `count`.
@@ -169,6 +183,14 @@ Commands marked **[Pro]** require Ix Pro (server-side). The **Planning** and
 If any Pro command prints `The '<name>' command requires Ix Pro.`, this install
 does not have them — skip that step, do not retry it, and do not mention it
 again for the rest of the session. Nothing outside those marks is Pro-gated.
+
+To know in advance, without running a Pro command, read
+`ix capabilities --format json`: `pro.available` is true when Ix Pro is
+installed and its entry point resolves to a file that exists. It is not started to check, so a Pro
+that then fails to initialize still reads `available`; the Pro command you
+call next exits 1 with "could not initialize", which is the signal to stop
+calling Pro commands (`ix doctor` / `ix upgrade` repair it). See
+[flags.md](flags.md#ix-capabilities) for the full shape.
 
 Pro-only surface: `plan`, `task`, `tasks`, `workflow`, `decide`,
 `decisions`, `goal`, `truth`, `bug`, `briefing`.

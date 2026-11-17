@@ -7,7 +7,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { buildBundle, clampBudgets } from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { clampBudgets } from "../context/options.js";
 import type { ContextFacts } from "../explain/facts.js";
 import { coChangedFiles, gitRunner, recentCommits, type GitRunner } from "../explain/history.js";
 

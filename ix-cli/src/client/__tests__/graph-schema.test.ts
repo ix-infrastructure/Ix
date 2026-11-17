@@ -1,6 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -98,6 +99,34 @@ describe("graph patch schema", () => {
     const typo: graphModel.GraphKind = "fucntion";
     const written: NodeKind = "function";
     expect([typo, written]).toHaveLength(2);
+  });
+
+  // A kind set kept outside graph-model.ts must still be typed, or a kind that
+  // exists nowhere compiles there. Scans every CLI source for a kind list
+  // (`FOO_KINDS = new Set([...])`, `allKinds = [...]`) and asks for a type.
+  it("types every kind list in the CLI sources, not only graph-model.ts", () => {
+    const root = fileURLToPath(new URL("../../", import.meta.url));
+    // A kind list is named like one, or holds only graph kinds (two or more).
+    const declaration = /\b(\w+)\s*(?::[ \t]*([^=;\n]+?))?\s*=\s*(?:new Set\s*(?:<([^>]*)>)?\s*\(\s*\[([^\]]*)\]|\[(\s*"[^\]]*)\])([^;]*)/g;
+    const graphKinds = new Set<string>([...NODE_KINDS, ...graphModel.READ_ONLY_KINDS]);
+    const isKindList = (name: string, body: string): boolean => {
+      if (/(?:KINDS|Kinds|KindSet)$/.test(name)) return true;
+      const items = body.split(",").map((item) => item.trim()).filter(Boolean);
+      return items.length >= 2 && items.every((item) => /^"[a-z_]+"$/.test(item) && graphKinds.has(item.slice(1, -1)));
+    };
+    const untyped: string[] = [];
+    for (const file of readdirSync(root, { recursive: true, encoding: "utf8" })) {
+      if (!file.endsWith(".ts") || file.includes("__tests__") || file.endsWith(".d.ts")) continue;
+      const source = readFileSync(join(root, file), "utf8");
+      for (const match of source.matchAll(declaration)) {
+        const [, name, annotation, setType, setBody, arrayBody, rest] = match;
+        if (!isKindList(name!, setBody ?? arrayBody ?? "")) continue;
+        // `rest` carries a trailing `satisfies readonly GraphKind[]`.
+        const typed = `${annotation ?? ""} ${setType ?? ""} ${rest ?? ""}`;
+        if (!/\b(GraphKind|KindSet|NodeKind)\b/.test(typed)) untyped.push(`${file}: ${name}`);
+      }
+    }
+    expect(untyped).toEqual([]);
   });
 
   it("does not list a read-only kind that a writer now emits", () => {

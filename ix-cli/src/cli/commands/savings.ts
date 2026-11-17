@@ -6,24 +6,7 @@ import { createClient } from "../../client/factory.js";
 import { llmLine, printLlmLines } from "../llm.js";
 import { printJson } from "../format.js";
 import { choiceOption, formatOption } from "../options.js";
-
-interface CommandBreakdown {
-  count: number;
-  saved: number;
-}
-
-interface SavingsData {
-  commandCount: number;
-  tokensSaved: number;
-  naiveTokens: number;
-  actualTokens: number;
-  byCommandType: Record<string, CommandBreakdown>;
-}
-
-interface SavingsResponse {
-  session: SavingsData;
-  lifetime: SavingsData;
-}
+import type { SavingsCommandBreakdown as CommandBreakdown, SavingsData, SavingsResponse } from "../../client/types.js";
 
 /**
  * `ix savings --format llm`.

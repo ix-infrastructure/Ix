@@ -15,7 +15,7 @@ import { normalizePathSeparators } from "../path-match.js";
 import { checkGraphHealth } from "../graph-health.js";
 import { STRUCTURAL_KINDS } from "../graph-model.js";
 import { formatOption } from "../options.js";
-import { suggest } from "../next-step.js";
+import { hint } from "../next-step.js";
 
 /** One `ix search` row as the llm renderer takes it. */
 export interface SearchLlmRow {
@@ -318,7 +318,9 @@ export function foldImportRows(scored: Scored[], term: string): { kept: Scored[]
 /** The `imports_folded` diagnostic: how many import rows were folded, and the command that lists them. */
 export function importsFoldedMessage(folded: number, term: string): string {
   const rows = folded === 1 ? "row" : "rows";
-  return `${folded} import ${rows} of ${term} folded behind its definition. Use ${suggest.neighbors(term, "imported_by")} to list the importers.`;
+  const folding = `${folded} import ${rows} of ${term} folded behind its definition.`;
+  const importers = hint({ action: "neighbors", symbol: term, relation: "imported_by" });
+  return importers ? `${folding} Use ${importers} to list the importers.` : folding;
 }
 
 function normalizePath(value: string | undefined): string {

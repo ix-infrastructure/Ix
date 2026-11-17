@@ -42,6 +42,10 @@ This is a quick check that the build works. It is not everything CI runs: see
 
 ## Development Workflow
 
+For a map of the code — the two packages, how commands are registered, how a
+file becomes graph patches, and the rules that hold it together — read
+[docs/architecture.md](docs/architecture.md) first.
+
 1. Create a branch from `main`
 2. Make your changes
 3. Run the checks in [Before you open a PR](#before-you-open-a-pr)
@@ -108,7 +112,12 @@ in `ci.yml`:
 Other workflows report on the PR as well. The PR title must be a conventional
 commit (`pr-title.yml`). The [security checks](#security-checks) also run.
 A change under `ix-cli/src/cli/` runs the advisory plugin contract check
-(`plugin-contract.yml`).
+(`plugin-contract.yml`): the commands, flags, json fields and MCP tool names
+the editor plugins use. Its scope and its ignore list are described at the top
+of `ix-cli/scripts/check-plugin-contract.mjs`. It also reads the MCP tool lists
+in `ix-cli/src/mcp/server.ts`, but a PR that only changes `ix-cli/src/mcp/`
+does not trigger it: there it runs nightly, or by hand with
+`npm run build && node scripts/check-plugin-contract.mjs --clone` in `ix-cli/`.
 
 ## Branch Naming
 
@@ -145,6 +154,19 @@ Breaking changes: use `feat!:` or `fix!:` prefix.
 | CLI code | `cd ix-cli && npm test` while you work |
 | Any change | Everything in [Before you open a PR](#before-you-open-a-pr) |
 
+New CLI tests go beside the code they test, in that directory's `__tests__/`
+(a command's tests in `ix-cli/src/cli/commands/__tests__/`). A test that runs
+a command uses `runCommand(argv, { backend })` from
+`ix-cli/src/cli/__tests__/helpers/run-command.ts`, which runs it through the
+CLI's own error boundary against the shared `FakeBackend`
+(`helpers/fake-backend.ts`) in a scratch home and workspace, and returns
+`{ stdout, stderr, exitCode }`. A test that sets up its own home, config and
+files, and reads them back afterwards, uses `runInProcess` from the same file
+instead. When a
+command reads a route the fake does not serve, add the route to `FakeBackend`,
+shaped as `docs/api/openapi.yaml` describes it, rather than writing a fake
+client in the test file.
+
 ## CLI Standards
 
 ### Adding a command
@@ -171,6 +193,10 @@ command disagree.
 ### Output quality
 - Clean, minimal output — no unnecessary verbosity
 - Consistent formatting across all commands
+- A new command's output is a `Renderer<T>` (`text`, `json`, `llm`) in
+  `ix-cli/src/cli/render/<command>.ts`, printed with `emit(renderer, value, format)`
+  from `ix-cli/src/cli/output/emit.ts`. Do not compare `format` by hand, and do
+  not add renderers to `format.ts`: it only re-exports names that moved out of it
 
 ### Error handling
 - No raw stack traces in normal mode
