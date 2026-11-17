@@ -486,6 +486,7 @@ describe("renderExplanation", () => {
   it("renders pipeline choke point wording for narrow-but-critical nodes", () => {
     const facts = makeFacts({
       name: "pickBest",
+      path: "src/cli/resolve.ts",
       callerCount: 1,
       dependentCount: 2,
       downstreamDependents: 25,
@@ -1582,6 +1583,41 @@ describe("inferFlowSemantics", () => {
     });
     const flow = inferFlowSemantics(facts);
     expect(flow.flowName).toBe("conflict-resolution flow");
+  });
+
+  it("a common verb alone never reaches high confidence (#1018)", () => {
+    for (const [name, path] of [
+      ["selectMenuItem", "src/menu.ts"],
+      ["rankResults", "src/search.ts"],
+      ["pickColor", "src/theme.ts"],
+      ["chooseOption", ""],
+      ["resolveTheme", "src/theme.ts"],
+      ["resolveConflict", "src/merge.ts"],
+      ["parseArgs", "src/cli.ts"],
+    ]) {
+      const flow = inferFlowSemantics(makeFacts({ name, path }));
+      expect(flow.confidence, name).not.toBe("high");
+    }
+  });
+
+  it("a file name alone does not make every function in it a flow step", () => {
+    const flow = inferFlowSemantics(makeFacts({ name: "doStuff", path: "src/cli/resolve.ts" }));
+    expect(flow.confidence).not.toBe("high");
+    expect(flow.roleInFlow).not.toBe("selection step");
+  });
+
+  it("selectMenuItem renders without resolution-flow wording", () => {
+    const facts = makeFacts({
+      kind: "function",
+      name: "selectMenuItem",
+      path: "src/menu.ts",
+      callerCount: 1,
+      calleeCount: 3,
+      downstreamDependents: 25,
+    });
+    const rendered = renderExplanation(facts, inferRole(facts), inferImportance(facts));
+    const text = `${rendered.explanation} ${rendered.whyItMatters}`;
+    expect(text).not.toMatch(/resolution flow|selection step|entity resolution/);
   });
 
   it("upstream/downstream hints populated correctly", () => {

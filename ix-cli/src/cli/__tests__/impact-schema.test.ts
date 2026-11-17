@@ -203,7 +203,7 @@ describe("inferRiskSemantics: boundary class", () => {
 });
 
 describe("inferRiskSemantics: flow function", () => {
-  it("pickBest-like function: risk summary mentions candidate selection / resolution flow", () => {
+  it("pickBest-like function: risk summary mentions selection / resolution flow", () => {
     const facts = makeFacts({
       name: "pickBest",
       kind: "function",
@@ -216,7 +216,7 @@ describe("inferRiskSemantics: flow function", () => {
     });
     const risk = inferRiskSemantics(facts);
     expect(risk.category).toBe("flow");
-    expect(risk.riskSummary.toLowerCase()).toContain("candidate selection");
+    expect(risk.riskSummary.toLowerCase()).toContain("risk to selection");
     expect(risk.riskSummary.toLowerCase()).toContain("resolution flow");
     // Should not lead with "callers: 1, callees: 4"
     expect(risk.riskSummary).not.toMatch(/callers?:\s*\d/);
@@ -400,7 +400,7 @@ describe("humanizeLabel", () => {
 // ── Flow-specific risk summary ──────────────────────────────────────────────
 
 describe("inferRiskSemantics: flow-specific risk summary", () => {
-  it("pickBest summary contains 'candidate selection' and 'resolution flow'", () => {
+  it("pickBest summary contains 'selection' and 'resolution flow'", () => {
     const facts = makeFacts({
       name: "pickBest",
       kind: "function",
@@ -412,7 +412,7 @@ describe("inferRiskSemantics: flow-specific risk summary", () => {
       ],
     });
     const risk = inferRiskSemantics(facts);
-    expect(risk.riskSummary.toLowerCase()).toContain("candidate selection");
+    expect(risk.riskSummary.toLowerCase()).toContain("risk to selection");
     expect(risk.riskSummary.toLowerCase()).toContain("resolution flow");
   });
 });
@@ -496,5 +496,74 @@ describe("inferRiskSemantics: next-step guidance", () => {
     });
     const risk = inferRiskSemantics(facts);
     expect(risk.nextStep).toBeUndefined();
+  });
+});
+
+// ── Common verbs do not invent an Ix flow (#1018) ────────────────────────────
+
+describe("inferRiskSemantics: common verbs outside Ix", () => {
+  // Shaped like leaf `ix impact`: the file is only in targetPath, and a
+  // function has no region path of its own.
+  const leaf = (name: string, targetPath: string, kind = "function") =>
+    makeFacts({ name, kind, targetPath, callers: 2, callees: 1 });
+
+  it.each([
+    ["save_config", "settings.py"],
+    ["selectMenuItem", "src/menu.ts"],
+    ["renderButton", "src/button.tsx"],
+    ["evaluateExpression", "src/calc.ts"],
+    ["lookupUser", "src/users.ts"],
+    ["mergeOptions", "src/options.ts"],
+    ["readSettings", "src/settings.ts"],
+    ["rankResults", "src/search.ts"],
+    ["storeToken", "src/session.ts"],
+  ])("%s in %s is not described as an Ix flow", (name, file) => {
+    const risk = inferRiskSemantics(leaf(name, file));
+    expect(risk.category).not.toBe("flow");
+    expect(risk.flowRole).toBeUndefined();
+    const text = [risk.riskSummary, ...risk.behaviorAtRisk, risk.mostAffectedHint ?? ""].join(" ").toLowerCase();
+    expect(text).not.toMatch(/ingestion|resolution|explanation|scoring|parsing|conflict|candidate/);
+  });
+
+  it("a method named with a common verb is not a flow either", () => {
+    const risk = inferRiskSemantics(leaf("save", "src/models/user.py", "method"));
+    expect(risk.category).not.toBe("flow");
+  });
+
+  it("a verb names a flow when the target's file names the same flow", () => {
+    const risk = inferRiskSemantics(makeFacts({
+      name: "pickBest", kind: "function", targetPath: "ix-cli/src/cli/resolve.ts", callers: 1, callees: 4,
+    }));
+    expect(risk.category).toBe("flow");
+    expect(risk.riskSummary).toBe("Medium risk to selection in the resolution flow.");
+  });
+
+  it("the target's file alone does not make a flow", () => {
+    const risk = inferRiskSemantics(makeFacts({
+      name: "normalize", kind: "function", targetPath: "ix-cli/src/cli/resolve.ts", callers: 1, callees: 4,
+    }));
+    expect(risk.category).not.toBe("flow");
+  });
+
+  it("a file of a different flow does not confirm the verb", () => {
+    const risk = inferRiskSemantics(makeFacts({
+      name: "saveCache", kind: "function", targetPath: "src/parser.ts", callers: 2, callees: 1,
+    }));
+    expect(risk.category).not.toBe("flow");
+  });
+
+  it("a flow name keeps no Ix subsystem noun", () => {
+    const risk = inferRiskSemantics(makeFacts({ name: "resolveTheme", kind: "function", targetPath: "src/theme.ts" }));
+    expect(risk.category).toBe("flow");
+    const text = [risk.riskSummary, ...risk.behaviorAtRisk].join(" ");
+    expect(text).not.toMatch(/entity resolution|file ingestion|candidate/);
+    expect(risk.behaviorAtRisk).toContain("Reference resolution logic");
+
+    const ingest = inferRiskSemantics(makeFacts({ name: "ingestEvents", kind: "function" }));
+    expect(ingest.riskSummary).toBe("Medium risk to data ingestion in the ingestion flow.");
+    expect(ingest.behaviorAtRisk.join(" ")).not.toContain("file ingestion");
+
+    const score = inferRiskSemantics(makeFacts({ name: "scoreGame", kind: "function" }));
+    expect(score.riskSummary).toBe("Medium risk to scoring in the scoring flow.");
   });
 });
