@@ -120,8 +120,8 @@ describe("explain entity request budget", () => {
     expect(g.counts()).toEqual({ entityReads: 2, batchReads: 1 });
   });
 
-  it("preserves callee results on older backends without individual probes", async () => {
-    const g = await graph(20, 404);
+  it.each([404, 405, 501])("preserves callee results on a %i batch route without individual probes", async (status) => {
+    const g = await graph(20, status);
     const client = new IxClient(g.endpoint, undefined, QUERY_CLIENT_OPTIONS);
     const facts = await collectFacts(client, g.target.id, g.target.name, g.target.kind);
     expect(facts.callList?.map((ref) => ref.resolved)).toEqual(g.callees.map((_, i) => i % 2 === 1));

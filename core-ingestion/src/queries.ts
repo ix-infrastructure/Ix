@@ -128,6 +128,13 @@ export const TYPESCRIPT_QUERIES = `
     object: (this) @_qualifier
     property: (property_identifier) @call.name)) @call
 
+; super.method(). Capture super as the qualifier so index.ts can substitute
+; the enclosing class's base.
+(call_expression
+  function: (member_expression
+    object: (super) @_qualifier
+    property: (property_identifier) @call.name)) @call
+
 ; Constructor calls: new Foo()
 (new_expression
   constructor: (identifier) @call.name) @call
@@ -319,6 +326,13 @@ export const JAVASCRIPT_QUERIES = `
     object: (this) @_qualifier
     property: (property_identifier) @call.name)) @call
 
+; super.method(). Capture super as the qualifier so index.ts can substitute
+; the enclosing class's base.
+(call_expression
+  function: (member_expression
+    object: (super) @_qualifier
+    property: (property_identifier) @call.name)) @call
+
 ; Constructor calls: new Foo()
 (new_expression
   constructor: (identifier) @call.name) @call
@@ -400,6 +414,15 @@ export const PYTHON_QUERIES = `
 (call
   function: (attribute
     object: (identifier) @_qualifier
+    attribute: (identifier) @call.name)) @call
+
+; super().method() and super(Cls, self).method(). Capture super as the
+; qualifier so index.ts can substitute the enclosing class's base.
+(call
+  function: (attribute
+    object: (call
+      function: (identifier) @_qualifier
+      (#eq? @_qualifier "super"))
     attribute: (identifier) @call.name)) @call
 
 ; Django ORM manager pattern: Model.objects.method(...)
@@ -1107,6 +1130,10 @@ export const RUST_QUERIES = `
 (call_expression function: (scoped_identifier
   path: (identifier) @_qualifier
   name: (identifier) @call.name)) @call
+; A call spelled with a longer path: crate::stats::report()
+(call_expression function: (scoped_identifier
+  path: (scoped_identifier) @_qualifier
+  name: (identifier) @call.name)) @call
 (call_expression function: (generic_function function: (identifier) @call.name)) @call
 
 ; Struct literal construction: User { name: value }
@@ -1222,6 +1249,7 @@ export const PHP_QUERIES = `
 
 ; Static call: Foo::bar() (php_only uses scoped_call_expression)
 (scoped_call_expression
+  scope: (_) @_qualifier
   name: (name) @call.name) @call
 
 ; Constructor call: new User()
@@ -1392,9 +1420,17 @@ export const KOTLIN_QUERIES = `
   (simple_identifier) @name) @definition.function
 
 ; ── Properties ───────────────────────────────────────────────────────────
-(property_declaration
-  (variable_declaration
-    (simple_identifier) @name)) @definition.property
+; Top-level and member properties only. A local val/var inside a function body
+; is also a property_declaration; capturing it would make it a member of the
+; enclosing class and take over the calls in its initializer.
+(source_file
+  (property_declaration
+    (variable_declaration
+      (simple_identifier) @name)) @definition.property)
+(class_body
+  (property_declaration
+    (variable_declaration
+      (simple_identifier) @name)) @definition.property)
 
 ; ── Enum entries ─────────────────────────────────────────────────────────
 (enum_entry
@@ -1442,7 +1478,16 @@ export const KOTLIN_QUERIES = `
       (user_type (type_identifier) @heritage.extends)))) @heritage
 
 ; ── Type references ───────────────────────────────────────────────────────────
-(type_reference (user_type (type_identifier) @reference.type))
+; tree-sitter-kotlin has no type_reference wrapper node: a type in a parameter,
+; property, return or generic-argument position is a bare user_type. Only those
+; positions are listed, so a constructor call or a supertype (already a CALLS or
+; heritage capture above) does not also become a reference.
+(parameter (user_type (type_identifier) @reference.type))
+(class_parameter (user_type (type_identifier) @reference.type))
+(variable_declaration (user_type (type_identifier) @reference.type))
+(function_declaration (user_type (type_identifier) @reference.type))
+(nullable_type (user_type (type_identifier) @reference.type))
+(type_projection (user_type (type_identifier) @reference.type))
 `;
 
 // Swift queries - works with tree-sitter-swift

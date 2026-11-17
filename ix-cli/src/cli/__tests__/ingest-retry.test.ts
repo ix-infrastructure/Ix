@@ -16,6 +16,7 @@ import {
 } from '../commands/ingest.js';
 import { retryCommit } from '../commit-retry.js';
 import { httpError } from '../../client/api.js';
+import { IxHttpError } from '../../client/http-error.js';
 
 // Verbatim from a backend that refused a bulk save of a >1,000-file repo (Ix#516).
 // A bulk commit runs as one exclusive Arango transaction, and Arango caps that at
@@ -40,7 +41,7 @@ describe('isAbortError', () => {
   });
 
   it('is false for ordinary errors', () => {
-    expect(isAbortError(new Error('500: internal error'))).toBe(false);
+    expect(isAbortError(new IxHttpError(500, 'internal error'))).toBe(false);
     expect(isAbortError('write-write conflict')).toBe(false);
   });
 });
@@ -61,7 +62,7 @@ describe('isRetryableCommitConflict', () => {
   });
 
   it('does not retry a plain 500', () => {
-    expect(isRetryableCommitConflict(new Error('500: internal server error'))).toBe(false);
+    expect(isRetryableCommitConflict(new IxHttpError(500, 'internal server error'))).toBe(false);
   });
 });
 
@@ -69,7 +70,7 @@ describe('isPayloadTooLargeError', () => {
   it.each([
     Object.assign(new Error('proxy rejected the request'), { status: 413 }),
     Object.assign(new Error('proxy rejected the request'), { statusCode: 413 }),
-    new Error('413: request rejected'),
+    new IxHttpError(413, 'request rejected'),
     new Error('Payload Too Large'),
     new Error('Request Entity Too Large'),
     new Error('Content Too Large'),
@@ -82,7 +83,7 @@ describe('isPayloadTooLargeError', () => {
   });
 
   it('does not mistake an unrelated error for a payload limit', () => {
-    expect(isPayloadTooLargeError(new Error('500: internal server error'))).toBe(false);
+    expect(isPayloadTooLargeError(new IxHttpError(500, 'internal server error'))).toBe(false);
     expect(isPayloadTooLargeError(new Error('patch 413 failed validation'))).toBe(false);
   });
 });
@@ -108,7 +109,7 @@ describe('commitFailureIndictsBackend', () => {
     const aborted = Object.assign(new Error('aborted'), { name: 'AbortError' });
     expect(commitFailureIndictsBackend(aborted, true)).toBe(false);
     // Anything at all, once the budget is gone.
-    expect(commitFailureIndictsBackend(new Error('500: nope'), true)).toBe(false);
+    expect(commitFailureIndictsBackend(new IxHttpError(500, 'nope'), true)).toBe(false);
   });
 
   it('counts a lock conflict that has already exhausted its retries', () => {
@@ -133,15 +134,15 @@ describe('commitFailureIndictsBackend', () => {
 
   it('does not count payload-too-large, which is about the patch and not the server', () => {
     // Five oversized generated files in a row must not stop the whole repo.
-    expect(commitFailureIndictsBackend(new Error('413: payload too large'), false)).toBe(false);
+    expect(commitFailureIndictsBackend(new IxHttpError(413, 'payload too large'), false)).toBe(false);
     expect(commitFailureIndictsBackend(ARANGO_TRANSACTION_LIMIT_ERROR, false)).toBe(false);
   });
 
   it('counts an ordinary backend rejection, including one that says "aborted"', () => {
     // `isAbortError` matches "aborted" anywhere in the text, so this 500 used to
     // be excluded from the cutoff along with the real aborts.
-    expect(commitFailureIndictsBackend(new Error('500: internal server error'), false)).toBe(true);
-    expect(commitFailureIndictsBackend(new Error('500: {"error":"AQL: transaction aborted"}'), false)).toBe(true);
+    expect(commitFailureIndictsBackend(new IxHttpError(500, 'internal server error'), false)).toBe(true);
+    expect(commitFailureIndictsBackend(new IxHttpError(500, '{"error":"AQL: transaction aborted"}'), false)).toBe(true);
   });
 });
 
@@ -154,7 +155,7 @@ describe('commitBulkWithPayloadSplit', () => {
     await commitBulkWithPayloadSplit([1, 2, 3, 4, 5], {
       commitBulk: async batch => {
         bulkCalls.push([...batch]);
-        if (batch.length > 2) throw new Error('413: payload too large');
+        if (batch.length > 2) throw new IxHttpError(413, 'payload too large');
         return batch.length;
       },
       onBulkCommitted: batch => committed.push(...batch),
@@ -185,7 +186,7 @@ describe('commitBulkWithPayloadSplit', () => {
         peak = Math.max(peak, inFlight);
         await new Promise(r => setTimeout(r, 1));
         inFlight--;
-        if (batch.length > 3) throw new Error('413: {"error":"payload_too_large","suggestedMaxPatches":3}');
+        if (batch.length > 3) throw new IxHttpError(413, '{"error":"payload_too_large","suggestedMaxPatches":3}');
         return batch.length;
       },
       onBulkCommitted: batch => committed.push(...batch),
@@ -199,7 +200,7 @@ describe('commitBulkWithPayloadSplit', () => {
   });
 
   it('keeps the per-file path for a single rejected patch', async () => {
-    const error = new Error('413: payload too large');
+    const error = new IxHttpError(413, 'payload too large');
     const commitIndividually = vi.fn(async () => {});
 
     await commitBulkWithPayloadSplit([1], {
@@ -241,7 +242,7 @@ describe('commitBulkWithPayloadSplit', () => {
   });
 
   it('keeps the existing per-file fallback for non-payload bulk failures', async () => {
-    const error = new Error('500: internal server error');
+    const error = new IxHttpError(500, 'internal server error');
     const commitIndividually = vi.fn(async () => {});
 
     await commitBulkWithPayloadSplit([1, 2, 3], {
@@ -260,7 +261,7 @@ describe('commitBulkWithPayloadSplit', () => {
   // against the backend that is the reason. `beforeFallback` lets the caller
   // say which case this is.
   it('abandons the per-file fallback when the caller has given up on the backend', async () => {
-    const error = new Error('500: transaction begin timeout');
+    const error = new IxHttpError(500, 'transaction begin timeout');
     const commitIndividually = vi.fn(async () => {});
     const onAbandoned = vi.fn();
     let stop = false;
@@ -278,7 +279,7 @@ describe('commitBulkWithPayloadSplit', () => {
   });
 
   it('still fans out while the caller has not given up', async () => {
-    const error = new Error('500: internal server error');
+    const error = new IxHttpError(500, 'internal server error');
     const commitIndividually = vi.fn(async () => {});
 
     await commitBulkWithPayloadSplit([1, 2, 3], {
@@ -296,7 +297,7 @@ describe('commitBulkWithPayloadSplit', () => {
     // per patch -- and it is the only way a backend that recovered mid-run can
     // prove it. Skipping it was also strictly worse: the group came back as N
     // serialized per-file commits via the retry instead of one bulk.
-    const commitBulk = vi.fn(async () => { throw new Error('500: still refusing'); });
+    const commitBulk = vi.fn(async () => { throw new IxHttpError(500, 'still refusing'); });
     const commitIndividually = vi.fn(async () => {});
     const onAbandoned = vi.fn();
 
@@ -340,10 +341,10 @@ describe('commitBulkWithPayloadSplit', () => {
 
     await commitBulkWithPayloadSplit([1, 2, 3, 4], {
       commitBulk: async (batch) => {
-        if (batch.length > 2) throw new Error('413: payload too large');
+        if (batch.length > 2) throw new IxHttpError(413, 'payload too large');
         sent.push(batch);
         stop = true;               // the first half is what gives up
-        throw new Error('500: transaction begin timeout');
+        throw new IxHttpError(500, 'transaction begin timeout');
       },
       onBulkCommitted: vi.fn(),
       commitIndividually: vi.fn(async () => {}),
@@ -362,7 +363,7 @@ describe('commitBulkWithPayloadSplit', () => {
 
     await commitBulkWithPayloadSplit([1, 2, 3, 4], {
       commitBulk: async (batch) => {
-        if (batch.length > 2) throw new Error('413: payload too large');
+        if (batch.length > 2) throw new IxHttpError(413, 'payload too large');
         committed.push(batch);
         return 'ok';
       },
@@ -393,13 +394,14 @@ const item = (id: string) => ({ patch: { patchId: id } });
 // Ix-memory#273's answer to a bulk whose every id landed under another plan
 // (ErrorHandler, BulkPlanMismatchException): the ids, no "partially committed".
 const planMismatchBody = (ids: string[]) =>
-  new Error(
-    `409: ${JSON.stringify({
+  new IxHttpError(
+    409,
+    JSON.stringify({
       error: 'conflict',
       message: `bulk patch IDs were previously committed by a different request plan (${ids.length} patch IDs)`,
       committed_patch_ids: ids,
       committed_count: ids.length,
-    })}`
+    }),
   );
 
 describe('plan-mismatch bulk groups (Ix-memory#273)', () => {
@@ -412,10 +414,10 @@ describe('plan-mismatch bulk groups (Ix-memory#273)', () => {
 
   it('needs both the 409 and a list of ids it can trust', () => {
     // The pre-#273 body named no ids: still an ordinary conflict.
-    expect(isBulkPlanMismatchError(new Error('409: {"error":"conflict","message":"bulk patch IDs were previously committed by a different request plan"}'))).toBe(false);
-    expect(isBulkPlanMismatchError(new Error('409: {"committed_patch_ids":["a",7]}'))).toBe(false);
-    expect(isBulkPlanMismatchError(new Error('500: {"committed_patch_ids":["a"]}'))).toBe(false);
-    expect(isBulkPlanMismatchError(new Error('413: {"error":"payload_too_large"}'))).toBe(false);
+    expect(isBulkPlanMismatchError(new IxHttpError(409, '{"error":"conflict","message":"bulk patch IDs were previously committed by a different request plan"}'))).toBe(false);
+    expect(isBulkPlanMismatchError(new IxHttpError(409, '{"committed_patch_ids":["a",7]}'))).toBe(false);
+    expect(isBulkPlanMismatchError(new IxHttpError(500, '{"committed_patch_ids":["a"]}'))).toBe(false);
+    expect(isBulkPlanMismatchError(new IxHttpError(413, '{"error":"payload_too_large"}'))).toBe(false);
   });
 
   it('counts every named patch as landed and never re-bulks them', async () => {
@@ -466,21 +468,21 @@ describe('partly-committed bulk groups', () => {
   });
 
   it('does not mistake an ordinary conflict for a partial commit', () => {
-    expect(isBulkPartiallyCommittedError(new Error('409: {"error":"conflict"}'))).toBe(false);
+    expect(isBulkPartiallyCommittedError(new IxHttpError(409, '{"error":"conflict"}'))).toBe(false);
   });
 
   // Undefined must mean "fall back", never "nothing landed" — an empty set
   // would re-send patches the server already has and fail the same way.
   it('returns undefined when the backend does not name the ids', () => {
-    const old = new Error('409: {"error":"conflict","message":"bulk request is partially committed (6/498 patch IDs)"}');
+    const old = new IxHttpError(409, '{"error":"conflict","message":"bulk request is partially committed (6/498 patch IDs)"}');
     expect(isBulkPartiallyCommittedError(old)).toBe(true);
     expect(parseBulkCommittedPatchIds(old)).toBeUndefined();
   });
 
   it('returns undefined for a body it cannot trust', () => {
-    expect(parseBulkCommittedPatchIds(new Error('409: not json at all'))).toBeUndefined();
-    expect(parseBulkCommittedPatchIds(new Error('409: {"committed_patch_ids":"p1"}'))).toBeUndefined();
-    expect(parseBulkCommittedPatchIds(new Error('409: {"committed_patch_ids":["p1",7]}'))).toBeUndefined();
+    expect(parseBulkCommittedPatchIds(new IxHttpError(409, 'not json at all'))).toBeUndefined();
+    expect(parseBulkCommittedPatchIds(new IxHttpError(409, '{"committed_patch_ids":"p1"}'))).toBeUndefined();
+    expect(parseBulkCommittedPatchIds(new IxHttpError(409, '{"committed_patch_ids":["p1",7]}'))).toBeUndefined();
   });
 
   it('marks the landed replay as a replay, so a caller that has given up still sends it', async () => {
@@ -539,7 +541,7 @@ describe('partly-committed bulk groups', () => {
 
   it('falls back whole when the backend named no ids', async () => {
     const items = ['p1', 'p2'].map(item);
-    const error = new Error('409: {"error":"conflict","message":"bulk request is partially committed (1/2 patch IDs)"}');
+    const error = new IxHttpError(409, '{"error":"conflict","message":"bulk request is partially committed (1/2 patch IDs)"}');
     const commitIndividually = vi.fn(async () => {});
 
     await commitBulkWithPayloadSplit(items, {
@@ -607,11 +609,11 @@ describe('bulk request bounds (IN-05)', () => {
   });
 
   it('reads the patch count a 413 suggests, and nothing from one that has none', () => {
-    expect(parseSuggestedMaxPatches(new Error('413: {"error":"payload_too_large","message":"x","suggestedMaxPatches":120}'))).toBe(120);
-    expect(parseSuggestedMaxPatches(new Error('413: {"error":"payload_too_large"}'))).toBeUndefined();
-    expect(parseSuggestedMaxPatches(new Error('413: {"suggestedMaxPatches":0}'))).toBeUndefined();
+    expect(parseSuggestedMaxPatches(new IxHttpError(413, '{"error":"payload_too_large","message":"x","suggestedMaxPatches":120}'))).toBe(120);
+    expect(parseSuggestedMaxPatches(new IxHttpError(413, '{"error":"payload_too_large"}'))).toBeUndefined();
+    expect(parseSuggestedMaxPatches(new IxHttpError(413, '{"suggestedMaxPatches":0}'))).toBeUndefined();
     expect(parseSuggestedMaxPatches(ARANGO_TRANSACTION_LIMIT_ERROR)).toBeUndefined();
-    expect(parseSuggestedMaxPatches(new Error('413: request rejected'))).toBeUndefined();
+    expect(parseSuggestedMaxPatches(new IxHttpError(413, 'request rejected'))).toBeUndefined();
   });
 
   it('reads the count from the estimate\'s message when the body is not JSON, and none from a byte refusal', () => {
@@ -626,7 +628,7 @@ describe('bulk request bounds (IN-05)', () => {
     expect(parseSuggestedMaxPatches(new Error(
       '413: {"error":"payload_too_large","message":"the request body exceeds 67108864 bytes; send fewer patches per request"}',
     ))).toBeUndefined();
-    expect(parseSuggestedMaxPatches(new Error('413: <html><body>413 Request Entity Too Large</body></html>'))).toBeUndefined();
+    expect(parseSuggestedMaxPatches(new IxHttpError(413, '<html><body>413 Request Entity Too Large</body></html>'))).toBeUndefined();
   });
 
   it('cuts by bytes too once a byte bound is set, and only then', () => {

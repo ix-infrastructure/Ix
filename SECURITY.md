@@ -21,5 +21,6 @@ versions are not maintained; please upgrade (`ix upgrade`) before reporting.
 ## Scope
 
 This policy covers the `ix` CLI and the artifacts published from this
-repository. The memory-layer backend is released from a separate repository and
-has its own reporting channel.
+repository. The memory-layer backend (the `ix-memory-layer` image) is released
+from a separate repository. Report a backend vulnerability privately to
+security@ix-infra.com, not as a public issue here.

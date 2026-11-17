@@ -214,6 +214,51 @@ final class UseCase
     });
   });
 
+  it('qualifies a static call with the class it names', () => {
+    const result = parseFile(
+      '/repo/Child.php',
+      `<?php
+class Child extends Base
+{
+    public function run($class): void
+    {
+        Other::make();
+        self::helper();
+        static::helper();
+        parent::run($class);
+        \\App\\Other::make();
+        $class::make();
+    }
+}
+      `,
+    );
+
+    expect(result?.relationships.filter(rel => rel.predicate === 'CALLS')).toEqual([
+      { srcName: 'Child.run', dstName: 'Other.make', predicate: 'CALLS', phpCallKind: 'static' },
+      { srcName: 'Child.run', dstName: 'Child.helper', predicate: 'CALLS', phpCallKind: 'static' },
+      { srcName: 'Child.run', dstName: 'Base.run', predicate: 'CALLS', phpCallKind: 'static' },
+      { srcName: 'Child.run', dstName: 'make', predicate: 'CALLS', phpCallKind: 'static' },
+    ]);
+  });
+
+  it('keeps a bare static call when self or parent has no class to name', () => {
+    const result = parseFile(
+      '/repo/Orphan.php',
+      `<?php
+class Orphan
+{
+    public function run(): void { parent::boot(); }
+}
+function outside(): void { self::boot(); }
+      `,
+    );
+
+    expect(result?.relationships.filter(rel => rel.predicate === 'CALLS')).toEqual([
+      { srcName: 'Orphan.run', dstName: 'boot', predicate: 'CALLS', phpCallKind: 'static' },
+      { srcName: 'outside', dstName: 'boot', predicate: 'CALLS', phpCallKind: 'static' },
+    ]);
+  });
+
   it('preserves bare-name fallback when the receiver type is unknown', () => {
     const result = parseFile(
       '/repo/Runner.php',

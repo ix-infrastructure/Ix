@@ -11,6 +11,8 @@ The skill installer (`scripts/install-skill.sh`) reads an explicit, small harnes
 
 When `TOOLSCAN_PATH` is set, both surfaces consult its discovery output so a harness CLI installed outside `PATH` can still be found — and `ix mcp install` executes the absolute path toolscan reports, so the off-PATH harness is inspected and registered through the binary toolscan found. Toolscan is optional and additive: if it is unset or fails, the embedded `PATH` and config-directory probes remain authoritative. `TOOLSCAN_PATH` is opt-in: neither surface ever looks `toolscan` up on `PATH` (the CLI executes whatever `TOOLSCAN_PATH` names, so only set it to a binary you trust).
 
+`ix install` is a menu over the same script, not a second installer. It runs `install-skill.sh --dry-run --json` to list the harnesses (so a harness added to the table shows up in the menu with no other edit), collects the harness ids, dry run or apply, and `--force` or not, previews that exact run, and only after confirmation runs the script for real. Off a terminal it prints a hint and writes nothing unless `--dry-run` or `--yes` is given, in which case it passes the options straight to the script. `--json` prints the script's own report on stdout. The parity tests are in `ix-cli/src/cli/__tests__/install-menu.test.ts`.
+
 The probe battery has two environment seams:
 
 | Seam | Used by | Default |

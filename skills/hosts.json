@@ -1,0 +1,17 @@
+{
+  "$comment": "Per-host settings for ix-cli/scripts/render-skills.mjs, which renders skills/workflows/*.md for each host below. dialect: how a skill reaches Ix (cli = shell commands with --format llm; mcp = the tools `ix mcp serve` registers). exposure: for an mcp host, the `ix mcp serve --tools` set the host registers; every tool its skills call must be in it, and the renderer refuses a core host's call to any other tool. Cursor is all because ix-cursor-plugin's mcp.json starts `ix mcp --tools=all` (a bare `ix mcp`, as `ix mcp install --host cursor` writes, is core). skills: the workflows the host ships. frontmatter: keys added to or overriding the template's front matter (null removes one). preamble: host-only lines that replace the template's {{preamble}} line (kept here, not in a template, because they link to files only the host plugin has).",
+  "hosts": {
+    "claude": {
+      "dialect": "cli",
+      "skills": ["ix-impact"],
+      "frontmatter": { "disable-model-invocation": "true" },
+      "preamble": "> [ix-claude-plugin shared model](../shared.md)"
+    },
+    "cursor": {
+      "dialect": "mcp",
+      "exposure": "all",
+      "skills": ["ix-impact"],
+      "frontmatter": {}
+    }
+  }
+}

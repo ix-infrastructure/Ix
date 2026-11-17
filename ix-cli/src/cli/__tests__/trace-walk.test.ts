@@ -7,6 +7,7 @@ import { registerTraceCommand } from "../commands/trace.js";
 import { compactTreeNode } from "../format.js";
 import { isRawId } from "../resolve.js";
 import { EXPAND_CONCURRENCY } from "../tree-walk.js";
+import { expandAnswer } from "./helpers/expand-answer.js";
 
 /**
  * `ix trace --upstream/--downstream` and the both-directions mode, end to end
@@ -124,7 +125,7 @@ function serve(graph: Graph, delaySeed?: number) {
     maxInFlight = Math.max(maxInFlight, inFlight);
     try {
       if (rand) await new Promise((r) => setTimeout(r, Math.floor(rand() * 3)));
-      return { nodes: graph[opts.direction]?.[id]?.[opts.predicates[0]] ?? [], edges: [] };
+      return expandAnswer(id, opts.direction, graph[opts.direction]?.[id], opts.predicates);
     } finally {
       inFlight--;
     }
@@ -187,6 +188,20 @@ describe("ix trace directional output against the depth-first walk", () => {
     serve(randomGraph(4, 150, 4), 9);
     await trace(["--depth", "4", "--cap", "400"]);
     expect(maxInFlight).toBe(EXPAND_CONCURRENCY);
+  });
+
+  it("sends one expand per visited node and direction, asking for every predicate", async () => {
+    serve(randomGraph(3, 40, 3), 3);
+    const out = await trace(["--depth", "4", "--cap", "1000000"]);
+    expect(out.upstream.summary.nodes_visited).toBeGreaterThan(0);
+    expect(out.downstream.summary.nodes_visited).toBeGreaterThan(0);
+    const perNode = new Map<string, number>();
+    for (const [id, opts] of expand.mock.calls) {
+      expect(opts).toMatchObject({ predicates: PREDICATES, hops: 1 });
+      const key = `${opts.direction}|${id}`;
+      perNode.set(key, (perNode.get(key) ?? 0) + 1);
+    }
+    expect([...perNode].filter(([, n]) => n !== 1)).toEqual([]);
   });
 
   it("keeps the shallowest nodes when the cap cuts, and says so", async () => {
