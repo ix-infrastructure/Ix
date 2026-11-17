@@ -200,12 +200,39 @@ describe("withEdgeSites against files on disk", () => {
     expect(files.lines("src/caller.ts")).toBe(files.lines("src/caller.ts"));
   });
 
-  it("renders as site=path:line, also= and a snippet, after the row's own location", () => {
+  it("renders a site in the row's own file as site=<line>, also= and a snippet, after the row's location", () => {
     const rows = withEdgeSites([callerRow], "callers", { name: "target" }, { root });
     const lines = renderEdgeResultsLlm(sliceEdgeResults(rows, 50), "callers", "target", "graph");
+    // path= already names the file, so site= carries only the line (#1014).
     expect(lines[1]).toBe(
-      'ref name=caller kind=function path=src/caller.ts lines=4-11 site=src/caller.ts:6 also=8 snippet="const y = target(a);"',
+      'ref name=caller kind=function path=src/caller.ts lines=4-11 site=6 also=8 snippet="const y = target(a);"',
     );
+  });
+
+  it("imported-by: the importing file's own import prints as site=<line>", () => {
+    const importer = { name: "caller.ts", kind: "file", provenance: { sourceUri: "src/caller.ts" } };
+    const rows = withEdgeSites([importer], "imported-by", { name: "lib.ts", kind: "file", path: "src/lib.ts" }, { root });
+    const lines = renderEdgeResultsLlm(sliceEdgeResults(rows, 50), "imported-by", "lib.ts", "graph");
+    expect(lines[1]).toMatch(/^ref name=caller\.ts kind=file path=src\/caller\.ts site=1 /);
+  });
+
+  it("callees: a site in the target's file, not the row's, keeps site=path:line", () => {
+    const helper = { name: "helper", kind: "function", provenance: { sourceUri: "src/other.ts" } };
+    const rows = withEdgeSites([helper], "callees", {
+      name: "target", kind: "function", path: "src/lib.ts", lineStart: 1, lineEnd: 3,
+    }, { root });
+    const lines = renderEdgeResultsLlm(sliceEdgeResults(rows, 50), "callees", "target", "graph");
+    expect(lines[1]).toBe('ref name=helper kind=function path=src/other.ts site=src/lib.ts:2 snippet="return helper(n);"');
+  });
+
+  it("keeps site=path:line when --fields drops path, and the bare line when it keeps it", () => {
+    const rows = withEdgeSites([callerRow], "callers", { name: "target" }, { root });
+    setOutputShape({ fields: "name,site" });
+    expect(renderEdgeResultsLlm(sliceEdgeResults(rows, 50), "callers", "target", "graph")[1])
+      .toBe("ref name=caller site=src/caller.ts:6");
+    setOutputShape({ fields: "site,path" });
+    expect(renderEdgeResultsLlm(sliceEdgeResults(rows, 50), "callers", "target", "graph")[1])
+      .toBe("ref site=6 path=src/caller.ts");
   });
 
   it("carries the site into json and onto a second text line", () => {

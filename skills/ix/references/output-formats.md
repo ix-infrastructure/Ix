@@ -21,9 +21,12 @@ Each row carries the location you would otherwise grep or re-read for:
   listed, rows that only import that name are folded away, and a `diagnostic
   code=imports_folded` record says how many (`--quiet` drops it); list them
   with `ix imported-by <term>`.
-- `callers`, `callees`, `imports`, `imported-by` rows: `site=path:line` is the
-  call or import itself, with `snippet=` (the line) and `also=` (more sites in
-  the same scope); `path=`/`lines=` are where the other entity is defined.
+- `callers`, `callees`, `imports`, `imported-by` rows: `site=` is the call or
+  import itself, with `snippet=` (the line) and `also=` (more sites in the
+  same scope); `path=`/`lines=` are where the other entity is defined. A site
+  in the row's own file (`callers`, `imported-by`) is just the line
+  (`site=64`, in `path=`); one in another file (`callees`, `imports`) is
+  `site=path:line`.
   On a Java method, `callers` also lists callers through a superclass or
   interface after the direct ones, each ending `via=<Supertype>.<method>`
   (json: `via`).
