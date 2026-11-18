@@ -1,0 +1,378 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ix callers with two targets, one found and one missing: plugin-facing output > --format json 1`] = `
+"$ ix callers paint vanish --format json
+exit: 3
+--- stdout
+{"targets":[{"target":"paint","exitCode":0,"results":[{"name":"draw","kind":"function","id":"00000005-0000-4000-8000-000000000000","path":"src/app.ts","lineStart":3,"lineEnd":5,"site":{"path":"src/app.ts","line":4,"snippet":"paint(canvas);"}}],"resultSource":"graph","resolvedTarget":{"id":"00000006-0000-4000-8000-000000000000","kind":"function","name":"paint","path":"src/app.ts","resolutionMode":"exact"},"summary":{"shown":1,"total":1,"resolved":1,"unresolved":0,"truncated":false,"offset":0}},{"target":"vanish","exitCode":3,"error":"unresolved_target","message":"No entity found matching \\"vanish\\".","didYouMean":[]}],"summary":{"total":2,"ok":1,"ambiguous":0,"notFound":1,"notMapped":0,"failed":0}}
+
+--- stderr
+"
+`;
+
+exports[`ix callers with two targets, one found and one missing: plugin-facing output > --format llm 1`] = `
+"$ ix callers paint vanish --format llm
+exit: 3
+--- stdout
+target n=1 name=paint
+callers target=paint shown=1 total=1 resolved=1
+ref name=draw kind=function path=src/app.ts lines=3-5 site=src/app.ts:4 snippet=paint(canvas);
+target n=2 name=vanish
+error code=unresolved_target message="No entity found matching \\"vanish\\"."
+targets total=2 ok=1 not_found=1
+
+--- stderr
+"
+`;
+
+exports[`ix inventory: plugin-facing output > --format json > backend down 1`] = `
+"$ ix inventory --kind function --format json # IX_ENDPOINT=http://127.0.0.1:<DOWN_PORT>, nothing listening
+exit: 1
+--- stdout
+{"error":"backend_unreachable","message":"Ix backend not reachable at http://127.0.0.1:<DOWN_PORT>.","next":"Check your network, and that the endpoint is right (\`ix config get endpoint\`)."}
+
+--- stderr
+
+  Ix backend not reachable at http://127.0.0.1:<DOWN_PORT>.
+
+  Next
+  Check your network, and that the endpoint is right (\`ix config get endpoint\`).
+
+"
+`;
+
+exports[`ix inventory: plugin-facing output > --format json > healthy 1`] = `
+"$ ix inventory --kind function --format json
+exit: 0
+--- stdout
+{"kind":"function","offset":0,"shown":3,"truncated":false,"byFile":[{"path":"src/geometry.ts","items":["draw"]},{"path":"src/app.ts","items":["draw","paint"]}]}
+
+--- stderr
+"
+`;
+
+exports[`ix inventory: plugin-facing output > --format json > unmapped 1`] = `
+"$ ix inventory --kind function --format json # from an unmapped directory
+exit: 4
+--- stdout
+{"error":"workspace_not_mapped","message":"<TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from.","dir":"<TMP>/elsewhere","next":"Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them)."}
+
+--- stderr
+
+  <TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from.
+
+  Next
+  Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them).
+
+"
+`;
+
+exports[`ix inventory: plugin-facing output > --format llm > backend down 1`] = `
+"$ ix inventory --kind function --format llm # IX_ENDPOINT=http://127.0.0.1:<DOWN_PORT>, nothing listening
+exit: 1
+--- stdout
+error code=backend_unreachable message="Ix backend not reachable at http://127.0.0.1:<DOWN_PORT>." hint="Check your network, and that the endpoint is right (\`ix config get endpoint\`)."
+
+--- stderr
+"
+`;
+
+exports[`ix inventory: plugin-facing output > --format llm > healthy 1`] = `
+"$ ix inventory --kind function --format llm
+exit: 0
+--- stdout
+inventory kind=function shown=3
+file path=src/geometry.ts items=draw
+file path=src/app.ts items=draw,paint
+
+--- stderr
+"
+`;
+
+exports[`ix inventory: plugin-facing output > --format llm > unmapped 1`] = `
+"$ ix inventory --kind function --format llm # from an unmapped directory
+exit: 4
+--- stdout
+error code=workspace_not_mapped message="<TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from." dir=<TMP>/elsewhere hint="Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them)."
+
+--- stderr
+"
+`;
+
+exports[`ix inventory: plugin-facing output > --format text > backend down 1`] = `
+"$ ix inventory --kind function --format text # IX_ENDPOINT=http://127.0.0.1:<DOWN_PORT>, nothing listening
+exit: 1
+--- stdout
+
+--- stderr
+
+  Ix backend not reachable at http://127.0.0.1:<DOWN_PORT>.
+
+  Next
+  Check your network, and that the endpoint is right (\`ix config get endpoint\`).
+
+"
+`;
+
+exports[`ix inventory: plugin-facing output > --format text > healthy 1`] = `
+"$ ix inventory --kind function --format text
+exit: 0
+--- stdout
+Inventory: 3 function entities
+  function    draw                            src/geometry.ts
+  function    draw                            src/app.ts
+  function    paint                           src/app.ts
+
+--- stderr
+"
+`;
+
+exports[`ix inventory: plugin-facing output > --format text > unmapped 1`] = `
+"$ ix inventory --kind function --format text # from an unmapped directory
+exit: 4
+--- stdout
+
+--- stderr
+
+  <TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from.
+
+  Next
+  Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them).
+
+"
+`;
+
+exports[`ix overview: plugin-facing output > --format json > backend down 1`] = `
+"$ ix overview paint --format json # IX_ENDPOINT=http://127.0.0.1:<DOWN_PORT>, nothing listening
+exit: 1
+--- stdout
+{"error":"backend_unreachable","message":"Ix backend not reachable at http://127.0.0.1:<DOWN_PORT>.","next":"Check your network, and that the endpoint is right (\`ix config get endpoint\`)."}
+
+--- stderr
+
+  Ix backend not reachable at http://127.0.0.1:<DOWN_PORT>.
+
+  Next
+  Check your network, and that the endpoint is right (\`ix config get endpoint\`).
+
+"
+`;
+
+exports[`ix overview: plugin-facing output > --format json > healthy 1`] = `
+"$ ix overview paint --format json
+exit: 0
+--- stdout
+{"resolvedTarget":{"id":"00000006-0000-4000-8000-000000000000","kind":"function","name":"paint"},"resolutionMode":"exact","path":"src/app.ts","systemPath":[{"name":"paint","kind":"function"}],"hasMapData":false,"childrenByKind":null,"keyItems":null,"containedIn":{"kind":"file","name":"app.ts"},"siblingsByKind":{"function":1},"keySiblings":[{"name":"draw","kind":"function"}],"diagnostics":["No system map. Run \`ix map\` to see hierarchy."]}
+
+--- stderr
+"
+`;
+
+exports[`ix overview: plugin-facing output > --format json > unmapped 1`] = `
+"$ ix overview paint --format json # from an unmapped directory
+exit: 4
+--- stdout
+{"error":"workspace_not_mapped","message":"<TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from.","dir":"<TMP>/elsewhere","next":"Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them)."}
+
+--- stderr
+
+  <TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from.
+
+  Next
+  Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them).
+
+"
+`;
+
+exports[`ix overview: plugin-facing output > --format llm > backend down 1`] = `
+"$ ix overview paint --format llm # IX_ENDPOINT=http://127.0.0.1:<DOWN_PORT>, nothing listening
+exit: 1
+--- stdout
+error code=backend_unreachable message="Ix backend not reachable at http://127.0.0.1:<DOWN_PORT>." hint="Check your network, and that the endpoint is right (\`ix config get endpoint\`)."
+
+--- stderr
+"
+`;
+
+exports[`ix overview: plugin-facing output > --format llm > healthy 1`] = `
+"$ ix overview paint --format llm
+exit: 0
+--- stdout
+overview target=paint kind=function file=src/app.ts contained_in="file app.ts"
+nearby function=1
+sibling name=draw kind=function
+note text="No system map. Run \`ix map\` to see hierarchy."
+
+--- stderr
+"
+`;
+
+exports[`ix overview: plugin-facing output > --format llm > unmapped 1`] = `
+"$ ix overview paint --format llm # from an unmapped directory
+exit: 4
+--- stdout
+error code=workspace_not_mapped message="<TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from." dir=<TMP>/elsewhere hint="Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them)."
+
+--- stderr
+"
+`;
+
+exports[`ix overview: plugin-facing output > --format text > backend down 1`] = `
+"$ ix overview paint --format text # IX_ENDPOINT=http://127.0.0.1:<DOWN_PORT>, nothing listening
+exit: 1
+--- stdout
+
+--- stderr
+
+  Ix backend not reachable at http://127.0.0.1:<DOWN_PORT>.
+
+  Next
+  Check your network, and that the endpoint is right (\`ix config get endpoint\`).
+
+"
+`;
+
+exports[`ix overview: plugin-facing output > --format text > healthy 1`] = `
+"$ ix overview paint --format text
+exit: 0
+--- stdout
+
+Overview
+  Kind:             function
+  File:             src/app.ts
+  Contained in:     app.ts
+
+Nearby structure
+  Sibling functions:1
+
+Key siblings
+  draw
+  Note  No system map. Run \`ix map\` to see hierarchy.
+
+--- stderr
+Resolved: function 00000006 paint
+
+"
+`;
+
+exports[`ix overview: plugin-facing output > --format text > unmapped 1`] = `
+"$ ix overview paint --format text # from an unmapped directory
+exit: 4
+--- stdout
+
+--- stderr
+
+  <TMP>/elsewhere is not inside a mapped Ix workspace, so there is no graph to answer from.
+
+  Next
+  Run \`ix map <TMP>/elsewhere\` to map this directory, or run the command from inside a workspace that is already mapped (\`ix config show\` lists them).
+
+"
+`;
+
+exports[`ix status: plugin-facing output > --format json > backend down 1`] = `
+"$ ix status --format json # IX_ENDPOINT=http://127.0.0.1:<DOWN_PORT>, nothing listening
+exit: 1
+--- stdout
+{"error":"backend_unreachable","message":"Ix backend not reachable at http://127.0.0.1:<DOWN_PORT>.","next":"Check your network, and that the endpoint is right (\`ix config get endpoint\`)."}
+
+--- stderr
+Ix backend not reachable at http://127.0.0.1:<DOWN_PORT>.
+Check your network, and that the endpoint is right (\`ix config get endpoint\`).
+"
+`;
+
+exports[`ix status: plugin-facing output > --format json > healthy 1`] = `
+"$ ix status --format json
+exit: 0
+--- stdout
+{"backend":"ok","graphCompleted":false,"mapCompleted":false,"mapStale":false,"mapRefreshError":null,"currentRev":0,"lastIngestAt":null,"staleFiles":0,"sampleChangedFiles":[],"replayedFiles":[],"parseTimeouts":[],"graphHealth":{"status":"ok","nodes":6,"edges":7,"structuralEdges":4,"symbols":4},"verify":null}
+
+--- stderr
+"
+`;
+
+exports[`ix status: plugin-facing output > --format json > unmapped 1`] = `
+"$ ix status --format json # from an unmapped directory
+exit: 0
+--- stdout
+{"backend":"ok","graphCompleted":false,"mapCompleted":false,"mapStale":false,"mapRefreshError":null,"currentRev":0,"lastIngestAt":null,"staleFiles":0,"sampleChangedFiles":[],"replayedFiles":[],"parseTimeouts":[],"graphHealth":{"status":"ok","nodes":6,"edges":7,"structuralEdges":4,"symbols":4},"verify":null}
+
+--- stderr
+"
+`;
+
+exports[`ix status: plugin-facing output > --format llm > backend down 1`] = `
+"$ ix status --format llm # IX_ENDPOINT=http://127.0.0.1:<DOWN_PORT>, nothing listening
+exit: 1
+--- stdout
+error code=backend_unreachable message="Ix backend not reachable at http://127.0.0.1:<DOWN_PORT>." hint="Check your network, and that the endpoint is right (\`ix config get endpoint\`)."
+
+--- stderr
+"
+`;
+
+exports[`ix status: plugin-facing output > --format llm > healthy 1`] = `
+"$ ix status --format llm
+exit: 0
+--- stdout
+status backend=ok endpoint=http://127.0.0.1:<PORT> graph_health=ok graph_complete=false map_complete=false rev=0 stale_files=0 not_applied=0 parse_timeouts=0 stale=true
+
+--- stderr
+"
+`;
+
+exports[`ix status: plugin-facing output > --format llm > unmapped 1`] = `
+"$ ix status --format llm # from an unmapped directory
+exit: 0
+--- stdout
+status backend=ok endpoint=http://127.0.0.1:<PORT> graph_health=ok graph_complete=false map_complete=false rev=0 stale_files=0 not_applied=0 parse_timeouts=0 stale=true
+
+--- stderr
+"
+`;
+
+exports[`ix status: plugin-facing output > --format text > backend down 1`] = `
+"$ ix status --format text # IX_ENDPOINT=http://127.0.0.1:<DOWN_PORT>, nothing listening
+exit: 1
+--- stdout
+
+--- stderr
+Ix backend not reachable at http://127.0.0.1:<DOWN_PORT>.
+Check your network, and that the endpoint is right (\`ix config get endpoint\`).
+"
+`;
+
+exports[`ix status: plugin-facing output > --format text > healthy 1`] = `
+"$ ix status --format text
+exit: 0
+--- stdout
+
+Status
+  Ix Memory:        ok
+  Endpoint:         http://127.0.0.1:<PORT>
+  Graph:            ok
+  Revision:         0
+  Warning  No completed source graph ingest is recorded for this workspace.
+  Note  Run ix map to build a trustworthy graph.
+
+--- stderr
+"
+`;
+
+exports[`ix status: plugin-facing output > --format text > unmapped 1`] = `
+"$ ix status --format text # from an unmapped directory
+exit: 0
+--- stdout
+
+Status
+  Ix Memory:        ok
+  Endpoint:         http://127.0.0.1:<PORT>
+  Graph:            ok
+  Revision:         0
+  Warning  No completed source graph ingest is recorded for this workspace.
+  Note  Run ix map to build a trustworthy graph.
+
+--- stderr
+"
+`;
