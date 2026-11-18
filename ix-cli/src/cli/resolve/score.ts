@@ -32,8 +32,9 @@ export function looksTypeLikeSymbol(symbol: string): boolean {
  *   is enough to put even a PascalCase CSS class (-7 with the type boost)
  *   behind a same-named function (-1).
  *
- * A demotion, never a filter — when nothing else shares the name these are
- * still the best (and only) answer.
+ * A demotion, not a filter — when nothing else shares the name these are
+ * still the best (and only) answer. (`ix search` alone also folds an exact-name
+ * import away once the definition is listed; see `foldImportRows`.)
  */
 export function originPenalty(
   node: any,

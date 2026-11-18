@@ -1,8 +1,9 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import chalk from "chalk";
+import type { EdgeSite } from "../edge-sites.js";
 import { llmLine, llmShortId, type LlmValue } from "../llm.js";
-import { projectRow } from "../output-shape.js";
+import { projectRow, requestedFields } from "../output-shape.js";
 import { emit, type Renderer } from "../output/emit.js";
 import { attrLabel, disambiguatingIds, lineSpan, locationLabel, relativePath, rowLocation, siteLabel } from "../output/rows.js";
 import { dispatchVia, isPastEnd, isRawIdName, pastEndMessage, truncationHint, type Slice } from "../output/slice.js";
@@ -90,13 +91,24 @@ export function renderEdgeResultsLlm(
       ? llmLine("ref", [...projectRow([
           ["name", ref.name], ["kind", ref.kind], ["id", ids[i]],
           ["path", ref.path], ["lines", lineSpan(ref)],
-          ["site", ref.site ? siteLabel(ref.site) : undefined],
+          ["site", ref.site ? refSiteLabel(ref.site, ref.path) : undefined],
           ["also", ref.site?.also?.join(",")],
           ["snippet", ref.site?.snippet],
         ]), ...tag])
       : llmLine("ref", [...projectRow([["kind", ref.kind], ["id", llmShortId(ref.id)], ["resolved", false]]), ...tag]));
   });
   return lines;
+}
+
+/**
+ * The `site=` of one llm ref row. A site in the row's own file (every
+ * `callers` and `imported-by` site) prints as just its line: `path=` on the
+ * same row already names the file (#1014). When `--fields` drops `path`, or
+ * the site is in another file (`callees`, `imports`), it stays `path:line`.
+ */
+function refSiteLabel(site: EdgeSite, rowPath: string | undefined): string {
+  const pathShown = requestedFields()?.includes("path") ?? true;
+  return pathShown && rowPath !== undefined && site.path === rowPath ? `${site.line}` : siteLabel(site);
 }
 
 /** What `formatEdgeResults` prints: one page of an edge query and how it was resolved. */

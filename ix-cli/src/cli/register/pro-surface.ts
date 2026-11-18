@@ -39,7 +39,6 @@ export const PRO_COMMANDS = [
   // (commands/patches.ts, registered by `registerOssCommands` in oss.ts and
   // listed in oss-table.ts). A stub for it shadowed a working command — #371.
   { name: "plan", description: "Manage plans and plan tasks" },
-  { name: "plans", description: "List all plans" },
   { name: "task", description: "Manage tasks" },
   { name: "tasks", description: "List all tasks across plans" },
   { name: "truth", description: "Manage project intents (truth)" },
@@ -55,6 +54,8 @@ export const PRO_RETIRED: Readonly<Record<string, string>> = {
   goals: "goal list",
   // Ix-pro#108 collapsed `ix bugs` into `ix bug list`.
   bugs: "bug list",
+  // Ix-pro#125 collapsed `ix plans` into `ix plan list` (#920).
+  plans: "plan list",
 };
 
 type ProMcpToolName = Extract<(typeof PRO_COMMANDS)[number], { mcpTool: string }>["mcpTool"];

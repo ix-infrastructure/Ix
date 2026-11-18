@@ -105,9 +105,9 @@ before it exits: `ix map` re-ingests the workspace, and so does `ix ingest` when
 
 ## Ix Pro
 
-Some commands (`plan`, `plans`, `task`, `tasks`, `workflow`, `decide`, `decisions`, `goal`, `truth`, `bug` and
-`briefing`) belong to Ix Pro. Without Pro they print `The '<name>' command requires Ix Pro.` Everything else on this
-page is open source. The old `ix goals` and `ix bugs` are now `ix goal list` and `ix bug list`.
+Some commands (`plan`, `task`, `tasks`, `workflow`, `decide`, `decisions`, `goal`, `truth`, `bug` and `briefing`)
+belong to Ix Pro. Without Pro they print `The '<name>' command requires Ix Pro.` Everything else on this page is open
+source. The old `ix goals`, `ix bugs` and `ix plans` are now `ix goal list`, `ix bug list` and `ix plan list`.
 
 ## Deprecated
 

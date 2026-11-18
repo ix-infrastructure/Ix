@@ -77,6 +77,13 @@ describe("Pro surface table", () => {
     }
   });
 
+  // #920: Ix-pro#125 collapsed `ix plans` into `ix plan list`, as Ix-pro#103 and
+  // #108 did for `goals` and `bugs`.
+  it("retires the collapsed plurals goals, bugs and plans", () => {
+    expect(PRO_RETIRED).toMatchObject({ goals: "goal list", bugs: "bug list", plans: "plan list" });
+    for (const old of ["goals", "bugs", "plans"]) expect(PRO_COMMAND_NAMES).not.toContain(old);
+  });
+
   // #371: a Pro name that ix-cli also implements shadows the real command.
   it("names no command the OSS CLI registers", () => {
     const program = new Command();
