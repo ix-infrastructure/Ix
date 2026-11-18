@@ -53,6 +53,15 @@ export function inferFlowSemantics(facts: EntityFacts): FlowSemantics {
     let score = 0;
     let matches = true;
 
+    // A rule that pairs a name pattern with a path pattern needs both. Common
+    // verbs (select, rank, resolve) appear in any repo, so the name alone must
+    // not reach the high confidence that turns on flow wording, and neither
+    // must the file name alone (every function in resolve.ts is not a
+    // selection step). Name-only rules top out at medium (2 + priority 1).
+    if (rule.namePat && rule.pathPat && !rule.containerPat) {
+      if (!rule.namePat.test(name) || !rule.pathPat.test(path)) continue;
+    }
+
     if (rule.namePat) {
       if (rule.namePat.test(name)) score += 2;
       else if (!rule.pathPat && !rule.containerPat) { matches = false; continue; }

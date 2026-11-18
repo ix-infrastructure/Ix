@@ -442,6 +442,10 @@ Many nodes in one read, at the latest revision (Ix-memory 1.0.33+). Body
 `{ ids: string[], fields?: "full" }`, at most 1000 ids (413 above that).
 `fields: "full"` returns whole nodes, attrs and provenance included. `ix map`
 uses it once per batch to check the nodes an extractor change left behind.
+`ix explain` reads the target's callees with it in one request, and reads
+one `/v1/entity/{id}` each for the ids it does not return; on a backend
+without the route (404/405/501, remembered for 10 minutes) it reads every
+callee that way.
 
 **Response** — `{ rev: number, nodes: GraphNode[], missing: string[] }`; only
 live nodes are returned, every other id is in `missing`.
