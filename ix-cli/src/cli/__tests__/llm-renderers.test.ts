@@ -193,9 +193,14 @@ describe("renderSmellsLlm", () => {
     expect(lines[2]).toBe("smell kind=has_smell.orphan_file file=low.py confidence=0.5 connections=0");
   });
   it("renders --list claims", () => {
-    const lines = renderSmellsListLlm([{ smell: "has_smell.god_module", entity_id: "abcdef0123456789", confidence: 0.7, inference_version: "smell_v1" }]);
+    const lines = renderSmellsListLlm([{
+      smell: "has_smell.god_module",
+      entity_id: "abcdef0123456789",
+      value: { confidence: 0.7, file: "src/big.ts" },
+      inference_version: "smell_v1",
+    }]);
     expect(lines[0]).toBe("smells count=1 version=smell_v1");
-    expect(lines[1]).toBe("smell kind=has_smell.god_module entity=abcdef012345 confidence=0.7 version=smell_v1");
+    expect(lines[1]).toBe("smell kind=god_module path=src/big.ts entity=abcdef012345 confidence=0.7 version=smell_v1");
   });
 });
 
