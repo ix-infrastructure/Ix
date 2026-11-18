@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { isLoopbackEndpoint } from "./endpoint.js";
 import { routeMissing } from "../client/features.js";
+import { isIxHttpError } from "../client/http-error.js";
 import { acquireLockAt, namedLockPath, type LockHandle } from "./single-flight.js";
 
 // ---------------------------------------------------------------------------
@@ -237,6 +238,9 @@ export function connectionNeverEstablished(error: unknown): boolean {
   // an AggregateError adds one, so the cap is what stops a pathological chain.
   const seen = (e: unknown, depth: number): boolean => {
     if (e === null || e === undefined || depth > 5) return false;
+    // The server answered: its body's `code` is not a socket code, and a
+    // request something answered was not "never connected".
+    if (isIxHttpError(e)) return false;
     const { syscall, code, cause, errors } = e as {
       syscall?: unknown; code?: unknown; cause?: unknown; errors?: unknown;
     };

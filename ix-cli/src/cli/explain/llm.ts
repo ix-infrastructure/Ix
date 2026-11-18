@@ -147,10 +147,8 @@ export function renderExplainLlm(
     lines.push(llmLine("used_by", [["text", rendered.usedBy]]));
   }
 
-  for (const note of rendered.notes) {
-    lines.push(llmLine("note", [["text", note]]));
-  }
-
+  // No `note` records: every note is prose rendered from one of the
+  // diagnostics below (`renderNotes`), so printing both said each thing twice.
   for (const diagnostic of facts.diagnostics) {
     lines.push(llmLine("diagnostic", [
       ["code", diagnostic.code],

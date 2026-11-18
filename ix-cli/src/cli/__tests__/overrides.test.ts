@@ -198,6 +198,15 @@ describe("ix overrides on a three-level hierarchy", () => {
     expect(text).toMatch(/ {2}siblings \(via Base\.m\)\n {4}Other\.m {2}pkg\/other\.py:7-9 {2}depth 1/);
   });
 
+  it("a target given as Mid.m is matched by m and shown as Mid.m", async () => {
+    target.value = { ...asTarget(MID_M), displayName: "Mid.m" };
+    const { out } = await run(["overrides", "Mid.m", "--format", "llm"]);
+    expect(out[0]).toBe("overrides target=Mid.m owner=Mid root=Base.m shown=3 total=3");
+    const body = json((await run(["overrides", "Mid.m", "--format", "json"])).out);
+    expect(body.resolvedTarget).toEqual({ id: MID_M.id, name: "Mid.m", kind: "method", path: "pkg/mid.py" });
+    expect(body.total).toBe(3);
+  });
+
   it("answers under the implementations alias", async () => {
     const body = json((await run(["implementations", "m", "--format", "json"])).out);
     expect(body.total).toBe(3);

@@ -976,8 +976,13 @@ describe("ingestFiles against a fake backend", () => {
       // --force re-sends every file; replays of unchanged content are fine.
       backend.semantics = "legacy";
       await incremental();
+      const forced = () => ingestFiles(repo, { format: "text", force: true, suppressOutput: true, printSummary: false });
 
-      const summary = await ingestFiles(repo, { format: "text", force: true, suppressOutput: true, printSummary: false });
+      // The first forced run re-sends held content under the full-mode id
+      // (Ix#965), so it is applied; the next one is the replay.
+      const first = await forced();
+      expect(first.replayedChanges).toEqual([]);
+      const summary = await forced();
 
       expect(summary.idempotentPatches).toBeGreaterThan(0);
       expect(summary.replayedChanges).toEqual([]);
