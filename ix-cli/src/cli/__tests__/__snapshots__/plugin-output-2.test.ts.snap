@@ -16,7 +16,7 @@ exit: 3
 --- stdout
 target n=1 name=paint
 callers target=paint shown=1 total=1 resolved=1
-ref name=draw kind=function path=src/app.ts lines=3-5 site=src/app.ts:4 snippet=paint(canvas);
+ref name=draw kind=function path=src/app.ts lines=3-5 site=4 snippet=paint(canvas);
 target n=2 name=vanish
 error code=unresolved_target message="No entity found matching \\"vanish\\"."
 targets total=2 ok=1 not_found=1
