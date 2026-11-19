@@ -22,6 +22,7 @@ import { renderNote, renderWarningErr, reportFailure } from "../ui.js";
 import { takeResolutionNotices } from "../format.js";
 import { checkGraphHealth } from "../graph-health.js";
 
+import { archivedFacts, revisionBehavior, revisionTarget } from "../context/behavior-revision.js";
 import { buildBundle } from "../context/bundle.js";
 import { collectContextFacts, bundleGraphHealth } from "../context/collect.js";
 import { buildFreshBundle, renderInvestigationDiff } from "../context/investigation-diff.js";
@@ -214,7 +215,8 @@ async function runDiff(id: string, target: string | undefined, opts: ContextOpti
 async function emitTargetBundle(target: string, opts: ContextOptions, fmt: BundleFormat): Promise<void> {
   const client = createClient({ query: true });
 
-  const found = await resolveFileOrReport(client, target, {
+  const historical = opts.asOfRev && await revisionTarget(client, target, opts.asOfRev, opts);
+  const found = historical || await resolveFileOrReport(client, target, {
     kind: opts.kind,
     path: opts.path,
     pick: opts.pick,
@@ -230,11 +232,11 @@ async function emitTargetBundle(target: string, opts: ContextOptions, fmt: Bundl
   const budgets = clampBudgets(opts, fmt);
   const asOfRev = opts.asOfRev;
 
-  const [facts, context, workspaceHealth] = await Promise.all([
+  const [liveFacts, context, workspaceHealth] = await Promise.all([
     // Also carries the provenance response: `collectFacts` needs it for the
     // history length, and fetching it again here doubled one of the
     // slowest calls the command makes (~1.3s on the Ix repo's graph).
-    collectContextFacts(client, resolved),
+    asOfRev ? undefined : collectContextFacts(client, resolved),
     // By id, not by name. Seeding by name makes the backend re-run the
     // search the resolver just did, and it can land on a different node of
     // the same name. Every call site must use it (this one, `buildFreshBundle`
@@ -248,11 +250,13 @@ async function emitTargetBundle(target: string, opts: ContextOptions, fmt: Bundl
     }),
     // Cached per backend revision (graph-health.ts); in parallel, so free
     // on a warm cache.
-    checkGraphHealth(client, activeReadScope()),
+    asOfRev ? undefined : checkGraphHealth(client, activeReadScope()),
   ]);
+  const facts = liveFacts ?? archivedFacts(resolved, context, asOfRev!);
   const provenance = facts.provenance;
 
   const bundle = buildBundle({
+    revisionBehavior: asOfRev ? await revisionBehavior(client, resolved, context, asOfRev, !!historical && historical.identityVerified, target) : undefined,
     resolved,
     facts,
     context,
@@ -261,8 +265,9 @@ async function emitTargetBundle(target: string, opts: ContextOptions, fmt: Bundl
     depth: opts.depth,
     budgets,
     format: fmt,
-    graphCompleted: hasCompletedSourceGraphBaseline(),
-    graphHealth: bundleGraphHealth(workspaceHealth, resolved, facts),
+    graphCompleted: !asOfRev && hasCompletedSourceGraphBaseline(),
+    isStale: asOfRev ? () => false : undefined,
+    graphHealth: workspaceHealth && bundleGraphHealth(workspaceHealth, resolved, facts),
   });
 
   await emitBundle(bundle, opts);

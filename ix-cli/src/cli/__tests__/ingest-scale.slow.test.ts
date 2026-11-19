@@ -98,9 +98,10 @@ describe("ingestFiles at 5,000 files (QA-07)", () => {
       const dep = i % 10 === 0 && i > 0 ? i - 1 : -1;
       const imp = dep >= 0 ? `import { ${nameOf(dep)} } from "../${dirOf(dep)}/${nameOf(dep)}.js";\n` : "";
       const call = dep >= 0 ? `${nameOf(dep)}() + ` : "";
+      const write = i % 20 === 0 ? 'let state; state = "ready"; ' : "";
       writeFileSync(
         join(repo, dirOf(i), `${nameOf(i)}.ts`),
-        `${imp}export function ${nameOf(i)}(): number { return ${call}${i}; }\n`,
+        `${imp}export function ${nameOf(i)}(): number { ${write}return ${call}${i}; }\n`,
         "utf8",
       );
     }
@@ -120,7 +121,7 @@ describe("ingestFiles at 5,000 files (QA-07)", () => {
     }
     const wallMs = Date.now() - started;
     peakRss = Math.max(peakRss, process.memoryUsage().rss);
-    process.stderr.write(`ingest-scale: wall=${wallMs}ms peakRssGrowth=${peakRss - baseRss}B bulks=${backend!.bulkCount}\n`);
+    process.stderr.write(`ingest-scale: wall=${wallMs}ms peakRssGrowth=${peakRss - baseRss}B bulks=${backend!.bulkCount} uploadBytes=${backend!.bulkBodyBytes.reduce((sum, n) => sum + n, 0)}\n`);
 
     expect(wallMs, "wall time").toBeLessThan(MAX_WALL_MS);
     expect(peakRss - baseRss, "peak RSS growth").toBeLessThan(MAX_RSS_GROWTH_BYTES);

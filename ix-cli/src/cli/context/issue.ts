@@ -36,6 +36,7 @@ import { reportFailure } from "../ui.js";
 import { printJson, relativePath } from "../format.js";
 import { checkGraphHealth } from "../graph-health.js";
 
+import { archivedFacts, revisionBehavior } from "./behavior-revision.js";
 import { buildBundle } from "./bundle.js";
 import { collectContextFacts, fileNodeIdOrUndefined, bundleGraphHealth } from "./collect.js";
 import type { BudgetSnapshot, BundleFormat, ContextOptions } from "./options.js";
@@ -81,13 +82,15 @@ export async function buildIssueBundle(
     return undefined;
   }
   const resolved = { id: centre.id!, name: centre.name, kind: centre.kind, resolutionMode: "issue" };
-  const [facts, context, around, workspaceHealth] = await Promise.all([
-    collectContextFacts(client, resolved),
+  const asOfRev = opts.asOfRev;
+  const [liveFacts, context, around, workspaceHealth] = await Promise.all([
+    asOfRev ? undefined : collectContextFacts(client, resolved),
     client.contextForNode(resolved.id, { asOfRev: opts.asOfRev, depth: opts.depth }),
     Promise.all(starts.filter((s) => s.id && s !== centre).map((s) => startNeighbourhood(client, s))),
-    checkGraphHealth(client, activeReadScope()),
+    asOfRev ? undefined : checkGraphHealth(client, activeReadScope()),
   ]);
 
+  const facts = liveFacts ?? archivedFacts(resolved, context, asOfRev!);
   const issue = await issueBundleSection(client, {
     text, plan, starts, walked,
     neighbourhoods: [{ start: centre, facts, related: facts.relatedRefs ?? [] }, ...around],
@@ -95,6 +98,7 @@ export async function buildIssueBundle(
   });
 
   return buildBundle({
+    revisionBehavior: asOfRev ? await revisionBehavior(client, resolved, context, asOfRev, false, centre.name) : undefined,
     resolved,
     facts,
     context,
@@ -103,8 +107,9 @@ export async function buildIssueBundle(
     depth: opts.depth,
     budgets,
     format,
-    graphCompleted: hasCompletedSourceGraphBaseline(),
-    graphHealth: bundleGraphHealth(workspaceHealth, resolved, facts),
+    graphCompleted: !asOfRev && hasCompletedSourceGraphBaseline(),
+    isStale: asOfRev ? () => false : undefined,
+    graphHealth: workspaceHealth && bundleGraphHealth(workspaceHealth, resolved, facts),
     issue,
   });
 }

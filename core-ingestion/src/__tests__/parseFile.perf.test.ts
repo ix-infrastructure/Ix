@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { parseFile } from '../index.js';
+import { behaviorLimits } from '../behavior.js';
 
 /**
  * Parse time must grow with the file, not with its square.
@@ -173,4 +174,26 @@ describe('parseFile budget', () => {
     expect(parseFile('notes.unknownext', 'hello', { onFailure: (f) => failures.push(f) })).toBeNull();
     expect(failures).toEqual([]);
   });
+});
+
+describe('bounded behavioral parsing', () => {
+  it('retains structural output for a file with thousands of matching writes', () => {
+    const line = 'if (this.status === "queued") { this.status = "running"; }';
+    const source = ['class Job {', 'start() {', ...Array(4000).fill(line), '}', '}'].join('\n');
+    const { ms, parsed } = timed(source, BOUND_MS);
+    expect(parsed?.behavior).toMatchObject({ coverage: 'partial', cutReason: 'writes' });
+    expect(parsed?.behavior?.writes).toHaveLength(behaviorLimits.writes);
+    expect(parsed?.entities.some(e => e.name === 'start')).toBe(true);
+    expect(ms).toBeLessThan(BOUND_MS);
+  }, TEST_TIMEOUT_MS);
+
+  it('cuts deep guards before constructing an unbounded guard stack', () => {
+    const depth = 200;
+    const source = 'class Job { start() { this.state="init";' + 'if (ready) {'.repeat(depth)
+      + 'this.state="deep";' + '}'.repeat(depth) + '} }';
+    const { ms, parsed } = timed(source, BOUND_MS);
+    expect(parsed?.behavior).toMatchObject({ coverage: 'partial', cutReason: 'depth' });
+    expect(parsed?.behavior?.writes.map(w => w.observed.to.value)).toEqual(['init']);
+    expect(ms).toBeLessThan(BOUND_MS);
+  }, TEST_TIMEOUT_MS);
 });

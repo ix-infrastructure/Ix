@@ -12,6 +12,7 @@ const CUT_LABELS: Record<string, string> = {
   "issue.starts": "starting points row",
   "issue.ranking": "ranked files row",
   "facts.container": "container",
+  "facts.behavior": "behavioral evidence",
   "facts.members": "member",
   "facts.imports": "import",
   "facts.callees": "call",

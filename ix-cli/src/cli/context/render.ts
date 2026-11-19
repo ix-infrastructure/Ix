@@ -132,7 +132,10 @@ export function bundleLlmLines(bundle: ContextBundle, next: string[] = llmNextLi
 }
 
 /** The two prose lines `--format text` prints for one evidence item. */
+import { behaviorDescription } from "../behavioral-evidence.js";
+
 export function textEvidenceLines(item: EvidenceItem): string[] {
+  if (item.behavior) return [`  [${item.score}] ${item.title} — ${behaviorDescription(item.behavior)}`];
   const where = item.location ? `${formatLocation(item.location)} — ` : "";
   return [`  [${item.score}] ${item.kind} — ${item.title}`, `         ${where}${item.reason}`];
 }

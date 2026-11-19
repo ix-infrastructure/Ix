@@ -5,6 +5,10 @@ import * as crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 // @ts-ignore — tree-sitter has no bundled types
 import Parser from 'tree-sitter';
+import { behaviorLimits, extractBehavior, firstBehaviorCandidate } from './behavior.js';
+import type { BehaviorDefinition, BehavioralEvidence } from './behavior.js';
+export { bindBehaviorIds } from './behavior.js';
+export type { BehaviorWrite, BehavioralEvidence } from './behavior.js';
 import type { EdgePredicate, NodeKind } from './schema.js';
 // A grammar is imported by the explicit path to its binding ONLY when Node
 // would otherwise emit DEP0151 for it. That is a narrower set than it looks.
@@ -317,6 +321,8 @@ export interface ExportPublicName {
 }
 
 export interface FileParseResult {
+  /** Optional, source-local evidence. The structural patch builder does not consume it. */
+  behavior?: BehavioralEvidence;
   filePath: string;
   language: SupportedLanguages;
   entities: ParsedEntity[];
@@ -2983,6 +2989,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     // JS/TS named/default import bindings (local → public symbol) for cross-repo
     // alias resolution. Additive: never alters emitted relationships.
     const isJsTs = language === SupportedLanguages.JavaScript || language === SupportedLanguages.TypeScript;
+    const firstCandidate = isJsTs && !TS_DECLARATION_FILE.test(filePath) ? firstBehaviorCandidate(source) : -1;
+    const behaviorDefs: BehaviorDefinition[] | undefined = firstCandidate >= 0 && !tree.rootNode.hasError ? [] : undefined;
     const importBindings: ImportBinding[] = [];
     const jsTsImportedLocalNames = new Set<string>();
     const jsTsImportUseHasUnshadowed = new Map<string, boolean>();
@@ -3153,7 +3161,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           ? heritageClassCapture.node.text
           : (enclosing ?? undefined);
 
-        entities.push({
+        const entity: ParsedEntity = {
           name,
           kind,
           lineStart,
@@ -3165,7 +3173,11 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
               ? phpNamespaceForNode(defNode, phpNamespaces.spans)
               : undefined
           ),
-        });
+        };
+        entities.push(entity);
+        if (behaviorDefs && nameCapture && behaviorDefs.length < behaviorLimits.visits) {
+          behaviorDefs.push({ entity, node: defNode, name: nameCapture.node });
+        }
 
         pendingChunks.push({
           name,
@@ -3943,6 +3955,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     }
     const tsGlobalTypes = isTsSource ? tsGlobalTypeNames(tree.rootNode) : [];
     const tsModule = isTsSource && isTsModule(tree.rootNode);
+    const fileRole = classifyFileRole(filePath, source);
+    const behavior = behaviorDefs && extractBehavior(entities, behaviorDefs, source, firstCandidate, deadline, qualifiedKey);
 
     return {
       filePath,
@@ -3965,7 +3979,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       ...(receiverTypedCalls.length ? { receiverTypedCalls } : {}),
       ...(tsGlobalTypes.length ? { tsGlobalTypes } : {}),
       ...(tsModule ? { tsModule: true as const } : {}),
-      fileRole: classifyFileRole(filePath, source),
+      fileRole,
+      ...(behavior ? { behavior } : {}),
     };
   } catch (e) {
     if (process.env.IX_PARSE_DEBUG === '1') console.error('parseFile threw:', e);

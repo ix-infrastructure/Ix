@@ -12,8 +12,11 @@ import type { GraphHealth } from "../graph-health.js";
 
 import type { BudgetSnapshot, BundleFormat } from "./options.js";
 
+import type { BehaviorView } from "../behavioral-evidence.js";
+
 /** Stable evidence kinds, ordered by relevance tier (lower is more relevant). */
 type EvidenceKind =
+  | "behavior"
   | "target"
   | "structural"
   | "claim"
@@ -31,6 +34,7 @@ export interface EvidenceLocation {
 }
 
 export interface EvidenceItem {
+  behavior?: BehaviorView;
   id: string;
   kind: EvidenceKind;
   source: string;
@@ -129,6 +133,7 @@ export interface ContextBundle {
 }
 
 export interface BuildInput {
+  revisionBehavior?: BehaviorView;
   resolved: { id: string; name: string; kind: string; resolutionMode: string };
   facts: ContextFacts;
   context: StructuredContext;
