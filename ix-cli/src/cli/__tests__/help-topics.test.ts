@@ -88,6 +88,7 @@ describe("collapsed plural help topics resolve", () => {
   it.each([
     ["bugs", "bug"],
     ["goals", "goal"],
+    ["plans", "plan"],
   ])("ix help %s forwards to the %s command instead of erroring", (plural, singular) => {
     const { stdout, stderr, exitCode } = runHelp(plural);
     expect(stderr).not.toContain("Unknown help topic");

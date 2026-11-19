@@ -1,13 +1,13 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import chalk from "chalk";
-import { llmLine, llmShortId, type LlmValue } from "../llm.js";
-import { projectRow } from "../output-shape.js";
 import type { EdgeSite } from "../edge-sites.js";
+import { llmLine, llmShortId, type LlmValue } from "../llm.js";
+import { projectRow, requestedFields } from "../output-shape.js";
 import { emit, type Renderer } from "../output/emit.js";
-import { disambiguatingIds, lineSpan, locationLabel, relativePath, rowLocation, siteLabel } from "../output/rows.js";
+import { attrLabel, disambiguatingIds, lineSpan, locationLabel, relativePath, rowLocation, siteLabel } from "../output/rows.js";
 import { dispatchVia, isPastEnd, isRawIdName, pastEndMessage, truncationHint, type Slice } from "../output/slice.js";
-import type { Diagnostic, ResultSource } from "../output/types.js";
+import type { Diagnostic, EdgeRow, ResultSource } from "../output/types.js";
 
 /**
  * The candidates an `--all` edge query ran over. Rows carry `candidate: <n>`,
@@ -27,18 +27,18 @@ export interface EdgeCandidate {
  * then one `ref` row per related entity. Unresolved targets carry resolved=false.
  */
 export function renderEdgeResultsLlm(
-  slice: Slice<any>, relation: string, symbol: string,
+  slice: Slice<EdgeRow>, relation: string, symbol: string,
   source?: ResultSource, diagnostics?: Diagnostic[], candidates?: EdgeCandidate[],
 ): string[] {
-  const refs = slice.rows.map((n: any) => {
-    const name = n.name || n.attrs?.name || "";
+  const refs = slice.rows.map((n) => {
+    const name = n.name || attrLabel(n.attrs?.name) || "";
     return {
       resolved: !!name && !isRawIdName(name),
       name,
       kind: n.kind ?? undefined,
       id: n.id ?? undefined,
-      site: n.site as EdgeSite | undefined,
-      candidate: typeof n.candidate === "number" ? n.candidate as number : undefined,
+      site: n.site,
+      candidate: typeof n.candidate === "number" ? n.candidate : undefined,
       via: dispatchVia(n),
       ...rowLocation(n),
     };
@@ -91,7 +91,7 @@ export function renderEdgeResultsLlm(
       ? llmLine("ref", [...projectRow([
           ["name", ref.name], ["kind", ref.kind], ["id", ids[i]],
           ["path", ref.path], ["lines", lineSpan(ref)],
-          ["site", ref.site ? siteLabel(ref.site) : undefined],
+          ["site", ref.site ? refSiteLabel(ref.site, ref.path) : undefined],
           ["also", ref.site?.also?.join(",")],
           ["snippet", ref.site?.snippet],
         ]), ...tag])
@@ -100,15 +100,37 @@ export function renderEdgeResultsLlm(
   return lines;
 }
 
+/**
+ * The `site=` of one llm ref row. A site in the row's own file (every
+ * `callers` and `imported-by` site) prints as just its line: `path=` on the
+ * same row already names the file (#1014). When `--fields` drops `path`, or
+ * the site is in another file (`callees`, `imports`), it stays `path:line`.
+ */
+function refSiteLabel(site: EdgeSite, rowPath: string | undefined): string {
+  const pathShown = requestedFields()?.includes("path") ?? true;
+  return pathShown && rowPath !== undefined && site.path === rowPath ? `${site.line}` : siteLabel(site);
+}
+
 /** What `formatEdgeResults` prints: one page of an edge query and how it was resolved. */
 export interface EdgeResults {
-  slice: Slice<any>;
+  slice: Slice<EdgeRow>;
   relation: string;
   symbol: string;
-  resolvedTarget?: { id: string; kind: string; name: string; resolutionMode?: string };
+  resolvedTarget?: ResolvedEdgeTarget;
   source?: ResultSource;
   diagnostics?: Diagnostic[];
   candidates?: EdgeCandidate[];
+}
+
+/** The entity an edge query resolved to; its `path`, when given, prints relative. */
+export interface ResolvedEdgeTarget {
+  id: string;
+  kind: string;
+  name: string;
+  /** The name to show, e.g. the qualified `Class.method` form; never emitted as its own JSON key. */
+  displayName?: string;
+  resolutionMode?: string;
+  path?: string;
 }
 
 /** callers, callees, contains, imports, imported-by, depends and the like. */
@@ -120,8 +142,8 @@ export const edgeResultsRenderer: Renderer<EdgeResults> = {
 };
 
 export function formatEdgeResults(
-  slice: Slice<any>, relation: string, symbol: string, format: string,
-  resolvedTarget?: { id: string; kind: string; name: string; resolutionMode?: string },
+  slice: Slice<EdgeRow>, relation: string, symbol: string, format: string,
+  resolvedTarget?: ResolvedEdgeTarget,
   source?: ResultSource,
   diagnostics?: Diagnostic[],
   candidates?: EdgeCandidate[],
@@ -132,8 +154,8 @@ export function formatEdgeResults(
 function edgeResultsJson({ slice, relation, resolvedTarget, source, diagnostics, candidates }: EdgeResults): unknown {
   const nodes = slice.rows;
 
-  const results = nodes.map((n: any) => {
-    const name = n.name || n.attrs?.name || "";
+  const results = nodes.map((n) => {
+    const name = n.name || attrLabel(n.attrs?.name) || "";
     const resolved = !!name && !isRawIdName(name);
     const ref: any = {
       name: resolved ? name : undefined,
@@ -159,9 +181,11 @@ function edgeResultsJson({ slice, relation, resolvedTarget, source, diagnostics,
     resultSource: source ?? "graph",
   };
   if (resolvedTarget) {
+    const { displayName, ...shown } = resolvedTarget;
     output.resolvedTarget = {
-      ...resolvedTarget,
-      path: relativePath((resolvedTarget as any).path),
+      ...shown,
+      name: displayName ?? shown.name,
+      path: relativePath(resolvedTarget.path),
     };
     if (resolvedTarget.resolutionMode && resolvedTarget.resolutionMode !== "exact") {
       output.resolutionMode = resolvedTarget.resolutionMode;
@@ -225,7 +249,7 @@ function printEdgeResultsText({ slice, relation, symbol, source, diagnostics, ca
     console.log(chalk.dim(`  [${c.n}] ${c.kind} ${c.name}${where}`));
   }
   for (const n of nodes) {
-    const name = n.name || n.attrs?.name || "";
+    const name = n.name || attrLabel(n.attrs?.name) || "";
     const shortId = n.id?.slice(0, 8) ?? "";
     if (!name || isRawIdName(name)) {
       console.log(`  ${chalk.cyan((n.kind ?? "").padEnd(10))}  ${chalk.dim(shortId)}  ${chalk.dim("(unresolved)")}`);
@@ -237,7 +261,7 @@ function printEdgeResultsText({ slice, relation, symbol, source, diagnostics, ca
         + (typeof n.candidate === "number" ? `  ${chalk.dim(`[${n.candidate}]`)}` : "")
         + (dispatchVia(n) ? `  ${chalk.dim(`(via ${dispatchVia(n)})`)}` : ""),
       );
-      const site = n.site as EdgeSite | undefined;
+      const site = n.site;
       if (site) console.log(`      ${chalk.dim(`at ${siteLabel(site)}`)}  ${site.snippet}`);
     }
   }

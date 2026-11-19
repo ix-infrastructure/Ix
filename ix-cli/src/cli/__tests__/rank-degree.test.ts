@@ -3,8 +3,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import {
-  DEGREE_CHECK_MIN, DEGREE_MAX_IDS, DEGREE_TIMEOUT_MS, DEGREE_UNUSABLE_TTL_MS, registerRankCommand, scoreViaDegree,
+  DEGREE_CHECK_MIN, DEGREE_MAX_IDS, DEGREE_TIMEOUT_MS, DEGREE_UNUSABLE_TTL_MS, RANK_LIST_LIMIT, registerRankCommand, scoreViaDegree,
 } from "../commands/rank.js";
+import { IxHttpError } from "../../client/http-error.js";
 
 const { listByKind, expand, degree } = vi.hoisted(() => ({ listByKind: vi.fn(), expand: vi.fn(), degree: vi.fn() }));
 vi.mock("../../client/api.js", () => ({
@@ -283,9 +284,9 @@ describe("ix rank /v1/degree fallback", () => {
   const args = ["--by", "importers", "--kind", "class", "--top", TOP, "--format", "llm"];
 
   it.each([
-    ["404", new Error('404: {"error":"not found"}'), true],
-    ["405", new Error("405: Method Not Allowed"), true],
-    ["413", new Error("413: Payload Too Large"), false],
+    ["404", new IxHttpError(404, '{"error":"not found"}'), true],
+    ["405", new IxHttpError(405, "Method Not Allowed"), true],
+    ["413", new IxHttpError(413, "Payload Too Large"), false],
     ["transport error", new TypeError("fetch failed"), false],
   ] as const)("%s: the expand path, same output; route missing remembered: %s", async (_label, err, remembered) => {
     const before = await oldPathOutput(args);
@@ -303,7 +304,7 @@ describe("ix rank /v1/degree fallback", () => {
   });
 
   it("remembers a missing route per backend, not for every backend", async () => {
-    degree.mockReset().mockRejectedValue(new Error("404: not found"));
+    degree.mockReset().mockRejectedValue(new IxHttpError(404, "not found"));
     await run(args);
     expect(degree).toHaveBeenCalledTimes(1);
 
@@ -318,7 +319,7 @@ describe("ix rank /v1/degree fallback", () => {
     try {
       const before = await oldPathOutput(args);
       process.env.IX_ENDPOINT = freshEndpoint();
-      degree.mockReset().mockRejectedValue(new Error("404: not found"));
+      degree.mockReset().mockRejectedValue(new IxHttpError(404, "not found"));
       await run(args);
       vi.advanceTimersByTime(DEGREE_UNUSABLE_TTL_MS - 1);
       await run(args);
@@ -428,5 +429,67 @@ describe("scoreViaDegree chunking", () => {
     expect(scored).not.toBeNull();
     expect(scored!.map(s => s.score)).toEqual(candidates.map((_, i) => i % 3));
     expect(diagnostics).toEqual([]);
+  });
+});
+
+describe("ix rank says when the candidate window was cut", () => {
+  /** `count` classes; the last one listed is the only one with callers. */
+  const window = (count: number) => Array.from({ length: count }, (_, i) => ({
+    id: `w${i}`, name: `W${i}`, kind: "class", provenance: { sourceUri: "src/w.ts" },
+  }));
+  const hotLast = async (ids: string[]) => ({
+    rev: 1, truncated: false,
+    counts: Object.fromEntries(ids.map(id => [id, id === `w${RANK_LIST_LIMIT}` ? 6 : 0])),
+  });
+  const ARGS = ["--by", "callers", "--kind", "class", "--top", "2"];
+  const MESSAGE = `More than ${RANK_LIST_LIMIT} class entities exist; only the first ${RANK_LIST_LIMIT} the server returned were ranked, `
+    + "so entities that belong in this ranking may be missing. Narrow with --path (or a more specific --kind).";
+
+  beforeEach(() => {
+    degree.mockImplementation(hotLast);
+    expand.mockResolvedValue({ nodes: [], edges: [] });
+  });
+
+  it("asks for one row past the window", async () => {
+    listByKind.mockResolvedValue(window(3));
+    await run([...ARGS, "--format", "json"]);
+    expect(listByKind).toHaveBeenCalledWith("class", { limit: RANK_LIST_LIMIT + 1, scope: undefined, workspaceId: "test-workspace" });
+  });
+
+  it("json: summary.truncated and a diagnostic, and the row past the window is not ranked", async () => {
+    listByKind.mockResolvedValue(window(RANK_LIST_LIMIT + 1));
+    const out = JSON.parse(await run([...ARGS, "--format", "json"]));
+    expect(out.summary).toEqual({ evaluated: RANK_LIST_LIMIT, returned: 2, truncated: true });
+    expect(out.diagnostics).toEqual([MESSAGE]);
+    expect(out.results.map((r: { name: string }) => r.name)).not.toContain(`W${RANK_LIST_LIMIT}`);
+  });
+
+  it("llm: truncated=true on the header and a candidates_truncated diagnostic before the rows", async () => {
+    listByKind.mockResolvedValue(window(RANK_LIST_LIMIT + 1));
+    const lines = (await run([...ARGS, "--format", "llm"])).split("\n");
+    expect(lines[0]).toBe(`rank metric=callers kind=class evaluated=${RANK_LIST_LIMIT} returned=2 truncated=true`);
+    expect(lines[1]).toBe(`diagnostic code=candidates_truncated message="${MESSAGE}"`);
+    expect(lines[2]).toMatch(/^entity /);
+  });
+
+  it("text: the diagnostic follows the ranking", async () => {
+    listByKind.mockResolvedValue(window(RANK_LIST_LIMIT + 1));
+    const out = await run([...ARGS, "--format", "text"]);
+    expect(out).toContain("Top 2 classes by callers:");
+    expect(out).toContain(MESSAGE);
+  });
+
+  it("a cut window whose rows are all filtered out still says it was cut", async () => {
+    listByKind.mockResolvedValue(window(RANK_LIST_LIMIT + 1));
+    const out = JSON.parse(await run([...ARGS, "--exclude-path", "src/w.ts", "--format", "json"]));
+    expect(out.summary.truncated).toBe(true);
+    expect(out.diagnostics).toEqual([MESSAGE, 'No entities matched filters: exclude-path "src/w.ts".']);
+  });
+
+  it.each(["json", "llm", "text"])("a window that is exactly full is not reported as cut (--format %s)", async (format) => {
+    listByKind.mockResolvedValue(window(RANK_LIST_LIMIT));
+    const out = await run([...ARGS, "--format", format]);
+    expect(out).not.toContain("truncated");
+    expect(out).not.toContain("More than");
   });
 });

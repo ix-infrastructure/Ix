@@ -88,6 +88,7 @@ before it exits: `ix map` re-ingests the workspace, and so does `ix ingest` when
 | `ix status` | Checks the backend is reachable |
 | `ix doctor` | Checks server, database and graph integrity |
 | `ix verify` | Compares the graph's nodes to a fresh re-parse of a sample of files (nodes only, not edges) |
+| `ix capabilities` | Reports what this CLI supports — version, whether Ix Pro is installed, the `ix hook` entry points — without the backend. Plugins read `ix capabilities --format json` instead of probing with real commands |
 | `ix docker start` / `stop` / `restart` | Starts, stops or restarts the local backend containers |
 | `ix docker start --local-token` | Makes the local backend require a bearer token, which the CLI stores and sends (`--no-local-token` turns it off). See [Local token](/reference/configuration/#local-token) |
 | `ix docker status` / `logs` | Shows container health, or tails the backend's logs |
@@ -104,9 +105,9 @@ before it exits: `ix map` re-ingests the workspace, and so does `ix ingest` when
 
 ## Ix Pro
 
-Some commands (`plan`, `plans`, `task`, `tasks`, `workflow`, `decide`, `decisions`, `goal`, `truth`, `bug` and
-`briefing`) belong to Ix Pro. Without Pro they print `The '<name>' command requires Ix Pro.` Everything else on this
-page is open source. The old `ix goals` and `ix bugs` are now `ix goal list` and `ix bug list`.
+Some commands (`plan`, `task`, `tasks`, `workflow`, `decide`, `decisions`, `goal`, `truth`, `bug` and `briefing`)
+belong to Ix Pro. Without Pro they print `The '<name>' command requires Ix Pro.` Everything else on this page is open
+source. The old `ix goals`, `ix bugs` and `ix plans` are now `ix goal list`, `ix bug list` and `ix plan list`.
 
 ## Deprecated
 

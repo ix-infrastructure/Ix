@@ -159,12 +159,12 @@ const FLOW_BEHAVIOR_VERBS: Record<string, string> = {
 
 function flowActionNoun(flowName: string): string {
   if (flowName.includes("conflict")) return "conflict resolution";
-  if (flowName.includes("resolution")) return "entity resolution";
+  if (flowName.includes("resolution")) return "resolution";
   if (flowName.includes("parsing")) return "input parsing";
   if (flowName.includes("impact")) return "impact analysis";
   if (flowName.includes("explanation")) return "explanation generation";
-  if (flowName.includes("ingestion")) return "file ingestion";
-  if (flowName.includes("scoring")) return "candidate scoring";
+  if (flowName.includes("ingestion")) return "ingestion";
+  if (flowName.includes("scoring")) return "scoring";
   return "processing";
 }
 

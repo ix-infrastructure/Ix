@@ -7,7 +7,7 @@ import { createClient } from "../../client/factory.js";
 import {
   resolveFileOrEntityFull, rankEntity, withContainers, printResolved, printAmbiguous,
   looksFileLike, isRawId, qualifiedSeparator, isFuzzyResult, withMissReason, withTargetCandidates,
-  answerAmbiguous, fuzzyTextAnswer, textMatchesFor,
+  answerAmbiguous, fuzzyTextAnswer, textMatchesFor, shownTarget,
   type AmbiguousResult, type ResolvedEntity, type ResolveResult, type Suggestion,
 } from "../resolve.js";
 import { textMatchesJson, textMatchesLlm, textMatchesText, type TextMatch, type TextMatchSource } from "../text-matches.js";
@@ -259,7 +259,7 @@ async function resolveWithAmbiguity(
 
   if (result.resolved) {
     if (result.notices?.length) reportResolutionNotices(result.notices, format, opts);
-    return { target: result.entity, ambiguous: false };
+    return { target: shownTarget(result.entity), ambiguous: false };
   }
 
   if (result.ambiguous) {

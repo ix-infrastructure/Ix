@@ -17,10 +17,16 @@ Each row carries the location you would otherwise grep or re-read for:
 
 - `search` rows: `path=` and `lines=` (e.g. `lines=320-340`). An empty search
   ends in a `hint` record — search matches one identifier, so search a single
-  word, or use `ix text` for a phrase.
-- `callers`, `callees`, `imports`, `imported-by` rows: `site=path:line` is the
-  call or import itself, with `snippet=` (the line) and `also=` (more sites in
-  the same scope); `path=`/`lines=` are where the other entity is defined.
+  word, or use `ix text` for a phrase. Once the definition of the term is
+  listed, rows that only import that name are folded away, and a `diagnostic
+  code=imports_folded` record says how many (`--quiet` drops it); list them
+  with `ix imported-by <term>`.
+- `callers`, `callees`, `imports`, `imported-by` rows: `site=` is the call or
+  import itself, with `snippet=` (the line) and `also=` (more sites in the
+  same scope); `path=`/`lines=` are where the other entity is defined. A site
+  in the row's own file (`callers`, `imported-by`) is just the line
+  (`site=64`, in `path=`); one in another file (`callees`, `imports`) is
+  `site=path:line`.
   On a Java method, `callers` also lists callers through a superclass or
   interface after the direct ones, each ending `via=<Supertype>.<method>`
   (json: `via`).
@@ -175,13 +181,21 @@ used as a workaround.
 
 Commands marked **[Pro]** require Ix Pro (server-side). The **Planning** and
 **Workflows** sections of the CLI are entirely Pro-only — including `plan`,
-`plans`, `task`, `tasks`, and `workflow`.
+`task`, `tasks`, and `workflow`. The old `ix plans` is now `ix plan list`.
 
 If any Pro command prints `The '<name>' command requires Ix Pro.`, this install
 does not have them — skip that step, do not retry it, and do not mention it
 again for the rest of the session. Nothing outside those marks is Pro-gated.
 
-Pro-only surface: `plan`, `plans`, `task`, `tasks`, `workflow`, `decide`,
+To know in advance, without running a Pro command, read
+`ix capabilities --format json`: `pro.available` is true when Ix Pro is
+installed and its entry point resolves to a file that exists. It is not started to check, so a Pro
+that then fails to initialize still reads `available`; the Pro command you
+call next exits 1 with "could not initialize", which is the signal to stop
+calling Pro commands (`ix doctor` / `ix upgrade` repair it). See
+[flags.md](flags.md#ix-capabilities) for the full shape.
+
+Pro-only surface: `plan`, `task`, `tasks`, `workflow`, `decide`,
 `decisions`, `goal`, `truth`, `bug`, `briefing`.
 
 ### Semantic boundaries (Pro record types)

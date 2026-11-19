@@ -335,14 +335,21 @@ export function graphHealthLlmFields(health: GraphHealth): Array<[string, string
   ];
 }
 
+/**
+ * What {@link graphHealthJson} prints: the verdict's own fields, each left out
+ * when empty. Part of `ix status`'s json contract (contracts/status.ts).
+ */
+export type GraphHealthJson = Pick<GraphHealth, keyof GraphHealth>;
+
 /** The same verdict for `--format json`: only what a consumer acts on. */
-export function graphHealthJson(health: GraphHealth): Record<string, unknown> {
-  const out: Record<string, unknown> = { status: health.status };
+export function graphHealthJson(health: GraphHealth): GraphHealthJson {
+  const out: GraphHealthJson = { status: health.status };
   if (health.reason) out.reason = health.reason;
   if (health.message) out.message = health.message;
   if (health.fix) out.fix = health.fix;
   for (const k of ["nodes", "edges", "structuralEdges", "symbols"] as const) {
-    if (typeof health[k] === "number") out[k] = health[k];
+    const n = health[k];
+    if (typeof n === "number") out[k] = n;
   }
   return out;
 }

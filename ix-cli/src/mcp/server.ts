@@ -28,13 +28,17 @@ import { withCaller } from "../cli/next-step.js";
 export type { IxRunner } from "./runner.js";
 
 /**
- * Tools every install can run.
+ * Tools every install can run: the full OSS catalog (`--tools=all`).
  *
- * This set is the union of what the per-host Ix plugins expose, minus three
- * deliberate drops: `ix_query` is the deprecated command the CLI docs tell
- * agents not to use, and `ix_neighbors` / `ix_docs_tool` are convenience
- * composites of `ix_callers` + `ix_callees` + `ix_depends` and of
- * `ix_overview`, all of which are here individually.
+ * A default session advertises {@link IX_MCP_CORE_TOOL_NAMES} instead. This
+ * list is the union of what the per-host Ix plugins expose, minus two
+ * deliberate drops: `ix_query`, the deprecated command the CLI docs tell
+ * agents not to use, and `ix_docs_tool`, a convenience composite of
+ * `ix_overview`. `ix_neighbors` is served — one tool for callers, callees,
+ * imports, importers and overrides. The single-relation tools
+ * (`ix_callers`, `ix_callees`, `ix_imported_by`, `ix_imports`, `ix_overrides`)
+ * stay in this catalog; `--tools=core` advertises `ix_neighbors` in their place.
+ * `ix_status` is Gemini's name for `ix_health`.
  */
 export const IX_MCP_OSS_TOOL_NAMES = [
   // First, as it is registered first: tools/list leads with where to start.
@@ -1148,7 +1152,11 @@ async function runSmells(runIx: IxRunner, input: ToolInput): Promise<CallToolRes
       // rank). Prefix matching answered `{"count": 0}` — a confident "no
       // architecture smells here" — for the `src` an agent had just used
       // successfully against ix_inventory on files stored as `ix-cli/src/...`.
-      return normalizePath(candidate.file).includes(path);
+      // Against the file's `path` when the CLI could read it (relative to the
+      // current directory when inside it, else `~/...` or absolute): `file` is
+      // a basename, which no directory matches.
+      const location = typeof candidate.path === "string" ? candidate.path : candidate.file;
+      return normalizePath(location).includes(path);
     });
   const candidates = matched.slice(0, limit);
 

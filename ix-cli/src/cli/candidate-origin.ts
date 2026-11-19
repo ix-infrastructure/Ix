@@ -20,8 +20,11 @@
  * - **generated** — copies of the definition in build output (`dist/`,
  *   `*.min.js`, `*-output.*`) and stand-ins in fixtures and samples.
  *
- * All three are demoted, never dropped: when nothing better matched they are
- * still the answer.
+ * All three are demoted, not dropped: when nothing better matched they are
+ * still the answer. One exception: `ix search` folds away an import whose name
+ * is the term once the term's definition is itself in the answer, and says how
+ * many it folded (`foldImportRows` in commands/search.ts). The resolver behind
+ * `context` / `explain` / `locate` still only demotes.
  */
 
 import type { GraphKind, KindSet } from "./graph-model.js";

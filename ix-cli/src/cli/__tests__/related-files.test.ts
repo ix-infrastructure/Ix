@@ -2,7 +2,9 @@
 
 import { describe, expect, it } from "vitest";
 
-import { buildBundle, clampBudgets, renderBundle } from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { clampBudgets } from "../context/options.js";
+import { renderBundle } from "../context/render.js";
 import type { ContextFacts, EntityLocation } from "../explain/facts.js";
 import { collectRelatedFiles, isTestPath, type RelatedRef } from "../explain/related-files.js";
 

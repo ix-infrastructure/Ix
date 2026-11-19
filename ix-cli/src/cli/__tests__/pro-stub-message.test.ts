@@ -101,13 +101,14 @@ describe("Pro stubs", () => {
     expect(patches?.options.map(o => o.long)).toContain("--format");
   });
 
-  // @ix/pro registers a plural list command alongside `plan` and `task`
-  // (register.ts: registerPlansCommand, registerTasksCommand). Stubbing only the
-  // singular is the failure this pins: the plural fell through to commander's
-  // "unknown command" instead of the sentinel above, so an agent told to stop on
+  // @ix/pro registers a plural list command alongside `task`
+  // (register.ts: registerTasksCommand). Stubbing only the singular is the
+  // failure this pins: the plural fell through to commander's "unknown command"
+  // instead of the sentinel above, so an agent told to stop on
   // `requires Ix Pro.` saw an unrecognized error and had nothing to match.
+  // (`plans` was the other such plural until Ix-pro#125 made it `ix plan list`;
+  // it is in the retired list below now, #920.)
   it.each([
-    ["plan", "plans"],
     ["task", "tasks"],
   ])("stubs both %s and %s", (singular, plural) => {
     for (const name of [singular, plural]) {
@@ -115,8 +116,9 @@ describe("Pro stubs", () => {
     }
   });
 
-  // `goals` and `bugs` are retired: @ix/pro collapsed them into `ix goal list`
-  // (Ix-pro#103) and `ix bug list` (Ix-pro#108). They are PRO_RETIRED in
+  // `goals`, `bugs` and `plans` are retired: @ix/pro collapsed them into
+  // `ix goal list` (Ix-pro#103), `ix bug list` (Ix-pro#108) and `ix plan list`
+  // (Ix-pro#125, #920). They are PRO_RETIRED in
   // register/pro-surface.ts (#932). The stub must not claim the retired name is a
   // Pro command, but it still has to give the sentinel — for the command that
   // does exist — so an agent typing the old name stops instead of retrying an
@@ -124,6 +126,7 @@ describe("Pro stubs", () => {
   it.each([
     ["goals", "goal"],
     ["bugs", "bug"],
+    ["plans", "plan"],
   ])("answers retired %s with the sentinel for %s and the new form", (old, current) => {
     const { err, exitCode } = runStub([old, "--status", "open"]);
     expect(err).toContain(`The '${current}' command requires Ix Pro.`);

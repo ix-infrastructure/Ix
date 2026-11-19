@@ -14,16 +14,18 @@ import {
   routeMissing,
   type BackendFeature,
 } from "../features.js";
+import { IxHttpError } from "../http-error.js";
 
 describe("httpStatus", () => {
-  it("reads the status IxClient puts at the front of its error", () => {
-    expect(httpStatus(new Error("404: not found"))).toBe(404);
-    expect(httpStatus("Error: 501: Not Implemented")).toBe(501);
+  it("reads the status off the typed error IxClient throws", () => {
+    expect(httpStatus(new IxHttpError(404, "not found"))).toBe(404);
+    expect(httpStatus(new IxHttpError(500, "upstream said 404: Not Found"))).toBe(500);
   });
 
-  it("never reads a three-digit run from anywhere but the front", () => {
+  it("never reads a status out of a message (#940)", () => {
+    expect(httpStatus(new Error("404: not found"))).toBeNull();
+    expect(httpStatus("Error: 501: Not Implemented")).toBeNull();
     expect(httpStatus(new Error("connect ECONNREFUSED 127.0.0.1:404"))).toBeNull();
-    expect(httpStatus(new Error("500: upstream said 404: Not Found"))).toBe(500);
     expect(httpStatus(undefined)).toBeNull();
   });
 });
@@ -41,11 +43,11 @@ describe("routeMissing", () => {
 
   it.each(cases)("%s: missing on %j, present otherwise", (feature, missing, present) => {
     for (const status of missing) {
-      expect(routeMissing(feature, new Error(`${status}: x`))).toBe(true);
+      expect(routeMissing(feature, new IxHttpError(status, "x"))).toBe(true);
       expect(routeMissing(feature, status)).toBe(true);
     }
     for (const status of present) {
-      expect(routeMissing(feature, new Error(`${status}: x`))).toBe(false);
+      expect(routeMissing(feature, new IxHttpError(status, "x"))).toBe(false);
       expect(routeMissing(feature, status)).toBe(false);
     }
   });
@@ -53,12 +55,14 @@ describe("routeMissing", () => {
   it("is false for a transport failure or a body that merely mentions a status", () => {
     expect(routeMissing("stitch", new Error("fetch failed"))).toBe(false);
     // A proxy answering 200 with an HTML page titled "404: Not Found" (#528).
-    expect(routeMissing("stitch", new Error("200: response body is not JSON: <title>404: Not Found"))).toBe(false);
+    expect(routeMissing("stitch", new IxHttpError(200, "response body is not JSON: <title>404: Not Found"))).toBe(false);
+    // An untyped error whose message looks like an answered 404 is not one.
+    expect(routeMissing("stitch", new Error("404: Not Found"))).toBe(false);
   });
 
   it("is false for a feature detected by release rather than by probing", () => {
     expect(routeMissing("bulkDeletes", 404)).toBe(false);
-    expect(routeMissing("searchScope", new Error("404: x"))).toBe(false);
+    expect(routeMissing("searchScope", new IxHttpError(404, "x"))).toBe(false);
   });
 });
 

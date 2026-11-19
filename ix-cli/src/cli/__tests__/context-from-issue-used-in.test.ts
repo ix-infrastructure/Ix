@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { IxClient } from "../../client/api.js";
-import { renderLeanIssueLlm, renderLeanIssueText } from "../commands/context.js";
+import { renderLeanIssueLlm, renderLeanIssueText } from "../context/issue.js";
 import { leanIssueView, pickStartingPoints, type IssuePlan, type LeanIssueView, type StartingPoint } from "../explain/issue.js";
 import {
   addUsedIn,

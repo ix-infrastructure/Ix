@@ -46,9 +46,11 @@ export interface ImpactFacts {
   kind: string;
   path?: string;
   /**
-   * The target's workspace-relative file, used only to pin the suggested next
-   * call to this entity. Kept apart from `path`, which feeds categorisation:
-   * setting that would move the risk category the CLI has always printed.
+   * The target's workspace-relative file. It pins the suggested next call to
+   * this entity, and its name can confirm an everyday verb in the target's
+   * name as a flow (see FLOW_PATTERNS); it never makes a flow by itself. Kept
+   * apart from `path`, which feeds categorisation: setting that would move the
+   * risk category of every symbol in a file such as `parser.ts`.
    */
   targetPath?: string;
 
@@ -168,19 +170,37 @@ interface FlowMatch {
   behaviorDomain: string;
 }
 
-const FLOW_PATTERNS: Array<{ triggers: string[]; flowName: string; behaviorDomain: string }> = [
-  { triggers: ["conflict", "merge", "conflicts"], flowName: "conflict-resolution", behaviorDomain: "conflict handling" },
-  { triggers: ["resolve", "resolution", "match", "select", "pick", "lookup", "resolver", "matcher", "selector"], flowName: "resolution", behaviorDomain: "entity resolution" },
-  { triggers: ["parse", "decode", "read", "tokenize", "lex", "parser", "decoder", "reader", "lexer"], flowName: "parsing", behaviorDomain: "input parsing" },
-  { triggers: ["impact"], flowName: "impact analysis", behaviorDomain: "impact analysis" },
-  { triggers: ["explain", "render"], flowName: "explanation", behaviorDomain: "explanation generation" },
-  { triggers: ["ingest", "store", "persist", "save", "ingestion"], flowName: "ingestion", behaviorDomain: "file ingestion" },
-  { triggers: ["score", "rank", "weight", "evaluate"], flowName: "scoring", behaviorDomain: "candidate scoring" },
+/**
+ * Name tokens that place a target in a flow.
+ *
+ * `triggers` name the flow by themselves, in the target's name or its context
+ * (container, region path). `verbs` are everyday verbs (save, select, render,
+ * merge, ...) that any repository uses for unrelated code, so they place a
+ * target in the flow only when the target's own file names the same flow, as
+ * `pickBest` in `resolve.ts` does. On their own they are no evidence (#1018).
+ * Domains stay generic: they are read on every repository, not just Ix.
+ */
+const FLOW_PATTERNS: Array<{ triggers: string[]; verbs: string[]; flowName: string; behaviorDomain: string }> = [
+  { triggers: ["conflict", "conflicts"], verbs: ["merge"], flowName: "conflict-resolution", behaviorDomain: "conflict handling" },
+  { triggers: ["resolve", "resolution", "resolver"], verbs: ["match", "select", "pick", "lookup", "matcher", "selector"], flowName: "resolution", behaviorDomain: "resolution" },
+  { triggers: ["parse", "decode", "tokenize", "lex", "parser", "decoder", "lexer"], verbs: ["read", "reader"], flowName: "parsing", behaviorDomain: "input parsing" },
+  { triggers: ["impact"], verbs: [], flowName: "impact analysis", behaviorDomain: "impact analysis" },
+  { triggers: ["explain"], verbs: ["render"], flowName: "explanation", behaviorDomain: "explanation generation" },
+  { triggers: ["ingest", "ingestion"], verbs: ["store", "persist", "save"], flowName: "ingestion", behaviorDomain: "ingestion" },
+  { triggers: ["score"], verbs: ["rank", "weight", "evaluate"], flowName: "scoring", behaviorDomain: "scoring" },
 ];
 
-function detectFlow(tokens: string[]): FlowMatch | undefined {
+function detectFlow(facts: ImpactFacts): FlowMatch | undefined {
+  const tokens = allTokens(facts);
+  const nameTokens = splitTokens(facts.name);
+  // The target's own file confirms a verb but never makes a flow by itself:
+  // `path` stays the only file that feeds categorisation (see ImpactFacts).
+  const fileTokens = splitTokens(fileBaseName(facts.targetPath));
   for (const p of FLOW_PATTERNS) {
-    if (p.triggers.some((t) => tokens.includes(t))) {
+    const named = p.triggers.some((t) => tokens.includes(t));
+    const confirmedVerb = p.verbs.some((t) => nameTokens.includes(t)) &&
+      p.triggers.some((t) => fileTokens.includes(t));
+    if (named || confirmedVerb) {
       return { flowName: p.flowName, behaviorDomain: p.behaviorDomain };
     }
   }
@@ -190,10 +210,10 @@ function detectFlow(tokens: string[]): FlowMatch | undefined {
 // ── Flow role inference ──────────────────────────────────────────────────────
 
 const FLOW_ROLE_PATTERNS: Array<{ triggers: string[]; role: string }> = [
-  { triggers: ["pick", "select", "best", "filter", "choose"], role: "candidate selection" },
+  { triggers: ["pick", "select", "best", "filter", "choose"], role: "selection" },
   { triggers: ["resolve", "lookup", "match"], role: "reference resolution" },
   { triggers: ["conflict", "merge"], role: "conflict resolution" },
-  { triggers: ["score", "rank", "evaluate"], role: "candidate scoring" },
+  { triggers: ["score", "rank", "evaluate"], role: "scoring" },
   { triggers: ["parse", "decode", "tokenize"], role: "input parsing" },
   { triggers: ["render"], role: "output rendering" },
   { triggers: ["infer"], role: "semantic inference" },
@@ -280,7 +300,7 @@ function detectCategory(facts: ImpactFacts): { category: RiskCategory; reasons: 
   }
 
   // Flow: callable entities or service classes in flow-related paths
-  const flow = detectFlow(tokens);
+  const flow = detectFlow(facts);
   if (flow && (CALLABLE_KINDS.has(kind) || kind === "method")) {
     return { category: "flow", reasons: [`callable in ${flow.flowName} flow`] };
   }
@@ -350,7 +370,6 @@ function computeRiskLevel(facts: ImpactFacts, category: RiskCategory): RiskLevel
 
 function buildRiskSummary(facts: ImpactFacts, category: RiskCategory, riskLevel: RiskLevel): string {
   const level = riskLevel === "critical" ? "High" : capitalize(riskLevel);
-  const tokens = allTokens(facts);
   const domain = inferDomainNoun(facts.name);
   const layers = propagationLayerPhrase(facts);
 
@@ -366,7 +385,7 @@ function buildRiskSummary(facts: ImpactFacts, category: RiskCategory, riskLevel:
     case "boundary":
       return `${level} risk to backend-facing CLI operations through the ${facts.name} boundary.`;
     case "flow": {
-      const flow = detectFlow(tokens);
+      const flow = detectFlow(facts);
       const flowRole = inferFlowRole(splitTokens(facts.name), flow);
       const flowName = flow?.flowName ?? "pipeline";
       if (flowRole) {
@@ -393,7 +412,7 @@ function capitalize(s: string): string {
 function buildBehaviorAtRisk(facts: ImpactFacts, category: RiskCategory): string[] {
   const tokens = allTokens(facts);
   const domain = inferDomainNoun(facts.name);
-  const flow = detectFlow(tokens);
+  const flow = detectFlow(facts);
 
   switch (category) {
     case "foundation": {
@@ -429,9 +448,11 @@ function buildBehaviorAtRisk(facts: ImpactFacts, category: RiskCategory): string
       const behaviors: string[] = [];
       const flowLabel = flow?.behaviorDomain ?? "processing";
       if (tokens.some((t) => ["pick", "select", "best", "filter", "choose"].includes(t))) {
-        behaviors.push(`Candidate selection during ${flowLabel}`);
+        behaviors.push(`Selection during ${flowLabel}`);
       } else if (tokens.some((t) => ["resolve", "lookup", "match"].includes(t))) {
-        behaviors.push(`Reference resolution during ${flowLabel}`);
+        behaviors.push(
+          flowLabel === "resolution" ? "Reference resolution logic" : `Reference resolution during ${flowLabel}`,
+        );
       } else if (tokens.some((t) => ["conflict", "merge"].includes(t))) {
         behaviors.push(`Conflict handling logic`);
       } else {
@@ -467,7 +488,6 @@ function buildBehaviorAtRisk(facts: ImpactFacts, category: RiskCategory): string
 
 function buildMostAffectedHint(facts: ImpactFacts, category: RiskCategory): string | undefined {
   const domain = inferDomainNoun(facts.name);
-  const tokens = allTokens(facts);
 
   switch (category) {
     case "foundation":
@@ -478,7 +498,7 @@ function buildMostAffectedHint(facts: ImpactFacts, category: RiskCategory): stri
     case "boundary":
       return "command handlers that depend on client access";
     case "flow": {
-      const flow = detectFlow(tokens);
+      const flow = detectFlow(facts);
       const flowName = flow?.flowName ?? "processing";
       const flowRole = inferFlowRole(splitTokens(facts.name), flow);
       const hints: string[] = [];
@@ -543,10 +563,9 @@ function buildNextStep(facts: ImpactFacts, category: RiskCategory): string | und
 function buildFlowPropagation(
   facts: ImpactFacts,
   category: RiskCategory,
-  tokens: string[],
+  flow: FlowMatch | undefined,
 ): { flowName: string; count: number } | undefined {
   if (category !== "flow") return undefined;
-  const flow = detectFlow(tokens);
   if (!flow) return undefined;
   const totalCount = facts.propagationBuckets.reduce((sum, b) => sum + b.count, 0);
   if (totalCount === 0) return undefined;
@@ -561,10 +580,9 @@ export function inferRiskSemantics(facts: ImpactFacts): RiskSemantics {
   const riskSummary = buildRiskSummary(facts, category, riskLevel);
   const behaviorAtRisk = buildBehaviorAtRisk(facts, category);
   const mostAffectedHint = buildMostAffectedHint(facts, category);
-  const tokens = allTokens(facts);
-  const flow = detectFlow(tokens);
+  const flow = detectFlow(facts);
   const flowRole = category === "flow" ? inferFlowRole(splitTokens(facts.name), flow) : undefined;
-  const flowPropagation = buildFlowPropagation(facts, category, tokens);
+  const flowPropagation = buildFlowPropagation(facts, category, flow);
   const nextStep = buildNextStep(facts, category);
 
   return {

@@ -411,6 +411,22 @@ Two commands cannot know a true total and say so rather than inventing one:
   `offset_past_end`: more matches exist). `--format json` stays a bare array of matches with no
   paging fields; the next offset is the offset plus its length.
 
+`ix rank` scores at most 2000 entities of the kind, the first 2000 `/v1/list`
+returns. `/v1/list` has no offset and does not order by degree, so an entity
+past that window is never a candidate, whatever its score. When more than
+2000 exist the header carries `truncated=true` and a
+`diagnostic code=candidates_truncated` record follows it (json:
+`summary.truncated: true` and the message in `diagnostics`; text: the message
+under the ranking). `evaluated` is then the window, not the workspace, and the
+ranking is of that window only. `--path` is applied by the server before the
+cut, so narrowing with it (or a more specific `--kind`) brings the rest in.
+
+```
+rank metric=callers kind=function evaluated=2000 returned=3 truncated=true
+diagnostic code=candidates_truncated message="More than 2000 function entities exist; only the first 2000 the server returned were ranked, so entities that belong in this ranking may be missing. Narrow with --path (or a more specific --kind)."
+entity name=hotZ kind=function score=3
+```
+
 `ix read` caps a read at 400 lines and marks the `file` record with
 `truncated=true total_lines=<n> next=<target>`. `total_lines` is always a
 count, never a line number:
@@ -462,8 +478,8 @@ entity at the other end is defined; `site=` says where the edge itself is:
 
 ```
 callers target=resolveWorkspaceRoot shown=2 total=2 resolved=2
-ref name=ingestFiles kind=function path=ix-cli/src/cli/commands/ingest.ts lines=1366-3660 site=ix-cli/src/cli/commands/ingest.ts:1496 snippet=": nodePath.resolve(resolveWorkspaceRoot(opts.root), path);"
-ref name=registerCallersCommand kind=function path=ix-cli/src/cli/commands/callers.ts lines=15-141 site=ix-cli/src/cli/commands/callers.ts:43 also=135 snippet="const root = resolveWorkspaceRoot();"
+ref name=ingestFiles kind=function path=ix-cli/src/cli/commands/ingest.ts lines=1366-3660 site=1496 snippet=": nodePath.resolve(resolveWorkspaceRoot(opts.root), path);"
+ref name=registerCallersCommand kind=function path=ix-cli/src/cli/commands/callers.ts lines=15-141 site=43 also=135 snippet="const root = resolveWorkspaceRoot();"
 ```
 
 | relation | `site=` is |
@@ -472,6 +488,12 @@ ref name=registerCallersCommand kind=function path=ix-cli/src/cli/commands/calle
 | `callees` | the call to the row, inside the target's span (the target's file) |
 | `imported-by` | the import of the target, in the importing file |
 | `imports` | the import of the row, in the target's file |
+
+A site in the row's own file prints as just its line (`site=1496`): `path=`
+on the same row already names the file. That is every `callers` and
+`imported-by` site. A site in another file, as with `callees` and `imports`,
+prints as `site=path:line`, and so does any site under `--fields` that leaves
+out `path`.
 
 `also=` lists further sites in the same scope (at most four), and `snippet=`
 is the site's line, with up to two continuation lines of a call left open.
@@ -665,6 +687,15 @@ templates, data/config) are dropped; `filtered_non_source=<k>` appears when any
 were. Output stops at `--limit` (default 50, highest confidence first); when it
 cuts, a `diagnostic code=results_truncated` record follows the header.
 
+`file` is the file's name as the backend reports it, a basename that two files
+can share. `--format json` adds each candidate's `path` beside it, read from
+the file's node in one batched request; it is left out when the backend cannot
+serve that read or the file is no longer in the graph. `path` is written the
+way other rows write one: relative to the current directory when the file is
+inside it, otherwise `~/...` or absolute. The MCP tool `ix_smells` keeps the
+candidates whose `path` contains its `path` argument as a substring, and
+matches against `file` only when a candidate has no `path`.
+
 `ix smells` waits for a fresh analysis for 20 s in llm and json (`--wait
 <seconds>` or `IX_SMELLS_WAIT` changes it; text waits 5 minutes, which is
 also the most: Node's HTTP client stops waiting for a response there). When the analysis has not finished by then, or the backend refuses
@@ -726,6 +757,19 @@ importers and dependents.
 For a container target the `counts` record is
 `counts members=<n> importers=<n> dependents=<n> member_callers=<n> dependents_total=<n>`;
 its `dependents=` is the `CALLS`/`REFERENCES` expand alone (`summary.directDependents`).
+A container target's `impact` record carries its own `path=` right after `kind=`, and a
+`member` row leaves `path=` off when it is in that same file, so a file's members print the
+path once, not on every row. A member somewhere else (a class whose member lives in another
+file) keeps its own `path=`; a target with no path gets no header `path=`, and every row keeps
+its own. `lines=` stays on every row, and the json `topImpactedMembers` rows keep `path`.
+A leaf target's `impact` record has no `path=`.
+
+```
+impact target=auth.ts kind=file path=src/auth.ts risk=low category=unknown summary="Low risk to dependent code."
+counts members=2 importers=2 dependents=2 member_callers=3 dependents_total=3
+member name=verify kind=function callers=2 lines=1-20
+member name=Session kind=class callers=1 lines=22-80
+```
 
 **Dependents: the one count.** `dependents_total=` on the `counts` record, and
 `summary.dependents` in `--format json`, is how many distinct entities depend on the target. Read it instead of combining the other counts,
@@ -761,18 +805,23 @@ item name=parseFile kind=method
 `ix context <target>`:
 
 ```
-context target=Widget target_kind=class target_path=src/widget.ts stale=false classification=current entities=2 relationships=1 claims=1 decisions=0 conflicts=0 intents=0 evidence=7 truncated_entities=0 truncated_relationships=0 truncated_evidence=0 truncated_chars=0
-evidence score=0 kind=target title="Widget (class)" path=src/widget.ts
-evidence score=2000 kind=structural title="member render" path=src/widget.ts lines=12-40
-evidence score=3000 kind=claim title="renders to DOM"
-evidence score=4000 kind=relationship title="Widget --calls--> mount"
+context target=Widget target_kind=class target_path=src/widget.ts stale=false classification=current entities=2 relationships=1 claims=1 evidence=7
+evidence kind=target title="Widget (class)" path=src/widget.ts
+evidence kind=structural title="member render" path=src/widget.ts lines=12-40
+evidence kind=claim title="renders to DOM"
+evidence kind=relationship title="Widget --calls--> mount"
 ```
 
-One header record, then the ranked evidence. `score` is `tier * 1000` plus the
-row's place in its tier, tiers in order target, issue, structural, claims,
-relationships, provenance, so a tier never runs into the next. Each entity gets
-one row: a relationship that restates a member, import or caller row is left
-out. A target's callers and dependents share one row, titled with how many of
+One header record, then the ranked evidence. The header always carries
+`entities`, `relationships` and `evidence`; `claims`, `decisions`,
+`conflicts`, `intents` and the four `truncated_*` counters appear only when
+they are not zero. The rows are printed in rank order and carry no `score=`:
+the score (`--format json` has it) is `tier * 1000` plus the row's place in its
+tier, tiers in order target, issue, structural, claims, relationships,
+provenance, so a tier never runs into the next. Each entity gets one row: a
+relationship that restates a member, import or caller row is left out, and
+edges whose titles would read the same (overloads sharing a name and a path)
+are one row ending ` (n edges)`. A target's callers and dependents share one row, titled with how many of
 how many (`used by (3 of 214): ...`); `--format json` carries the two numbers
 as `count: { shown, total }`. The entity, relationship and claim
 lists stay counts here — `llm` is the token-minimal surface and the ranked
@@ -802,7 +851,8 @@ claim change=added id=c-8f31a2 entity=entity-1 status=active statement="mounts t
 The counts keep their zeros: "nothing was added" is the answer `--diff` was
 asked for, not a default worth dropping. Added and removed share one record
 kind and separate on `change=`, so a consumer routing on `entity` sees both
-sides of the comparison.
+sides of the comparison. Diff `evidence` rows keep `score=`: added and removed
+rows come from two rankings, and the score is what says where each one stood.
 
 `saved_at` is when the baseline snapshot was taken. `freshness_previous` says
 whether it was fresh *then*, not how long ago that was, so a snapshot from five
@@ -860,9 +910,11 @@ investigation id=auth-path saved_at=2026-01-02T17:03:11.882Z target=verify_token
 `skipped` counts saved files that did not match the contract and is present
 only when it is non-zero — it is the one thing about a listing that cannot be
 seen from the records themselves. Note that `stale=` and the four `truncated_*`
-fields are *not* dropped when zero or false: `llmField` omits only nullish and
-empty-string values, and these say "measured, and it was none", which a missing
-field does not.
+fields are *not* dropped when zero or false here: a listing compares saved
+bundles side by side, and these say "measured, and it was none", which a
+missing field does not. The `context` header drops its zero counters instead:
+it is the first thing an agent reads on every bundle, and there an absent
+counter means none.
 
 `id` is the id `--resume` and `--diff` take, not necessarily the file name on
 disk; the two differ whenever an id contains a character outside
@@ -875,8 +927,8 @@ and `ix context --resume <id>` fetches one:
 
 ```
 resumed id=widget saved_at=2026-01-03T09:12:44.108Z
-context target=Widget target_kind=class stale=false classification=current entities=2 relationships=1 claims=1 decisions=0 conflicts=0 intents=0 evidence=7 truncated_entities=0 truncated_relationships=0 truncated_evidence=0 truncated_chars=0
-evidence score=0 kind=target title="Widget (class)"
+context target=Widget target_kind=class stale=false classification=current entities=2 relationships=1 claims=1 evidence=7
+evidence kind=target title="Widget (class)"
 ```
 
 `resumed`, not `investigation`: the record kinds are distinct because the

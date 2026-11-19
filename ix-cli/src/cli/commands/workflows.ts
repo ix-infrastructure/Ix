@@ -111,7 +111,7 @@ export function registerWorkflowsHelpCommand(program: Command): void {
 
       // Plural commands @ix/pro collapsed into a subcommand of the singular
       // (`ix goals` -> `ix goal list`, Ix-pro#103; `ix bugs` -> `ix bug list`,
-      // Ix-pro#108). The plural is no longer a command anywhere, so `ix help
+      // Ix-pro#108; `ix plans` -> `ix plan list`, Ix-pro#125). The plural is no longer a command anywhere, so `ix help
       // bugs` would fall through to "Unknown help topic". Forward it to the
       // singular, whose help documents the new subcommand. The pairs are
       // PRO_RETIRED in register/pro-surface.ts.
