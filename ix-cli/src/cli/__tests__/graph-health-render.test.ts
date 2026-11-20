@@ -3,7 +3,8 @@
 import { describe, expect, it } from "vitest";
 
 import { renderExplainLlm } from "../explain/llm.js";
-import { buildBundle, renderBundle } from "../commands/context.js";
+import { buildBundle } from "../context/bundle.js";
+import { renderBundle } from "../context/render.js";
 import { contextBundleSchema } from "../context-bundle-schema.js";
 import { assessGraphStats, assessTargetStructure } from "../graph-health.js";
 import type { ContextFacts, EntityFacts } from "../explain/facts.js";

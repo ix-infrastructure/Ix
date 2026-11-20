@@ -32,7 +32,7 @@ function buildSchemas(z: typeof Zod.z) {
    * written as if it were a valid bundle, nor honoured when read back.
    *
    * The shapes below mirror the `ContextBundle` and `EvidenceItem` interfaces in
-   * `commands/context.ts`. Fields the renderers and `--diff` dereference by name
+   * `context/types.ts`. Fields the renderers and `--diff` dereference by name
    * — `evidence[].title`, the `budgets`, the four `truncation` counters and
    * the `metadata` values `--diff` re-sends to the backend — are pinned to their
    * real types rather than left as open records: validation that accepts `{}`

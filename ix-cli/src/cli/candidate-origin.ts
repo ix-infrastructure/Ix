@@ -20,9 +20,14 @@
  * - **generated** — copies of the definition in build output (`dist/`,
  *   `*.min.js`, `*-output.*`) and stand-ins in fixtures and samples.
  *
- * All three are demoted, never dropped: when nothing better matched they are
- * still the answer.
+ * All three are demoted, not dropped: when nothing better matched they are
+ * still the answer. One exception: `ix search` folds away an import whose name
+ * is the term once the term's definition is itself in the answer, and says how
+ * many it folded (`foldImportRows` in commands/search.ts). The resolver behind
+ * `context` / `explain` / `locate` still only demotes.
  */
+
+import type { GraphKind, KindSet } from "./graph-model.js";
 
 type CandidateOrigin = "definition" | "import" | "non-code" | "generated";
 
@@ -41,7 +46,7 @@ const NON_CODE_EXTENSIONS = new Set([
 ]);
 
 /** Kinds core-ingestion emits only for docs and config, never for code. */
-const NON_CODE_KINDS = new Set(["heading", "section", "config_entry", "config"]);
+const NON_CODE_KINDS: KindSet = new Set<GraphKind>(["heading", "section", "config_entry", "config"]);
 
 /**
  * Build output and other derived copies of source.

@@ -4,74 +4,27 @@ import type { Command } from "commander";
 import { applyOssSetup } from "./oss-setup.js";
 import { proIsAbsent } from "./pro-loader.js";
 import { OSS_FALLBACK_TABLE, registerOssFallbacks } from "./oss-fallbacks.js";
+import { OSS_COMMANDS, type RegisterCommand } from "./commands.js";
 
 /**
  * Which module registers each OSS command, so the CLI can load only the one
  * being run.
  *
- * `registerOssCommands()` (`register/oss.ts`) imports all ~40 command modules
+ * `registerOssCommands()` (`register/oss.ts`) loads all ~40 command modules
  * and everything they depend on, on every call, `--version` included, before
  * the command does anything. Agents and plugin hooks call `ix` far more
  * often than a person does, and compare it with `rg`, which has answered by
  * then. So `run-cli.ts` asks `planStartup` first and, where it can, registers
  * the one command instead.
  *
- * Keyed by every top-level name and alias `registerOssCommands()` registers;
+ * Keyed by every top-level name and alias in the manifest
+ * (`register/commands.ts`), which `registerOssCommands()` registers from too;
  * a module that registers two commands (`callers` and `callees`) appears under
- * both. A test holds this table and `registerOssCommands()` to the same set of
- * names, so a command added there and not here fails CI rather than silently
- * taking the slow path.
+ * both.
  */
-type RegisterCommand = (program: Command) => void;
-
-export const OSS_COMMAND_TABLE: Readonly<Record<string, () => Promise<RegisterCommand>>> = {
-  query: async () => (await import("../commands/query.js")).registerQueryCommand,
-  ingest: async () => (await import("../commands/ingest.js")).registerIngestCommand,
-  search: async () => (await import("../commands/search.js")).registerSearchCommand,
-  status: async () => (await import("../commands/status.js")).registerStatusCommand,
-  entity: async () => (await import("../commands/entity.js")).registerEntityCommand,
-  history: async () => (await import("../commands/history.js")).registerHistoryCommand,
-  conflicts: async () => (await import("../commands/conflicts.js")).registerConflictsCommand,
-  diff: async () => (await import("../commands/diff.js")).registerDiffCommand,
-  init: async () => (await import("../commands/init.js")).registerInitCommand,
-  text: async () => (await import("../commands/text.js")).registerTextCommand,
-  locate: async () => (await import("../commands/locate.js")).registerLocateCommand,
-  explain: async () => (await import("../commands/explain.js")).registerExplainCommand,
-  callers: async () => (await import("../commands/callers.js")).registerCallersCommand,
-  callees: async () => (await import("../commands/callers.js")).registerCallersCommand,
-  overrides: async () => (await import("../commands/overrides.js")).registerOverridesCommand,
-  implementations: async () => (await import("../commands/overrides.js")).registerOverridesCommand,
-  imports: async () => (await import("../commands/imports.js")).registerImportsCommand,
-  "imported-by": async () => (await import("../commands/imports.js")).registerImportsCommand,
-  contains: async () => (await import("../commands/contains.js")).registerContainsCommand,
-  stats: async () => (await import("../commands/stats.js")).registerStatsCommand,
-  doctor: async () => (await import("../commands/doctor.js")).registerDoctorCommand,
-  depends: async () => (await import("../commands/depends.js")).registerDependsCommand,
-  read: async () => (await import("../commands/read.js")).registerReadCommand,
-  inventory: async () => (await import("../commands/inventory.js")).registerInventoryCommand,
-  impact: async () => (await import("../commands/impact.js")).registerImpactCommand,
-  rank: async () => (await import("../commands/rank.js")).registerRankCommand,
-  overview: async () => (await import("../commands/overview.js")).registerOverviewCommand,
-  watch: async () => (await import("../commands/watch.js")).registerWatchCommand,
-  docker: async () => (await import("../commands/docker.js")).registerDockerCommand,
-  help: async () => (await import("../commands/workflows.js")).registerWorkflowsHelpCommand,
-  map: async () => (await import("../commands/map.js")).registerMapCommand,
-  smells: async () => (await import("../commands/smells.js")).registerSmellsCommand,
-  subsystems: async () => (await import("../commands/subsystems.js")).registerSubsystemsCommand,
-  reset: async () => (await import("../commands/reset.js")).registerResetCommand,
-  config: async () => (await import("../commands/config.js")).registerConfigCommand,
-  trace: async () => (await import("../commands/trace.js")).registerTraceCommand,
-  upgrade: async () => (await import("../commands/upgrade.js")).registerUpgradeCommand,
-  view: async () => (await import("../commands/view.js")).registerViewCommand,
-  savings: async () => (await import("../commands/savings.js")).registerSavingsCommand,
-  patches: async () => (await import("../commands/patches.js")).registerPatchesCommand,
-  mcp: async () => (await import("../commands/mcp.js")).registerMcpCommand,
-  install: async () => (await import("../commands/install.js")).registerInstallCommand,
-  context: async () => (await import("../commands/context.js")).registerContextCommand,
-  around: async () => (await import("../commands/around.js")).registerAroundCommand,
-  hook: async () => (await import("../commands/hook.js")).registerHookCommand,
-  verify: async () => (await import("../commands/verify.js")).registerVerifyCommand,
-};
+export const OSS_COMMAND_TABLE: Readonly<Record<string, () => Promise<RegisterCommand>>> = Object.fromEntries(
+  OSS_COMMANDS.flatMap((entry) => entry.names.map((name) => [name, entry.load] as const)),
+);
 
 /**
  * Commands that read the registry itself. `ix help <topic>` looks the topic up

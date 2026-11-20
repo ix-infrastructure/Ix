@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
+import { IxHttpError } from "../../client/http-error.js";
 
 /**
  * CL-17: `ix status` said "Graph is up to date" on the evidence of file mtimes
@@ -126,7 +127,7 @@ describe("ix status", () => {
   }
 
   async function statusWith(
-    info: { mapCompleted?: boolean; mapStale?: boolean; mapRefreshError?: string | null },
+    info: { mapCompleted?: boolean; mapStale?: boolean; mapRefreshError?: string | null; files?: string[] },
     ...args: string[]
   ): Promise<string> {
     vi.doMock("../stale.js", async (orig) => ({
@@ -134,7 +135,8 @@ describe("ix status", () => {
       detectStaleFiles: () => ({
         graphCompleted: true, mapCompleted: info.mapCompleted ?? true, mapStale: info.mapStale ?? false, mapRefreshError: info.mapRefreshError ?? null,
         currentRev: 7, lastIngestAt,
-        staleFiles: 0, sampleChangedFiles: [], replayedFiles: [], parseTimeouts: [],
+        staleFiles: info.files?.length ?? 0, sampleChangedFiles: info.files ?? [],
+        replayedFiles: info.files ?? [], parseTimeouts: info.files ?? [],
       }),
     }));
     const { registerStatusCommand } = await import("../commands/status.js");
@@ -311,6 +313,31 @@ describe("ix status", () => {
     expect(JSON.parse(await status("--format", "json")).verify).toBeNull();
   });
 
+  it("prints only the json paths it publishes (contracts/fields.ts), and all of them", async () => {
+    // The plugin contract check fails a plugin read of a path not published
+    // for `status`, so a printed path missing from the list would fail a
+    // plugin that reads it correctly.
+    const { acceptsField, JSON_FIELDS } = await import("../contracts/fields.js");
+    const { fieldPaths } = await import("./helpers/field-paths.js");
+    const { saveVerifyRecord } = await import("../verify.js");
+    registerRepo();
+    stats = HOLLOW;
+    saveVerifyRecord({
+      root: repo, at: new Date().toISOString(), lastIngestAt: null, graph: "diverged",
+      files: 20, stale: 1, diverged: 1, unverified: 0, divergedFiles: ["a.ts"], fix: "ix reset --workspace --yes --ingest",
+    });
+    const printed = new Set<string>();
+    for (const info of [{ files: ["a.ts"] }, { mapCompleted: false, mapStale: true, mapRefreshError: "timed out" }]) {
+      out.length = 0;
+      for (const p of fieldPaths(JSON.parse(await statusWith(info, "--format", "json")))) printed.add(p);
+    }
+    expect([...printed].filter((p) => acceptsField("status", p) !== true)).toEqual([]);
+    // The failure record's paths are pinned in json-fields.test.ts; every
+    // other published path is printed here.
+    const own = JSON_FIELDS.status.filter((p) => !["error", "message", "dir", "next"].includes(p));
+    expect(own.filter((p) => !printed.has(p))).toEqual([]);
+  });
+
   it("says unverified, not ok, when the directory is in no workspace", async () => {
     stats = HOLLOW;
     const json = JSON.parse(await status("--format", "json"));
@@ -349,7 +376,7 @@ describe("doctor checks", () => {
     expect(await assessDatabase(new Error("fetch failed"), never)).toMatchObject({ ok: true, detail: expect.stringMatching(/skipped/) });
     // An older backend: health says nothing about the database.
     expect(await assessDatabase({ status: "ok" }, async () => ({ rev: 3 }))).toMatchObject({ ok: true });
-    expect(await assessDatabase({ status: "ok" }, async () => { throw new Error("500: arango connection refused"); }))
+    expect(await assessDatabase({ status: "ok" }, async () => { throw new IxHttpError(500, "arango connection refused"); }))
       .toMatchObject({ ok: false, detail: expect.stringMatching(/could not read its database: 500/) });
     // A 1.0.32 backend enforcing the token: health is exempt, the probe is not.
     // A refused token is not a dead database.
@@ -361,10 +388,10 @@ describe("doctor checks", () => {
 
   it("a 503 health body is an answer, anything else is not", async () => {
     const { healthFromError } = await import("../commands/doctor.js");
-    expect(healthFromError(new Error('503: {"status":"degraded","database":"unreachable"}')))
+    expect(healthFromError(new IxHttpError(503, '{"status":"degraded","database":"unreachable"}')))
       .toEqual({ status: "degraded", database: "unreachable" });
-    expect(healthFromError(new Error("503: <html>bad gateway</html>"))).toBeNull();
-    expect(healthFromError(new Error('500: {"status":"x"}'))).toBeNull();
+    expect(healthFromError(new IxHttpError(503, "<html>bad gateway</html>"))).toBeNull();
+    expect(healthFromError(new IxHttpError(500, '{"status":"x"}'))).toBeNull();
   });
 
   it("Config file parses", async () => {
@@ -471,7 +498,7 @@ describe("doctor checks", () => {
     });
     expect(await assessGraphVerify(report("unverified", { unverified: 20 }, { reason: "not_mapped" })))
       .toEqual({ ok: true, detail: "not checked: not mapped" });
-    expect(await assessGraphVerify(async () => { throw new Error("404: not found"); }))
+    expect(await assessGraphVerify(async () => { throw new IxHttpError(404, "not found"); }))
       .toMatchObject({ ok: true, detail: expect.stringMatching(/^not checked/) });
   });
 

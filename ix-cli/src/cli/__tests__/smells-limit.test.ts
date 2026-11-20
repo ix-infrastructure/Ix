@@ -266,5 +266,34 @@ describe("ix smells command (mocked client)", () => {
       expect(out.smells.length).toBe(6);
       expect(out.truncated).toBe(false);
     });
+
+    // GET /v1/smells as the backend answers it: file and confidence live under
+    // `value`, not on the row. See storedSmellToCandidate.
+    it("json and llm carry kind, path and confidence from the stored claim", async () => {
+      fakeClient.listSmells.mockResolvedValue({
+        smells: [{
+          smell: "has_smell.orphan_file",
+          entity_id: "entity-a-0123456789",
+          value: { confidence: 0.4, file: "src/a.ts", signals: { connectivity: 0 } },
+          inference_version: "smell_v1",
+        }],
+      });
+
+      await run("--list", "--format", "json");
+      const out = JSON.parse(logs.join("\n"));
+      expect(out.smells).toEqual([{
+        smell: "has_smell.orphan_file",
+        entity_id: "entity-a-012",
+        kind: "orphan_file",
+        path: "src/a.ts",
+        confidence: 0.4,
+      }]);
+
+      logs.length = 0;
+      const lines = await run("--list", "--format", "llm");
+      expect(lines.filter(l => l.startsWith("smell "))).toEqual([
+        "smell kind=orphan_file path=src/a.ts entity=entity-a-012 confidence=0.4 version=smell_v1",
+      ]);
+    });
   });
 });

@@ -91,8 +91,8 @@ describe("cli/config.ts split (#943)", () => {
       "mapResultCachePath", "mapStalePath", "readConfiguredFormat", "readStitchScope", "readableRoots",
       "resetConfigMemo", "resetMalformedPruneWarningsForTests", "resolveWorkspaceRoot", "saveConfig",
       "selectWorkspaceForCwd", "stitchScopeCachePath", "storedLocalToken", "updateConfig",
-      "verifyRecordPath", "withConfigWriteLock", "writeStitchScope",
-    ]);
+      "verifyRecordPath", "withConfigWriteLock", "writeStitchScope", "WORKSPACE_STATE_FILES",
+    ].sort());
     expect("getActiveWorkspaceRoot" in config).toBe(false);
   });
 });

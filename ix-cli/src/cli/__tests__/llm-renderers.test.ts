@@ -193,9 +193,14 @@ describe("renderSmellsLlm", () => {
     expect(lines[2]).toBe("smell kind=has_smell.orphan_file file=low.py confidence=0.5 connections=0");
   });
   it("renders --list claims", () => {
-    const lines = renderSmellsListLlm([{ smell: "has_smell.god_module", entity_id: "abcdef0123456789", confidence: 0.7, inference_version: "smell_v1" }]);
+    const lines = renderSmellsListLlm([{
+      smell: "has_smell.god_module",
+      entity_id: "abcdef0123456789",
+      value: { confidence: 0.7, file: "src/big.ts" },
+      inference_version: "smell_v1",
+    }]);
     expect(lines[0]).toBe("smells count=1 version=smell_v1");
-    expect(lines[1]).toBe("smell kind=has_smell.god_module entity=abcdef012345 confidence=0.7 version=smell_v1");
+    expect(lines[1]).toBe("smell kind=god_module path=src/big.ts entity=abcdef012345 confidence=0.7 version=smell_v1");
   });
 });
 
@@ -208,6 +213,12 @@ describe("impact llm helpers", () => {
     const lines = impactHeaderLlm({ kind: "function", name: "verify_token" }, risk, [{ name: "Auth", kind: "subsystem" }, { name: "Core", kind: "system" }]);
     expect(lines[0]).toBe('impact target=verify_token kind=function risk=high category=boundary system_path=Auth,Core summary="Auth check; 14 sites"');
     expect(lines[1]).toBe('behavior text="Token validation"');
+  });
+  it("impactHeaderLlm puts a container's path right after kind=, and prints none without one", () => {
+    const lines = impactHeaderLlm({ kind: "file", name: "auth.ts" }, risk, [], "src/auth.ts");
+    expect(lines[0]).toBe('impact target=auth.ts kind=file path=src/auth.ts risk=high category=boundary summary="Auth check; 14 sites"');
+    const bare = impactHeaderLlm({ kind: "file", name: "auth.ts" }, risk, [], undefined);
+    expect(bare[0]).toBe('impact target=auth.ts kind=file risk=high category=boundary summary="Auth check; 14 sites"');
   });
   it("impactPropagationLlm sorts buckets by member count and emits flow first", () => {
     const lines = impactPropagationLlm(
