@@ -3,7 +3,10 @@
 import { describe, expect, it } from "vitest";
 
 import type { IxClient } from "../../client/api.js";
+import { buildBundle } from "../context/bundle.js";
+import { clampBudgets } from "../context/options.js";
 import { collectFacts } from "../explain/facts.js";
+import { collectRelatedFiles } from "../explain/related-files.js";
 
 const TARGET = "00000000-0000-0000-0000-000000000001";
 const CALLEE = "00000000-0000-0000-0000-000000000002";
@@ -237,5 +240,164 @@ describe("collectFacts member ranking", () => {
     expect(facts.memberRefs?.find((m) => m.id === "m-resolve")?.usedBy).toBeUndefined();
     expect(facts.members[0]).toBe("real");
     expect(facts.members.at(-1)).toBe("resolveWorkspaceRoot");
+  });
+});
+
+/**
+ * A class whose methods call into other classes (#1138). CALLS edges start at
+ * methods, so the class node itself calls nothing: what it uses is only
+ * visible through its members.
+ */
+describe("class targets: what the members call", () => {
+  const CLASS = "c-engine";
+  const memberNodes = [
+    { id: "m-run", name: "run", kind: "method", attrs: { line_start: 20, line_end: 40 }, provenance: { sourceUri: "src/engine.ts" } },
+    { id: "m-stop", name: "stop", kind: "method", attrs: { line_start: 41, line_end: 50 }, provenance: { sourceUri: "src/engine.ts" } },
+    { id: "m-field", name: "state", kind: "property", attrs: { line_start: 12, line_end: 12 }, provenance: { sourceUri: "src/engine.ts" } },
+  ];
+  const ext = (id: string, name: string, path: string, line: number, kind = "method") =>
+    ({ id, name, kind, attrs: { line_start: line, line_end: line + 5 }, provenance: { sourceUri: path } });
+  const parse = ext("x-parse", "parse", "src/parser.ts", 5);
+  const save = ext("x-save", "save", "src/store.ts", 9);
+  // Defined inside the class's span, but not one of its direct members.
+  const inner = ext("x-inner", "inner", "src/engine.ts", 60, "function");
+  const memberCalls: Record<string, unknown[]> = {
+    "m-run": [parse, memberNodes[1], save],
+    "m-stop": [save, inner],
+  };
+
+  function classClient(calls: Call[], targetKind = "class"): IxClient {
+    return {
+      async entity(id: string) {
+        calls.push({ method: "entity", id });
+        return {
+          node: { id, name: "Engine", kind: targetKind, attrs: { line_start: 10, line_end: 80 }, provenance: { sourceUri: "src/engine.ts" } },
+          claims: [], decisions: [], edges: [],
+        };
+      },
+      async expand(id: string, opts?: { direction?: string; predicates?: string[]; limit?: number }) {
+        calls.push({ method: "expand", id, predicates: opts?.predicates, hops: opts?.limit });
+        if (id === CLASS && opts?.direction === "out" && opts.predicates?.[0] === "CONTAINS") {
+          return { nodes: memberNodes, edges: [] };
+        }
+        if (id !== CLASS && opts?.direction === "out" && opts.predicates?.includes("CALLS")) {
+          const nodes = memberCalls[id] ?? [];
+          return { nodes, edges: nodes.map((n: any) => ({ src: id, dst: n.id, predicate: "CALLS" })) };
+        }
+        return { nodes: [], edges: [] };
+      },
+      async provenance(id: string) {
+        calls.push({ method: "provenance", id });
+        return { entityId: id, chain: [] };
+      },
+    } as unknown as IxClient;
+  }
+
+  const outwardCallProbes = (calls: Call[]) =>
+    calls.filter((c) => c.method === "expand" && c.id !== CLASS && c.predicates?.includes("CALLS")
+                        && !c.predicates.includes("REFERENCES"));
+
+  it("lists the outside entities a class's methods call, most-called first", async () => {
+    const calls: Call[] = [];
+    const facts = await collectFacts(classClient(calls), CLASS, "Engine", "class", "context");
+
+    // The class node itself calls nothing.
+    expect(facts.calleeRefs).toEqual([]);
+    expect(facts.memberCalleeRefs?.map((r) => r.name)).toEqual(["save", "parse"]);
+    expect(facts.memberCalleeRefs?.[0]).toMatchObject({ id: "x-save", path: "src/store.ts", lineStart: 9 });
+    expect(facts.memberCalls).toEqual([
+      { src: "m-run", dst: "x-parse", predicate: "CALLS" },
+      { src: "m-run", dst: "x-save", predicate: "CALLS" },
+      { src: "m-stop", dst: "x-save", predicate: "CALLS" },
+    ]);
+    // Only callable members are probed, one outbound CALLS expand each.
+    expect(outwardCallProbes(calls).map((c) => c.id).sort()).toEqual(["m-run", "m-stop"]);
+  });
+
+  it("keeps at most 8 member callees and probes at most 20 members", async () => {
+    const many = Array.from({ length: 25 }, (_, i) => ({
+      id: `mm-${i}`, name: `method${i}`, kind: "method",
+      attrs: { line_start: 100 + i * 10, line_end: 100 + i * 10 + 25 - i }, provenance: { sourceUri: "src/engine.ts" },
+    }));
+    const calls: Call[] = [];
+    const client = {
+      async entity(id: string) {
+        return { node: { id, name: "Engine", kind: "class", attrs: {}, provenance: { sourceUri: "src/engine.ts" } }, edges: [] };
+      },
+      async expand(id: string, opts?: { direction?: string; predicates?: string[]; limit?: number }) {
+        calls.push({ method: "expand", id, predicates: opts?.predicates });
+        if (id === CLASS && opts?.direction === "out" && opts.predicates?.[0] === "CONTAINS") return { nodes: many, edges: [] };
+        if (id.startsWith("mm-") && opts?.direction === "out" && opts.predicates?.includes("CALLS")) {
+          return { nodes: [ext(`x-${id}`, `callee_${id}`, `src/dep-${id}.ts`, 3)], edges: [] };
+        }
+        return { nodes: [], edges: [] };
+      },
+      async provenance(id: string) { return { entityId: id, chain: [] }; },
+    } as unknown as IxClient;
+
+    const facts = await collectFacts(client, CLASS, "Engine", "class", "context");
+
+    expect(outwardCallProbes(calls)).toHaveLength(20);
+    expect(facts.memberCalleeRefs).toHaveLength(8);
+    // Every edge kept ends at a kept callee.
+    const kept = new Set(facts.memberCalleeRefs!.map((r) => r.id));
+    expect(facts.memberCalls?.every((e) => kept.has(e.dst))).toBe(true);
+    expect(facts.memberCalls).toHaveLength(8);
+  });
+
+  it("leaves ix explain, and file targets, as they were", async () => {
+    const explainCalls: Call[] = [];
+    const explained = await collectFacts(classClient(explainCalls), CLASS, "Engine", "class");
+    expect(outwardCallProbes(explainCalls)).toEqual([]);
+    expect(explained).not.toHaveProperty("memberCalleeRefs");
+
+    const fileCalls: Call[] = [];
+    const file = await collectFacts(classClient(fileCalls, "file"), CLASS, "engine.ts", "file", "context");
+    expect(outwardCallProbes(fileCalls)).toEqual([]);
+    expect(file).not.toHaveProperty("memberCalleeRefs");
+  });
+
+  it("puts the member callees and their CALLS edges in the bundle", async () => {
+    const facts = await collectFacts(classClient([]), CLASS, "Engine", "class", "context");
+    const bundle = buildBundle({
+      resolved: { id: CLASS, name: "Engine", kind: "class", resolutionMode: "exact" },
+      facts,
+      context: {
+        claims: [], conflicts: [], decisions: [], intents: [], nodes: [], edges: [],
+        metadata: { query: "", seedEntities: [], hopsExpanded: 1, asOfRev: 1 },
+      } as never,
+      provenance: {},
+      budgets: clampBudgets({}, "json"),
+      format: "json",
+      isStale: () => false,
+    });
+
+    const ids = bundle.entities.map((e) => e.id);
+    expect(ids).toEqual(expect.arrayContaining(["x-save", "x-parse", "m-run", "m-stop"]));
+    expect(bundle.relationships).toEqual(expect.arrayContaining([
+      { src: "m-run", dst: "x-parse", predicate: "CALLS" },
+      { src: "m-run", dst: "x-save", predicate: "CALLS" },
+      { src: "m-stop", dst: "x-save", predicate: "CALLS" },
+    ]));
+    const save = bundle.evidence.find((e) => e.refs.includes("x-save") && e.source === "facts.callees");
+    expect(save).toMatchObject({ title: "calls save", location: { path: "src/store.ts" } });
+    expect(save?.reason).toContain("run");
+    expect(save?.reason).toContain("stop");
+  });
+
+  it("walks the related files from the member callees too", async () => {
+    const expanded: string[] = [];
+    const client = {
+      async expand(id: string) {
+        expanded.push(id);
+        return { nodes: [], edges: [] };
+      },
+    };
+    await collectRelatedFiles(client as never, { id: CLASS, kind: "class" }, {
+      path: "src/engine.ts",
+      walkSeeds: { callers: [], dependents: [], callees: [] },
+      memberCalleeRefs: [{ id: "x-save", name: "save", kind: "method", path: "src/store.ts" }],
+    });
+    expect(expanded).toContain("x-save");
   });
 });

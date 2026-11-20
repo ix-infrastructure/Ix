@@ -253,6 +253,14 @@ function outwardRows(input: RankInput): Array<[Structural, EntityLocation]> {
       reason: "the target calls this", refs: [ref.id], ...locationField(ref),
     }, ref]);
   }
+  // A class's own node calls nothing; its methods do. Same source and title
+  // as a callee row, so consumers routing on them see nothing new.
+  for (const ref of input.facts.memberCalleeRefs ?? []) {
+    rows.push([{
+      id: rowId("calls", ref.name, ref), source: "facts.callees", title: `calls ${ref.name}`,
+      reason: memberCallReason(input, ref), refs: [ref.id], ...locationField(ref),
+    }, ref]);
+  }
   for (const ref of (input.facts.neighbourRefs ?? []).slice(0, SHOWN_NEIGHBOUR_MEMBERS)) {
     const where = ref.path ? ref.path.split("/").pop() : undefined;
     rows.push([{
@@ -262,6 +270,18 @@ function outwardRows(input: RankInput): Array<[Structural, EntityLocation]> {
     }, ref]);
   }
   return rows;
+}
+
+/** Which of the target's members call a member callee, by name. */
+function memberCallReason(input: RankInput, ref: EntityLocation): string {
+  const names = new Map((input.facts.memberRefs ?? []).map((m) => [m.id, m.name]));
+  const callers = [...new Set((input.facts.memberCalls ?? [])
+    .filter((e) => e.dst === ref.id)
+    .map((e) => names.get(e.src))
+    .filter((name): name is string => !!name))].sort(cmp);
+  return callers.length > 0
+    ? `the target's ${callers.length === 1 ? "member" : "members"} ${callers.join(", ")} ${callers.length === 1 ? "calls" : "call"} this`
+    : "a member of the target calls this";
 }
 
 /** Claims, decisions and intents, from the context service. */

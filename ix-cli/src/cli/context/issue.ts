@@ -152,7 +152,7 @@ export async function issueBundleSection(
     // Neighbour members and text/history-related files do not establish a
     // direct graph edge. Only the facts' direct references fill missing hops.
     for (const ref of [
-      ...(n.facts?.importRefs ?? []), ...(n.facts?.calleeRefs ?? []),
+      ...(n.facts?.importRefs ?? []), ...(n.facts?.calleeRefs ?? []), ...(n.facts?.memberCalleeRefs ?? []),
       ...(n.facts?.topCallerRefs ?? []), ...(n.facts?.topDependentRefs ?? []),
       ...(n.facts?.memberRefs ?? []),
     ]) atDistance(ref.id, 1);
@@ -335,8 +335,8 @@ async function startNeighbourhood(
 function oneHopRefs(facts: ContextFacts | undefined): EntityLocation[] {
   if (!facts) return [];
   return [
-    ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []), ...(facts.topCallerRefs ?? []),
-    ...(facts.topDependentRefs ?? []), ...(facts.neighbourRefs ?? []),
+    ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []), ...(facts.memberCalleeRefs ?? []),
+    ...(facts.topCallerRefs ?? []), ...(facts.topDependentRefs ?? []), ...(facts.neighbourRefs ?? []),
   ];
 }
 

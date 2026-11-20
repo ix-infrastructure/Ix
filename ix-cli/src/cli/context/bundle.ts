@@ -33,9 +33,14 @@ export function buildBundle(input: BuildInput): ContextBundle {
   const prov = provenanceSource(provenance);
 
   const gathered = gatherEntities(input);
-  // Relationships: graph edges, ordered deterministically.
+  // Relationships: graph edges, ordered deterministically. A class's members'
+  // calls out of it are added: the backend's slice is the class's CONTAINS
+  // neighbourhood, so without them nothing says what the class uses (#1138).
   const contextEdges = context.edges.length > 0 ? context.edges : (context.edgeSummaries ?? []);
-  const relationships = [...contextEdges]
+  const edgeKey = (e: { src: string; dst: string; predicate: string }) => `${e.src}\u0000${e.dst}\u0000${e.predicate}`;
+  const contextKeys = new Set(contextEdges.map(edgeKey));
+  const memberCalls = (facts.memberCalls ?? []).filter((e) => !contextKeys.has(edgeKey(e)));
+  const relationships = [...contextEdges, ...memberCalls]
     .sort((a, b) => cmp(a.src, b.src) || cmp(a.dst, b.dst) || cmp(a.predicate, b.predicate))
     .map((edge) => ({ src: edge.src, dst: edge.dst, predicate: edge.predicate }));
   const entities = placeIssueEntities(input, gathered.entities, relationships, gathered.discoveredOnly);
@@ -165,6 +170,8 @@ function leadingRefs(input: BuildInput): EntityLocation[] {
     // an entry point is looking for where to go next.
     ...(facts.importRefs ?? []),
     ...(facts.calleeRefs ?? []),
+    // For a class, what its methods call: the class itself calls nothing.
+    ...(facts.memberCalleeRefs ?? []),
     // What those files define. Naming the file is half an answer to "which
     // function does X"; these are the other half.
     ...(facts.neighbourRefs ?? []),
