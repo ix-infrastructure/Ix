@@ -97,9 +97,10 @@ describe.skipIf(!kotlinAvailable)('Kotlin queries', () => {
     expect(calls).toEqual(expect.arrayContaining(['format', 'render', 'Widget']));
   });
 
+  // An implemented interface is an EXTENDS edge too: the graph has no IMPLEMENTS predicate.
   it('captures heritage for a superclass call and an implemented interface', () => {
     const extended = parse().relationships
-      .filter(rel => rel.srcName === 'Service' && (rel.predicate === 'EXTENDS' || rel.predicate === 'IMPLEMENTS'))
+      .filter(rel => rel.srcName === 'Service' && rel.predicate === 'EXTENDS')
       .map(rel => rel.dstName);
     expect(extended).toEqual(expect.arrayContaining(['Base', 'Greeter']));
   });

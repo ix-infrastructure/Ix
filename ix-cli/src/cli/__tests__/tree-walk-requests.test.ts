@@ -14,7 +14,7 @@ import { expandAnswer } from "./helpers/expand-answer.js";
  * fetch one predicate at a time. The tree must not change.
  */
 
-const PREDICATES = ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "IMPLEMENTS"];
+const PREDICATES = ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS"];
 type Adjacency = Record<string, Record<string, any[]>>;
 
 const fn = (id: string, path?: string) => ({ id, name: id, kind: "function", ...(path ? { provenance: { source_uri: path } } : {}) });
@@ -155,7 +155,7 @@ describe("ix depends: one expand per visited node", () => {
 
   it("lists a node reached through two predicates once, under the first", async () => {
     const adjacency: Adjacency = {
-      root: { CALLS: [fn("a"), fn("b")], IMPORTS: [fn("b"), fn("c")], IMPLEMENTS: [fn("a")] },
+      root: { CALLS: [fn("a"), fn("b")], IMPORTS: [fn("b"), fn("c")], EXTENDS: [fn("a")] },
     };
     const { client, expand } = clientFor(adjacency);
     const walk = await buildDependencyTree(client, "root", { maxDepth: 1 });

@@ -380,6 +380,9 @@ Build a bounded, deterministic context bundle for a symbol, file, or entity (or 
 ### `ix depends <symbol>`
 
 Show upstream dependents of the given entity (full tree by default).
+Follows `CALLS`, `IMPORTS`, `REFERENCES` and `EXTENDS` edges inward. `EXTENDS`
+carries `implements` too, so a class's subclasses and implementers both show
+as `extended_by`.
 
 | Flag | Value | Default | Effect |
 |---|---|---|---|
@@ -995,7 +998,8 @@ Fast lexical/text search across the codebase (uses ripgrep).
 
 ### `ix trace <symbol>`
 
-Follow how it connects.
+Follow how it connects. With no `--kind`, walks `CALLS`, `IMPORTS`,
+`REFERENCES`, `EXTENDS` (which carries `implements`) and `CONTAINS`.
 
 | Flag | Value | Default | Effect |
 |---|---|---|---|

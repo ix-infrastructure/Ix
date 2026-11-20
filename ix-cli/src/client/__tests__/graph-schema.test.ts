@@ -129,6 +129,51 @@ describe("graph patch schema", () => {
     expect(untyped).toEqual([]);
   });
 
+  // The predicate side of the same rule: a predicate the CLI asks the graph for
+  // must be one something writes, or the query can never match (#1009: the CLI
+  // walked IMPLEMENTS while the parser writes `implements` as EXTENDS).
+  // Scans every CLI source for a predicate in a reading position: a
+  // `predicates: [...]` field, a list or set named like predicates, a
+  // `predicate === "X"` test, a `fooPredicate = ...` choice, a `sourceEdge`
+  // and the type walk's `expand(id, "in", "X")`.
+  it("reads only predicates something writes", () => {
+    // Written by the backend or Pro, not by a patch from this repo.
+    const writtenElsewhere = ["IN_REGION", "DECISION_AFFECTS", "TASK_AFFECTS", "BUG_AFFECTS"];
+    const contexts = [
+      /\bpredicates\s*:\s*\[([^\]]*)\]/g,
+      /\b\w*(?:PREDICATES|Predicates)\w*\s*(?::[^=\n]+)?=\s*(?:new Set\s*(?:<[^>]*>)?\s*\(\s*)?\[([^\]]*)\]/g,
+      /\bpredicate\s*[!=]==?\s*("[A-Z_]+")/g,
+      /\b\w*[Pp]redicate\s*=([^;\n]*)/g,
+      /\bsourceEdge\s*:([^;\n]*)/g,
+      /\bexpand\([^()]*,\s*"(?:in|out|both)",\s*("[A-Z_]+")\)/g,
+      /\bcase\s+"[a-z]+"\s*:\s*return\s*\[([^\]]*)\]/g,
+    ];
+    const root = fileURLToPath(new URL("../../", import.meta.url));
+    const found = new Map<string, Set<string>>();
+    for (const file of readdirSync(root, { recursive: true, encoding: "utf8" })) {
+      if (!file.endsWith(".ts") || file.includes("__tests__") || file.endsWith(".d.ts")) continue;
+      // The patch schema itself lists what is written, not what is read.
+      if (file.endsWith("graph-schema.ts")) continue;
+      const source = readFileSync(join(root, file), "utf8");
+      for (const context of contexts) {
+        for (const match of source.matchAll(context)) {
+          for (const literal of match[1]!.matchAll(/"([A-Z][A-Z_]*)"/g)) {
+            found.set(literal[1]!, (found.get(literal[1]!) ?? new Set()).add(file));
+          }
+        }
+      }
+    }
+    // The scan finds what it is meant to: one from each kind of position.
+    for (const predicate of ["CALLS", "CONTAINS", "EXTENDS", "IMPORTS", "REFERENCES", "CONTAINS_CHUNK", ...writtenElsewhere]) {
+      expect(found.has(predicate), predicate).toBe(true);
+    }
+    const known = new Set<string>([...EDGE_PREDICATES, ...writtenElsewhere]);
+    const unknown = [...found]
+      .filter(([predicate]) => !known.has(predicate))
+      .flatMap(([predicate, files]) => [...files].map((file) => `${file}: ${predicate}`));
+    expect(unknown).toEqual([]);
+  });
+
   it("does not list a read-only kind that a writer now emits", () => {
     expect(graphModel.READ_ONLY_KINDS.filter((kind) => (NODE_KINDS as readonly string[]).includes(kind))).toEqual([]);
   });

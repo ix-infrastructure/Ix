@@ -113,12 +113,13 @@ describe("depends direction semantics", () => {
     expect(command.description()).not.toContain("reverse CALLS");
   });
 
-  it("walks inbound edges one hop at a time, one request per node for all five predicates", async () => {
+  it("walks inbound edges one hop at a time, one request per node for all four predicates", async () => {
     await run(["Target", "--format", "json"]);
     expect(expand).toHaveBeenCalled();
     for (const [, opts] of expand.mock.calls) {
       expect(opts).toMatchObject({ direction: "in", hops: 1 });
-      expect(opts.predicates).toEqual(["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "IMPLEMENTS"]);
+      // No IMPLEMENTS: the parser writes `implements` as EXTENDS (#1009).
+      expect(opts.predicates).toEqual(["CALLS", "IMPORTS", "REFERENCES", "EXTENDS"]);
     }
     expect(expand.mock.calls.filter(([id]) => id === "target-id")).toHaveLength(1);
   });
