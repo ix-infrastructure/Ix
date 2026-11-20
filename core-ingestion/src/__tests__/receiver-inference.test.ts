@@ -18,7 +18,7 @@ const methods = (ext: string, body: string) => ext === 'scala'
     : `package p\ntype Target struct{}; type Other struct{}; func (t Target) Run() {}; func (o Other) Run() {}; ${body}`;
 
 const typedEdgeOps = (ops: Array<{ type: string; attrs?: unknown }>) =>
-  ops.filter(op => op.type === 'UpsertEdge' && (op.attrs as { tier?: string } | undefined)?.tier === 'type');
+  ops.filter(op => op.type === 'UpsertEdge' && (op as any).predicate === 'CALLS' && (op.attrs as { tier?: string } | undefined)?.tier === 'type');
 
 describe('typed local receivers', () => {
   it('Go resolves a receiver method declared in another package file', () => {
@@ -137,7 +137,7 @@ describe('typed local receivers', () => {
 
   it.each(labelledCases)('matches the labelled $language $name sample', (fixture) => {
     const result = parse(fixture.language, fixture.source);
-    const edges = resolveEdges([result]).filter(e => e.tier === 'type');
+    const edges = resolveEdges([result]).filter(e => e.predicate === 'CALLS' && e.tier === 'type');
     expect(edges.map(e => e.dstQualifiedKey)).toEqual(fixture.expected);
   });
   it.each([
@@ -295,7 +295,7 @@ describe('typed local receivers', () => {
     ['scala', 'class Use(val dep: Target) { def use() = new Runnable { def run() = this.dep.run() } }'],
   ])('%s `this` rebound by a nested function or object does not reach the class field', (ext, body) => {
     const result = parse(ext, methods(ext, body));
-    expect(resolveEdges([result]).filter(e => e.tier === 'type')).toEqual([]);
+    expect(resolveEdges([result]).filter(e => e.predicate === 'CALLS' && e.tier === 'type')).toEqual([]);
     expect(typedEdgeOps(buildPatch(result, 'hash', 'workspace').ops)).toEqual([]);
   });
 
@@ -341,12 +341,12 @@ describe('typed local receivers', () => {
 
   it('TypeScript bare names never resolve through a same-named field or parameter property', () => {
     const result = parse('ts', "import { logger } from './logger'; class AuditLog { info() {} } class Client { send() {} } class Other { send() {} } const client = new Other(); class Svc { private logger: AuditLog = new AuditLog(); constructor(private client: Client) {} run() { logger.info('x'); client.send(); this.logger.info('y'); } }");
-    expect(resolveEdges([result]).filter(e => e.tier === 'type').map(e => e.dstQualifiedKey)).toEqual(['Other.send', 'AuditLog.info']);
+    expect(resolveEdges([result]).filter(e => e.predicate === 'CALLS' && e.tier === 'type').map(e => e.dstQualifiedKey)).toEqual(['Other.send', 'AuditLog.info']);
   });
 
   it('Go closure parameters stay inside the closure', () => {
     const result = parse('go', methods('go', 'func use() { dep := Target{}; f := func(dep Other) { dep.Run() }; _ = f; dep.Run() }'));
-    expect(resolveEdges([result]).filter(e => e.tier === 'type').map(e => e.dstQualifiedKey)).toEqual(['Other.Run', 'Target.Run']);
+    expect(resolveEdges([result]).filter(e => e.predicate === 'CALLS' && e.tier === 'type').map(e => e.dstQualifiedKey)).toEqual(['Other.Run', 'Target.Run']);
   });
 
   it.each(['extends Base', 'extends Empty with Base'])('Scala resolves inherited members: %s', (heritage) => {
@@ -383,7 +383,7 @@ describe('typed local receivers', () => {
   ])('Scala types a receiver only from a type in scope (%j)', (imports, expected) => {
     const lib = parse('scala', 'package mylib\nclass Option { def get() = () }', 'option');
     const use = parse('scala', `package app\n${imports}object Use { def use(o: Option) = o.get() }`);
-    expect(resolveEdges([lib, use]).filter(e => e.tier === 'type').map(e => e.dstQualifiedKey)).toEqual(expected);
+    expect(resolveEdges([lib, use]).filter(e => e.predicate === 'CALLS' && e.tier === 'type').map(e => e.dstQualifiedKey)).toEqual(expected);
   });
 
   it('Scala types a receiver from its own package without an import', () => {
@@ -404,7 +404,7 @@ describe('typed local receivers', () => {
     const dep = parse('scala', 'package a\npackage b\nclass Dep { def run() = () }', 'dep');
     const use = parse('scala', `${header}object Use { def use(d: Dep) = d.run() }`);
     expect(summarizeParseResult(dep).receiverPackage).toBe('a.b');
-    expect(resolveEdges([dep, use]).filter(e => e.tier === 'type').map(e => e.dstQualifiedKey)).toEqual(expected);
+    expect(resolveEdges([dep, use]).filter(e => e.predicate === 'CALLS' && e.tier === 'type').map(e => e.dstQualifiedKey)).toEqual(expected);
   });
 
   it('Scala imports disambiguate same-named types by declared package', () => {

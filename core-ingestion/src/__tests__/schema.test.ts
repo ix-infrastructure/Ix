@@ -21,7 +21,7 @@ export const LIMIT = 3;
 export interface Shape { area(): number }
 export class Square implements Shape {
   constructor(private side: number) {}
-  area(): number { return helper(this.side); }
+  area(): number { this.side += 1; return helper(this.side); }
 }
 export class Cube extends Square {}
 export function make(): Shape { return new Square(LIMIT); }

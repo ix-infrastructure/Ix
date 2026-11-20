@@ -40,7 +40,7 @@ export const READ_ONLY_KINDS = [
   "system", "subsystem", "region",
   // Named by the one-off kind lists in other commands (type-walk, explain,
   // graph-health, verify); no extractor here writes them.
-  "protocol", "data_class", "variable", "property", "field",
+  "protocol", "data_class", "variable", "property",
 ] as const;
 
 /** A kind the CLI knows: written by a patch, or read from a graph another writer built. */

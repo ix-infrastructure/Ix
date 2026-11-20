@@ -782,6 +782,38 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "packageScope": undefined,
     },
     {
+      "container": "CheckResult",
+      "kind": "field",
+      "language": "typescript",
+      "lineEnd": 15,
+      "lineStart": 15,
+      "name": "name",
+    },
+    {
+      "container": "CheckResult",
+      "kind": "field",
+      "language": "typescript",
+      "lineEnd": 16,
+      "lineStart": 16,
+      "name": "ok",
+    },
+    {
+      "container": "CheckResult",
+      "kind": "field",
+      "language": "typescript",
+      "lineEnd": 17,
+      "lineStart": 17,
+      "name": "detail",
+    },
+    {
+      "container": "CheckRunner",
+      "kind": "field",
+      "language": "typescript",
+      "lineEnd": 49,
+      "lineStart": 49,
+      "name": "loader",
+    },
+    {
       "kind": "module",
       "language": "typescript",
       "lineEnd": 11,
@@ -869,6 +901,52 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
       "dstName": "describe",
       "predicate": "CONTAINS",
       "srcName": "CheckRunner",
+    },
+    {
+      "dstName": "name",
+      "predicate": "CONTAINS",
+      "srcName": "CheckResult",
+    },
+    {
+      "dstName": "ok",
+      "predicate": "CONTAINS",
+      "srcName": "CheckResult",
+    },
+    {
+      "dstName": "detail",
+      "predicate": "CONTAINS",
+      "srcName": "CheckResult",
+    },
+    {
+      "dstName": "loader",
+      "predicate": "CONTAINS",
+      "srcName": "CheckRunner",
+    },
+    {
+      "dstName": "CheckRunner.loader",
+      "fieldSites": [
+        {
+          "line": 52,
+        },
+      ],
+      "predicate": "WRITES",
+      "receiverFactory": undefined,
+      "receiverOnly": true,
+      "receiverType": "CheckRunner",
+      "srcName": "CheckRunner.constructor",
+    },
+    {
+      "dstName": "CheckRunner.loader",
+      "fieldSites": [
+        {
+          "line": 56,
+        },
+      ],
+      "predicate": "READS",
+      "receiverFactory": undefined,
+      "receiverOnly": true,
+      "receiverType": "CheckRunner",
+      "srcName": "CheckRunner.load",
     },
     {
       "dstName": "node:fs",

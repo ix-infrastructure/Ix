@@ -169,12 +169,13 @@ export function patchActor(): string {
   return process.env.IX_PATCH_ACTOR ?? 'ix/ingestion';
 }
 
+/** 1.31: exact field READS/WRITES and per-site values; re-ingest unchanged files once. */
 export function extractorName(): string {
-  return `tree-sitter/1.30`;
+  return `tree-sitter/1.31`;
 }
 
 /** Previous extractor versions — their patches are superseded when re-ingesting. */
-export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.29', 'tree-sitter/1.28', 'tree-sitter/1.27', 'tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
+export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.30', 'tree-sitter/1.29', 'tree-sitter/1.28', 'tree-sitter/1.27', 'tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
 
 /** Patch ids that may own the active graph entities for a stored source hash. */
 export function sourcePatchIdCandidates(
@@ -412,9 +413,11 @@ export function buildPatchWithResolution(
     entityQKey.set(e, e.container ? `${e.container}.${e.name}` : e.name);
   }
 
+  const fieldQKeys = new Set(entities.filter(e => e.kind === 'field').map(e => `${e.container}.${e.name}`));
   // Reverse lookup: plain name → list of qualified keys (for edge resolution).
   const nameToQKeys = new Map<string, string[]>();
   for (const [e, qk] of entityQKey) {
+    if (e.kind === 'field') continue;
     const list = nameToQKeys.get(e.name) ?? [];
     list.push(qk);
     nameToQKeys.set(e.name, list);
@@ -430,6 +433,7 @@ export function buildPatchWithResolution(
   // For ambiguous names (appear multiple times), falls back to the plain name
   // so that the edge still points to *something* deterministic.
   function resolveKey(name: string, container?: string): string {
+    if (container && fieldQKeys.has(`${container}.${name}`)) return `${container}.${name}`;
     const rawKeys = nameToQKeys.get(name);
     if (!rawKeys) return name;
     // Deduplicate: @overload in Python (and similar patterns in other languages)
@@ -588,8 +592,9 @@ export function buildPatchWithResolution(
    * builtin, a library, or a name that resolved nowhere. Those dangling edges
    * were over half the edges in a typical graph.
    */
-  const keepEdge = (srcNodeId: string, dst: ReturnType<typeof resolveDst>): boolean =>
-    seenNodeIds.has(srcNodeId) &&
+  const fieldNodeIds = new Set([...fieldQKeys].map(key => nodeId(idPath, key)));
+  const keepEdge = (srcNodeId: string, dst: ReturnType<typeof resolveDst>, predicate: string): boolean =>
+    !(predicate === 'CALLS' && fieldNodeIds.has(dst.dstNodeId)) && seenNodeIds.has(srcNodeId) &&
     (dst.resolution !== null || dst.externalPkg !== null || seenNodeIds.has(dst.dstNodeId));
 
   const relationshipDstKey = (r: (typeof relationships)[number]): string =>
@@ -624,7 +629,7 @@ export function buildPatchWithResolution(
         : dstKey;
       const dst = resolveDst(r, dstKey);
       // Only edges that are written can collide.
-      if (!keepEdge(nodeId(idPath, srcKey), dst)) continue;
+      if (!keepEdge(nodeId(idPath, srcKey), dst, r.predicate)) continue;
       const tuple = edgeIdTuple(srcKey, edgeDstKey, r.predicate);
       let seen = dstsByTuple.get(tuple);
       if (!seen) { seen = new Set<string>(); dstsByTuple.set(tuple, seen); }
@@ -642,7 +647,7 @@ export function buildPatchWithResolution(
     const baseResolutionKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
     const dst = resolveDst(r, dstKey);
     const { dstNodeId, externalPkg, resolution } = dst;
-    if (!keepEdge(nodeId(idPath, srcKey), dst)) {
+    if (!keepEdge(nodeId(idPath, srcKey), dst, r.predicate)) {
       if (r.predicate === 'CALLS') unresolvedCalls.add(nodeId(idPath, srcKey), r.dstName);
       continue;
     }
@@ -669,8 +674,16 @@ export function buildPatchWithResolution(
     const edgeIdentity = `${nodeId(idPath, srcKey)}\x00${dstNodeId}\x00${r.predicate}`;
     const emitted = emittedEdgeIdentities.get(edgeIdentity);
     if (emitted) {
+      if (r.fieldSites) {
+        // Different imported aliases can resolve to one owner/member. Preserve
+        // every transition site when their logical edges collapse to one id.
+        const attrs = emitted.attrs as { sites?: typeof r.fieldSites; [key: string]: unknown };
+        const bySite = new Map([...(attrs.sites ?? []), ...r.fieldSites]
+          .map(site => [JSON.stringify([site.line, site.value]), site]));
+        const sites = [...bySite.values()].sort((a, b) => a.line - b.line);
+        emitted.attrs = { ...attrs, sites, line_start: sites[0]?.line };
       // A typed relationship confirming an edge the call already wrote.
-      if (r.receiverOnly && resolution) {
+      } else if (r.receiverOnly && resolution) {
         emitted.attrs = { confidence: resolution.confidence, ...(resolution.tier ? { tier: resolution.tier } : {}) };
       }
       continue;
@@ -680,9 +693,10 @@ export function buildPatchWithResolution(
     const idDstKey = collidingIdTuples.has(edgeIdTuple(srcKey, edgeDstKey, r.predicate))
       ? `${edgeDstKey}\x00${dstNodeId}`
       : edgeDstKey;
-    const edgeAttrs: ResolvedEdgeAttrs = resolution
-      ? { confidence: resolution.confidence, ...(resolution.tier ? { tier: resolution.tier } : {}) }
-      : {};
+    const edgeAttrs: ResolvedEdgeAttrs = {
+      ...(resolution ? { confidence: resolution.confidence, ...(resolution.tier ? { tier: resolution.tier } : {}) } : {}),
+      ...(r.fieldSites ? { sites: r.fieldSites, line_start: r.fieldSites[0]?.line } : {}),
+    };
     const edgeOp: UpsertEdgeOp = {
       type: 'UpsertEdge',
       id: edgeId(idPath, srcKey, idDstKey, r.predicate),

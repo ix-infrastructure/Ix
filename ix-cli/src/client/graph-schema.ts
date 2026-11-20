@@ -41,6 +41,8 @@ export const NODE_KINDS = [
   'function',
   'method',
   'constant',
+  // A declared or inferred member read or written by a function.
+  'field',
   'macro',
   // SQL.
   'table',
@@ -84,6 +86,9 @@ export const EDGE_PREDICATES = [
   'EXTENDS',
   // A use of a type or name that is not a call.
   'REFERENCES',
+  // Exact field accesses, resolved through the receiver's type.
+  'READS',
+  'WRITES',
   // File to chunk.
   'CONTAINS_CHUNK',
   // Chunk to the symbol it spans.
@@ -167,6 +172,9 @@ export type ResolvedEdgeAttrs = {
   confidence?: number;
   /** How it was resolved: type, binding, import, transitive, qualifier or global. */
   tier?: string;
+  /** Source locations and assignment values of exact field accesses. */
+  sites?: Array<{ line: number; value?: string; value_kind?: 'literal' | 'member' }>;
+  line_start?: number;
 };
 
 // ---------------------------------------------------------------------------

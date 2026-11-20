@@ -23,6 +23,10 @@ export interface FileSummary {
   entityCount: number;
   /** `[name, qualifiedKey]` per entity other than the file and module nodes, in source order. */
   qkeys: Array<[string, string]>;
+  /** Exact field keys; absent in older summaries (field resolution fails closed). */
+  fieldKeys?: string[];
+  /** Field-only base types; kept separate to preserve call resolution behavior. */
+  fieldHeritage?: Array<[string, string]>;
   /**
    * `[public, local]` export names (JS/TS), when the file has any. A renaming
    * re-export adds the module specifier it names: `[public, local, source]`.
@@ -50,7 +54,7 @@ export interface FileSummary {
 /** The fields of a summary other files bind to: what `summaryBindings` reads. */
 type BindingFields = Pick<FileSummary,
   'language' | 'qkeys' | 'exportPublicNames' | 'imports' | 'phpTypes' | 'receiverFactories' |
-  'receiverHeritage' | 'receiverPackage' | 'importAliases' | 'tsGlobalTypes'>;
+  'receiverHeritage' | 'receiverPackage' | 'importAliases' | 'tsGlobalTypes' | 'fieldKeys' | 'fieldHeritage'>;
 
 /**
  * A summary as the dependents functions read it. One read back from the CLI's
@@ -77,6 +81,8 @@ export function summaryBindings(s: Partial<BindingFields> | undefined): Map<stri
   if (!s) return out;
   const pkg = s.receiverPackage ?? '';
   for (const [name, qkey] of s.qkeys ?? []) out.set(`q\0${pkg}\0${name}\0${qkey}`, [name, qkey]);
+  for (const key of s.fieldKeys ?? []) out.set(`field\0${key}`, [key, key.split('.')[0]]);
+  for (const [name, base] of s.fieldHeritage ?? []) out.set(`field-base\0${name}\0${base}`, [name]);
   for (const [publicName, local, source] of s.exportPublicNames ?? []) {
     out.set(source === undefined ? `e\0${publicName}\0${local}` : `e\0${publicName}\0${local}\0${source}`, [publicName]);
   }
@@ -138,6 +144,7 @@ export function definedNames(summary: StoredFileSummary | undefined): Set<string
   const names = new Set<string>();
   if (!summary) return names;
   for (const [name, qkey] of summary.qkeys ?? []) { names.add(name); names.add(qkey); }
+  for (const key of summary.fieldKeys ?? []) { names.add(key); names.add(key.split('.')[0]); }
   for (const [publicName] of summary.exportPublicNames ?? []) names.add(publicName);
   for (const [fqcn, typeName] of summary.phpTypes ?? []) { names.add(fqcn); names.add(typeName); }
   return names;

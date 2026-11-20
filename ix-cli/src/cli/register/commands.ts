@@ -277,6 +277,14 @@ export const OSS_COMMANDS: readonly OssCommandEntry[] = [
     load: async () => (await import("../commands/capabilities.js")).registerCapabilitiesCommand,
     help: [{ usage: "capabilities", summary: "What this CLI supports" }],
   },
+  {
+    names: ["writers", "readers"],
+    load: async () => (await import("../commands/field-access.js")).registerFieldAccessCommands,
+    help: [
+      { usage: "writers <field>", summary: "Who writes Type.field" },
+      { usage: "readers <field>", summary: "Who reads Type.field" },
+    ],
+  },
 ];
 
 /**
@@ -294,7 +302,7 @@ export const ROOT_HELP_SECTIONS: readonly { readonly title: string; readonly com
   {
     title: "Explore",
     commands: [
-      "callers", "callees", "overrides", "imports", "imported-by", "contains", "depends", "entity",
+      "callers", "callees", "writers", "readers", "overrides", "imports", "imported-by", "contains", "depends", "entity",
       "trace", "subsystems", "inventory", "rank", "history", "diff", "patches", "conflicts",
     ],
   },
