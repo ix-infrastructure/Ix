@@ -567,6 +567,14 @@ offset?, truncated, diagnostics}`; each row is `{name, kind, id, path, lineStart
 lineEnd, owner: {name, kind, id}, relation, depth, via?}`. Over MCP it is
 `ix_neighbors relation=overrides` or `ix_overrides`.
 
+`ix depends <symbol>` prints a `depends` header and one `dep` record per
+dependent, `parent=` naming the node it hangs from (see Hierarchies). `rel=`
+(json: `rel` on each `tree` node) is `called_by`, `imported_by`,
+`referenced_by` or `extended_by`. `extended_by` covers both a
+subclass and an implementer: an `implements` clause is stored as an `EXTENDS`
+edge, and there is no separate `implemented_by`. `ix trace` with no `--kind`
+walks the same edges plus `CONTAINS`.
+
 `ix around <path>[:<line>]` — the dependents of the code at a location, sized
 for an agent's context (`--budget`, default 300 tokens):
 

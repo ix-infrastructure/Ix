@@ -80,7 +80,8 @@ export const EDGE_PREDICATES = [
   'CONTAINS',
   'CALLS',
   'IMPORTS',
-  // Inheritance and implementation.
+  // Inheritance and implementation: a class to its base class and to each
+  // interface it implements. There is no separate IMPLEMENTS predicate.
   'EXTENDS',
   // A use of a type or name that is not a call.
   'REFERENCES',

@@ -57,7 +57,8 @@ const MAX_NODES = 100;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-const ALL_PREDICATES = ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "IMPLEMENTS", "CONTAINS"];
+/** EXTENDS carries `implements` too; the graph has no IMPLEMENTS predicate (#1009). */
+const ALL_PREDICATES = ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "CONTAINS"];
 
 /** Map --kind flag to API predicates. If no kind specified, use all predicates (same as depends). */
 function kindToPredicates(kind?: string): string[] {

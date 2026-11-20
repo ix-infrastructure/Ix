@@ -3227,7 +3227,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         continue;
       }
 
-      // Heritage: IMPLEMENTS (separate edge type, use EXTENDS for simplicity)
+      // Heritage: an implemented interface. Written as EXTENDS, like a base
+      // class: the graph has no IMPLEMENTS predicate (`EDGE_PREDICATES`), and
+      // every reader of a type hierarchy walks EXTENDS for both (#1009).
       const heritageImpl = match.captures.find((c: any) =>
         c.name === 'heritage.implements'
       );

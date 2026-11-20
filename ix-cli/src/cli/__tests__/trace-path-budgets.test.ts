@@ -236,7 +236,7 @@ describe("trace --to predicate labels", () => {
     expect(out.kind).toBe("mixed");
   });
 
-  // The default --to search follows all six predicates, as before: a route
+  // The default --to search follows all five predicates, as before: a route
   // that exists only over one of the non-call relationships is still found.
   it.each(["REFERENCES", "EXTENDS", "CONTAINS"])(
     "without --kind, finds a route that exists only over %s",
@@ -252,18 +252,18 @@ describe("trace --to predicate labels", () => {
       expect(json.path.map((n: { name: string; via?: string }) => [n.name, n.via])).toEqual([["A", undefined], ["C", predicate]]);
       expect(json.kind).toBe("mixed");
       expect(expand.mock.calls[0][1].predicates).toEqual(
-        ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "IMPLEMENTS", "CONTAINS"],
+        ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "CONTAINS"],
       );
     },
   );
 
-  it("keeps all six predicates for a directional walk without --kind", async () => {
+  it("keeps all five predicates for a directional walk without --kind", async () => {
     const program = new Command().name("ix").exitOverride();
     registerTraceCommand(program);
     vi.spyOn(console, "log").mockImplementation(() => {});
     await program.parseAsync(["trace", "A", "--downstream", "--depth", "1", "--format", "json"], { from: "user" });
     expect(expand.mock.calls.map(([, o]) => o.predicates).flat()).toEqual(
-      ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "IMPLEMENTS", "CONTAINS"],
+      ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "CONTAINS"],
     );
   });
 

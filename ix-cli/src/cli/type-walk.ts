@@ -397,9 +397,10 @@ function truncationMessage(cap: HierarchyCap): string {
 type Expand = (id: string, direction: "in" | "out", predicate: string) => Promise<any[]>;
 
 /**
- * Breadth-first up `EXTENDS`, nearest first and by name within a level, to
- * `HIERARCHY_DEPTH` levels and `HIERARCHY_UP_MAX_TYPES` types. The level past
- * the last is expanded only to tell a cut walk from a finished one.
+ * Breadth-first up `EXTENDS` (which carries `implements`), nearest first and
+ * by name within a level, to `HIERARCHY_DEPTH` levels and
+ * `HIERARCHY_UP_MAX_TYPES` types. The level past the last is expanded only to
+ * tell a cut walk from a finished one.
  */
 async function walkUp(owner: any, expand: Expand, caps: Set<HierarchyCap>): Promise<{
   found: Array<{ type: any; depth: number }>; ownerHasBase: boolean; parentsOf: Map<string, string[]>;
