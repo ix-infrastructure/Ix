@@ -2,8 +2,8 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { parseFile } from '../index.js';
-import { buildPatch } from '../patch-builder.js';
+import { parseFile, resolveEdges } from '../index.js';
+import { buildPatch, buildPatchWithResolution } from '../patch-builder.js';
 import { EDGE_PREDICATES, NODE_KINDS, type PatchOp } from '../schema.js';
 
 /**
@@ -49,7 +49,12 @@ function opsOf(filePath: string, source: string): PatchOp[] {
   return buildPatch(result, 'hash', 'ws').ops;
 }
 
-const allOps = Object.entries(SAMPLES).flatMap(([file, source]) => opsOf(file, source));
+const production = parseFile('/repo/src/shapes.ts', SAMPLES['/repo/src/shapes.ts'])!;
+const test = parseFile('/repo/src/shapes.test.ts', "import { make } from './shapes'; it('makes', () => make());")!;
+const allOps = [
+  ...Object.entries(SAMPLES).flatMap(([file, source]) => opsOf(file, source)),
+  ...buildPatchWithResolution(test, 'hash', 'ws', resolveEdges([production, test])).ops,
+];
 
 describe('graph patch schema', () => {
   it('lists each kind and predicate once', () => {

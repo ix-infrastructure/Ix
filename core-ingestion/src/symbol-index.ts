@@ -17,6 +17,8 @@ import { SupportedLanguages } from './languages.js';
  * resolution independent of how the files are batched.
  */
 export interface FileSummary {
+  /** Test classification survives incremental resolution against stored summaries. */
+  isTest?: true;
   filePath: string;
   language: SupportedLanguages;
   /** Entities, file node included -- only the count is used (Go package anchors). */
@@ -50,7 +52,7 @@ export interface FileSummary {
 /** The fields of a summary other files bind to: what `summaryBindings` reads. */
 type BindingFields = Pick<FileSummary,
   'language' | 'qkeys' | 'exportPublicNames' | 'imports' | 'phpTypes' | 'receiverFactories' |
-  'receiverHeritage' | 'receiverPackage' | 'importAliases' | 'tsGlobalTypes'>;
+  'receiverHeritage' | 'receiverPackage' | 'importAliases' | 'tsGlobalTypes' | 'isTest'>;
 
 /**
  * A summary as the dependents functions read it. One read back from the CLI's
@@ -101,6 +103,11 @@ export function summaryBindings(s: Partial<BindingFields> | undefined): Map<stri
   }
   // TypeScript globals an unimported heritage base may name.
   for (const name of s.tsGlobalTypes ?? []) out.set(`g\0${name}`, [name]);
+  // A destination's test classification changes whether callers emit TESTS.
+  // Include it in each binding so the signature and changed names agree.
+  if (s.isTest) {
+    return new Map([...out].map(([key, names]) => [`t\0${key}`, names]));
+  }
   return out;
 }
 
@@ -167,6 +174,7 @@ export function changedNames(before: StoredFileSummary | undefined, after: Store
  */
 export function importsChanged(before: StoredFileSummary | undefined, after: StoredFileSummary | undefined): boolean {
   if (!before || !after) return false;
+  if (Boolean(before.isTest) !== Boolean(after.isTest)) return true;
   const key = (s: StoredFileSummary) =>
     JSON.stringify((s.imports ?? [])
       // An aliased Python import resolves by full path only, so adding or

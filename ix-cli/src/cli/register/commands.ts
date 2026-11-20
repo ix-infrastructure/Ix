@@ -277,6 +277,11 @@ export const OSS_COMMANDS: readonly OssCommandEntry[] = [
     load: async () => (await import("../commands/capabilities.js")).registerCapabilitiesCommand,
     help: [{ usage: "capabilities", summary: "What this CLI supports" }],
   },
+  {
+    names: ["tests-for"],
+    load: async () => (await import("../commands/tests-for.js")).registerTestsForCommand,
+    help: [{ usage: "tests-for <symbol>", summary: "Tests reaching a symbol or file" }],
+  },
 ];
 
 /**
@@ -289,7 +294,7 @@ export const ROOT_HELP_SECTIONS: readonly { readonly title: string; readonly com
   { title: "Start", commands: ["map", "watch", "ingest", "config"] },
   {
     title: "Understand",
-    commands: ["context", "search", "text", "locate", "explain", "impact", "overview", "read", "around", "smells"],
+    commands: ["context", "search", "text", "locate", "explain", "impact", "overview", "read", "around", "tests-for", "smells"],
   },
   {
     title: "Explore",

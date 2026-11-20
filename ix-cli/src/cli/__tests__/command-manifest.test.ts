@@ -83,6 +83,7 @@ Understand:
   overview <target>     Summarize structure
   read <target>         Read source
   around <path:line>    Who depends on it
+  tests-for <symbol>    Tests reaching a symbol or file
   smells                Detect issues
 
 Explore:

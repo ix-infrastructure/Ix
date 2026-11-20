@@ -133,6 +133,7 @@ const CASES: Record<OssTool, Args[]> = {
   ix_read: [{ symbol: "config", ...DISAMBIGUATE }],
   ix_diff: [{ from_rev: 1, to_rev: 2, target: "config", summary: true, path: "src", pick: 2 }],
   ix_neighbors: ["callers", "callees", "imports", "imported_by", "overrides"].map((relation) => ({ ...EDGE, relation })),
+  ix_tests_for: [{ symbol: "config", ...DISAMBIGUATE, limit: 20 }],
   ix_callers: [EDGE],
   ix_callees: [EDGE],
   ix_imported_by: [EDGE],

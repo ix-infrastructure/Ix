@@ -58,6 +58,7 @@ describe('summary signature and changed names (#961)', () => {
     const globals = some(() => pick(['G', 'H']), 2);
     if (globals.length) s.tsGlobalTypes = globals;
     if (rand() < 0.3) s.tsModule = true;
+    if (rand() < 0.3) s.isTest = true;
     return s;
   };
 
@@ -66,7 +67,7 @@ describe('summary signature and changed names (#961)', () => {
     const other = generate(rand) as Record<string, unknown>;
     const out = { ...s } as Record<string, unknown>;
     const fields = ['language', 'entityCount', 'qkeys', 'imports', 'refs', 'exportPublicNames', 'phpTypes', 'receiverFactories',
-      'receiverHeritage', 'receiverPackage', 'importAliases', 'tsGlobalTypes', 'tsModule'];
+      'receiverHeritage', 'receiverPackage', 'importAliases', 'tsGlobalTypes', 'tsModule', 'isTest'];
     for (const field of fields) {
       if (rand() < 0.15) {
         if (other[field] === undefined) delete out[field];
@@ -107,6 +108,24 @@ describe('summary signature and changed names (#961)', () => {
   it("ignores what other files cannot bind to: refs, entity count, a file's own import aliases", () => {
     const base = summary('m.ts', { qkeys: [['f', 'f']], refs: ['x'], entityCount: 2 });
     expect(summarySignature(base)).toBe(summarySignature({ ...base, refs: ['y'], entityCount: 3, importAliases: { ns: './c' } }));
+  });
+
+  it('invalidates callers and importers when a destination changes test classification', () => {
+    const production = signed(summary('checks.ts', {
+      qkeys: [['runCheck', 'runCheck']], exportPublicNames: [['check', 'runCheck']],
+    }));
+    const test = signed({ ...production, isTest: true });
+    const table = new Map([
+      ['driver.test.ts', entry(summary('driver.test.ts', { refs: ['runCheck'] }))],
+      ['importer.test.ts', entry(summary('importer.test.ts', { imports: [{ dstName: './checks' }] }))],
+    ]);
+    for (const [before, after] of [[production, test], [test, production]]) {
+      expect(before.sig).not.toBe(after.sig);
+      expect(changedNames(before, after)).toEqual(new Set(['runCheck', 'check']));
+      expect(importsChanged(before, after)).toBe(true);
+      expect(findDependents(table, changedNames(before, after), ['checks.ts'], new Set()))
+        .toEqual(['driver.test.ts', 'importer.test.ts']);
+    }
   });
 
   it('names a renaming re-export whose source module moved', () => {

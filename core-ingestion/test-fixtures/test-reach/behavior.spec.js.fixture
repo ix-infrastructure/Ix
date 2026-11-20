@@ -1,0 +1,4 @@
+import { doubleJs } from './calc.js';
+describe('arithmetic', () => {
+  it('doubles', () => { doubleJs(2); });
+});

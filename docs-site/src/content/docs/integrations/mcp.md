@@ -68,6 +68,12 @@ and `ix_explain`, which were in the default set before, plus the rest of the OSS
 `--tools=all`. Register the server by hand instead, or edit the client's config so the arguments are `mcp` and
 `--tools=all`.
 
+It also includes `ix_tests_for` (`symbol=<name or file>`, optional `kind`, `path`,
+`pick`, `limit`): ranked static test evidence with path:line, route and an inferred
+run command. Run `ix map` after upgrading to populate TESTS edges. This reports
+static dependencies, not runtime coverage. The CLI equivalent is
+`ix tests-for <symbol|file>`; see `docs/tests-for.md` in the source repository.
+
 ## Repair a moved launcher
 
 If you move or reinstall `ix`, a client may still point at the old path. For Cursor, VS Code, opencode and OpenClaw

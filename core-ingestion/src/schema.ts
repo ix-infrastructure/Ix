@@ -80,6 +80,8 @@ export const EDGE_PREDICATES = [
   'CONTAINS',
   'CALLS',
   'IMPORTS',
+  // Static evidence that test code reaches a production symbol or file.
+  'TESTS',
   // Inheritance and implementation.
   'EXTENDS',
   // A use of a type or name that is not a call.

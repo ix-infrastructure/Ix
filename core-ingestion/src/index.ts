@@ -2,6 +2,7 @@
 
 import * as nodePath from 'node:path';
 import * as crypto from 'node:crypto';
+import { markTestEntities } from './test-classifier.js';
 import { createRequire } from 'node:module';
 // @ts-ignore — tree-sitter has no bundled types
 import Parser from 'tree-sitter';
@@ -185,6 +186,8 @@ export type { FileSummary } from './symbol-index.js';
 // ---------------------------------------------------------------------------
 
 export interface ParsedEntity {
+  /** Runnable test definition, or file fallback for anonymous framework tests. */
+  isTest?: true;
   name: string;
   /** One of `NODE_KINDS` (schema.ts): "class", "function", "method", etc. */
   kind: NodeKind;
@@ -3944,6 +3947,11 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     const tsGlobalTypes = isTsSource ? tsGlobalTypeNames(tree.rootNode) : [];
     const tsModule = isTsSource && isTsModule(tree.rootNode);
 
+    const fileRole = classifyFileRole(filePath, source);
+    if (fileRole.role !== 'fixture' && fileRole.role !== 'generated' && fileRole.role !== 'external') {
+      markTestEntities(entities, tree.rootNode, language, fileRole.role === 'test', source);
+    }
+
     return {
       filePath,
       language,
@@ -3965,7 +3973,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       ...(receiverTypedCalls.length ? { receiverTypedCalls } : {}),
       ...(tsGlobalTypes.length ? { tsGlobalTypes } : {}),
       ...(tsModule ? { tsModule: true as const } : {}),
-      fileRole: classifyFileRole(filePath, source),
+      fileRole,
     };
   } catch (e) {
     if (process.env.IX_PARSE_DEBUG === '1') console.error('parseFile threw:', e);
@@ -3980,6 +3988,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
 
 /** A cross-file edge, any predicate, resolved to the file that defines its target. */
 export interface ResolvedEdge {
+  /** Destination is classified as test code, including framework-only paths. */
+  dstIsTest?: true;
   srcFilePath: string;
   srcName: string;
   dstFilePath: string;          // file where the destination symbol is actually defined
@@ -4092,6 +4102,7 @@ export function summarizeParseResult(r: FileParseResult): FileSummary {
     filePath: r.filePath,
     language: r.language,
     entityCount: r.entities.length,
+    ...(r.entities.some(e => e.kind === 'file' && e.isTest) || r.fileRole.role === 'test' ? { isTest: true as const } : {}),
     qkeys,
     ...(exportPublicNames ? { exportPublicNames } : {}),
     imports,
@@ -6223,6 +6234,19 @@ export function resolveEdges(
         const qualifierPart = dstName.slice(0, qualDot);
         const memberPart = dstName.slice(qualDot + 1);
         if (memberPart && qualifierPart) {
+          // Go's parser qualifies a package-local function with its package name.
+          // It needs no import: bind only within the same directory AND package.
+          if (srcLanguage === SupportedLanguages.Go && rel.predicate === 'CALLS'
+            && qualifierPart === summaries.get(srcFilePath)?.receiverPackage
+            && !result.importAliases?.[qualifierPart]) {
+            const local = (goReceiverFiles.get(goPackageKey(srcFilePath)) ?? [])
+              .filter(fp => fp !== srcFilePath && (fileQKeys.get(fp)?.get(memberPart) ?? []).includes(memberPart));
+            if (local.length === 1) resolved.push({
+              srcFilePath, srcName, dstFilePath: local[0], dstName: origDstName,
+              dstQualifiedKey: memberPart, predicate: 'CALLS', confidence: 0.9, tier: 'qualifier',
+            });
+            continue;
+          }
           // Rust `stats::report()`: `stats` is a module, bound by `mod stats;` or
           // `use crate::stats;`, or the call spells the path itself
           // (`crate::stats::report()`). A path into another crate, or one that
@@ -6447,6 +6471,10 @@ export function resolveEdges(
       }
       // 0 or >1 matches after all tiers — leave as dangling edge, do not emit
     }
+  }
+
+  for (const edge of resolved) {
+    if (summaries.get(edge.dstFilePath)?.isTest) edge.dstIsTest = true;
   }
 
   // Cross-repo dependency gate (co-ingest): keep a cross-repo edge only when the
