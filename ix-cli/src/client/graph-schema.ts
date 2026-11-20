@@ -42,6 +42,8 @@ export const NODE_KINDS = [
   'method',
   'constant',
   'macro',
+  // A synthetic error type raised or logged at an indexed error site.
+  'type',
   // SQL.
   'table',
   'view',
@@ -84,6 +86,8 @@ export const EDGE_PREDICATES = [
   'EXTENDS',
   // A use of a type or name that is not a call.
   'REFERENCES',
+  // An enclosing symbol to an indexed error type.
+  'RAISES',
   // File to chunk.
   'CONTAINS_CHUNK',
   // Chunk to the symbol it spans.

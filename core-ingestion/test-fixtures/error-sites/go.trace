@@ -1,0 +1,8 @@
+panic: Invalid record sample: missing field
+
+goroutine 1 [running]:
+main.fail({0x4c6983?, 0xfb9dcc3e1e0?})
+	/reporter/project/src/fail.go:6 +0x67
+main.main()
+	/reporter/project/src/fail.go:9 +0x1f
+exit status 2

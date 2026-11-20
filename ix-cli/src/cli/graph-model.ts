@@ -29,7 +29,7 @@ import type { NodeKind } from "../client/graph-schema.js";
  */
 export const READ_ONLY_KINDS = [
   // Type-like kinds the ingester folds into `class`.
-  "object", "struct", "enum", "record", "annotation", "union", "impl", "type",
+  "object", "struct", "enum", "record", "annotation", "union", "impl",
   // Contract kinds no extractor here writes.
   "type_alias", "sealed_trait", "abstract_class",
   // Containers the ingester writes as `module`.

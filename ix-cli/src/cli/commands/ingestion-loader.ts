@@ -7,7 +7,8 @@ import { readGrammarStatus, type GrammarStatus } from "../grammar-status.js";
 import type { StoredSummary } from "../ingest-symbols.js";
 
 type IngestionModule = {
-  parseFile: (filePath: string, source: string) => any;
+  parseFile: (filePath: string, source: string, opts?: { budgetMs?: number }) => any;
+  messageMatches: (template: string, text: string) => boolean;
   resolveEdges: (results: any[], stats?: any, globalIndex?: any) => any[];
   isGrammarSupported: (filePath: string) => boolean;
   /** Absent from a core-ingestion build older than #967; read it through `readGrammarStatus`. */

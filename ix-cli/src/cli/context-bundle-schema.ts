@@ -71,7 +71,7 @@ function buildSchemas(z: typeof Zod.z) {
             path: z.string(),
             lineStart: z.number().int().positive().optional(),
             lineEnd: z.number().int().positive().optional(),
-            via: z.enum(["path in issue", "identifier in issue", "bm25 fallback"]),
+            via: z.enum(["path in issue", "identifier in issue", "bm25 fallback", "error message", "traceback frame"]),
             // A name only the issue's snippet uses; a start a traceback frame gave.
             snippet: z.boolean().optional(),
             traceback: z.boolean().optional(),

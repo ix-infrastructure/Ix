@@ -26,6 +26,7 @@ export class Square implements Shape {
 export class Cube extends Square {}
 export function make(): Shape { return new Square(LIMIT); }
 `,
+  '/repo/src/failure.ts': 'export function fail() { throw new TypeError("Invalid record"); }',
   '/repo/src/macros.rs': `
 macro_rules! twice { ($e:expr) => { $e * 2 }; }
 trait Named { fn name(&self) -> String; }

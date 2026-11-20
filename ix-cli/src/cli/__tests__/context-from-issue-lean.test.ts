@@ -97,6 +97,16 @@ describe("lean rendering", () => {
     expect(text.length / 4).toBeLessThan(150);
   });
 
+  it.each([
+    ["error message", "Invalid record sample: missing field", "error message matches"],
+    ["traceback frame", "src/fail.ts:2", "traceback frame"],
+  ] as const)("explains a %s start in text and llm output", (via, token, why) => {
+    const view = leanIssueView(plan([ident(token, "src/fail.ts", { name: "fail", kind: "function", via })]));
+    const explanation = `${why} \`${token}\``;
+    expect(renderLeanIssueText(view)).toContain(explanation);
+    expect(renderLeanIssueLlm(view).find((line) => line.startsWith("start "))).toContain(explanation);
+  });
+
   it("says so in one line when there is no confident start", () => {
     expect(renderLeanIssueText(low).split("\n")).toHaveLength(1);
     expect(renderLeanIssueText(low)).toMatch(/^Ix found no confident starting point/);

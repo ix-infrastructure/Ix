@@ -1554,13 +1554,13 @@ components:
         the parser, which writes struct, enum, record, union, impl, type alias
         and annotation definitions as `class`.
       enum:
-        [file, module, class, interface, trait, function, method, constant, macro,
+        [file, module, class, interface, trait, function, method, constant, macro, type,
          table, view, label, config, config_entry, frontmatter, heading, section,
          environment, chunk, intent, doc, decision]
     EdgePredicate:
       type: string
       description: Every edge predicate a patch from the ix CLI writes.
-      enum: [CONTAINS, CALLS, IMPORTS, EXTENDS, REFERENCES, CONTAINS_CHUNK, DEFINES, NEXT]
+      enum: [CONTAINS, CALLS, IMPORTS, EXTENDS, REFERENCES, RAISES, CONTAINS_CHUNK, DEFINES, NEXT]
     UpsertNodeOp:
       type: object
       description: |
