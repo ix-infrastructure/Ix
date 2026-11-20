@@ -249,12 +249,26 @@ directly rather than `npm run build`. Missing from one path, it fails only on
 that kind of install.
 
 The release (`.github/workflows/release.yml`) runs when a `v*` tag is pushed.
-It builds the CLI and `core-ingestion` on a native runner per platform,
-because the tree-sitter bindings are compiled from source, stamps the version
-from the tag, packages one archive per platform with checksums and an SBOM,
-creates the GitHub release, and opens a pull request that updates the Homebrew
-formula. On a pull request that touches packaging it runs as a dry run with
-nothing published. Versions in the repository are not bumped by hand.
+It builds the CLI and `core-ingestion` on a native runner per platform, stamps
+the version from the tag, packages one archive per platform with checksums and
+an SBOM, creates the GitHub release, and opens a pull request that updates the
+Homebrew formula. On a pull request that touches packaging it runs as a dry run
+with nothing published. Versions in the repository are not bumped by hand.
+
+Most tree-sitter packages are not compiled at install time: the `tree-sitter`
+runtime and nearly every grammar ship prebuilt binaries (`prebuilds/`) for
+darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-arm64 and win32-x64,
+and node-gyp-build loads the one for the running platform. Two optional grammars
+are the exceptions. `tree-sitter-kotlin` ships no prebuilds, so `npm ci`
+compiles it on every platform. `tree-sitter-sas` ships prebuilds for
+darwin-arm64, darwin-x64 and linux-x64 only, so on linux-arm64 and Windows it
+is compiled too. When that compile fails, npm drops the optional grammar and
+files in that language are not parsed (`ix doctor` names it). These compiled
+grammars are why each platform still builds on its own runner. Because the
+archive copies `core-ingestion/node_modules` whole, every archive also carries
+the prebuilds for the other platforms and the grammars' C sources, which are
+unused at run time. `ix-cli/scripts/check-language-docs.test.mjs` records which
+packages lack a prebuild and fails when a dependency update changes that.
 
 ## Tests and CI
 
@@ -266,7 +280,7 @@ nothing published. Versions in the repository are not bumped by hand.
 | Parser tests | `core-ingestion/src/__tests__/` | `cd core-ingestion && npm test` | `test` |
 | End-to-end, against a real backend, and the performance gate | `ix-cli/test/e2e/`, `ix-cli/scripts/perf-gate.mjs` | see [the e2e README](../ix-cli/test/e2e/README.md) | `e2e` |
 | API reference parity | `ix-cli/scripts/check-api-parity.mjs` | `node scripts/check-api-parity.mjs` | `api-parity` |
-| Flag reference parity (reads the built `dist/`) | `ix-cli/scripts/check-doc-parity.mjs` | `node scripts/check-doc-parity.mjs` | `doc-parity` |
+| Flag reference and workflow-skill parity (reads the built `dist/`) | `ix-cli/scripts/check-doc-parity.mjs` | `node scripts/check-doc-parity.mjs` | `doc-parity` |
 | Markdown links | `ix-cli/scripts/check-links.mjs` | `node ix-cli/scripts/check-links.mjs` | `links` |
 | Docs site build, and links in the built site | `docs-site/` | `cd docs-site && npm run build` | `docs-site` |
 | Skill and MCP installers | `scripts/install-skill.sh`, `ix mcp install` | — | `harness-install-smoke`, `harness-install-smoke-windows` |
