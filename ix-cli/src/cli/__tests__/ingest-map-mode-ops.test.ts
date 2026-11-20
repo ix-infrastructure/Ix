@@ -250,6 +250,57 @@ describe("map/full ingestion identity (#965)", () => {
       });
     }
 
+    it(`a mode upgrade the backend already holds is recorded, not replayed forever (${semantics})`, async () => {
+      backend = new FakeBackend({ semantics });
+      vi.stubEnv("IX_ENDPOINT", await backend.start());
+      await ingest(false);
+      // A forced full run of unchanged bytes stores them under the full-mode id.
+      await ingest(false, true);
+      const heldId = backend.lastPatchIds.get("a.ts")!;
+      const fullGraph = backend.graphSignature();
+      // A baseline that lost its mode records (an older CLI rewrote it).
+      const baselinePath = ingestMtimeCachePath(repo);
+      const baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
+      delete baseline.fileModes;
+      writeFileSync(baselinePath, JSON.stringify(baseline));
+
+      // The upgrade re-send goes under that id and is answered Idempotent: the
+      // backend already holds the full payload, so the mode is recorded.
+      await ingest(false);
+      expect(backend.lastPatchIds.get("a.ts")).toBe(heldId);
+      expect(backend.graphSignature()).toEqual(fullGraph);
+      expect(loadIngestBaseline(repo)!.replayedFiles).toEqual([]);
+      expect(loadIngestBaseline(repo)!.fileModes.get(join(repo, "a.ts"))).toBe("full");
+      backend.resetRequests();
+      await ingest(false);
+      expect(backend.commitCount).toBe(0);
+      expect(backend.unknownPaths).toEqual([]);
+    });
+
+    it(`a mode upgrade whose hash lookup failed is a replay, not a recorded full ingest (${semantics})`, async () => {
+      backend = new FakeBackend({ semantics });
+      vi.stubEnv("IX_ENDPOINT", await backend.start());
+      const hasChunks = () => backend.graphSignature().nodes.some(n => n.includes(" chunk "));
+      await ingest(mapModeForIngest("0"));
+      expect(hasChunks()).toBe(false);
+
+      // Without the known hash the re-send keeps the built id, which the
+      // backend holds as ix map's patch: the Idempotent answer wrote nothing.
+      backend.failSourceHashes = true;
+      await ingest(false);
+      expect(hasChunks()).toBe(false);
+      expect(loadIngestBaseline(repo)!.fileModes.get(join(repo, "a.ts"))).not.toBe("full");
+      expect(loadIngestBaseline(repo)!.replayedFiles).toEqual(["a.ts"]);
+
+      // The next full run with a healthy lookup upgrades it.
+      backend.failSourceHashes = false;
+      await ingest(false);
+      expect(hasChunks()).toBe(true);
+      expect(loadIngestBaseline(repo)!.fileModes.get(join(repo, "a.ts"))).toBe("full");
+      expect(loadIngestBaseline(repo)!.replayedFiles).toEqual([]);
+      expect(backend.unknownPaths).toEqual([]);
+    });
+
     it(`map over a map-only legacy baseline neither re-sends nor writes chunks (${semantics})`, async () => {
       backend = new FakeBackend({ semantics });
       vi.stubEnv("IX_ENDPOINT", await backend.start());
