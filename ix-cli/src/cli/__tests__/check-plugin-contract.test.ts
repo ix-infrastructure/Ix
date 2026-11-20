@@ -119,6 +119,13 @@ describe("check-plugin-contract Pro surface", () => {
     }
   });
 
+  // #920: `plans` passed the check while the table still listed it as current.
+  it("flags a plugin calling ix plans", () => {
+    expect(contract.check(["plans", "--format", "json"], surface, pro)).toBe(
+      'retired Pro command "plans": use "ix plan list"',
+    );
+  });
+
   it("knows no Pro command it was not handed", () => {
     expect(contract.check(["briefing"], surface)).toBe('unknown command "briefing"');
     expect(contract.check(["workflows"], surface, pro)).toBe('unknown command "workflows"');

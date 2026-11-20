@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/readme-logo.png" width="34%" alt="Ix" />
+  <img src="./assets/readme-hero.jpg" width="34%" alt="Ix" />
 </p>
 
 <h1 align="center">Understand any codebase instantly.</h1>

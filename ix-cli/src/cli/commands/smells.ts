@@ -318,18 +318,15 @@ last completed run are shown instead, marked stale.`)
         const listSlice = sliceRanked<any>(
           result.smells ?? [],
           listLimit ?? Infinity,
-          listLimit === undefined ? undefined : (s) => -(Number(s.confidence) || 0),
+          // Confidence lives on the claim's value, which storedSmellToCandidate reads.
+          listLimit === undefined ? undefined : (s) => -storedSmellToCandidate(s).confidence,
         );
         if (opts.format === "json") {
           printJson({
             count: listSlice.total,
             ...(listLimit === undefined ? {} : { shown: listSlice.shown, truncated: listSlice.truncated }),
             inference_version: "smell_v1",
-            smells: listSlice.rows.map((s: any) => ({
-              smell: s.smell,
-              entity_id: s.entity_id?.slice(0, 12),
-              confidence: s.confidence,
-            })),
+            smells: listSlice.rows.map(listSmellRow),
           });
           return;
         }
@@ -532,6 +529,35 @@ export function storedSmellToCandidate(row: any): SmellCandidate {
   };
 }
 
+/** `has_smell.orphan_file` → `orphan_file`. A smell without that prefix is unchanged. */
+function shortSmellKind(smell: string): string {
+  const prefix = "has_smell.";
+  return smell.startsWith(prefix) ? smell.slice(prefix.length) : smell;
+}
+
+/**
+ * One `ix smells --list` row. `smell` and `entity_id` stay the claim's own
+ * fields (the entity id cut to 12 characters). `kind` is the short smell, and
+ * `path` and `confidence` are what `storedSmellToCandidate` reads out of the
+ * claim, so a caller can see where the smell is and how sure it is.
+ */
+function listSmellRow(row: any): {
+  smell: unknown;
+  entity_id: string | undefined;
+  kind: string;
+  path: string;
+  confidence: number;
+} {
+  const candidate = storedSmellToCandidate(row);
+  return {
+    smell: row?.smell,
+    entity_id: row?.entity_id?.slice(0, 12),
+    kind: shortSmellKind(candidate.smell),
+    path: candidate.file,
+    confidence: candidate.confidence,
+  };
+}
+
 /**
  * Answer with the stored smell claims (`GET /v1/smells`, what `--list`
  * reads) when a fresh run timed out or was refused: the claims are made into
@@ -597,7 +623,8 @@ function confidenceBar(conf: number): string {
 /**
  * Render `ix smells --list` claims as llm records. With a slice (an explicit
  * --limit), the header carries the total and `shown`, plus a truncation
- * diagnostic when rows were cut.
+ * diagnostic when rows were cut. Each row carries the same fields as the json
+ * row: a short kind, the file path, the confidence and the entity id.
  */
 export function renderSmellsListLlm(smells: any[], slice?: Slice<unknown>): string[] {
   const lines = [llmLine("smells", [
@@ -612,10 +639,12 @@ export function renderSmellsListLlm(smells: any[], slice?: Slice<unknown>): stri
     ]));
   }
   for (const s of smells) {
+    const row = listSmellRow(s);
     lines.push(llmLine("smell", [
-      ["kind", s.smell],
-      ["entity", s.entity_id?.slice(0, 12)],
-      ["confidence", s.confidence],
+      ["kind", row.kind],
+      ["path", row.path],
+      ["entity", row.entity_id],
+      ["confidence", row.confidence],
       ["version", s.inference_version],
     ]));
   }

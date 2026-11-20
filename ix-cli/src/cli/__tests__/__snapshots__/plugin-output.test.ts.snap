@@ -86,7 +86,7 @@ exports[`ix callers: plugin-facing output > --format llm > resolved target 1`] =
 exit: 0
 --- stdout
 callers target=paint shown=1 total=1 resolved=1
-ref name=draw kind=function path=src/app.ts lines=3-5 site=src/app.ts:4 snippet=paint(canvas);
+ref name=draw kind=function path=src/app.ts lines=3-5 site=4 snippet=paint(canvas);
 
 --- stderr
 "

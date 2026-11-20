@@ -478,8 +478,8 @@ entity at the other end is defined; `site=` says where the edge itself is:
 
 ```
 callers target=resolveWorkspaceRoot shown=2 total=2 resolved=2
-ref name=ingestFiles kind=function path=ix-cli/src/cli/commands/ingest.ts lines=1366-3660 site=ix-cli/src/cli/commands/ingest.ts:1496 snippet=": nodePath.resolve(resolveWorkspaceRoot(opts.root), path);"
-ref name=registerCallersCommand kind=function path=ix-cli/src/cli/commands/callers.ts lines=15-141 site=ix-cli/src/cli/commands/callers.ts:43 also=135 snippet="const root = resolveWorkspaceRoot();"
+ref name=ingestFiles kind=function path=ix-cli/src/cli/commands/ingest.ts lines=1366-3660 site=1496 snippet=": nodePath.resolve(resolveWorkspaceRoot(opts.root), path);"
+ref name=registerCallersCommand kind=function path=ix-cli/src/cli/commands/callers.ts lines=15-141 site=43 also=135 snippet="const root = resolveWorkspaceRoot();"
 ```
 
 | relation | `site=` is |
@@ -488,6 +488,12 @@ ref name=registerCallersCommand kind=function path=ix-cli/src/cli/commands/calle
 | `callees` | the call to the row, inside the target's span (the target's file) |
 | `imported-by` | the import of the target, in the importing file |
 | `imports` | the import of the row, in the target's file |
+
+A site in the row's own file prints as just its line (`site=1496`): `path=`
+on the same row already names the file. That is every `callers` and
+`imported-by` site. A site in another file, as with `callees` and `imports`,
+prints as `site=path:line`, and so does any site under `--fields` that leaves
+out `path`.
 
 `also=` lists further sites in the same scope (at most four), and `snippet=`
 is the site's line, with up to two continuation lines of a call left open.
@@ -751,6 +757,19 @@ importers and dependents.
 For a container target the `counts` record is
 `counts members=<n> importers=<n> dependents=<n> member_callers=<n> dependents_total=<n>`;
 its `dependents=` is the `CALLS`/`REFERENCES` expand alone (`summary.directDependents`).
+A container target's `impact` record carries its own `path=` right after `kind=`, and a
+`member` row leaves `path=` off when it is in that same file, so a file's members print the
+path once, not on every row. A member somewhere else (a class whose member lives in another
+file) keeps its own `path=`; a target with no path gets no header `path=`, and every row keeps
+its own. `lines=` stays on every row, and the json `topImpactedMembers` rows keep `path`.
+A leaf target's `impact` record has no `path=`.
+
+```
+impact target=auth.ts kind=file path=src/auth.ts risk=low category=unknown summary="Low risk to dependent code."
+counts members=2 importers=2 dependents=2 member_callers=3 dependents_total=3
+member name=verify kind=function callers=2 lines=1-20
+member name=Session kind=class callers=1 lines=22-80
+```
 
 **Dependents: the one count.** `dependents_total=` on the `counts` record, and
 `summary.dependents` in `--format json`, is how many distinct entities depend on the target. Read it instead of combining the other counts,

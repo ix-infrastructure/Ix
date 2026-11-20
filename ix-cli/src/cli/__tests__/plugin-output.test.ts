@@ -3,6 +3,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { FakeBackend, SMALL_READ_GRAPH } from "./helpers/fake-backend.js";
 import { runCommand, type RunCommandResult } from "./helpers/run-command.js";
+import { normalise } from "./helpers/normalise-output.js";
 import { llmQuote } from "../llm.js";
 
 /**
@@ -24,7 +25,8 @@ import { llmQuote } from "../llm.js";
  * `runCommand` (helpers/run-command.ts, which lists its limits: no Pro, no
  * rg/git on PATH, no TTY).
  *
- * Normalised, because they differ per run and per OS -- and nothing else:
+ * Normalised (helpers/normalise-output.ts), because they differ per run and
+ * per OS -- and nothing else:
  *   - the run's temp directory (scratch IX_HOME, workspace and unmapped
  *     directory all live under it), in any of the forms it is printed in
  *     (native, JSON-escaped, forward-slashed), becomes `<TMP>`, and the
@@ -54,27 +56,6 @@ afterEach(() => {
   backend.unknownPaths.length = 0;
   backend.reads.length = 0;
 });
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function normalise(text: string, run: RunCommandResult): string {
-  const root = run.tempRoot;
-  const forms = new Set([root, root.replace(/\\/g, "/"), JSON.stringify(root).slice(1, -1)]);
-  let out = text;
-  for (const form of [...forms].sort((a, b) => b.length - a.length)) {
-    // The root, then the rest of the path: any run of path characters and separators.
-    // A separator is `/`, `\`, or `\\` (a backslash JSON-escaped).
-    const pattern = new RegExp(`${escapeRegExp(form)}((?:(?:\\\\\\\\|[\\\\/])[\\w.-]+)*)`, "g");
-    out = out.replace(pattern, (_m, rest: string) => `<TMP>${rest.replace(/\\\\|\\/g, "/")}`);
-  }
-  // `--format llm` quotes a value holding a `\` (llm.ts), so on Windows a bare
-  // path prints as dir="C:\\...". Once it is `<TMP>/...` it needs no quoting:
-  // print it as it prints on POSIX.
-  out = out.replace(/="(<TMP>(?:\/[\w.-]+)*)"/g, "=$1");
-  return out.replace(/127\.0\.0\.1:\d+/g, "127.0.0.1:<PORT>");
-}
 
 function render(argv: string[], run: RunCommandResult): string {
   return [
