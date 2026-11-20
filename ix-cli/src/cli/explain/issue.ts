@@ -484,6 +484,9 @@ export type StartVia = "path in issue" | "identifier in issue" | "bm25 fallback"
 // Ranking evidence stays off the wire, but survives chooseCentre's object spread.
 const PINNED_IDENTIFIER = Symbol("pinned issue identifier");
 // Allow a few platform-specific definitions without pinning ubiquitous names.
+// The count is only trusted when the search came back short of a full page of
+// exact-name hits of any kind: the backend does not promise definitions come
+// first, so a page filled by imports or tests may hide more definitions.
 const MAX_PINNED_DEFINITION_FILES = 3;
 /** Search candidates fetched per name the issue mentions; only exact names are kept. */
 export const ISSUE_SEARCH_LIMIT = 20;
@@ -1022,7 +1025,8 @@ export interface Closeness {
 /**
  * Resolved issue paths precede specific prose definitions, then lexical hits.
  * Other starts retain a boost capped at 10% of the best lexical hit; snippet
- * names receive none. Scores remain bounded evidence, not precedence ranks.
+ * names receive none. Scores fall down the list: a pinned row below the next
+ * row's score is lifted just above it, and its reason says so.
  */
 export function rankIssueFiles(
   input: { starts: StartingPoint[]; bm25: Bm25Hit[]; near: ReadonlyMap<string, Closeness>; sourcePaths?: SourcePaths },
@@ -1073,6 +1077,17 @@ export function rankIssueFiles(
     else if (others > 0 && source(r.path)) {
       others--;
       kept.push({ path: r.path, score: round(r.score), reason: r.reason });
+    }
+  }
+  // List order is the contract, but a reader may re-sort by score. Lift a
+  // pinned row just above the row after it, so scores fall down the list.
+  // Only pinned rows can be lower than the next: the rest are in score order.
+  const pinned = new Set(rows.filter((r) => r.pin > 0).map((r) => r.path));
+  for (let i = kept.length - 2; i >= 0; i--) {
+    const next = kept[i + 1].score;
+    if (kept[i].score < next || (kept[i].score === next && pinned.has(kept[i].path))) {
+      const score = round(next + 0.001);
+      kept[i] = { ...kept[i], score, reason: `${kept[i].reason}; score raised from ${kept[i].score} to keep its pinned place` };
     }
   }
   return kept;

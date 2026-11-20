@@ -41,14 +41,36 @@ describe("strong issue starts", () => {
     const paths = Array.from({ length: count }, (_, i) => `src/definition${i}.py`);
     const { starts } = await pickStartingPoints("renderValue fails", {
       files: paths,
-      // Many overloads in one file should not trip the frequency guard.
-      search: async () => paths.flatMap((path) => Array.from({ length: 5 }, (_, i) => definition("renderValue", path, `${path}:${i}`))),
+      // Many overloads in one file should not trip the frequency guard. Four
+      // per file stays under a full search page, so only the file count decides.
+      search: async () => paths.flatMap((path) => Array.from({ length: 4 }, (_, i) => definition("renderValue", path, `${path}:${i}`))),
     });
     const ranked = rankIssueFiles({
       starts, bm25: [{ path: noise[0].path, score: 300 }, { path: paths[0], score: 1 }], near: new Map(),
     });
     expect(ranked[0].path).toBe(count <= 3 ? paths[0] : noise[0].path);
-    expect(ranked.find((r) => r.path === paths[0])?.score).toBe(31);
+    // Pinned: lifted just above the row it leads. Not pinned: BM25 plus the capped boost.
+    expect(ranked.find((r) => r.path === paths[0])?.score).toBe(count <= 3 ? 300.001 : 31);
+  });
+
+  it("keeps scores falling down the list when pinned rows lead on precedence", async () => {
+    const named = "src/named.py";
+    const defined = "src/defined.py";
+    const { starts } = await pickStartingPoints(`renderValue fails in ${named}`, {
+      files: [named, defined], search: async (token) => token === "renderValue" ? [definition("renderValue", defined)] : [],
+    });
+    const ranked = rankIssueFiles({
+      starts, bm25: [...noise, { path: named, score: 2 }, { path: defined, score: 1 }], near: new Map(),
+    });
+    expect(ranked.slice(0, 3).map((r) => r.path)).toEqual([named, defined, noise[0].path]);
+    // A reader that re-sorts by score gets the same order back.
+    const scores = ranked.map((r) => r.score);
+    expect(scores).toEqual([...scores].sort((a, b) => b - a));
+    expect(new Set(scores.slice(0, 3)).size).toBe(3);
+    expect(ranked[0].reason).toContain("pinned; ");
+    expect(ranked[0].reason).toContain("score raised from 32 to keep its pinned place");
+    // The unpinned rows keep their own scores.
+    expect(ranked[2].score).toBe(300);
   });
 
   it("keeps a generic prose name under the capped boost even with one definition", async () => {
@@ -131,5 +153,15 @@ describe("strong issue starts", () => {
     expect(rank(starts, path)[0].path).toBe(noise[0].path);
     const { starts: fewer } = await pickStartingPoints("renderValue fails", { files: [path], search: async () => page.slice(0, -1) });
     expect(rank(fewer, path)[0].path).toBe(path);
+  });
+
+  it("counts only exact-name hits toward a full page", async () => {
+    const path = "src/definition.py";
+    // A full page whose other rows only share part of the name: the page is
+    // not saturated by this name, so the single definition still pins.
+    const page = [definition("renderValue", path), ...Array.from({ length: ISSUE_SEARCH_LIMIT - 1 }, (_, i) =>
+      definition(`renderValue${i}`, `src/other${i}.py`))];
+    const { starts } = await pickStartingPoints("renderValue fails", { files: [path], search: async () => page });
+    expect(rank(starts, path)[0].path).toBe(path);
   });
 });
