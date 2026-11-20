@@ -169,11 +169,9 @@ describe('call resolution respects lexical scope (JS/TS)', () => {
 
     const edges = resolveEdges([caller, semver, zod]);
     expect(edges.filter(e => e.predicate === 'CALLS' && e.srcFilePath === 'src/schema.ts')).toEqual([]);
-    // Without the method elsewhere, the unique module-scope function keeps the
-    // global fallback exactly as before.
-    expect(callsTo(resolveEdges([caller, semver]), 'src/semver.ts')).toEqual([
-      expect.objectContaining({ dstName: 'gte', dstQualifiedKey: 'gte', confidence: 0.5 }),
-    ]);
+    // Nor does the unique module-scope function become its target without the
+    // method: a call to a parameter names the parameter (#1020).
+    expect(callsTo(resolveEdges([caller, semver]), 'src/semver.ts')).toEqual([]);
   });
 
   it('resolves an ambient-named helper destructured from a CommonJS require (import tier)', () => {
@@ -387,5 +385,73 @@ describe('dynamic and helper-literal imports (JS/TS)', () => {
     const unresolved = buildPatch(loader, 'hash', 'ws');
     const guessed = unresolved.ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'IMPORTS');
     expect(guessed).toHaveLength(2); // node:path + the real `import("./watch-utils.js")`
+  });
+});
+
+// #1020: across files, a member call or a call to a parameter was resolved by
+// its bare name, whatever the receiver or the local scope said.
+describe('member calls and calls to locals across files (#1020)', () => {
+  const callsFrom = (edges: ResolvedEdge[], srcFilePath: string) =>
+    edges.filter(e => e.predicate === 'CALLS' && e.srcFilePath === srcFilePath)
+      .map(e => `${e.srcName} -> ${e.dstFilePath}:${e.dstQualifiedKey}`);
+
+  it('TypeScript: a member call on a parameter does not resolve through an import of the file', () => {
+    const lib = parse('src/a.ts', 'export function validate(x: number) { return x; }\nexport function other() {}\n');
+    const caller = parse('src/b.ts', "import { other } from './a';\nexport function use(conn: Conn) { other(); conn.validate(); }\n");
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts')).toEqual(['use -> src/a.ts:other']);
+  });
+
+  it('TypeScript: a member call is not bound by an import of the same name', () => {
+    const lib = parse('src/a.ts', 'export function validate(x: number) { return x; }\n');
+    const caller = parse('src/b.ts', "import { validate } from './a';\nexport function use(conn: Conn) { return conn.validate(); }\n");
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts')).toEqual([]);
+  });
+
+  it('TypeScript: a call on a namespace import still reaches the module function', () => {
+    const lib = parse('src/a.ts', 'export function validate(x: number) { return x; }\n');
+    const caller = parse('src/b.ts', "import * as a from './a';\nexport function use() { return a.validate(1); }\n");
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts')).toEqual(['use -> src/a.ts:validate']);
+  });
+
+  it('JavaScript: a call on a lazily required module still reaches its function', () => {
+    const lib = parse('src/api.js', 'function validate(x) { return x; }\nmodule.exports = { validate };\n');
+    const caller = parse('src/b.js', "function use() { const api = require('./api'); return api.validate(1); }\nmodule.exports = { use };\n");
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.js')).toEqual(['use -> src/api.js:validate']);
+  });
+
+  it('TypeScript: a member call on an unknown receiver still reaches a method in another file', () => {
+    const lib = parse('src/check.ts', 'export class Checker { describe() { return 1; } }\n');
+    const caller = parse('src/b.ts', "import './check';\nexport function use(x: Thing) { return x.describe(); }\n");
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts')).toEqual(['use -> src/check.ts:Checker.describe']);
+  });
+
+  it('Python: a member call on a parameter does not take the global fallback to a module function', () => {
+    const lib = parse('pkg/a.py', 'def validate(x):\n    return x\n');
+    const caller = parse('pkg/b.py', 'def use(conn):\n    conn.validate()\n');
+    expect(callsFrom(resolveEdges([lib, caller]), 'pkg/b.py')).toEqual([]);
+  });
+
+  it('Python: an unknown receiver reaches another file\'s method even when this file has a module function of the name', () => {
+    const lib = parse('pkg/lib.py', 'class Foo:\n    def describe(self):\n        return 1\n');
+    const caller = parse('pkg/main.py', 'def describe():\n    return 0\n\ndef run(obj):\n    return obj.describe()\n');
+    expect(callsFrom(resolveEdges([lib, caller]), 'pkg/main.py')).toEqual(['run -> pkg/lib.py:Foo.describe']);
+  });
+
+  it('Python: a call to a parameter is not bound by the import it shadows', () => {
+    const lib = parse('pkg/a.py', 'def validate(x):\n    return x\n');
+    const caller = parse('pkg/b.py', 'from pkg.a import validate\n\ndef use(validate):\n    return validate(1)\n\ndef plain():\n    return validate(1)\n');
+    expect(callsFrom(resolveEdges([lib, caller]), 'pkg/b.py')).toEqual(['plain -> pkg/a.py:validate']);
+  });
+
+  it('Rust: a method call does not resolve to another file\'s free function', () => {
+    const lib = parse('src/lib.rs', 'pub fn validate(x: i32) -> i32 { x }\n');
+    const caller = parse('src/main.rs', 'fn t(conn: Conn) {\n  conn.validate();\n}\n');
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/main.rs')).toEqual([]);
+  });
+
+  it('PHP: a -> call does not resolve to another file\'s function', () => {
+    const lib = parse('src/lib.php', '<?php\nfunction validate($x) { return $x; }\n');
+    const caller = parse('src/main.php', '<?php\nfunction t($conn) {\n  $conn->validate();\n}\n');
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/main.php')).toEqual([]);
   });
 });

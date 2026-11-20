@@ -29,7 +29,7 @@ exports[`buildPatchWithResolution golden output (the CLI path) > is unchanged fo
       "{"type":"UpsertEdge","id":"449db296-a6b6-c75b-b4c2-bd7c5fa5d896","src":"3e9104e4-d5b2-d410-549c-29adea1e54a1","dst":"a409398d-e134-f376-b0b1-53af43619630","predicate":"CONTAINS","attrs":{}}",
       "{"type":"UpsertEdge","id":"7dcc0b99-63f6-5c90-5ccb-d1c2c8606c04","src":"2b0d5f33-0c22-7f54-f235-0642e32ee532","dst":"7971f9d9-0478-ece9-a2cb-d25119c3ba67","predicate":"CONTAINS","attrs":{}}",
       "{"type":"UpsertEdge","id":"ecf92f68-0821-3459-88d1-7b93229a75c7","src":"a409398d-e134-f376-b0b1-53af43619630","dst":"7971f9d9-0478-ece9-a2cb-d25119c3ba67","predicate":"CALLS","attrs":{}}",
-      "{"type":"UpsertEdge","id":"752a314f-f117-67e0-27f2-27d347fc2b50","src":"a409398d-e134-f376-b0b1-53af43619630","dst":"2bcc19aa-d0bd-4bb3-37bf-571a929ce157","predicate":"CALLS","attrs":{}}",
+      "{"type":"UpsertEdge","id":"feacbe31-56de-88b1-bf7b-3ace6af86f50","src":"a409398d-e134-f376-b0b1-53af43619630","dst":"2bcc19aa-d0bd-4bb3-37bf-571a929ce157","predicate":"CALLS","attrs":{}}",
       "{"type":"AssertClaim","entityId":"2b0d5f33-0c22-7f54-f235-0642e32ee532","field":"contains:Foo","value":"Foo","confidence":null}",
       "{"type":"AssertClaim","entityId":"3e9104e4-d5b2-d410-549c-29adea1e54a1","field":"contains:handle","value":"handle","confidence":null}",
       "{"type":"AssertClaim","entityId":"3e9104e4-d5b2-d410-549c-29adea1e54a1","field":"contains:run","value":"run","confidence":null}",

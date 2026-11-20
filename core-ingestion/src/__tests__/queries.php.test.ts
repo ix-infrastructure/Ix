@@ -257,7 +257,8 @@ class Child extends Base
       { srcName: 'Child.run', dstName: 'Other.make', predicate: 'CALLS', phpCallKind: 'static' },
       { srcName: 'Child.run', dstName: 'Child.helper', predicate: 'CALLS', phpCallKind: 'static' },
       { srcName: 'Child.run', dstName: 'Base.run', predicate: 'CALLS', phpCallKind: 'static' },
-      { srcName: 'Child.run', dstName: 'make', predicate: 'CALLS', phpCallKind: 'static' },
+      // A static call never reaches a function, whatever class it names.
+      { srcName: 'Child.run', dstName: 'make', predicate: 'CALLS', phpCallKind: 'static', memberCall: true },
     ]);
   });
 
@@ -274,8 +275,8 @@ function outside(): void { self::boot(); }
     );
 
     expect(result?.relationships.filter(rel => rel.predicate === 'CALLS')).toEqual([
-      { srcName: 'Orphan.run', dstName: 'boot', predicate: 'CALLS', phpCallKind: 'static' },
-      { srcName: 'outside', dstName: 'boot', predicate: 'CALLS', phpCallKind: 'static' },
+      { srcName: 'Orphan.run', dstName: 'boot', predicate: 'CALLS', phpCallKind: 'static', memberCall: true },
+      { srcName: 'outside', dstName: 'boot', predicate: 'CALLS', phpCallKind: 'static', memberCall: true },
     ]);
   });
 
@@ -296,6 +297,8 @@ function run($service): void
       dstName: 'create',
       predicate: 'CALLS',
       phpCallKind: 'member',
+      // A method of that name, never a function (#1020).
+      memberCall: true,
     });
   });
 
@@ -376,6 +379,7 @@ final class Union
       dstName: 'create',
       predicate: 'CALLS',
       phpCallKind: 'member',
+      memberCall: true,
     });
   });
 

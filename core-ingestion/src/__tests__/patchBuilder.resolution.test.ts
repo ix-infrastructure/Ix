@@ -599,3 +599,162 @@ describe('colliding edge ids (#554)', () => {
     expect(salted.replaces).toEqual(plain.replaces);
   });
 });
+
+// #1020: same-file fallback by name ignored the receiver, so `conn.validate()`
+// landed on a module-level `validate`, and a call to a parameter on the
+// module-level function the parameter shadows.
+describe('same-file calls by receiver and scope (#1020)', () => {
+  /** `caller -> callee` (qualified keys) of every CALLS edge in the patch, and the unresolved names. */
+  function sameFileCalls(filePath: string, source: string): { edges: string[]; unresolved: Record<string, string[]> } {
+    const result = parseFile(filePath, source, { budgetMs: 0 });
+    expect(result).not.toBeNull();
+    const patch = buildPatchWithResolution(result!, 'hash', 'ws', resolveEdges([result!]));
+    const keyOf = new Map<string, string>();
+    for (const e of result!.entities) {
+      const key = e.container ? `${e.container}.${e.name}` : e.name;
+      keyOf.set(deterministicId(`ws:${filePath.toLowerCase()}:${key}`), key);
+    }
+    const edges = patch.ops
+      .filter((op): op is Extract<typeof op, { type: 'UpsertEdge' }> => op.type === 'UpsertEdge' && op.predicate === 'CALLS')
+      .map(op => `${keyOf.get(op.src)} -> ${keyOf.get(op.dst) ?? op.dst}`)
+      .sort();
+    const unresolved: Record<string, string[]> = {};
+    for (const op of patch.ops) {
+      const names = op.type === 'UpsertNode' ? (op.attrs as { unresolved_calls?: string[] }).unresolved_calls : undefined;
+      if (op.type === 'UpsertNode' && names) unresolved[op.name] = [...names].sort();
+    }
+    return { edges, unresolved };
+  }
+
+  it('Python: a member call on a parameter or self never lands on a module-level function', () => {
+    const { edges, unresolved } = sameFileCalls('src/a.py', [
+      'def validate(x):',
+      '    return x',
+      '',
+      'def close():',
+      '    pass',
+      '',
+      'class C:',
+      '    def close(self):',
+      '        pass',
+      '    def run(self, conn):',
+      '        conn.validate()',
+      '        self.close()',
+      '        close()',
+      '',
+    ].join('\n'));
+    // `self.close()` reaches C.close once, and only the plain `close()` the
+    // module-level function.
+    expect(edges).toEqual(['C.run -> C.close', 'C.run -> close']);
+    expect(unresolved.run).toEqual(['conn.validate', 'validate']);
+  });
+
+  it('Python: a member call on an unknown receiver still guesses the one method of that name', () => {
+    const { edges } = sameFileCalls('src/a.py', [
+      'def describe():',
+      '    pass',
+      '',
+      'class Foo:',
+      '    def describe(self):',
+      '        pass',
+      '',
+      'def run(obj):',
+      '    obj.describe()',
+      '',
+    ].join('\n'));
+    expect(edges).toEqual(['run -> Foo.describe']);
+  });
+
+  it('Python: a module-scope receiver keeps name-based resolution', () => {
+    const { edges } = sameFileCalls('src/a.py', [
+      'import registry',
+      'def validate(x):',
+      '    return x',
+      'api = registry.lookup()',
+      'def run():',
+      '    api.validate(1)',
+      '',
+    ].join('\n'));
+    expect(edges).toEqual(['run -> validate']);
+  });
+
+  it('Python: a call to a parameter does not land on the function it shadows', () => {
+    const { edges, unresolved } = sameFileCalls('src/a.py', 'def validate(x):\n    return x\n\ndef use(validate):\n    return validate(1)\n');
+    expect(edges).toEqual([]);
+    expect(unresolved.use).toEqual(['validate']);
+  });
+
+  it('TypeScript: a member call on a parameter or this never lands on a module-level function', () => {
+    const { edges } = sameFileCalls('src/a.ts', [
+      'export function validate(x: number) { return x; }',
+      'export function use(conn: Conn) { conn.validate(1); }',
+      'export class Svc {',
+      '  check() {}',
+      '  run() { this.validate(); this.check(); }',
+      '}',
+    ].join('\n'));
+    expect(edges).toEqual(['Svc.run -> Svc.check']);
+  });
+
+  it('TypeScript: a member call on a module-level object keeps name-based resolution', () => {
+    const { edges } = sameFileCalls('src/a.ts', [
+      'function validate(x: number) { return x; }',
+      'const api = { validate };',
+      'export function use() { return api.validate(1); }',
+    ].join('\n'));
+    expect(edges).toEqual(['use -> validate']);
+  });
+
+  it('TypeScript: a call to a parameter or local does not land on the function it shadows', () => {
+    const { edges } = sameFileCalls('src/a.ts', [
+      'export function validate(x: number) { return x; }',
+      'export function param(validate: (x: number) => number) { return validate(1); }',
+      'export function local() { const validate = pick(); return validate(1); }',
+      'export function plain() { return validate(1); }',
+    ].join('\n'));
+    expect(edges).toEqual(['plain -> validate']);
+  });
+
+  it('TypeScript: a call to a local arrow function still reaches it', () => {
+    const { edges } = sameFileCalls('src/a.ts', 'export function outer() {\n  const helper = () => 1;\n  return helper();\n}\n');
+    expect(edges).toEqual(['outer -> helper']);
+  });
+
+  it('Rust: a method call never lands on a free function', () => {
+    const { edges } = sameFileCalls('src/a.rs', [
+      'fn validate(x: i32) -> i32 { x }',
+      'struct Conn;',
+      'impl Conn { fn close(&self) {} }',
+      'fn close() {}',
+      'fn useit(conn: Conn) { conn.validate(); conn.close(); validate(1); }',
+    ].join('\n'));
+    expect(edges).toEqual(['useit -> Conn.close', 'useit -> validate']);
+  });
+
+  it('PHP: a function call and a -> call of one name keep their own cross-file targets', () => {
+    // One file defines both a function `handle` and `Bar::handle`: the plain
+    // call is the function, the member call the method. They are two
+    // relationships of one name, so each needs its own resolution entry.
+    const lib = parseFile('src/lib.php', '<?php\nfunction handle() {}\nclass Bar { public function handle() {} }\n', { budgetMs: 0 })!;
+    const caller = parseFile('src/main.php', '<?php\nfunction t($obj) { handle(); $obj->handle(); }\n', { budgetMs: 0 })!;
+    const patch = buildPatchWithResolution(caller, 'hash', 'ws', resolveEdges([lib, caller]));
+    const dsts = patch.ops
+      .filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS')
+      .map(op => (op as { dst: string }).dst)
+      .sort();
+    expect(dsts).toEqual([
+      deterministicId('ws:src/lib.php:handle'),
+      deterministicId('ws:src/lib.php:Bar.handle'),
+    ].sort());
+  });
+
+  it('PHP: a -> call never lands on a function', () => {
+    const { edges } = sameFileCalls('src/a.php', [
+      '<?php',
+      'function validate($x) { return $x; }',
+      'function useit($conn) { $conn->validate(); }',
+      '',
+    ].join('\n'));
+    expect(edges).toEqual([]);
+  });
+});

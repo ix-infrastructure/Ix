@@ -59,10 +59,13 @@ def top_level():
       predicate: 'CALLS',
       bareCall: true,
     });
+    // `value` is a parameter, so `value.save()` is a method call: never a
+    // module-level `save` (#1020).
     expect(result!.relationships).toContainEqual({
       srcName: 'Service.run',
       dstName: 'save',
       predicate: 'CALLS',
+      memberCall: true,
     });
     // The qualifier pattern also emits the fully-qualified form so Tier-1b
     // resolution can resolve e.g. Session.execute → session.py when the
@@ -131,11 +134,12 @@ def my_view(request):
       dstName: 'MyClass.execute',
       predicate: 'CALLS',
     });
-    // bare callee edge is also emitted
+    // bare callee edge is also emitted, on a local receiver (#1020)
     expect(result!.relationships).toContainEqual({
       srcName: 'my_view',
       dstName: 'execute',
       predicate: 'CALLS',
+      memberCall: true,
     });
   });
 
@@ -278,5 +282,109 @@ class KernelHandle:
       expect(extendsOf('class X(*bases, **kw):\n    pass\n')).toEqual([]);
       expect(extendsOf('class X(make_base()):\n    pass\n')).toEqual([]);
     });
+  });
+});
+
+// #1020: which calls cannot denote a module-level function of their name.
+describe('Python call scope flags', () => {
+  function calls(source: string): Record<string, { memberCall?: true; localCallee?: true }> {
+    const result = parseFile('/repo/scope.py', source);
+    expect(result).not.toBeNull();
+    return Object.fromEntries(result!.relationships
+      .filter(rel => rel.predicate === 'CALLS')
+      .map(rel => [`${rel.srcName} -> ${rel.dstName}`, {
+        ...(rel.memberCall ? { memberCall: true as const } : {}),
+        ...(rel.localCallee ? { localCallee: true as const } : {}),
+      }]));
+  }
+
+  it('marks a member call on self, a parameter or a local, not its qualified form', () => {
+    const flags = calls([
+      'def close():',
+      '    pass',
+      '',
+      'class C:',
+      '    def close(self):',
+      '        pass',
+      '    def run(self, conn):',
+      '        conn.validate()',
+      '        self.close()',
+      '        self.pool[0].release()',
+      '        with open_conn() as c:',
+      '            c.commit()',
+      '        super().flush()',
+    ].join('\n'));
+    expect(flags).toMatchObject({
+      'C.run -> validate': { memberCall: true },
+      'C.run -> close': { memberCall: true },
+      'C.run -> release': { memberCall: true },
+      'C.run -> commit': { memberCall: true },
+      'C.run -> flush': { memberCall: true },
+    });
+    // The qualified relationships keep resolving by their qualifier.
+    expect(flags['C.run -> C.close']).toEqual({});
+    expect(flags['C.run -> conn.validate']).toEqual({});
+  });
+
+  it('leaves a module-scope receiver unmarked', () => {
+    const flags = calls([
+      'import os',
+      'api = make_api()',
+      'def via_module():',
+      '    os.validate()',
+      'def via_global():',
+      '    api.validate()',
+      'def via_local_import():',
+      '    import helpers',
+      '    helpers.validate()',
+      'def via_global_decl():',
+      '    global api',
+      '    api = make_api()',
+      '    api.validate()',
+    ].join('\n'));
+    for (const caller of ['via_module', 'via_global', 'via_local_import', 'via_global_decl']) {
+      expect(flags[`${caller} -> validate`], caller).toEqual({});
+    }
+  });
+
+  it('marks a plain call to a parameter or local, never to a module-scope name', () => {
+    const flags = calls([
+      'from checks import check',
+      'def validate(x):',
+      '    return x',
+      'def param(validate):',
+      '    return validate(1)',
+      'def assigned_later():',
+      '    validate(1)',
+      '    validate = pick()',
+      'def loop(fns):',
+      '    for validate in fns:',
+      '        validate(1)',
+      'def closure(validate):',
+      '    def inner():',
+      '        return validate(1)',
+      '    return inner',
+      'def shadowed_import(check):',
+      '    return check(1)',
+      'def plain():',
+      '    return validate(1) + check(1)',
+      'def nested_def():',
+      '    def helper():',
+      '        return 1',
+      '    return helper()',
+      'def default_value(x=validate(0)):',
+      '    return x',
+    ].join('\n'));
+    expect(flags).toMatchObject({
+      'param -> validate': { localCallee: true },
+      'assigned_later -> validate': { localCallee: true },
+      'loop -> validate': { localCallee: true },
+      'inner -> validate': { localCallee: true },
+      'shadowed_import -> check': { localCallee: true },
+    });
+    expect(flags['plain -> validate']).toEqual({});
+    expect(flags['plain -> check']).toEqual({});
+    expect(flags['nested_def -> helper']).toEqual({});
+    expect(flags['default_value -> validate']).toEqual({});
   });
 });

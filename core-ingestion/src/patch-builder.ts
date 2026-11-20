@@ -598,8 +598,25 @@ export function buildPatchWithResolution(
     seenNodeIds.has(srcNodeId) &&
     (dst.resolution !== null || dst.externalPkg !== null || seenNodeIds.has(dst.dstNodeId));
 
-  const relationshipDstKey = (r: (typeof relationships)[number]): string =>
-    r.predicate === 'CONTAINS' ? resolveKey(r.dstName, r.srcName) : resolveKey(r.dstName);
+  // #1020: the key of a call that has no target in this file. It names no
+  // entity, so the edge is dropped and the call recorded as unresolved.
+  const noTargetKey = (name: string): string => `\0no-target\0${name}`;
+
+  // A member call that cannot be a module-level function (`conn.validate()`
+  // on a parameter, `self.close()`, `$x->m()`) lands only on a member of that
+  // name, and only on the one there is. Same rule as resolveEdges.
+  function resolveMemberKey(name: string): string {
+    const keys = [...new Set(nameToQKeys.get(name) ?? [])].filter(key => key !== name);
+    return keys.length === 1 ? keys[0] : noTargetKey(name);
+  }
+
+  const relationshipDstKey = (r: (typeof relationships)[number]): string => {
+    if (r.predicate === 'CONTAINS') return resolveKey(r.dstName, r.srcName);
+    // A call to a parameter or local names nothing this file declares.
+    if (r.predicate === 'CALLS' && r.localCallee) return noTargetKey(r.dstName);
+    if (r.predicate === 'CALLS' && r.memberCall) return resolveMemberKey(r.dstName);
+    return resolveKey(r.dstName);
+  };
 
   const edgeIdTuple = (srcKey: string, edgeDstKey: string, predicate: EdgePredicate): string =>
     `${srcKey}\x00${edgeDstKey}\x00${predicate}`;
