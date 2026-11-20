@@ -264,7 +264,10 @@ export interface ParsedRelationship {
    * enclosing function names (`conn.validate()`, `self.close()`). It resolves
    * to a method of that name or to nothing. Absent when some site's receiver
    * may be a module-scope name (`api.validate()` on a module-level object,
-   * `ns.f()` on a namespace import, `window.f()`), or unknown (#1020).
+   * `ns.f()` on a namespace import, `window.f()`, or a local aliasing one:
+   * `const m = ns`), or unknown (#1020). Also absent when the file assigns a
+   * reference that is not a local to a property of that name
+   * (`self.validate = validate`, `{ validate }`): the call may go through it.
    */
   memberCall?: true;
   /**
@@ -1187,6 +1190,13 @@ interface CallScopeFrame {
    * plain call should still reach.
    */
   calleeNames: Set<string>;
+  /**
+   * Locals that alias another name (`const m = utils`, `const { validate } =
+   * utils`, Python `m = a`), by the name at the root of the initialiser. Such a
+   * local is as local as that root: an alias of a module-scope name (a
+   * namespace import, a module-level object) may still reach a module function.
+   */
+  aliases?: Map<string, string>;
   /** Python `global x`: `x` here is the module's. */
   globals?: Set<string>;
   /** Bindings here are module scope (TypeScript namespace bodies). */
@@ -1201,7 +1211,7 @@ const JS_TS_SCOPE_FUNCTIONS = new Set([...JS_TS_FUNCTION_NODES, 'class_static_bl
 const JS_TS_SCOPE_BLOCKS = new Set(['statement_block', 'for_statement', 'for_in_statement', 'catch_clause', 'switch_body']);
 const JS_TS_FUNCTION_VALUES = new Set(['arrow_function', 'function_expression', 'function', 'generator_function', 'class']);
 const JS_TS_SCOPE_WALK = [...JS_TS_SCOPE_FUNCTIONS, ...JS_TS_SCOPE_BLOCKS, 'class_body', 'internal_module', 'module',
-  'lexical_declaration', 'variable_declaration', 'call_expression', 'new_expression'];
+  'lexical_declaration', 'variable_declaration', 'call_expression', 'new_expression', 'assignment_expression', 'object'];
 const PY_SCOPE_FUNCTIONS = new Set(['function_definition', 'lambda']);
 const PY_SCOPE_COMPREHENSIONS = new Set(['list_comprehension', 'set_comprehension', 'dictionary_comprehension', 'generator_expression']);
 const PY_SCOPE_WALK = [...PY_SCOPE_FUNCTIONS, ...PY_SCOPE_COMPREHENSIONS, 'class_definition',
@@ -1290,6 +1300,48 @@ function jsTsLoadsModule(value: any): boolean {
   }
 }
 
+/**
+ * The name an initialiser aliases (`utils` in `const m = utils`, `const {
+ * validate } = utils.sub`, Python `m = a`), or undefined when it computes a new
+ * value (a call, a literal, `this`).
+ */
+function aliasRoot(value: any, python: boolean): string | undefined {
+  let node = value;
+  for (;;) {
+    if (!node) return undefined;
+    const type = node.type;
+    if (type === 'identifier') return node.text;
+    if (type === 'await_expression' || type === 'parenthesized_expression' || type === 'non_null_expression' ||
+      type === 'as_expression' || type === 'satisfies_expression') node = node.namedChild(0);
+    else if (python ? type === 'attribute' : type === 'member_expression') node = node.childForFieldName?.('object');
+    else return undefined;
+  }
+}
+
+/**
+ * The name at the root of a value assigned to a property when it may be a
+ * function defined elsewhere (`validate`, `mod.validate`, `validate.bind(this)`),
+ * so a later `x.prop()` may call a module-level function, not a method. Null
+ * for `this.m` (a method of the class); undefined for any other value.
+ */
+function referenceRoot(value: any, python: boolean): string | null | undefined {
+  let node = value;
+  for (;;) {
+    if (!node) return undefined;
+    const type = node.type;
+    if (type === 'identifier' || type === 'shorthand_property_identifier') return node.text;
+    if (type === 'this' || type === 'super') return null;
+    if (type === 'parenthesized_expression' || type === 'non_null_expression' || type === 'as_expression') node = node.namedChild(0);
+    else if (python ? type === 'attribute' : type === 'member_expression') node = node.childForFieldName?.('object');
+    else if (!python && type === 'call_expression') {
+      // `validate.bind(this)`
+      const fn = node.childForFieldName?.('function');
+      if (fn?.type !== 'member_expression' || fn.childForFieldName?.('property')?.text !== 'bind') return undefined;
+      node = fn.childForFieldName?.('object');
+    } else return undefined;
+  }
+}
+
 /** The name at the root of a member call's receiver (`a` in `a.b[0].m()`), or the node there. */
 function receiverRoot(node: any, python: boolean): any {
   let root = node;
@@ -1324,6 +1376,25 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
   // costs no copy of the stack.
   const pending: Array<{ id: number; start: number; frame?: CallScopeFrame; name: string; receiver: boolean }> = [];
   const result = new Map<number, CallSiteScope>();
+  // The method name of each member call, and every property name the file
+  // assigns a reference to (`this.validate = validate`, `{ validate }`): a call
+  // of such a name may reach a module-level function through the property, so
+  // it is never a member-only call.
+  const memberNames = new Map<number, string>();
+  const assignedProperties = new Set<string>();
+  // Property assignments whose value is rooted at a name, decided after the
+  // walk: a parameter or local (`this.loader = loader`) holds no module function.
+  const pendingProperties: Array<{ prop: string; start: number; frame?: CallScopeFrame; name: string }> = [];
+  const assignProperty = (prop: string | undefined, value: any, start: number): void => {
+    if (!prop) return;
+    const root = referenceRoot(value, python);
+    if (typeof root === 'string') pendingProperties.push({ prop, start, frame: frames[frames.length - 1], name: root });
+  };
+  const bindAlias = (frame: CallScopeFrame | undefined, names: Set<string>, root: string): void => {
+    if (!frame || frame.moduleLike) return;
+    frame.aliases ??= new Map();
+    for (const name of names) frame.aliases.set(name, root);
+  };
   const newFrame = (node: any, type: string, body?: any): CallScopeFrame => ({
     type, end: node.endIndex, bodyStart: body?.startIndex ?? node.startIndex, names: new Set(), calleeNames: new Set(),
     outer: frames[frames.length - 1],
@@ -1374,8 +1445,13 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
       } else if (type === 'class_definition') {
         frames.push({ ...newFrame(node, type), hidden: true });
       } else if (type === 'assignment' || type === 'augmented_assignment' || type === 'for_statement') {
-        pythonTargetNames(node.childForFieldName?.('left'), names);
-        bind(functionFrame(), names);
+        const left = node.childForFieldName?.('left');
+        const right = type === 'assignment' ? node.childForFieldName?.('right') : undefined;
+        if (left?.type === 'attribute') assignProperty(left.childForFieldName?.('attribute')?.text, right, node.startIndex);
+        pythonTargetNames(left, names);
+        const root = left?.type === 'identifier' ? aliasRoot(right, true) : undefined;
+        if (root !== undefined) bindAlias(functionFrame(), names, root);
+        else bind(functionFrame(), names);
       } else if (type === 'for_in_clause') {
         pythonTargetNames(node.childForFieldName?.('left'), names);
         bind(frames[frames.length - 1], names);
@@ -1396,6 +1472,8 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
         if (fn?.type === 'identifier') {
           pending.push({ id: node.id, start: node.startIndex, frame: frames[frames.length - 1], name: fn.text, receiver: false });
         } else if (fn?.type === 'attribute') {
+          const member = fn.childForFieldName?.('attribute')?.text;
+          if (member) memberNames.set(node.id, member);
           const rootNode = receiverRoot(fn.childForFieldName?.('object'), true);
           if (rootNode?.type === 'identifier') {
             pending.push({ id: node.id, start: node.startIndex, frame: frames[frames.length - 1], name: rootNode.text, receiver: true });
@@ -1442,14 +1520,34 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
         jsTsPatternNames(pattern, declared);
         const value = declarator.childForFieldName?.('value');
         if (jsTsLoadsModule(value)) continue;
+        const root = aliasRoot(value, false);
+        if (root !== undefined) {
+          bindAlias(frame, declared, root);
+          continue;
+        }
         const functionValued = pattern?.type === 'identifier' && JS_TS_FUNCTION_VALUES.has(value?.type);
         bind(frame, declared, !functionValued);
+      }
+    } else if (type === 'assignment_expression') {
+      const left = node.childForFieldName?.('left');
+      if (left?.type === 'member_expression') {
+        assignProperty(left.childForFieldName?.('property')?.text, node.childForFieldName?.('right'), node.startIndex);
+      }
+    } else if (type === 'object') {
+      for (const child of node.namedChildren) {
+        if (child.type === 'shorthand_property_identifier') assignProperty(child.text, child, child.startIndex);
+        else if (child.type === 'pair') {
+          const key = child.childForFieldName?.('key');
+          if (key?.type === 'property_identifier') assignProperty(key.text, child.childForFieldName?.('value'), child.startIndex);
+        }
       }
     } else if (type === 'call_expression' || type === 'new_expression') {
       const fn = node.childForFieldName?.(type === 'call_expression' ? 'function' : 'constructor');
       if (fn?.type === 'identifier') {
         pending.push({ id: node.id, start: node.startIndex, frame: frames[frames.length - 1], name: fn.text, receiver: false });
       } else if (fn?.type === 'member_expression') {
+        const member = fn.childForFieldName?.('property')?.text;
+        if (member) memberNames.set(node.id, member);
         const rootNode = receiverRoot(fn.childForFieldName?.('object'), false);
         if (rootNode?.type === 'this') {
           if (thisIsClassBound()) result.set(node.id, { localReceiver: true });
@@ -1462,18 +1560,46 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
     }
   }
 
-  for (const call of pending) {
-    for (let frame = call.frame; frame; frame = frame.outer) {
-      if (frame.hidden || frame.moduleLike || call.start < frame.bodyStart) continue;
-      if (frame.globals?.has(call.name)) break;
-      if ((call.receiver ? frame.names : frame.calleeNames).has(call.name)) {
-        result.set(call.id, call.receiver ? { localReceiver: true } : { localCallee: true });
-        break;
+  // Whether `name` at `start` names a parameter or local. `receiver`: any local
+  // counts; otherwise (a plain call) a local initialised with a function or
+  // class is that entity, not an unrelated local.
+  const isLocal = (name: string, start: number, innermost: CallScopeFrame | undefined, receiver: boolean): boolean => {
+    // After an alias, the question is whether its root is any local at all.
+    let aliased = false;
+    let hops = 0;
+    let frame = innermost;
+    while (frame) {
+      if (frame.hidden || frame.moduleLike || start < frame.bodyStart) {
+        frame = frame.outer;
+        continue;
       }
-      // A bound name that is a function or class (`const helper = () => 1`)
-      // is that entity, not an unrelated local.
-      if (!call.receiver && frame.names.has(call.name)) break;
+      if (frame.globals?.has(name)) return false;
+      const root = frame.aliases?.get(name);
+      if (root !== undefined) {
+        // `x = x` or a cycle: give up, which keeps the call as it was.
+        if (++hops > 8) return false;
+        // The root is looked up from this frame outward.
+        name = root;
+        aliased = true;
+        continue;
+      }
+      if ((receiver || aliased ? frame.names : frame.calleeNames).has(name)) return true;
+      if (!receiver && frame.names.has(name)) return false;
+      frame = frame.outer;
     }
+    return false;
+  };
+  for (const call of pending) {
+    if (isLocal(call.name, call.start, call.frame, call.receiver)) {
+      result.set(call.id, call.receiver ? { localReceiver: true } : { localCallee: true });
+    }
+  }
+  for (const assigned of pendingProperties) {
+    if (!isLocal(assigned.name, assigned.start, assigned.frame, true)) assignedProperties.add(assigned.prop);
+  }
+  for (const [id, scope] of result) {
+    const member = memberNames.get(id);
+    if (scope.localReceiver && member !== undefined && assignedProperties.has(member)) result.delete(id);
   }
   return result;
 }

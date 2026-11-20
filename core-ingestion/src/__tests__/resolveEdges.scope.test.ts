@@ -443,6 +443,68 @@ describe('member calls and calls to locals across files (#1020)', () => {
     expect(callsFrom(resolveEdges([lib, caller]), 'pkg/b.py')).toEqual(['plain -> pkg/a.py:validate']);
   });
 
+  // A local is only as local as what it aliases: a local that names a module,
+  // or is destructured from a namespace import, still reaches its functions.
+  it('TypeScript: a name destructured from a namespace import inside a function still reaches the module function', () => {
+    const lib = parse('src/a.ts', 'export function validate(x: number) { return x; }\n');
+    const caller = parse('src/b.ts', "import * as utils from './a';\nexport function f() { const { validate } = utils; return validate(1); }\n");
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts')).toEqual(['f -> src/a.ts:validate']);
+  });
+
+  it('TypeScript: a member call on a local alias of a namespace import still reaches the module function', () => {
+    const lib = parse('src/a.ts', 'export function validate(x: number) { return x; }\n');
+    const caller = parse('src/b.ts', "import * as utils from './a';\nexport function f() { const m = utils; return m.validate(1); }\n");
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts')).toEqual(['f -> src/a.ts:validate']);
+  });
+
+  it('TypeScript: an alias of a parameter is still a local', () => {
+    const lib = parse('src/a.ts', 'export function validate(x: number) { return x; }\n');
+    const caller = parse('src/b.ts', "import './a';\nexport function f(conn: Conn) { const c = conn; c.validate(1); }\nexport function g(conn: Conn) { const { validate } = conn; validate(1); }\n");
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts')).toEqual([]);
+  });
+
+  it('Python: a member call on a local alias of a module still reaches the module function', () => {
+    const lib = parse('pkg/a.py', 'def validate(x):\n    return x\n');
+    const caller = parse('pkg/b.py', 'from pkg import a\n\ndef f():\n    m = a\n    m.validate(1)\n');
+    expect(callsFrom(resolveEdges([lib, caller]), 'pkg/b.py')).toEqual(['f -> pkg/a.py:validate']);
+  });
+
+  it('Python: an alias of a parameter is still a local', () => {
+    const lib = parse('pkg/a.py', 'def validate(x):\n    return x\n');
+    const caller = parse('pkg/b.py', 'def f(conn):\n    c = conn\n    c.validate(1)\n');
+    expect(callsFrom(resolveEdges([lib, caller]), 'pkg/b.py')).toEqual([]);
+  });
+
+  // A property assigned a function reference (`self.validate = validate`)
+  // makes `self.validate()` a call of that function, not of a method.
+  it('Python: a self attribute holding an imported function still reaches it', () => {
+    const lib = parse('pkg/a.py', 'def validate(x):\n    return x\n');
+    const caller = parse('pkg/b.py', [
+      'from pkg.a import validate',
+      '',
+      'class S:',
+      '    def __init__(self):',
+      '        self.validate = validate',
+      '    def run(self):',
+      '        self.validate(1)',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'pkg/b.py')).toContain('S.run -> pkg/a.py:validate');
+  });
+
+  it('TypeScript: a this property holding an imported function still reaches it', () => {
+    const lib = parse('src/a.ts', 'export function validate(x: number) { return x; }\n');
+    const caller = parse('src/b.ts', [
+      "import { validate } from './a';",
+      'export class S {',
+      '  v: any;',
+      '  constructor() { this.handlers = { validate }; }',
+      '  run() { this.handlers.validate(1); }',
+      '}',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts')).toContain('S.run -> src/a.ts:validate');
+  });
+
   it('Rust: a method call does not resolve to another file\'s free function', () => {
     const lib = parse('src/lib.rs', 'pub fn validate(x: i32) -> i32 { x }\n');
     const caller = parse('src/main.rs', 'fn t(conn: Conn) {\n  conn.validate();\n}\n');
