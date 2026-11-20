@@ -1388,6 +1388,30 @@ function parameterRoots(param: any, python: boolean): string[] | undefined {
   return valueRoots(value, python);
 }
 
+/** AMD loaders: `define([...deps], factory)`, `require([...deps], callback)`. */
+const AMD_LOADERS = new Set(['define', 'require', 'requirejs']);
+
+/**
+ * How many leading parameters of a JS function are AMD dependencies: in
+ * `define(['./utils'], function (utils) { ... })` (or `require` / `requirejs`)
+ * the loader binds each callback parameter, by position, to the module the
+ * dependency array names there, as surely as `const utils = require('./utils')`
+ * does. So `utils.validate()` is a call on a module, not on a non-module
+ * receiver (#1020). Zero unless the function is a loader's argument and the
+ * argument before it is an array of string literals.
+ */
+function amdDependencyCount(fn: any): number {
+  const args = fn?.parent;
+  if (args?.type !== 'arguments') return 0;
+  const call = args.parent;
+  const callee = call?.type === 'call_expression' ? call.childForFieldName?.('function') : undefined;
+  if (callee?.type !== 'identifier' || !AMD_LOADERS.has(callee.text)) return 0;
+  const deps = fn.previousNamedSibling;
+  if (deps?.type !== 'array') return 0;
+  const elements = deps.namedChildren.filter((child: any) => child.type !== 'comment');
+  return elements.every((child: any) => child.type === 'string') ? elements.length : 0;
+}
+
 /** Python calls that wrap a function and keep it callable as an attribute. */
 const PY_FUNCTION_WRAPPERS = new Set(['staticmethod', 'classmethod', 'partial', 'functools.partial']);
 
@@ -1490,14 +1514,17 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
     else bind(frame, names);
   };
   // A function's parameters, each a local or an alias of what it defaults to.
-  const bindParameters = (frame: CallScopeFrame, params: any): void => {
+  // The first `modules` hold modules (AMD dependencies).
+  const bindParameters = (frame: CallScopeFrame, params: any, modules = 0): void => {
     const list = params?.type === (python ? 'parameters' : 'formal_parameters') || params?.type === 'lambda_parameters'
       ? params.namedChildren : [params];
+    let index = 0;
     for (const param of list) {
+      if (param?.type === 'comment') continue;
       const names = new Set<string>();
       if (python) pythonTargetNames(param, names);
       else jsTsPatternNames(param, names);
-      bindValue(frame, names, parameterRoots(param, python));
+      bindValue(frame, names, index++ < modules ? [MODULE_ROOT] : parameterRoots(param, python));
     }
   };
   // The innermost function (Python: or class) a `var` / assignment belongs to.
@@ -1591,7 +1618,7 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
         if (own) frame.names.add(own.text);
       }
       for (const name of frame.names) frame.calleeNames.add(name);
-      bindParameters(frame, node.childForFieldName?.('parameters') ?? node.childForFieldName?.('parameter'));
+      bindParameters(frame, node.childForFieldName?.('parameters') ?? node.childForFieldName?.('parameter'), amdDependencyCount(node));
       frames.push(frame);
     } else if (JS_TS_SCOPE_BLOCKS.has(type)) {
       const frame = newFrame(node, type);

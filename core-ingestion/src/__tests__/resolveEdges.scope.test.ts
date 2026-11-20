@@ -419,6 +419,55 @@ describe('member calls and calls to locals across files (#1020)', () => {
     expect(callsFrom(resolveEdges([lib, caller]), 'src/b.js')).toEqual(['use -> src/api.js:validate']);
   });
 
+  // AMD binds each callback parameter, by position, to the module its
+  // dependency array names: as much a module as a `require(...)` local.
+  it('JavaScript: a member call on an AMD define() dependency still reaches the module function', () => {
+    const lib = parse('src/utils.js', 'function validate(x) { return x; }\nmodule.exports = { validate };\n');
+    const caller = parse('src/app.js', "define(['./utils'], function (utils) {\n  function go() { return utils.validate(1); }\n  return { go };\n});\n");
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/app.js')).toEqual(['go -> src/utils.js:validate']);
+  });
+
+  it('JavaScript: a member call on an AMD require() dependency (arrow callback) still reaches the module function', () => {
+    const lib = parse('src/utils.js', 'function validate(x) { return x; }\nmodule.exports = { validate };\n');
+    const caller = parse('src/app.js', "function go() {\n  require(['./utils'], (utils) => utils.validate(1));\n}\n");
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/app.js')).toEqual(['go -> src/utils.js:validate']);
+  });
+
+  it('JavaScript: only the AMD callback parameters the dependency array names are modules', () => {
+    const lib = parse('src/utils.js', 'function validate(x) { return x; }\nfunction close() {}\nmodule.exports = { validate, close };\n');
+    // `conn` has no dependency entry; a non-literal array binds nothing.
+    const caller = parse('src/app.js', [
+      "define(['./utils'], function (utils, conn) {",
+      '  function go() { return conn.validate(1); }',
+      '  return { go };',
+      '});',
+      'function other(deps) { define(deps, function (m) { return m.close(); }); }',
+      "function third(dep) { define([dep], function (m) { return m.close(); }); }",
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/app.js')).toEqual([]);
+  });
+
+  // #1020 accepted trade-off: an untyped parameter with no default is a
+  // receiver known not to be a module, whatever it is named, so even
+  // `module.validate()` gets no edge to a module-level `validate`. Only a
+  // module-typed parameter (`typeof A`, `ModuleType`), a module default or an
+  // AMD dependency keeps it.
+  it('Python: an untyped parameter receiver gets no module-function edge, by design', () => {
+    const lib = parse('pkg/a.py', 'def validate(x):\n    return x\n');
+    const caller = parse('pkg/b.py', 'import pkg.a\n\ndef setup(module):\n    module.validate(1)\n');
+    expect(callsFrom(resolveEdges([lib, caller]), 'pkg/b.py')).toEqual([]);
+  });
+
+  it('TypeScript/JavaScript: an untyped parameter receiver gets no module-function edge, by design', () => {
+    const tsLib = parse('src/a.ts', 'export function validate(x: number) { return x; }\nexport function other() {}\n');
+    const tsCaller = parse('src/b.ts', "import { other } from './a';\nexport function setup(module) { other(); module.validate(1); }\n");
+    expect(callsFrom(resolveEdges([tsLib, tsCaller]), 'src/b.ts')).toEqual(['setup -> src/a.ts:other']);
+    const jsLib = parse('src/c.js', 'function validate(x) { return x; }\nmodule.exports = { validate };\n');
+    const jsCaller = parse('src/d.js', 'function setup(module) { return module.validate(1); }\nmodule.exports = { setup };\n');
+    expect(callsFrom(resolveEdges([jsLib, jsCaller]), 'src/d.js')).toEqual([]);
+  });
+
   it('TypeScript: a member call on an unknown receiver still reaches a method in another file', () => {
     const lib = parse('src/check.ts', 'export class Checker { describe() { return 1; } }\n');
     const caller = parse('src/b.ts', "import './check';\nexport function use(x: Thing) { return x.describe(); }\n");
