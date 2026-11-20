@@ -201,7 +201,7 @@ describe("map/full ingestion identity (#965)", () => {
 
   for (const semantics of ["legacy", "head"] as const) {
     for (const force of [false, true]) {
-      it(`map preserves a legacy full graph without mode metadata (${semantics}, force=${force})`, async () => {
+      it(`map keeps a legacy baseline's files in map mode (${semantics}, force=${force})`, async () => {
         backend = new FakeBackend({ semantics });
         vi.stubEnv("IX_ENDPOINT", await backend.start());
         await ingest(false);
@@ -227,17 +227,55 @@ describe("map/full ingestion identity (#965)", () => {
         const baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
         delete baseline.fileModes;
         writeFileSync(baselinePath, JSON.stringify(baseline));
-        const fullId = backend.lastPatchIds.get("a.ts")!;
         const fullGraph = backend.graphSignature();
         expect(fullGraph.edges.some(e => e.includes(" CONTAINS_CHUNK "))).toBe(true);
         expect(fullGraph.edges.some(e => e.includes(" DEFINES "))).toBe(true);
 
+        backend.resetRequests();
         await ingest(true, force);
-        expect(backend.graphSignature()).toEqual(fullGraph);
-        expect(loadIngestBaseline(repo)!.fileModes.get(join(repo, "a.ts"))).toBe("full");
+        // A legacy baseline cannot say whether chunks were written, so map
+        // does not turn its files into full ingests. Unforced, nothing is
+        // re-sent; forced, the file goes as a map patch, as before modes were
+        // recorded, and is recorded as mapped.
+        if (force) {
+          expect(backend.lastPatchIds.get("a.ts")).toBe(legacyId);
+          expect(backend.lastOps.get("a.ts")!.some(op => op.kind === "chunk")).toBe(false);
+          expect(loadIngestBaseline(repo)!.fileModes.get(join(repo, "a.ts"))).toBe("map");
+        } else {
+          expect(backend.commitCount).toBe(0);
+          expect(backend.graphSignature()).toEqual(fullGraph);
+          expect(loadIngestBaseline(repo)!.fileModes.has(join(repo, "a.ts"))).toBe(false);
+        }
         expect(backend.unknownPaths).toEqual([]);
       });
     }
+
+    it(`map over a map-only legacy baseline neither re-sends nor writes chunks (${semantics})`, async () => {
+      backend = new FakeBackend({ semantics });
+      vi.stubEnv("IX_ENDPOINT", await backend.start());
+      writeFileSync(join(repo, "b.ts"), "export function other() { return 7; }\n");
+      execFileSync("git", ["add", "b.ts"], { cwd: repo });
+      await ingest(true);
+      const baselinePath = ingestMtimeCachePath(repo);
+      const baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
+      delete baseline.fileModes;
+      writeFileSync(baselinePath, JSON.stringify(baseline));
+      const bId = backend.lastPatchIds.get("b.ts");
+
+      writeFileSync(join(repo, "a.ts"), "export function renamed() { return 43; }\n");
+      backend.resetRequests();
+      await ingest(true);
+      // Only the edited file goes, and as a map patch.
+      expect(backend.acceptedPatches()).toBe(1);
+      expect(backend.lastPatchIds.get("b.ts")).toBe(bId);
+      expect(backend.lastOps.get("a.ts")!.some(op => op.kind === "chunk")).toBe(false);
+      expect(backend.graphSignature().nodes.some(n => n.includes(" chunk "))).toBe(false);
+      expect(loadIngestBaseline(repo)!.fileModes).toEqual(new Map([[join(repo, "a.ts"), "map"]]));
+      backend.resetRequests();
+      await ingest(true);
+      expect(backend.commitCount).toBe(0);
+      expect(backend.unknownPaths).toEqual([]);
+    });
   }
 
   it("preserves modes outside a scoped run and skips a repeated mode", async () => {

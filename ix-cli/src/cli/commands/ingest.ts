@@ -3115,12 +3115,13 @@ export async function ingestFiles(
     };
     const previousMtimes = previousBaseline?.files ?? new Map<string, number>();
     const fileModes = new Map(previousBaseline?.fileModes);
-    // Bulk commits replace all source edges. Once a file has chunks, keep
-    // writing the full payload even during map so its chunk edges survive.
-    // Legacy baselines do not say whether chunks were written. Conservatively
-    // migrate their files to full; only new files default to map.
+    // Bulk commits replace all source edges. Once a full run has committed a
+    // file (so it has chunks), keep writing its full payload even during map
+    // so its chunk edges survive. A file with no recorded mode -- new, or from
+    // a baseline written before modes were recorded -- maps as before: map
+    // never turns a file it cannot prove holds chunks into a full ingest.
     const modeForFile = (absolutePath: string): IngestMode => mapMode
-      ? fileModes.get(absolutePath) ?? (previousMtimes.has(absolutePath) ? 'full' : 'map')
+      ? fileModes.get(absolutePath) ?? 'map'
       : 'full';
     const mapsFile = (relativePath: string): boolean =>
       modeForFile(nodePath.resolve(workspaceRoot, relativePath)) === 'map';
@@ -3133,10 +3134,15 @@ export async function ingestFiles(
       filePaths,
       previousBaseline?.deletedFiles ?? new Map(),
     );
-    // Upgrades to full (including from an unrecorded mode) must bypass both
-    // mtime and source-hash skipping, even for a scoped or --lang run.
-    for (const file of filePaths) {
-      if (fileModes.get(file) !== modeForFile(file)) forceReingestPaths.add(file);
+    // A full run re-sends every file not known to hold its full payload, so
+    // unchanged bytes a map wrote still get their chunks: it bypasses both
+    // mtime and source-hash skipping, even for a scoped or --lang run. That
+    // includes files with no recorded mode, once. A map run never upgrades a
+    // file, so it forces nothing here (and auto-map never re-sends the repo).
+    if (!mapMode) {
+      for (const file of filePaths) {
+        if (fileModes.get(file) !== 'full') forceReingestPaths.add(file);
+      }
     }
     const mtimeCache = (opts.force || workspaceMigrated)
       ? new Map<string, number>()
