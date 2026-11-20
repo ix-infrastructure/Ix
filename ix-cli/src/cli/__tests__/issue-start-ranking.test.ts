@@ -154,4 +154,14 @@ describe("strong issue starts", () => {
     const { starts: fewer } = await pickStartingPoints("renderValue fails", { files: [path], search: async () => page.slice(0, -1) });
     expect(rank(fewer, path)[0].path).toBe(path);
   });
+
+  it("counts only exact-name hits toward a full page", async () => {
+    const path = "src/definition.py";
+    // A full page whose other rows only share part of the name: the page is
+    // not saturated by this name, so the single definition still pins.
+    const page = [definition("renderValue", path), ...Array.from({ length: ISSUE_SEARCH_LIMIT - 1 }, (_, i) =>
+      definition(`renderValue${i}`, `src/other${i}.py`))];
+    const { starts } = await pickStartingPoints("renderValue fails", { files: [path], search: async () => page });
+    expect(rank(starts, path)[0].path).toBe(path);
+  });
 });
