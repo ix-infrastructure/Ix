@@ -65,6 +65,13 @@ describe("environment-variable registry (#948)", () => {
     }
   });
 
+  it("escapes backslashes and pipes so a description cannot end its cell early", () => {
+    const table = renderEnvTable({
+      IX_EXAMPLE: { type: "string", visibility: "public", description: "a\\|b\nc" },
+    });
+    expect(table).toContain("| `IX_EXAMPLE` | string | unset | a\\\\\\|b c |");
+  });
+
   it("keeps NOT_VARIABLES to names that still appear in the source", () => {
     for (const name of Object.keys(NOT_VARIABLES)) expect(uses.has(name), name).toBe(true);
   });

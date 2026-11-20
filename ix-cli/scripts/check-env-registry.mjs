@@ -102,7 +102,9 @@ export function scanSource(srcDir = join(CLI_ROOT, "src")) {
   return uses;
 }
 
-const escapeCell = (text) => text.replace(/\|/g, "\\|").replace(/\n/g, " ");
+// Backslashes first: otherwise a `\` already in the text would swallow the
+// escape added for the `|` after it and the cell would end there.
+const escapeCell = (text) => text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n/g, " ");
 
 /** The default as the table shows it. */
 export function defaultText(spec) {
