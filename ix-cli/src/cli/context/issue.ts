@@ -156,6 +156,10 @@ export async function issueBundleSection(
       ...(n.facts?.topCallerRefs ?? []), ...(n.facts?.topDependentRefs ?? []),
       ...(n.facts?.memberRefs ?? []),
     ]) atDistance(ref.id, 1);
+    // What a class's members call is two edges out: class -CONTAINS-> member
+    // -CALLS-> callee. `atDistance` keeps the smaller value, so a callee that
+    // is also a direct reference stays at one.
+    for (const ref of n.facts?.memberCalleeRefs ?? []) atDistance(ref.id, 2);
     for (const ref of n.related) {
       mark(ref.path, 0.5, `near ${n.start.name}`);
     }
@@ -335,8 +339,8 @@ async function startNeighbourhood(
 function oneHopRefs(facts: ContextFacts | undefined): EntityLocation[] {
   if (!facts) return [];
   return [
-    ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []), ...(facts.topCallerRefs ?? []),
-    ...(facts.topDependentRefs ?? []), ...(facts.neighbourRefs ?? []),
+    ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []), ...(facts.memberCalleeRefs ?? []),
+    ...(facts.topCallerRefs ?? []), ...(facts.topDependentRefs ?? []), ...(facts.neighbourRefs ?? []),
   ];
 }
 
