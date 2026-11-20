@@ -641,6 +641,57 @@ describe('member calls and calls to locals across files (#1020)', () => {
     expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts')).toEqual(['S.run -> src/a.ts:validate']);
   });
 
+  // A property holding a whole module (`this.utils = utils`) makes
+  // `this.utils.validate()` a call on that module, not a member-only call.
+  it('TypeScript: a this property or class field holding a namespace import still reaches the module function', () => {
+    const lib = parse('src/utils.ts', 'export function validate(x: number) { return x; }\n');
+    const caller = parse('src/b.ts', [
+      "import * as utils from './utils';",
+      'export class C {',
+      '  utils = utils;',
+      '  run() { this.utils.validate(1); }',
+      '}',
+      'export class D {',
+      '  u: any;',
+      '  constructor() { this.u = utils; }',
+      '  run() { this.u.validate(1); }',
+      '}',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts').sort()).toEqual([
+      'C.run -> src/utils.ts:validate', 'D.run -> src/utils.ts:validate',
+    ]);
+  });
+
+  it('TypeScript: a this property holding a parameter is still a non-module receiver', () => {
+    const lib = parse('src/utils.ts', 'export function validate(x: number) { return x; }\n');
+    const caller = parse('src/b.ts', [
+      "import * as utils from './utils';",
+      'export class C {',
+      '  conn: any;',
+      '  constructor(conn: Conn) { this.conn = conn; utils.validate(0); }',
+      '  run() { this.conn.validate(1); }',
+      '}',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts')).toEqual(['C.constructor -> src/utils.ts:validate']);
+  });
+
+  it('Python: a self attribute holding an imported module still reaches the module function', () => {
+    const lib = parse('pkg/utils.py', 'def validate(x):\n    return x\n');
+    const caller = parse('pkg/b.py', [
+      'from pkg import utils',
+      '',
+      'class C:',
+      '    def __init__(self):',
+      '        self.u = utils',
+      '    def run(self):',
+      '        self.u.validate(1)',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'pkg/b.py')).toEqual(['C.run -> pkg/utils.py:validate']);
+  });
+
   it('Rust: a method call reaches a trait-impl method in another file', () => {
     const lib = parse('src/shape.rs', 'pub trait Shape {\n    fn area(&self) -> f64;\n}\npub struct Sq;\nimpl Shape for Sq {\n    fn area(&self) -> f64 { 1.0 }\n}\n');
     const caller = parse('src/main.rs', 'fn make(s: &dyn Shape) {\n    s.area();\n}\n');

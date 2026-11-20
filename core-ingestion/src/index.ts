@@ -1461,6 +1461,28 @@ function receiverRoot(node: any, python: boolean): any {
 }
 
 /**
+ * The property names along a member call's receiver, root first (`utils` in
+ * `this.utils.validate()`, `a`, `b` in `x.a[0].b.m()`). A property holding a
+ * reference (`this.utils = utils`) can make the receiver a module, not a
+ * non-module local.
+ */
+function receiverProperties(node: any, python: boolean): string[] {
+  const props: string[] = [];
+  let root = node;
+  while (root) {
+    const type = root.type;
+    if (python ? type === 'attribute' : type === 'member_expression') {
+      const prop = root.childForFieldName?.(python ? 'attribute' : 'property')?.text;
+      if (prop) props.push(prop);
+      root = root.childForFieldName?.('object');
+    } else if (type === 'subscript' || type === 'subscript_expression') root = root.childForFieldName?.(python ? 'value' : 'object');
+    else if (type === 'non_null_expression' || type === 'parenthesized_expression') root = root.namedChild(0);
+    else break;
+  }
+  return props.reverse();
+}
+
+/**
  * Scope facts for every call in a JS/TS or Python tree, by call node id: which
  * member calls have a receiver bound inside a function (`conn.validate()` with
  * `conn` a parameter, `self.close()`, `this.save()`), and which plain calls
@@ -1486,6 +1508,10 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
   // of such a name may reach a module-level function through the property, so
   // it is never a member-only call.
   const memberNames = new Map<number, string>();
+  // The properties along each member call's receiver (`utils` in
+  // `this.utils.validate()`): one assigned a reference (`this.utils = utils`)
+  // may hold a module, so the call is not member-only either.
+  const receiverPropertyNames = new Map<number, string[]>();
   const assignedProperties = new Set<string>();
   // Property assignments whose value is rooted at a name, decided after the
   // walk: a parameter or local (`this.loader = loader`) holds no module function.
@@ -1603,6 +1629,8 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
         } else if (fn?.type === 'attribute') {
           const member = fn.childForFieldName?.('attribute')?.text;
           if (member) memberNames.set(node.id, member);
+          const receiverProps = receiverProperties(fn.childForFieldName?.('object'), true);
+          if (receiverProps.length) receiverPropertyNames.set(node.id, receiverProps);
           const rootNode = receiverRoot(fn.childForFieldName?.('object'), true);
           if (rootNode?.type === 'identifier') {
             pending.push({ id: node.id, start: node.startIndex, frame: frames[frames.length - 1], name: rootNode.text, receiver: true });
@@ -1690,6 +1718,8 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
       } else if (fn?.type === 'member_expression') {
         const member = fn.childForFieldName?.('property')?.text;
         if (member) memberNames.set(node.id, member);
+        const receiverProps = receiverProperties(fn.childForFieldName?.('object'), false);
+        if (receiverProps.length) receiverPropertyNames.set(node.id, receiverProps);
         const rootNode = receiverRoot(fn.childForFieldName?.('object'), false);
         if (rootNode?.type === 'this') {
           if (thisIsClassBound()) result.set(node.id, { localReceiver: true });
@@ -1741,8 +1771,10 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
     if (!isLocal(assigned.name, assigned.start, assigned.frame, true)) assignedProperties.add(assigned.prop);
   }
   for (const [id, scope] of result) {
+    if (!scope.localReceiver) continue;
     const member = memberNames.get(id);
-    if (scope.localReceiver && member !== undefined && assignedProperties.has(member)) result.delete(id);
+    if (member !== undefined && assignedProperties.has(member)) result.delete(id);
+    else if (receiverPropertyNames.get(id)?.some(prop => assignedProperties.has(prop))) result.delete(id);
   }
   return result;
 }
