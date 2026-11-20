@@ -172,3 +172,121 @@ describe('TypeScript class and interface heritage', () => {
       .toEqual([['A', 'I'], ['J', 'K']]);
   });
 });
+
+// #1020: which calls cannot denote a module-level function of their name.
+describe('TypeScript call scope flags', () => {
+  /** `src -> dst` for each CALLS relationship, with the scope flags it carries. */
+  function calls(source: string): Record<string, { memberCall?: true; localCallee?: true }> {
+    const result = parseFile('/repo/scope.ts', source);
+    expect(result).not.toBeNull();
+    return Object.fromEntries(result!.relationships
+      .filter(rel => rel.predicate === 'CALLS')
+      .map(rel => [`${rel.srcName} -> ${rel.dstName}`, {
+        ...(rel.memberCall ? { memberCall: true as const } : {}),
+        ...(rel.localCallee ? { localCallee: true as const } : {}),
+      }]));
+  }
+
+  it('marks a member call on a parameter, a local, this or super', () => {
+    expect(calls([
+      'export function validate(x: number) { return x; }',
+      'export function useParam(conn: Conn) { conn.validate(); }',
+      'export function useLocal() { const c = open(); c.pool[0].validate(); }',
+      'export function useCatch() { try { run(); } catch (err) { err.validate(); } }',
+      'export function useLoop(xs: Conn[]) { for (const x of xs) x.validate(); }',
+      'export function useArrow() { return (c: Conn) => c.validate(); }',
+      'class Base { validate() {} }',
+      'export class Svc extends Base {',
+      '  field = this.validate();',
+      '  run() { this.validate(); super.validate(); }',
+      '}',
+    ].join('\n'))).toMatchObject({
+      'useParam -> validate': { memberCall: true },
+      'useLocal -> validate': { memberCall: true },
+      'useCatch -> validate': { memberCall: true },
+      'useLoop -> validate': { memberCall: true },
+      'Svc.run -> validate': { memberCall: true },
+    });
+  });
+
+  it('leaves a receiver that may be a module-scope name unmarked', () => {
+    const flags = calls([
+      "import * as ns from './ns';",
+      'function validate(x: number) { return x; }',
+      'const api = { validate };',
+      'export function viaObject() { api.validate(); }',
+      'export function viaNamespace() { ns.validate(); }',
+      'export function viaGlobal() { window.validate(); }',
+      "export function viaRequire() { require('./a').validate(); }",
+      'export const literal = { run() { this.validate(); }, validate };',
+      'export function plain() { this.validate(); }',
+    ].join('\n'));
+    // `this` outside a class (an object literal's method, a plain function) is not an instance.
+    for (const caller of ['viaObject', 'viaNamespace', 'viaGlobal', 'viaRequire', 'literal', 'plain']) {
+      expect(flags[`${caller} -> validate`], caller).toEqual({});
+    }
+  });
+
+  it('does not mark a member call when one site in the scope may be a module-scope name', () => {
+    expect(calls([
+      'const api = { validate() {} };',
+      'export function mixed(conn: Conn) { conn.validate(); api.validate(); }',
+    ].join('\n'))['mixed -> validate']).toEqual({});
+  });
+
+  it('marks a member call when the other sites in the scope call a parameter or local', () => {
+    const flags = calls([
+      'export function validate() {}',
+      'export function both(validate: Fn, conn: Conn) { validate(); conn.validate(); }',
+      'export function withModule(conn: Conn) { validate(); conn.validate(); }',
+    ].join('\n'));
+    expect(flags['both -> validate']).toEqual({ memberCall: true });
+    expect(flags['withModule -> validate']).toEqual({});
+  });
+
+  it('marks a plain call to a parameter or local, never to a module-scope name', () => {
+    const flags = calls([
+      "import { check } from './check';",
+      'export function validate(x: number) { return x; }',
+      'export function param(validate: (x: number) => number) { return validate(1); }',
+      'export function arrowParam() { return [1].map(validate => validate(1)); }',
+      'export function local() { const validate = pick(); return validate(1); }',
+      'export function hoisted() { if (ok) { validate(1); } var validate = pick(); }',
+      'export function nested(validate: Fn) { return () => validate(1); }',
+      'export function imported() { return check(1) + validate(1); }',
+      'export function shadowedImport(check: Fn) { return check(1); }',
+      'export function blockOnly() { { const validate = pick(); } return validate(1); }',
+    ].join('\n'));
+    expect(flags).toMatchObject({
+      'param -> validate': { localCallee: true },
+      'local -> validate': { localCallee: true },
+      'hoisted -> validate': { localCallee: true },
+      'nested -> validate': { localCallee: true },
+      'shadowedImport -> check': { localCallee: true },
+    });
+    expect(flags['imported -> check']).toEqual({});
+    expect(flags['imported -> validate']).toEqual({});
+    expect(flags['blockOnly -> validate']).toEqual({});
+  });
+
+  it('does not mark a call to a local function the parser extracts as an entity', () => {
+    const result = parseFile('/repo/scope.ts', 'export function outer() {\n  const helper = () => 1;\n  return helper();\n}\n');
+    expect(result!.entities.map(e => e.name)).toContain('helper');
+    expect(calls('export function outer() {\n  const helper = () => 1;\n  return helper();\n}\n')['outer -> helper']).toEqual({});
+  });
+
+  it('leaves a local that holds a module unmarked', () => {
+    const flags = calls([
+      "export function lazy() { const api = require('./api'); api.validate(); }",
+      "export async function dynamic() { const mod = await import('./api'); mod.validate(); }",
+      "export function helper() { const sub = importModule('./api.js').sub; sub.validate(); }",
+      "export function plain() { const conn = open(); conn.validate(); }",
+    ].join('\n'));
+    for (const caller of ['lazy', 'dynamic', 'helper']) expect(flags[`${caller} -> validate`], caller).toEqual({});
+    expect(flags['plain -> validate']).toEqual({ memberCall: true });
+  });
+
+  it('treats a namespace body as module scope', () => {
+    expect(calls('namespace N {\n  const api = make();\n  export function run() { api.validate(); }\n}\n')['run -> validate']).toEqual({});
+  });
+});

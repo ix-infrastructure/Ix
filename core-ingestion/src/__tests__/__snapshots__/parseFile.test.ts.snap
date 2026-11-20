@@ -889,6 +889,7 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
     },
     {
       "dstName": "push",
+      "memberCall": true,
       "predicate": "CALLS",
       "srcName": "runChecks",
     },
@@ -926,11 +927,13 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
     },
     {
       "dstName": "every",
+      "memberCall": true,
       "predicate": "CALLS",
       "srcName": "statusOf",
     },
     {
       "dstName": "some",
+      "memberCall": true,
       "predicate": "CALLS",
       "srcName": "statusOf",
     },
@@ -946,6 +949,7 @@ exports[`parseFile snapshots > snapshots a TypeScript command module 1`] = `
     },
     {
       "dstName": "loader",
+      "memberCall": true,
       "predicate": "CALLS",
       "srcName": "CheckRunner.load",
     },

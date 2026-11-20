@@ -58,6 +58,8 @@ describe('summary signature and changed names (#961)', () => {
     const globals = some(() => pick(['G', 'H']), 2);
     if (globals.length) s.tsGlobalTypes = globals;
     if (rand() < 0.3) s.tsModule = true;
+    const bare = some(() => pick(['A', 'B']), 2);
+    if (bare.length) s.bareMembers = bare;
     return s;
   };
 
@@ -66,7 +68,7 @@ describe('summary signature and changed names (#961)', () => {
     const other = generate(rand) as Record<string, unknown>;
     const out = { ...s } as Record<string, unknown>;
     const fields = ['language', 'entityCount', 'qkeys', 'imports', 'refs', 'exportPublicNames', 'phpTypes', 'receiverFactories',
-      'receiverHeritage', 'receiverPackage', 'importAliases', 'tsGlobalTypes', 'tsModule'];
+      'receiverHeritage', 'receiverPackage', 'importAliases', 'tsGlobalTypes', 'tsModule', 'bareMembers'];
     for (const field of fields) {
       if (rand() < 0.15) {
         if (other[field] === undefined) delete out[field];
@@ -107,6 +109,18 @@ describe('summary signature and changed names (#961)', () => {
   it("ignores what other files cannot bind to: refs, entity count, a file's own import aliases", () => {
     const base = summary('m.ts', { qkeys: [['f', 'f']], refs: ['x'], entityCount: 2 });
     expect(summarySignature(base)).toBe(summarySignature({ ...base, refs: ['y'], entityCount: 3, importAliases: { ns: './c' } }));
+  });
+
+  it('names a function that became a bare-keyed member, or stopped being one (#1020)', () => {
+    // `fn area()` and a trait-impl `fn area(&self)` have the same key `area`;
+    // only bareMembers tells a member call which one it may land on.
+    const before = signed(summary('shape.rs', { qkeys: [['area', 'area']], bareMembers: [] }));
+    const after = signed(summary('shape.rs', { qkeys: [['area', 'area']], bareMembers: ['area'] }));
+    expect(before.sig).not.toBe(after.sig);
+    expect(changedNames(before, after)).toEqual(new Set(['area']));
+    // A file with no bare members keeps the signature it had before the field existed.
+    const old = summary('lib.rs', { qkeys: [['f', 'f']] });
+    expect(summarySignature({ ...old, bareMembers: [] })).toBe(summarySignature(old));
   });
 
   it('names a renaming re-export whose source module moved', () => {
