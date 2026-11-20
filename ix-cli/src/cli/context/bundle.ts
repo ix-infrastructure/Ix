@@ -170,13 +170,16 @@ function leadingRefs(input: BuildInput): EntityLocation[] {
     // an entry point is looking for where to go next.
     ...(facts.importRefs ?? []),
     ...(facts.calleeRefs ?? []),
-    // For a class, what its methods call: the class itself calls nothing.
-    ...(facts.memberCalleeRefs ?? []),
     // What those files define. Naming the file is half an answer to "which
     // function does X"; these are the other half.
     ...(facts.neighbourRefs ?? []),
     ...(facts.topCallerRefs ?? []),
     ...(facts.topDependentRefs ?? []),
+    // For a class, what its methods call: the class node calls little or
+    // nothing itself. After the callers and dependents, which say who relies
+    // on the class: there can be eight of these, and ahead of those they
+    // cut them first at a low `--max-entities`.
+    ...(facts.memberCalleeRefs ?? []),
     // Two steps out, ranked. After everything one step out, and ahead of the
     // backend's context nodes, which are ordered by kind and name only.
     ...(facts.relatedRefs ?? []),

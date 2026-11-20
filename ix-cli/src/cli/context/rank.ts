@@ -21,6 +21,9 @@ const TIER = { target: 0, issue: 1, structural: 2, claims: 3, relationships: 4, 
 
 const TIER_WIDTH = 1000;
 
+/** Places the claims tier uses: claims, decisions, intents. Member callees follow them. */
+const CLAIMS_TIER_KINDS = 3;
+
 const tierScore = (tier: number, index = 0): number => tier * TIER_WIDTH + Math.min(index, TIER_WIDTH - 1);
 
 /** The six factors the backend multiplies into a claim's confidence. */
@@ -96,6 +99,7 @@ export function rankEvidence(input: RankInput): EvidenceItem[] {
 
   items.push(...structuralEvidence(input, fresh, show));
   items.push(...contextEvidence(input));
+  items.push(...memberCalleeEvidence(input, fresh, show));
   items.push(...relationshipEvidence(input, fresh, show));
 
   items.push({
@@ -253,14 +257,6 @@ function outwardRows(input: RankInput): Array<[Structural, EntityLocation]> {
       reason: "the target calls this", refs: [ref.id], ...locationField(ref),
     }, ref]);
   }
-  // A class's own node calls nothing; its methods do. Same source and title
-  // as a callee row, so consumers routing on them see nothing new.
-  for (const ref of input.facts.memberCalleeRefs ?? []) {
-    rows.push([{
-      id: rowId("calls", ref.name, ref), source: "facts.callees", title: `calls ${ref.name}`,
-      reason: memberCallReason(input, ref), refs: [ref.id], ...locationField(ref),
-    }, ref]);
-  }
   for (const ref of (input.facts.neighbourRefs ?? []).slice(0, SHOWN_NEIGHBOUR_MEMBERS)) {
     const where = ref.path ? ref.path.split("/").pop() : undefined;
     rows.push([{
@@ -270,6 +266,34 @@ function outwardRows(input: RankInput): Array<[Structural, EntityLocation]> {
     }, ref]);
   }
   return rows;
+}
+
+/**
+ * What a class-like target's members call outside it (#1138), one row each,
+ * with the same source and title as a callee row. Ranked after the claims,
+ * decisions and intents, not with the structural rows: there can be up to
+ * eight of them, and ahead of the recorded knowledge about the class they
+ * pushed its decisions out of the default evidence budget. Still ahead of the
+ * relationships, so a row here keeps the entity's place over its CALLS edge.
+ */
+function memberCalleeEvidence(
+  input: RankInput,
+  fresh: (id: string | undefined) => boolean,
+  show: (ids: string[]) => void,
+): EvidenceItem[] {
+  const items: EvidenceItem[] = [];
+  for (const ref of input.facts.memberCalleeRefs ?? []) {
+    // A callee the class node itself calls (a class-level initialiser) is
+    // already a callee row.
+    if (!fresh(ref.id)) continue;
+    show([ref.id]);
+    items.push({
+      id: rowId("calls", ref.name, ref), kind: "structural", source: "facts.callees", title: `calls ${ref.name}`,
+      score: tierScore(TIER.claims, CLAIMS_TIER_KINDS + items.length),
+      reason: memberCallReason(input, ref), refs: [ref.id], ...locationField(ref),
+    });
+  }
+  return items;
 }
 
 /** Which of the target's members call a member callee, by name. */

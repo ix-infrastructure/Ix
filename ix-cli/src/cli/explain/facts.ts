@@ -109,10 +109,13 @@ export interface EntityFacts {
   importRefs?: EntityLocation[];
   calleeRefs?: EntityLocation[];
   /**
-   * For a class-like target: what its methods call outside it. CALLS edges
-   * start at methods, not at the class, so `calleeRefs` is always empty for
-   * one, and a bundle could not say what the class uses (#1138). Read by
-   * `ix context` only, and not for file targets.
+   * For a class-like target: what its methods call outside it. The parser
+   * attributes a call to the innermost function, method or constant around
+   * it, and to the class only for a call outside all of those (a class-level
+   * initialiser), so `calleeRefs` is empty or nearly so for a class, and a
+   * bundle could not say what the class uses (#1138). A callee may be in both
+   * lists; the bundle shows it once. Read by `ix context` only, and not for
+   * file targets.
    */
   memberCalleeRefs?: EntityLocation[];
   /** The member -> callee CALLS edges behind `memberCalleeRefs`, for the bundle's relationships. */
@@ -219,6 +222,18 @@ const MAX_CALLEE_REFS = 4;
  */
 const MAX_MEMBER_CALLEE_REFS = 8;
 const MEMBER_CALLEE_POOL = 20;
+/**
+ * Callees read per member. Bounds each of the up to `MEMBER_CALLEE_POOL`
+ * expands the way `MEMBER_USE_CAP` bounds the usage probes: a generated or
+ * dispatch-table method can call hundreds of things, and only the
+ * `MAX_MEMBER_CALLEE_REFS` most-called across the members are kept.
+ */
+const MEMBER_CALLEE_CAP = 50;
+/**
+ * Members whose outbound calls are read: the callable kinds, and constants,
+ * which the parser also makes the source of the calls in their initialisers.
+ */
+const CALL_SOURCE_KINDS: KindSet = new Set<GraphKind>([...CALLABLE_KINDS, "constant"]);
 
 /** Members probed for usage; the rest keep their structural order after them. */
 const MEMBER_USE_POOL = 40;
@@ -440,7 +455,7 @@ function rankUsers(nodes: any[], edges: any[] | undefined, targetPath: string | 
 /**
  * What a class-like target's methods call outside it (#1138).
  *
- * One outbound CALLS expand per callable member, for at most
+ * One outbound CALLS expand per callable or constant member, for at most
  * `MEMBER_CALLEE_POOL` of them in structural order (declarations, then the
  * big ones), so it runs alongside the usage ranking rather than after it.
  * Calls that stay inside the target -- to one of its members, or to anything
@@ -454,7 +469,7 @@ async function collectMemberCallees(
   members: EntityLocation[],
 ): Promise<{ refs: EntityLocation[]; edges: Array<{ src: string; dst: string; predicate: "CALLS" }> }> {
   const memberIds = new Set(members.map((m) => m.id));
-  const pool = structuralMemberOrder(members.filter((m) => CALLABLE_KINDS.has(m.kind))).slice(0, MEMBER_CALLEE_POOL);
+  const pool = structuralMemberOrder(members.filter((m) => CALL_SOURCE_KINDS.has(m.kind))).slice(0, MEMBER_CALLEE_POOL);
   const inside = (n: any): boolean => {
     if (target.lineStart === undefined || target.lineEnd === undefined) return false;
     const path = relativePath(n.provenance?.sourceUri ?? n.provenance?.source_uri);
@@ -468,7 +483,9 @@ async function collectMemberCallees(
     while (next < pool.length) {
       const index = next++;
       try {
-        const result = await client.expand(pool[index].id, { direction: "out", predicates: ["CALLS"] });
+        const result = await client.expand(pool[index].id, {
+          direction: "out", predicates: ["CALLS"], limit: MEMBER_CALLEE_CAP,
+        });
         found[index] = uniqueById(result.nodes).filter((n: any) =>
           n.id !== target.id && !memberIds.has(n.id) && !inside(n));
       } catch {
@@ -732,8 +749,8 @@ export async function collectFacts(
     forExplain && calleeEdges.length > 0 && calleeEdges.length <= 20
       ? resolveCallList(client, calleeEdges)
       : Promise.resolve(undefined),
-    // What a class's methods call: the class node has no CALLS edges of its
-    // own. `ix context` only, and not for files, whose bundles reach their
+    // What a class's methods call: the class node's own CALLS edges are only
+    // its class-level calls, if any. `ix context` only, and not for files, whose bundles reach their
     // members' calls through the related-files walk.
     !forExplain && TYPE_KINDS.has(targetKindName)
       ? collectMemberCallees(client, { id: targetId, path, ...targetLines }, memberLocations)

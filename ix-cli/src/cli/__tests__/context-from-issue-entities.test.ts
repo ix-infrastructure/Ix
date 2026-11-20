@@ -457,6 +457,23 @@ describe("issue bundle section, as --from-issue wires it", () => {
     expect(issue.rankedFiles.map(f => f.path)).toContain(second.path);
   });
 
+  it("seeds a class's member callees two hops out, never closer than a direct reference", async () => {
+    const issue = await issueBundleSection({ listByKind: vi.fn(async () => []) }, {
+      text: "expired entries", plan: { bm25: [], unresolved: [], fallback: false },
+      starts: [start], walked: false,
+      neighbourhoods: [{
+        start,
+        facts: {
+          calleeRefs: [callee],
+          memberCalleeRefs: [{ id: "via-member", name: "evict", kind: "function" }, callee],
+        } as unknown as ContextFacts,
+        related: [],
+      }],
+      scope: {},
+    });
+    expect(Object.fromEntries(issue.distances!)).toEqual({ start: 0, near: 1, "via-member": 2 });
+  });
+
   it("lists definitions in the active read scope and reads only tracked files", async () => {
     const { issue, listByKind, read } = await section();
     expect(listByKind).toHaveBeenCalledWith("method", { workspaceId: "ws", scope: path, limit: ISSUE_ENTITIES_PER_KIND });

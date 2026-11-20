@@ -17,6 +17,7 @@ interface Call {
   id: string;
   predicates?: string[];
   hops?: number;
+  limit?: number;
 }
 
 /**
@@ -276,7 +277,7 @@ describe("class targets: what the members call", () => {
         };
       },
       async expand(id: string, opts?: { direction?: string; predicates?: string[]; limit?: number }) {
-        calls.push({ method: "expand", id, predicates: opts?.predicates, hops: opts?.limit });
+        calls.push({ method: "expand", id, predicates: opts?.predicates, limit: opts?.limit });
         if (id === CLASS && opts?.direction === "out" && opts.predicates?.[0] === "CONTAINS") {
           return { nodes: memberNodes, edges: [] };
         }
@@ -312,6 +313,8 @@ describe("class targets: what the members call", () => {
     ]);
     // Only callable members are probed, one outbound CALLS expand each.
     expect(outwardCallProbes(calls).map((c) => c.id).sort()).toEqual(["m-run", "m-stop"]);
+    // Each probe is capped, so a member that calls hundreds of things stays one bounded read.
+    expect(outwardCallProbes(calls).map((c) => c.limit)).toEqual([50, 50]);
   });
 
   it("keeps at most 8 member callees and probes at most 20 members", async () => {
@@ -383,6 +386,118 @@ describe("class targets: what the members call", () => {
     expect(save).toMatchObject({ title: "calls save", location: { path: "src/store.ts" } });
     expect(save?.reason).toContain("run");
     expect(save?.reason).toContain("stop");
+  });
+
+  const emptyContext = (over: Record<string, unknown> = {}) => ({
+    claims: [], conflicts: [], decisions: [], intents: [], nodes: [], edges: [],
+    metadata: { query: "", seedEntities: [], hopsExpanded: 1, asOfRev: 1 },
+    ...over,
+  }) as never;
+  const bundleFor = (facts: Awaited<ReturnType<typeof collectFacts>>, context = emptyContext()) => buildBundle({
+    resolved: { id: CLASS, name: "Engine", kind: "class", resolutionMode: "exact" },
+    facts, context, provenance: {}, budgets: clampBudgets({}, "json"), format: "json", isStale: () => false,
+  });
+
+  it("probes constant members and keeps the rest when one member's expand fails", async () => {
+    const constant = { id: "m-table", name: "TABLE", kind: "constant", attrs: { line_start: 14, line_end: 18 }, provenance: { sourceUri: "src/engine.ts" } };
+    const calls: Call[] = [];
+    const base = classClient(calls);
+    const client = {
+      ...base,
+      async expand(id: string, opts?: { direction?: string; predicates?: string[]; limit?: number }) {
+        if (id === CLASS && opts?.direction === "out" && opts.predicates?.[0] === "CONTAINS") {
+          return { nodes: [...memberNodes, constant], edges: [] };
+        }
+        if (id === "m-run" && opts?.predicates?.includes("CALLS")) throw new Error("backend timeout");
+        if (id === "m-table" && opts?.predicates?.includes("CALLS")) {
+          calls.push({ method: "expand", id, predicates: opts.predicates });
+          return { nodes: [ext("x-build", "buildTable", "src/table.ts", 2, "function")], edges: [] };
+        }
+        return base.expand(id, opts as never);
+      },
+    } as unknown as IxClient;
+
+    const facts = await collectFacts(client, CLASS, "Engine", "class", "context");
+
+    // m-run's failure loses only its calls: stop's and the constant's survive.
+    expect(facts.memberCalleeRefs?.map((r) => r.id).sort()).toEqual(["x-build", "x-save"]);
+    expect(facts.memberCalls).toEqual([
+      { src: "m-stop", dst: "x-save", predicate: "CALLS" },
+      { src: "m-table", dst: "x-build", predicate: "CALLS" },
+    ]);
+  });
+
+  it("does not repeat a member CALLS edge the backend already returned", async () => {
+    const facts = await collectFacts(classClient([]), CLASS, "Engine", "class", "context");
+    const bundle = bundleFor(facts, emptyContext({ edges: [{ src: "m-run", dst: "x-save", predicate: "CALLS" }] }));
+    const runSave = bundle.relationships.filter((e) => e.src === "m-run" && e.dst === "x-save" && e.predicate === "CALLS");
+    expect(runSave).toHaveLength(1);
+  });
+
+  it("ranks member callees after the class's claims and decisions, so the budget keeps those", async () => {
+    const members = Array.from({ length: 10 }, (_, i) => ({
+      id: `mm-${i}`, name: `method${i}`, kind: "method",
+      attrs: { line_start: 100 + i * 10, line_end: 105 + i * 10 }, provenance: { sourceUri: "src/engine.ts" },
+    }));
+    const client = {
+      async entity(id: string) {
+        return { node: { id, name: "Engine", kind: "class", attrs: { line_start: 90, line_end: 300 }, provenance: { sourceUri: "src/engine.ts" } }, edges: [] };
+      },
+      async expand(id: string, opts?: { direction?: string; predicates?: string[] }) {
+        if (id === CLASS && opts?.direction === "out" && opts.predicates?.[0] === "CONTAINS") return { nodes: members, edges: [] };
+        if (id.startsWith("mm-") && opts?.direction === "out" && opts.predicates?.includes("CALLS")) {
+          return { nodes: [ext(`x-${id}`, `callee_${id}`, `src/dep-${id}.ts`, 3)], edges: [] };
+        }
+        return { nodes: [], edges: [] };
+      },
+      async provenance(id: string) { return { entityId: id, chain: [] }; },
+    } as unknown as IxClient;
+    const facts = await collectFacts(client, CLASS, "Engine", "class", "context");
+    expect(facts.memberCalleeRefs).toHaveLength(8);
+
+    const claim = (i: number) => ({
+      claim: { id: `claim-${i}`, statement: `engine fact ${i}`, entityId: CLASS }, relevance: 1, confidence: {},
+    });
+    const bundle = bundleFor(facts, emptyContext({
+      claims: [claim(1), claim(2), claim(3)],
+      decisions: [
+        { title: "engine owns the run loop", rationale: "one writer", entityId: CLASS },
+        { title: "stop is idempotent", rationale: "callers retry", entityId: CLASS },
+      ],
+    }));
+
+    const kinds = bundle.evidence.map((e) => e.kind);
+    expect(kinds.filter((k) => k === "decision")).toHaveLength(2);
+    expect(kinds.filter((k) => k === "claim")).toHaveLength(3);
+    // Every member callee row comes after the last decision.
+    const lastDecision = kinds.lastIndexOf("decision");
+    const calleeRows = bundle.evidence
+      .map((e, i) => [e, i] as const)
+      .filter(([e]) => e.source === "facts.callees");
+    expect(calleeRows.length).toBeGreaterThan(0);
+    expect(calleeRows.every(([, i]) => i > lastDecision)).toBe(true);
+  });
+
+  it("places member callees after the class's callers and dependents in the entity budget", () => {
+    const loc = (id: string, kind = "function") => ({ id, name: id, kind, path: `src/${id}.ts` });
+    const facts = {
+      id: CLASS, name: "Engine", kind: "class", path: "src/engine.ts", stale: false,
+      memberRefs: [], members: [], memberCount: 0, topCallers: [], topDependents: [],
+      diagnostics: [], historyLength: 0,
+      topCallerRefs: [loc("caller")],
+      topDependentRefs: [loc("dependent", "file")],
+      memberCalleeRefs: Array.from({ length: 8 }, (_, i) => loc(`callee${i}`)),
+    } as never;
+    const bundle = buildBundle({
+      resolved: { id: CLASS, name: "Engine", kind: "class", resolutionMode: "exact" },
+      facts, context: emptyContext(), provenance: {},
+      budgets: clampBudgets({ maxEntities: 4 }, "json"), format: "json", isStale: () => false,
+    });
+    const ids = bundle.entities.map((e) => e.id);
+    expect(ids).toContain("caller");
+    expect(ids).toContain("dependent");
+    // The member callees take what is left of the budget, in their ranked order.
+    expect(ids.filter((id) => id.startsWith("callee"))).toEqual(["callee0"]);
   });
 
   it("walks the related files from the member callees too", async () => {
