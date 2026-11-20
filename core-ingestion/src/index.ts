@@ -262,12 +262,15 @@ export interface ParsedRelationship {
    * `x.m()` in Rust, `$x->m()` / `X::m()` in PHP, and in JS/TS and Python a
    * receiver that `this` / `self` / `super`, a parameter or a local of an
    * enclosing function names (`conn.validate()`, `self.close()`). It resolves
-   * to a method of that name or to nothing. Absent when some site's receiver
-   * may be a module-scope name (`api.validate()` on a module-level object,
-   * `ns.f()` on a namespace import, `window.f()`, or a local aliasing one:
-   * `const m = ns`), or unknown (#1020). Also absent when the file assigns a
-   * reference that is not a local to a property of that name
-   * (`self.validate = validate`, `{ validate }`): the call may go through it.
+   * to a method of that name (FileParseResult.bareMembers counts too) or to
+   * nothing. Absent when some site's receiver may be a module-scope name
+   * (`api.validate()` on a module-level object, `ns.f()` on a namespace
+   * import, `window.f()`, or a local or parameter that may hold one: `const m
+   * = ns`, `o.impl ?? ns`, `mod = ns`, `mod: typeof ns`, a loop over modules,
+   * `importlib.import_module(...)`), or unknown (#1020). Also absent when the
+   * file assigns a reference that is not a local to a property of that name
+   * (`self.validate = validate`, `{ validate }`, a class-body `validate =
+   * staticmethod(validate)` or class field): the call may go through it.
    */
   memberCall?: true;
   /**
@@ -383,6 +386,15 @@ export interface FileParseResult {
    * for a script, and in a summary written before it existed.
    */
   tsModule?: true;
+  /**
+   * Sorted names of members the parser extracts with no container, so their
+   * key is the bare name a module-level function would have: a Rust function
+   * in an `impl` or `trait` block, a JS/TS object-literal method, an
+   * `X.prototype.m = function` assignment. A member call (`x.m()`,
+   * ParsedRelationship.memberCall) may land on them (#1020). Absent when the
+   * file has none.
+   */
+  bareMembers?: string[];
   fileRole: RoleClassification;
 }
 
@@ -1191,12 +1203,14 @@ interface CallScopeFrame {
    */
   calleeNames: Set<string>;
   /**
-   * Locals that alias another name (`const m = utils`, `const { validate } =
-   * utils`, Python `m = a`), by the name at the root of the initialiser. Such a
-   * local is as local as that root: an alias of a module-scope name (a
-   * namespace import, a module-level object) may still reach a module function.
+   * Locals that alias other names (`const m = utils`, `const { validate } =
+   * utils`, `const m = o.impl ?? A`, Python `m = a`, a parameter defaulting to
+   * a name, a loop variable over names), by the names at the roots of the
+   * value (valueRoots). Such a local is local only when every root is: an
+   * alias of a module-scope name (a namespace import, a module-level object)
+   * may still reach a module function.
    */
-  aliases?: Map<string, string>;
+  aliases?: Map<string, string[]>;
   /** Python `global x`: `x` here is the module's. */
   globals?: Set<string>;
   /** Bindings here are module scope (TypeScript namespace bodies). */
@@ -1211,7 +1225,8 @@ const JS_TS_SCOPE_FUNCTIONS = new Set([...JS_TS_FUNCTION_NODES, 'class_static_bl
 const JS_TS_SCOPE_BLOCKS = new Set(['statement_block', 'for_statement', 'for_in_statement', 'catch_clause', 'switch_body']);
 const JS_TS_FUNCTION_VALUES = new Set(['arrow_function', 'function_expression', 'function', 'generator_function', 'class']);
 const JS_TS_SCOPE_WALK = [...JS_TS_SCOPE_FUNCTIONS, ...JS_TS_SCOPE_BLOCKS, 'class_body', 'internal_module', 'module',
-  'lexical_declaration', 'variable_declaration', 'call_expression', 'new_expression', 'assignment_expression', 'object'];
+  'lexical_declaration', 'variable_declaration', 'call_expression', 'new_expression', 'assignment_expression', 'object',
+  'public_field_definition', 'field_definition'];
 const PY_SCOPE_FUNCTIONS = new Set(['function_definition', 'lambda']);
 const PY_SCOPE_COMPREHENSIONS = new Set(['list_comprehension', 'set_comprehension', 'dictionary_comprehension', 'generator_expression']);
 const PY_SCOPE_WALK = [...PY_SCOPE_FUNCTIONS, ...PY_SCOPE_COMPREHENSIONS, 'class_definition',
@@ -1301,27 +1316,87 @@ function jsTsLoadsModule(value: any): boolean {
 }
 
 /**
- * The name an initialiser aliases (`utils` in `const m = utils`, `const {
- * validate } = utils.sub`, Python `m = a`), or undefined when it computes a new
- * value (a call, a literal, `this`).
+ * A root no frame binds: what a value that loads a module (`require('./a')`,
+ * `importlib.import_module('a')`) or a parameter typed as one (`typeof A`,
+ * `ModuleType`) aliases, so a local holding it is never a non-module local.
  */
-function aliasRoot(value: any, python: boolean): string | undefined {
-  let node = value;
-  for (;;) {
-    if (!node) return undefined;
-    const type = node.type;
-    if (type === 'identifier') return node.text;
-    if (type === 'await_expression' || type === 'parenthesized_expression' || type === 'non_null_expression' ||
-      type === 'as_expression' || type === 'satisfies_expression') node = node.namedChild(0);
-    else if (python ? type === 'attribute' : type === 'member_expression') node = node.childForFieldName?.('object');
-    else return undefined;
+const MODULE_ROOT = '\0module';
+
+/** Python calls that return a module. */
+const PY_MODULE_LOADERS = new Set(['importlib.import_module', 'import_module', '__import__']);
+
+/**
+ * The names a value may alias (`utils` in `const m = utils` and `const {
+ * validate } = utils.sub`, both sides of `o.impl ?? A`, `a or b`, either
+ * branch of a conditional, the elements of `[A, B]` or Python `a, b`), or
+ * undefined when it computes a new value (a call, a literal, `this`). A value
+ * that loads a module gives MODULE_ROOT.
+ */
+function valueRoots(value: any, python: boolean): string[] | undefined {
+  if (!value) return undefined;
+  const type = value.type;
+  if (type === 'identifier') return [value.text];
+  const many = (nodes: any[]): string[] | undefined => {
+    const roots = nodes.flatMap(node => valueRoots(node, python) ?? []);
+    return roots.length > 0 ? roots : undefined;
+  };
+  if (python) {
+    switch (type) {
+      case 'attribute': return valueRoots(value.childForFieldName?.('object'), python);
+      case 'subscript': return valueRoots(value.childForFieldName?.('value'), python);
+      case 'parenthesized_expression': case 'await': return valueRoots(value.namedChild(0), python);
+      case 'boolean_operator':
+        return many([value.childForFieldName?.('left'), value.childForFieldName?.('right')]);
+      // `a if c else b`: the condition is not the value.
+      case 'conditional_expression': return many([value.namedChild(0), value.namedChild(2)]);
+      case 'expression_list': case 'tuple': case 'list': case 'set': return many(value.namedChildren);
+      case 'call': return PY_MODULE_LOADERS.has(value.childForFieldName?.('function')?.text) ? [MODULE_ROOT] : undefined;
+      default: return undefined;
+    }
+  }
+  if (jsTsLoadsModule(value)) return [MODULE_ROOT];
+  switch (type) {
+    case 'member_expression': return valueRoots(value.childForFieldName?.('object'), python);
+    case 'subscript_expression': return valueRoots(value.childForFieldName?.('object'), python);
+    case 'await_expression': case 'parenthesized_expression': case 'non_null_expression':
+    case 'as_expression': case 'satisfies_expression':
+      return valueRoots(value.namedChild(0), python);
+    case 'binary_expression': {
+      const op = value.childForFieldName?.('operator')?.type;
+      return op === '??' || op === '||' || op === '&&'
+        ? many([value.childForFieldName?.('left'), value.childForFieldName?.('right')])
+        : undefined;
+    }
+    case 'ternary_expression':
+      return many([value.childForFieldName?.('consequence'), value.childForFieldName?.('alternative')]);
+    case 'array': return many(value.namedChildren);
+    default: return undefined;
   }
 }
 
 /**
+ * What a parameter aliases: the roots of its default value (`mod = A`,
+ * Python `mod=a`), or MODULE_ROOT when its type says it holds a module
+ * (`mod: typeof A`, Python `mod: ModuleType`). Undefined for a plain parameter.
+ */
+function parameterRoots(param: any, python: boolean): string[] | undefined {
+  const type = param?.childForFieldName?.('type');
+  if (python ? /\bModuleType\b/.test(type?.text ?? '') : /^:\s*typeof\b/.test(type?.text ?? '')) return [MODULE_ROOT];
+  // JavaScript writes a default as `mod = A` (assignment_pattern), TypeScript
+  // and Python as a `value` field.
+  const value = !python && param?.type === 'assignment_pattern' ? param.childForFieldName?.('right') : param?.childForFieldName?.('value');
+  return valueRoots(value, python);
+}
+
+/** Python calls that wrap a function and keep it callable as an attribute. */
+const PY_FUNCTION_WRAPPERS = new Set(['staticmethod', 'classmethod', 'partial', 'functools.partial']);
+
+/**
  * The name at the root of a value assigned to a property when it may be a
- * function defined elsewhere (`validate`, `mod.validate`, `validate.bind(this)`),
- * so a later `x.prop()` may call a module-level function, not a method. Null
+ * function defined elsewhere (`validate`, `mod.validate`, `validate.bind(this)`,
+ * `staticmethod(validate)`), so a later `x.prop()` may call a module-level
+ * function, not a method. A class-body binding (Python `v = validate`, a JS/TS
+ * class field `validate = validate`) is such a property too. Null
  * for `this.m` (a method of the class); undefined for any other value.
  */
 function referenceRoot(value: any, python: boolean): string | null | undefined {
@@ -1338,6 +1413,9 @@ function referenceRoot(value: any, python: boolean): string | null | undefined {
       const fn = node.childForFieldName?.('function');
       if (fn?.type !== 'member_expression' || fn.childForFieldName?.('property')?.text !== 'bind') return undefined;
       node = fn.childForFieldName?.('object');
+    } else if (python && type === 'call' && PY_FUNCTION_WRAPPERS.has(node.childForFieldName?.('function')?.text)) {
+      // `staticmethod(validate)`
+      node = node.childForFieldName?.('arguments')?.namedChild(0);
     } else return undefined;
   }
 }
@@ -1390,10 +1468,10 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
     const root = referenceRoot(value, python);
     if (typeof root === 'string') pendingProperties.push({ prop, start, frame: frames[frames.length - 1], name: root });
   };
-  const bindAlias = (frame: CallScopeFrame | undefined, names: Set<string>, root: string): void => {
+  const bindAlias = (frame: CallScopeFrame | undefined, names: Set<string>, roots: string[]): void => {
     if (!frame || frame.moduleLike) return;
     frame.aliases ??= new Map();
-    for (const name of names) frame.aliases.set(name, root);
+    for (const name of names) frame.aliases.set(name, roots);
   };
   const newFrame = (node: any, type: string, body?: any): CallScopeFrame => ({
     type, end: node.endIndex, bodyStart: body?.startIndex ?? node.startIndex, names: new Set(), calleeNames: new Set(),
@@ -1404,6 +1482,22 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
     for (const name of names) {
       frame.names.add(name);
       if (calleeToo) frame.calleeNames.add(name);
+    }
+  };
+  // Names bound to a value: an alias of its roots when it has any, else locals.
+  const bindValue = (frame: CallScopeFrame | undefined, names: Set<string>, roots: string[] | undefined): void => {
+    if (roots !== undefined) bindAlias(frame, names, roots);
+    else bind(frame, names);
+  };
+  // A function's parameters, each a local or an alias of what it defaults to.
+  const bindParameters = (frame: CallScopeFrame, params: any): void => {
+    const list = params?.type === (python ? 'parameters' : 'formal_parameters') || params?.type === 'lambda_parameters'
+      ? params.namedChildren : [params];
+    for (const param of list) {
+      const names = new Set<string>();
+      if (python) pythonTargetNames(param, names);
+      else jsTsPatternNames(param, names);
+      bindValue(frame, names, parameterRoots(param, python));
     }
   };
   // The innermost function (Python: or class) a `var` / assignment belongs to.
@@ -1437,8 +1531,7 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
     if (python) {
       if (PY_SCOPE_FUNCTIONS.has(type)) {
         const frame = newFrame(node, type, node.childForFieldName?.('body'));
-        pythonTargetNames(node.childForFieldName?.('parameters'), frame.names);
-        for (const name of frame.names) frame.calleeNames.add(name);
+        bindParameters(frame, node.childForFieldName?.('parameters'));
         frames.push(frame);
       } else if (PY_SCOPE_COMPREHENSIONS.has(type)) {
         frames.push(newFrame(node, type));
@@ -1446,15 +1539,21 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
         frames.push({ ...newFrame(node, type), hidden: true });
       } else if (type === 'assignment' || type === 'augmented_assignment' || type === 'for_statement') {
         const left = node.childForFieldName?.('left');
-        const right = type === 'assignment' ? node.childForFieldName?.('right') : undefined;
+        const right = type === 'augmented_assignment' ? undefined : node.childForFieldName?.('right');
         if (left?.type === 'attribute') assignProperty(left.childForFieldName?.('attribute')?.text, right, node.startIndex);
         pythonTargetNames(left, names);
-        const root = left?.type === 'identifier' ? aliasRoot(right, true) : undefined;
-        if (root !== undefined) bindAlias(functionFrame(), names, root);
-        else bind(functionFrame(), names);
+        const frame = functionFrame();
+        // A class-body binding is an attribute: `v = staticmethod(validate)`
+        // makes `self.v()` a call of `validate`.
+        if (type === 'assignment' && left?.type === 'identifier' && frame?.type === 'class_definition') {
+          assignProperty(left.text, right, node.startIndex);
+        }
+        // `m = a`, `m = o.impl or a`; a loop variable takes what it iterates over.
+        const roots = left?.type === 'identifier' || type === 'for_statement' ? valueRoots(right, true) : undefined;
+        bindValue(frame, names, roots);
       } else if (type === 'for_in_clause') {
         pythonTargetNames(node.childForFieldName?.('left'), names);
-        bind(frames[frames.length - 1], names);
+        bindValue(frames[frames.length - 1], names, valueRoots(node.childForFieldName?.('right'), true));
       } else if (type === 'as_pattern') {
         pythonTargetNames(node.childForFieldName?.('alias'), names);
         bind(functionFrame(), names);
@@ -1486,13 +1585,13 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
     }
     if (JS_TS_SCOPE_FUNCTIONS.has(type)) {
       const frame = newFrame(node, type, node.childForFieldName?.('body'));
-      jsTsPatternNames(node.childForFieldName?.('parameters') ?? node.childForFieldName?.('parameter'), frame.names);
       // A named function expression's own name is visible only inside it.
       if (type === 'function_expression' || type === 'function' || type === 'generator_function') {
         const own = node.childForFieldName?.('name');
         if (own) frame.names.add(own.text);
       }
       for (const name of frame.names) frame.calleeNames.add(name);
+      bindParameters(frame, node.childForFieldName?.('parameters') ?? node.childForFieldName?.('parameter'));
       frames.push(frame);
     } else if (JS_TS_SCOPE_BLOCKS.has(type)) {
       const frame = newFrame(node, type);
@@ -1500,7 +1599,16 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
       const outer = frames[frames.length - 1];
       if (type === 'statement_block' && (outer?.type === 'internal_module' || outer?.type === 'module')) frame.moduleLike = true;
       if (type === 'catch_clause') jsTsPatternNames(node.childForFieldName?.('parameter'), frame.names);
-      if (type === 'for_in_statement' && node.childForFieldName?.('kind')) jsTsPatternNames(node.childForFieldName?.('left'), frame.names);
+      let loopRoots: string[] | undefined;
+      if (type === 'for_in_statement' && node.childForFieldName?.('kind')) {
+        const declared = new Set<string>();
+        jsTsPatternNames(node.childForFieldName?.('left'), declared);
+        // `for (const m of [A, B])` takes what it iterates over; `in` gives keys.
+        const of = node.children.some((child: any) => !child.isNamed && child.type === 'of');
+        loopRoots = of ? valueRoots(node.childForFieldName?.('right'), false) : undefined;
+        if (loopRoots !== undefined) bindAlias(frame, declared, loopRoots);
+        else for (const name of declared) frame.names.add(name);
+      }
       for (const name of frame.names) frame.calleeNames.add(name);
       frames.push(frame);
     } else if (type === 'class_body' || type === 'internal_module' || type === 'module') {
@@ -1520,9 +1628,9 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
         jsTsPatternNames(pattern, declared);
         const value = declarator.childForFieldName?.('value');
         if (jsTsLoadsModule(value)) continue;
-        const root = aliasRoot(value, false);
-        if (root !== undefined) {
-          bindAlias(frame, declared, root);
+        const roots = valueRoots(value, false);
+        if (roots !== undefined) {
+          bindAlias(frame, declared, roots);
           continue;
         }
         const functionValued = pattern?.type === 'identifier' && JS_TS_FUNCTION_VALUES.has(value?.type);
@@ -1533,6 +1641,10 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
       if (left?.type === 'member_expression') {
         assignProperty(left.childForFieldName?.('property')?.text, node.childForFieldName?.('right'), node.startIndex);
       }
+    } else if (type === 'public_field_definition' || type === 'field_definition') {
+      // A class field holding a reference: `validate = validate`.
+      const key = node.childForFieldName?.(type === 'field_definition' ? 'property' : 'name');
+      if (key?.type === 'property_identifier') assignProperty(key.text, node.childForFieldName?.('value'), node.startIndex);
     } else if (type === 'object') {
       for (const child of node.namedChildren) {
         if (child.type === 'shorthand_property_identifier') assignProperty(child.text, child, child.startIndex);
@@ -1563,31 +1675,32 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
   // Whether `name` at `start` names a parameter or local. `receiver`: any local
   // counts; otherwise (a plain call) a local initialised with a function or
   // class is that entity, not an unrelated local.
+  // An alias is local only when every name it aliases is; after an alias the
+  // question is whether that root is any local at all.
   const isLocal = (name: string, start: number, innermost: CallScopeFrame | undefined, receiver: boolean): boolean => {
-    // After an alias, the question is whether its root is any local at all.
-    let aliased = false;
-    let hops = 0;
-    let frame = innermost;
-    while (frame) {
-      if (frame.hidden || frame.moduleLike || start < frame.bodyStart) {
+    // Lookups left for this question: `x = x`, a cycle or a long chain gives
+    // up, which keeps the call as it was.
+    let budget = 32;
+    const lookup = (name: string, innermost: CallScopeFrame | undefined, aliased: boolean, depth: number): boolean => {
+      if (--budget < 0 || depth > 8) return false;
+      let frame = innermost;
+      while (frame) {
+        if (frame.hidden || frame.moduleLike || start < frame.bodyStart) {
+          frame = frame.outer;
+          continue;
+        }
+        if (frame.globals?.has(name)) return false;
+        const roots = frame.aliases?.get(name);
+        // The roots are looked up from this frame outward.
+        const from: CallScopeFrame = frame;
+        if (roots !== undefined) return roots.every(root => lookup(root, from, true, depth + 1));
+        if ((receiver || aliased ? frame.names : frame.calleeNames).has(name)) return true;
+        if (!receiver && frame.names.has(name)) return false;
         frame = frame.outer;
-        continue;
       }
-      if (frame.globals?.has(name)) return false;
-      const root = frame.aliases?.get(name);
-      if (root !== undefined) {
-        // `x = x` or a cycle: give up, which keeps the call as it was.
-        if (++hops > 8) return false;
-        // The root is looked up from this frame outward.
-        name = root;
-        aliased = true;
-        continue;
-      }
-      if ((receiver || aliased ? frame.names : frame.calleeNames).has(name)) return true;
-      if (!receiver && frame.names.has(name)) return false;
-      frame = frame.outer;
-    }
-    return false;
+      return false;
+    };
+    return lookup(name, innermost, false, 0);
   };
   for (const call of pending) {
     if (isLocal(call.name, call.start, call.frame, call.receiver)) {
@@ -3415,6 +3528,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
 
     // Track class ranges for containment: [name, startLine, endLine]
     const classRanges: Array<{ name: string; start: number; end: number }> = [];
+    // Names of members extracted with no container (FileParseResult.bareMembers).
+    const bareMembers = new Set<string>();
     // PHP class name → the class it `extends`, for `parent::method()`.
     const phpParentClass = new Map<string, string>();
     // class name → the bases it extends. A `super` call is rewritten to the
@@ -3657,6 +3772,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         if (kind === 'class' || kind === 'interface' || kind === 'trait') {
           classRanges.push({ name, start: lineStart, end: lineEnd });
         }
+        if (!effectiveContainer && isBareMemberDefinition(defNode, kind)) bareMembers.add(name);
 
         if (effectiveContainer) {
           relationships.push({ srcName: effectiveContainer, dstName: name, predicate: 'CONTAINS' });
@@ -4470,6 +4586,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       ...(receiverTypedCalls.length ? { receiverTypedCalls } : {}),
       ...(tsGlobalTypes.length ? { tsGlobalTypes } : {}),
       ...(tsModule ? { tsModule: true as const } : {}),
+      ...(bareMembers.size ? { bareMembers: [...bareMembers].sort() } : {}),
       fileRole: classifyFileRole(filePath, source),
     };
   } catch (e) {
@@ -4607,6 +4724,9 @@ export function summarizeParseResult(r: FileParseResult): FileSummary {
     ...(r.importAliases ? { importAliases: r.importAliases } : {}),
     ...(r.tsGlobalTypes ? { tsGlobalTypes: r.tsGlobalTypes } : {}),
     ...(r.tsModule ? { tsModule: true as const } : {}),
+    // Always present, so a summary written before #1020 (no field) is told
+    // apart from one with no bare members.
+    bareMembers: r.bareMembers ?? [],
     refs: [...refs].sort(),
   };
   return { ...summary, sig: summarySignature(summary) };
@@ -6223,12 +6343,17 @@ export function resolveEdges(
   }
 
   /**
-   * The keys of `name` in a file that belong to a member (`Class.name`), not
-   * to a module-scope declaration (key `name`): what a member call that cannot
-   * be a module-level function may land on (#1020).
+   * The keys of `name` in a file that belong to a member, not to a
+   * module-scope declaration: what a member call that cannot be a module-level
+   * function may land on (#1020). That is every `Class.name` key, and the bare
+   * key `name` when the file's summary lists it among its bare members (a Rust
+   * `impl` function, a JS object-literal method). A file with no summary, or
+   * one written before bareMembers existed, counts its bare key too, as before.
    */
   function memberQKeys(filePath: string, name: string): string[] {
-    return [...new Set(fileQKeys.get(filePath)?.get(name) ?? [])].filter(qk => qk !== name);
+    const bare = summaries.get(filePath)?.bareMembers;
+    const bareIsMember = bare === undefined || bare.includes(name);
+    return [...new Set(fileQKeys.get(filePath)?.get(name) ?? [])].filter(qk => qk !== name || bareIsMember);
   }
 
   function definesMember(filePath: string, name: string): boolean {
@@ -7098,6 +7223,30 @@ export function resolveEdges(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Whether a definition the parser keeps without a container is still a member,
+ * reached only through a receiver (FileParseResult.bareMembers): any method
+ * (a JS/TS object-literal method), a JS/TS `obj.m = function () {}`
+ * assignment other than to `exports`, and a Rust function inside an `impl` or
+ * `trait` block.
+ */
+function isBareMemberDefinition(defNode: any, kind: NodeKind): boolean {
+  if (kind === 'method') return true;
+  if (defNode.type === 'expression_statement') {
+    const left = defNode.namedChild(0)?.type === 'assignment_expression'
+      ? defNode.namedChild(0).childForFieldName('left') : undefined;
+    if (left?.type !== 'member_expression') return false;
+    // `exports.f = function` is the module's own function, not a member.
+    const object = left.childForFieldName('object')?.text;
+    return object !== 'exports' && object !== 'module.exports';
+  }
+  if (defNode.type === 'function_item') {
+    const owner = defNode.parent?.type === 'declaration_list' ? defNode.parent.parent?.type : undefined;
+    return owner === 'impl_item' || owner === 'trait_item';
+  }
+  return false;
+}
 
 function findEnclosing(
   ranges: Array<{ name: string; start: number; end: number }>,

@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { parseFile, resolveEdges as resolveEdgesWithTier, type FileParseResult, type ResolvedEdge } from '../index.js';
+import { buildGlobalResolutionIndex, parseFile, resolveEdges as resolveEdgesWithTier, summarizeParseResult, type FileParseResult, type ResolvedEdge } from '../index.js';
 import { resolveEdges } from './helpers/untiered.js';
 import { buildPatch, buildPatchWithResolution } from '../patch-builder.js';
 
@@ -508,6 +508,109 @@ describe('member calls and calls to locals across files (#1020)', () => {
   it('Rust: a method call does not resolve to another file\'s free function', () => {
     const lib = parse('src/lib.rs', 'pub fn validate(x: i32) -> i32 { x }\n');
     const caller = parse('src/main.rs', 'fn t(conn: Conn) {\n  conn.validate();\n}\n');
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/main.rs')).toEqual([]);
+  });
+
+  // A receiver that may hold a module through a compound value, a parameter's
+  // default or type, a loop or importlib is not a non-module local.
+  it('TypeScript: a receiver holding a module through ??, a default, typeof or a loop still reaches the module function', () => {
+    const lib = parse('src/a.ts', 'export function validate(x: number) { return x; }\n');
+    const caller = parse('src/b.ts', [
+      "import * as A from './a';",
+      'export function g(o: Opts) { const m = o.impl ?? A; m.validate(1); }',
+      'export function h(mod: typeof A) { mod.validate(1); }',
+      'export function d(mod = A) { mod.validate(1); }',
+      'export function l() { for (const m of [A]) m.validate(1); }',
+      'export function c(o: Opts) { const m = o.flag ? o.impl : o.other; m.validate(1); }',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts').sort()).toEqual([
+      'd -> src/a.ts:validate', 'g -> src/a.ts:validate', 'h -> src/a.ts:validate', 'l -> src/a.ts:validate',
+    ]);
+  });
+
+  it('JavaScript: a parameter defaulting to a module still reaches the module function', () => {
+    const lib = parse('src/a.js', 'export function validate(x) { return x; }\n');
+    const caller = parse('src/b.js', "import * as A from './a';\nexport function d(mod = A) { mod.validate(1); }\nexport function p(conn) { conn.validate(1); }\n");
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.js')).toEqual(['d -> src/a.js:validate']);
+  });
+
+  it('Python: a receiver holding a module through a default, importlib, or/if or a loop still reaches the module function', () => {
+    const lib = parse('pkg/a.py', 'def validate(x):\n    return x\n');
+    const caller = parse('pkg/b.py', [
+      'import importlib',
+      'from pkg import a',
+      '',
+      'def run(mod=a):',
+      '    mod.validate(1)',
+      '',
+      'def dyn():',
+      "    m = importlib.import_module('pkg.a')",
+      '    m.validate(1)',
+      '',
+      'def either(o):',
+      '    m = o.impl or a',
+      '    m.validate(1)',
+      '',
+      'def loop():',
+      '    for m in (a,):',
+      '        m.validate(1)',
+      '',
+      'def local(conn):',
+      '    for c in conn.items:',
+      '        c.validate(1)',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'pkg/b.py').sort()).toEqual([
+      'dyn -> pkg/a.py:validate', 'either -> pkg/a.py:validate', 'loop -> pkg/a.py:validate', 'run -> pkg/a.py:validate',
+    ]);
+  });
+
+  // A class-body binding of a function is an attribute holding it.
+  it('Python: a class attribute holding a function still reaches it through self', () => {
+    const lib = parse('pkg/a.py', 'def validate(x):\n    return x\n');
+    const caller = parse('pkg/b.py', [
+      'from pkg.a import validate',
+      '',
+      'class S:',
+      '    validate = staticmethod(validate)',
+      '    def run(self):',
+      '        self.validate(1)',
+      '',
+      'class T:',
+      '    validate = validate',
+      '    def run(self):',
+      '        self.validate(1)',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'pkg/b.py').sort()).toEqual(['S.run -> pkg/a.py:validate', 'T.run -> pkg/a.py:validate']);
+  });
+
+  it('TypeScript: a class field holding an imported function still reaches it through this', () => {
+    const lib = parse('src/a.ts', 'export function validate(x: number) { return x; }\n');
+    const caller = parse('src/b.ts', "import { validate } from './a';\nexport class S {\n  validate = validate;\n  run() { this.validate(1); }\n}\n");
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts')).toEqual(['S.run -> src/a.ts:validate']);
+  });
+
+  it('Rust: a method call reaches a trait-impl method in another file', () => {
+    const lib = parse('src/shape.rs', 'pub trait Shape {\n    fn area(&self) -> f64;\n}\npub struct Sq;\nimpl Shape for Sq {\n    fn area(&self) -> f64 { 1.0 }\n}\n');
+    const caller = parse('src/main.rs', 'fn make(s: &dyn Shape) {\n    s.area();\n}\n');
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/main.rs')).toEqual(['make -> src/shape.rs:area']);
+  });
+
+  it('JavaScript: a member call on a parameter reaches an object-literal or prototype method in another file', () => {
+    const lib = parse('src/api.js', 'export const api = {\n  validate() { return 1; },\n};\nfunction Foo() {}\nFoo.prototype.save = function () {};\n');
+    const caller = parse('src/b.js', 'export function f(x) {\n  x.validate();\n  x.save();\n}\n');
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.js').sort()).toEqual(['f -> src/api.js:save', 'f -> src/api.js:validate']);
+  });
+
+  it('a summary written before bareMembers existed counts its bare keys as members', () => {
+    const lib = parse('src/shape.rs', 'pub fn area() -> f64 { 1.0 }\n');
+    const caller = parse('src/main.rs', 'fn make(s: &dyn Shape) {\n    s.area();\n}\n');
+    const { bareMembers: _b, ...old } = summarizeParseResult(lib);
+    const index = buildGlobalResolutionIndex([lib.filePath], new Map([[lib.filePath, old]]));
+    expect(callsFrom(resolveEdges([caller], undefined, index), 'src/main.rs')).toEqual(['make -> src/shape.rs:area']);
+    // With a current summary the free function is not a member call's target.
     expect(callsFrom(resolveEdges([lib, caller]), 'src/main.rs')).toEqual([]);
   });
 

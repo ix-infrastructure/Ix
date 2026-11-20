@@ -41,6 +41,13 @@ export interface FileSummary {
   tsGlobalTypes?: string[];
   /** TypeScript: the file is a module, so only its tsGlobalTypes are globals. Absent in older summaries. */
   tsModule?: true;
+  /**
+   * Members extracted with no container, keyed by their bare name
+   * (FileParseResult.bareMembers): what a member call may land on besides the
+   * `Class.name` keys. Absent in a summary written before #1020; resolution
+   * then counts every bare key of the file as a possible member, as it did.
+   */
+  bareMembers?: string[];
   /** Sorted unique names this file calls, references or extends (for IN-11). */
   refs: string[];
   /** Hash of what other files can resolve to here (`summarySignature`). */
@@ -50,7 +57,7 @@ export interface FileSummary {
 /** The fields of a summary other files bind to: what `summaryBindings` reads. */
 type BindingFields = Pick<FileSummary,
   'language' | 'qkeys' | 'exportPublicNames' | 'imports' | 'phpTypes' | 'receiverFactories' |
-  'receiverHeritage' | 'receiverPackage' | 'importAliases' | 'tsGlobalTypes'>;
+  'receiverHeritage' | 'receiverPackage' | 'importAliases' | 'tsGlobalTypes' | 'bareMembers'>;
 
 /**
  * A summary as the dependents functions read it. One read back from the CLI's
@@ -62,7 +69,7 @@ export type StoredFileSummary = Partial<FileSummary>;
 /**
  * What other files can bind to in a summary, as `key -> names`: one key per
  * entity name and qualified key, per export pair, PHP type, receiver factory,
- * receiver heritage, namespace export and TypeScript global. The key carries
+ * receiver heritage, namespace export, TypeScript global and bare member. The key carries
  * what the name resolves to, so `export { a as foo }` becoming
  * `export { b as foo }` changes a key although no name came or went. The
  * names are what a file referring to that binding names; every key has at
@@ -101,6 +108,8 @@ export function summaryBindings(s: Partial<BindingFields> | undefined): Map<stri
   }
   // TypeScript globals an unimported heritage base may name.
   for (const name of s.tsGlobalTypes ?? []) out.set(`g\0${name}`, [name]);
+  // Whether a member call (`x.m()`) may land on a bare-keyed `m` here.
+  for (const name of s.bareMembers ?? []) out.set(`b\0${pkg}\0${name}`, [name]);
   return out;
 }
 

@@ -604,9 +604,12 @@ export function buildPatchWithResolution(
 
   // A member call that cannot be a module-level function (`conn.validate()`
   // on a parameter, `self.close()`, `$x->m()`) lands only on a member of that
-  // name, and only on the one there is. Same rule as resolveEdges.
+  // name, and only on the one there is: a `Class.name` key, or the bare key of
+  // a member extracted with no container (a Rust `impl` function, a JS
+  // object-literal method). Same rule as resolveEdges.
+  const bareMembers = new Set(result.bareMembers ?? []);
   function resolveMemberKey(name: string): string {
-    const keys = [...new Set(nameToQKeys.get(name) ?? [])].filter(key => key !== name);
+    const keys = [...new Set(nameToQKeys.get(name) ?? [])].filter(key => key !== name || bareMembers.has(name));
     return keys.length === 1 ? keys[0] : noTargetKey(name);
   }
 

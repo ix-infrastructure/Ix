@@ -806,4 +806,75 @@ describe('same-file calls by receiver and scope (#1020)', () => {
     expect(now.size).toBe(2);
     expect(now).toEqual(before);
   });
+
+  // Members the parser keeps with no container have the bare key a function
+  // would: the member rule must still land on them.
+  it('Rust: a method call reaches a trait-impl method, which has no container', () => {
+    const { edges } = sameFileCalls('src/shape.rs', [
+      'trait Shape {',
+      '    fn area(&self) -> f64;',
+      '}',
+      'struct Sq;',
+      'impl Shape for Sq {',
+      '    fn area(&self) -> f64 { 1.0 }',
+      '}',
+      'fn run(q: Sq) {',
+      '    q.area();',
+      '}',
+      '',
+    ].join('\n'));
+    expect(edges).toEqual(['run -> area']);
+  });
+
+  it('JavaScript: a member call on a parameter reaches an object-literal method and a prototype method', () => {
+    const { edges } = sameFileCalls('src/api.js', [
+      'export const api = {',
+      '  validate() { return 1; },',
+      '};',
+      'function Foo() {}',
+      'Foo.prototype.save = function () {};',
+      'function f(x) {',
+      '  x.validate();',
+      '  x.save();',
+      '}',
+      '',
+    ].join('\n'));
+    expect(edges).toEqual(['f -> save', 'f -> validate']);
+  });
+
+  it('Python: a class attribute holding a module function still reaches it through self', () => {
+    const { edges } = sameFileCalls('src/f.py', [
+      'def validate(x):',
+      '    return x',
+      '',
+      'class C:',
+      '    validate = staticmethod(validate)',
+      '    def run(self):',
+      '        self.validate(1)',
+      '',
+    ].join('\n'));
+    expect(edges).toEqual(['C.run -> validate']);
+  });
+
+  it('JavaScript: a member call on a parameter does not land on a CommonJS export', () => {
+    const { edges } = sameFileCalls('src/api.js', [
+      'exports.validate = function () {};',
+      'function f(conn) {',
+      '  conn.validate();',
+      '}',
+      '',
+    ].join('\n'));
+    expect(edges).toEqual([]);
+  });
+
+  it('Rust: a method call still does not land on a free function of the name', () => {
+    const { edges } = sameFileCalls('src/lib.rs', [
+      'fn validate(x: i32) -> i32 { x }',
+      'fn run(conn: Conn) {',
+      '    conn.validate();',
+      '}',
+      '',
+    ].join('\n'));
+    expect(edges).toEqual([]);
+  });
 });
