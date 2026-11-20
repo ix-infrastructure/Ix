@@ -17,10 +17,6 @@ class Ix < Formula
       system "npm", "run", "build"
     end
 
-    # Install core-ingestion runtime (parser + tree-sitter grammars)
-    # The CLI loads these at runtime via a relative path from dist/cli/commands/
-    (prefix/"core-ingestion").install Dir["core-ingestion/dist", "core-ingestion/node_modules", "core-ingestion/package.json"]
-
     cd "ix-cli" do
       system "npm", "install", "--silent"
       # Sync package.json version with the formula version
@@ -56,6 +52,15 @@ class Ix < Formula
         exec "#{Formula["node@22"].opt_bin}/node" "#{libexec}/dist/cli/main.js" "$@"
       EOS
     end
+
+    # Install core-ingestion runtime (parser + tree-sitter grammars)
+    # The CLI loads these at runtime via a relative path from dist/cli/commands/
+    #
+    # Only now that ix-cli has compiled: `install` moves the files, and ix-cli's
+    # tsc reads core-ingestion's declarations from ../core-ingestion/dist (the
+    # `paths` entries in ix-cli/tsconfig.json, #953). Moved any earlier, they
+    # are gone when tsc looks for them and the build fails with TS2307.
+    (prefix/"core-ingestion").install Dir["core-ingestion/dist", "core-ingestion/node_modules", "core-ingestion/package.json"]
   end
 
   def caveats
