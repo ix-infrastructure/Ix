@@ -9,8 +9,8 @@ import { relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
 import { projectRow } from "../output-shape.js";
 import { normalizeForPathMatch, normalizePathSeparators } from "../path-match.js";
-import { nextPageCommand, parseOffset } from "../paging.js";
-import { formatOption, pageOffsetOption } from "../options.js";
+import { nextPageCommand } from "../paging.js";
+import { formatOption, pageOffsetOption, pagingValues } from "../options.js";
 
 /**
  * The most rows one /v1/list call returns. The backend clamps the request's
@@ -134,8 +134,7 @@ Examples:
       kind: string; path?: string; limit: string; offset?: string; format: string;
     }, cmd: Command) => {
       const client = createClient();
-      const limit = parseInt(opts.limit, 10);
-      const offset = parseOffset(opts.offset);
+      const { limit, offset } = pagingValues(opts);
 
       // Pass --path as a server-side scope so the LIMIT is applied AFTER path
       // filtering (otherwise a capped fetch can truncate away the target before

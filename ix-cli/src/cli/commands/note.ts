@@ -6,6 +6,7 @@ import { createClient } from "../config.js";
 import type { Note, NoteSearchResult, NoteTag } from "../../client/types.js";
 import { readStdin, relativeTime, renderRows, reportWriteTarget, shortId } from "../memory-render.js";
 import { rememberRecent, resolveRecent } from "../recent.js";
+import { parseLimit } from "../paging.js";
 
 /**
  * `ix note`: create, list, show, supersede and retract notes in the local
@@ -178,7 +179,7 @@ a label anyone can set, not an authenticated identity.
       const opts = subOpts<ListOpts>(cmd);
       const tag = validTag(opts.tag);
       if (tag === null) return;
-      const limit = opts.limit ? parseInt(opts.limit, 10) : undefined;
+      const limit = opts.limit ? parseLimit(opts.limit) : undefined;
       if (limit != null && (Number.isNaN(limit) || limit <= 0)) {
         console.error(chalk.red("--limit must be a positive integer"));
         process.exitCode = 1;
