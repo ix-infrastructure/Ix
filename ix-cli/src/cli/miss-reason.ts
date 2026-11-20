@@ -10,6 +10,7 @@ import { SKIPPED_DIRS, isGeneratedFile, isSupportedSourceFile } from "./file-dis
 import { isFileStale } from "./stale.js";
 import type { TextMatch } from "./text-matches.js";
 import { normalizeForPathMatch } from "./path-match.js";
+import { envFlag } from "./env.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -110,7 +111,7 @@ function probedName(symbol: string): string {
  * that pays for its own lookup before the probe checks this first.
  */
 export function missProbeWouldRun(symbol: string): boolean {
-  if (process.env[MISS_PROBE_ENV] === "0") return false;
+  if (!envFlag(MISS_PROBE_ENV)) return false;
   if (PROBE_BUDGET_MS - probeTimeSpent() <= 0) return false;
   return /^[A-Za-z_$][\w$]*$/.test(probedName(symbol));
 }

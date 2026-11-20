@@ -10,6 +10,7 @@
  * - Results collected via Promise.all preserve input ordering.
  */
 import { Worker } from 'node:worker_threads';
+import { envNumber } from '../env.js';
 
 /**
  * The 'error' listener left on a worker the pool has let go of.
@@ -37,9 +38,7 @@ type Task = {
  * package at runtime.
  */
 function parseBudgetMsFromEnv(): number {
-  const raw = process.env.IX_PARSE_BUDGET_MS;
-  const n = raw === undefined || raw.trim() === '' ? Number.NaN : Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : 10_000;
+  return envNumber('IX_PARSE_BUDGET_MS');
 }
 
 export class ParsePool {

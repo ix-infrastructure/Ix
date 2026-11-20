@@ -9,6 +9,7 @@ import { appendHookLog } from "./entry.js";
 import { hostAdapter, type HostAdapter } from "./host.js";
 import { parseObject, str } from "./hosts/fields.js";
 import { runHookMain, withDeadline } from "./io.js";
+import { envNumber, numberDefault } from "../env.js";
 import { canonicalPath, fingerprint, gitTopLevel, hookStateDir } from "./session.js";
 
 /**
@@ -43,7 +44,7 @@ import { canonicalPath, fingerprint, gitTopLevel, hookStateDir } from "./session
  * one deadline per run.
  */
 
-export const DEFAULT_AUTO_MAP_DEBOUNCE_SECONDS = 300;
+export const DEFAULT_AUTO_MAP_DEBOUNCE_SECONDS = numberDefault("IX_MAP_DEBOUNCE_SECONDS");
 
 export interface AutoMapOptions {
   /** Whose payload is on stdin: `claude` (default), `cursor`, `gemini` or `codex`. */
@@ -118,11 +119,9 @@ function adapterProjectDirs(adapter: HostAdapter, raw: string): string[] {
   return event ? adapter.projectDirs(event) : [];
 }
 
-/** IX_MAP_DEBOUNCE_SECONDS in ms: a whole number of seconds, 0 for none; anything else keeps 300 s. */
+/** IX_MAP_DEBOUNCE_SECONDS in ms: a whole number of seconds, 0 for none; anything else keeps 300 s (env.ts's parser). */
 export function autoMapDebounceMs(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env.IX_MAP_DEBOUNCE_SECONDS?.trim();
-  const seconds = raw !== undefined && /^\d+$/.test(raw) ? Number(raw) : DEFAULT_AUTO_MAP_DEBOUNCE_SECONDS;
-  return seconds * 1000;
+  return envNumber("IX_MAP_DEBOUNCE_SECONDS", env) * 1000;
 }
 
 /** The root's debounce stamp: `<hook-state>/auto-map/<hash of the root>.stamp`, holding the last attempt in epoch ms. */

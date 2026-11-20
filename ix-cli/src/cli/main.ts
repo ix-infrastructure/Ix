@@ -74,7 +74,8 @@ if (args[0] === "__map-refresh" && args[1] !== undefined) {
   //
   // One command for `ix mcp`'s child-process runner: phrase its hints for the
   // MCP session that asked, with the tools that session was offered.
-  if (process.env.IX_MCP_CHILD === "1") {
+  const { envFlag } = await import("./env.js");
+  if (envFlag("IX_MCP_CHILD")) {
     const [{ setProcessCaller }, { callerFromChildEnv }] = await Promise.all([
       import("./next-step.js"),
       import("../mcp/hints.js"),

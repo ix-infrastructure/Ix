@@ -263,7 +263,9 @@ describe("settings", () => {
     expect(autoMapDebounceMs({})).toBe(300_000);
     expect(autoMapDebounceMs({ IX_MAP_DEBOUNCE_SECONDS: "60" })).toBe(60_000);
     expect(autoMapDebounceMs({ IX_MAP_DEBOUNCE_SECONDS: " 0 " })).toBe(0);
-    for (const bad of ["", "-1", "5m", "abc", "1e3"]) expect(autoMapDebounceMs({ IX_MAP_DEBOUNCE_SECONDS: bad })).toBe(300_000);
+    for (const bad of ["", "-1", "5m", "abc", "2.5"]) expect(autoMapDebounceMs({ IX_MAP_DEBOUNCE_SECONDS: bad })).toBe(300_000);
+    // env.ts's one number parser: a whole decimal number, `1e3` included, is the value.
+    expect(autoMapDebounceMs({ IX_MAP_DEBOUNCE_SECONDS: "1e3" })).toBe(1_000_000);
   });
 
   it("keeps its stamps under <IX_HOME>/hook-state", () => {

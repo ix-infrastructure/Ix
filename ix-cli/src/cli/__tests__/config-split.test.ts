@@ -43,14 +43,17 @@ const clientModules = readdirSync(join(SRC, "client"))
   .map((f) => join(SRC, "client", f));
 
 describe("cli/config.ts split (#943)", () => {
-  it("client/ imports from cli/ only the endpoint and connection modules", () => {
+  // cli/env.ts (#948) is the environment-variable registry; it imports
+  // nothing, so the client can read IX_* settings through it.
+  it("client/ imports from cli/ only the endpoint, connection and env modules", () => {
     const direct = new Set<string>();
     for (const file of clientModules) {
       for (const target of edges(file, true)) {
         if (rel(target).startsWith("cli/")) direct.add(rel(target));
       }
     }
-    expect([...direct].sort()).toEqual(["cli/connection.ts", "cli/endpoint.ts"]);
+    expect([...direct].sort()).toEqual(["cli/connection.ts", "cli/endpoint.ts", "cli/env.ts"]);
+    expect(edges(join(SRC, "cli/env.ts"), true)).toEqual([]);
   });
 
   it("the client package never loads cli/config.ts, workspace selection or the read guard", () => {

@@ -1,6 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { randomUUID } from "node:crypto";
+import { envFlag } from "../cli/env.js";
 
 /**
  * The X-Correlation-Id this CLI sends on every backend request.
@@ -42,7 +43,7 @@ export function nextCorrelationId(): string {
  * out: it can carry the user's search text.
  */
 export function debugRequest(method: string, path: string, id: string, env: NodeJS.ProcessEnv = process.env): void {
-  if (env.IX_DEBUG !== "1") return;
+  if (!envFlag("IX_DEBUG", env)) return;
   const bare = path.split("?", 1)[0];
   process.stderr.write(`[debug] ${method} ${bare} ${CORRELATION_ID_HEADER}: ${id}\n`);
 }

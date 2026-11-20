@@ -12,6 +12,8 @@ const nodeModules = resolve(coreIngestionDir, 'node_modules');
 // idempotent: a cached node_modules (CI cache hit, or a normal local checkout)
 // skips the native tree-sitter recompile, which is the slowest and most
 // failure-prone step. Set IX_FORCE_INSTALL=1 to force a clean `npm ci`.
+// Formula/ix.rb relies on the skip: it runs `npm ci` in core-ingestion itself,
+// then `npm run build` here.
 if (process.env.IX_FORCE_INSTALL === '1' || !existsSync(nodeModules)) {
   execSync(`${npmCmd} ci --silent`, {
     cwd: coreIngestionDir,

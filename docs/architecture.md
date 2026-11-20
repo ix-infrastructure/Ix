@@ -237,16 +237,17 @@ There are three ways the CLI reaches a machine, and each has its own layout:
 |---|---|
 | Source checkout | `ix-cli/dist/` beside `core-ingestion/dist/` in the repository |
 | Release archive (used by `scripts/install/install.sh` and `install.ps1`, extracted to `~/.ix/cli`) | `cli/` (the CLI's `dist/`, `node_modules/`, `package.json`, `scripts/`, `assets/`), `core-ingestion/`, `compass/` |
-| Homebrew (`Formula/ix.rb`) | the CLI under `libexec/`, `core-ingestion/` under the formula prefix |
+| Homebrew (`Formula/ix.rb`) | the CLI under `libexec/`, `core-ingestion/` under the formula prefix; no `compass/` (`ix upgrade` fetches one into `~/.ix/cli/compass`) |
 
 **Rule:** a file the CLI reads at run time from outside `dist/` must be
 packaged in all three. Examples are `docker-compose.standalone.yml` (copied
 into `dist/` by the `build` script in `ix-cli/package.json`) and the banner
 inputs `ix-cli/scripts/render-logo.mjs` and `ix-cli/assets/logo.png`. Add a new
-one to the `build` script or to the staging step in
-`.github/workflows/release.yml`, and to `Formula/ix.rb`, which runs `tsc`
-directly rather than `npm run build`. Missing from one path, it fails only on
-that kind of install.
+one to the `build` script, which the release and `Formula/ix.rb` both run, or
+else to the staging step in `.github/workflows/release.yml` and to
+`Formula/ix.rb`. Missing from one path, it fails only on that kind of install.
+The formula builds the way the release does (`npm ci`, `npm run build`, then
+`npm prune --omit=dev`), so the two ship the same dependency tree.
 
 The release (`.github/workflows/release.yml`) runs when a `v*` tag is pushed.
 It builds the CLI and `core-ingestion` on a native runner per platform,

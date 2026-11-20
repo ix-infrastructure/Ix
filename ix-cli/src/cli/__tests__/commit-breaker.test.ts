@@ -43,16 +43,17 @@ describe("commitFailureLimit", () => {
     expect(commitFailureLimit("0.5")).toBe(5);
   });
 
-  it("falls back on the shapes parseInt and Number each got wrong", () => {
-    // parseInt read "1e3" as 1 -- a cutoff tripping on the very first failure --
-    // and Number reads it as 1000. Neither is what someone typing it meant, and
-    // guessing is worse than the documented default. Same for the values Number
-    // quietly coerces to 0, which would DISABLE the cutoff: the opposite of a
-    // conservative fallback.
-    expect(commitFailureLimit("1e3")).toBe(5);
-    expect(commitFailureLimit("0x10")).toBe(5);
+  it("reads what the shared number parser reads, never a prefix and never space as 0", () => {
+    // parseInt read "1e3" as 1 -- a cutoff tripping on the very first failure.
+    // Every IX_* number now goes through env.ts's parser (#948), which reads
+    // the union of what the old per-variable rules took: a value Number()
+    // reads in full, surrounding spaces ignored.
+    expect(commitFailureLimit("1e3")).toBe(1000);
+    expect(commitFailureLimit(" 3 ")).toBe(3);
+    // An all-space value is empty -- the default -- not Number("  "), which is
+    // 0 and would DISABLE the cutoff.
     expect(commitFailureLimit("  ")).toBe(5);
-    expect(commitFailureLimit(" 3 ")).toBe(5);
+    expect(commitFailureLimit("15x")).toBe(5);
   });
 });
 

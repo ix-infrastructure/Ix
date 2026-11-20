@@ -40,6 +40,7 @@
 // bounds the transient waits (0: no transient retries).
 // ---------------------------------------------------------------------------
 
+import { numberDefault } from "./env.js";
 import { httpStatusOf } from "../client/http-error.js";
 
 /** Lock contention, as opposed to the transport failures below. Kept separate
@@ -162,8 +163,12 @@ function withinBudget<T>(promise: Promise<T>, ms: number): Promise<T | undefined
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-/** Total time one call may spend on transient statuses, attempts and waits together (the default of `IX_COMMIT_TRANSIENT_RETRY_MS`). */
-export const TRANSIENT_RETRY_BUDGET_MS = 5_000;
+/**
+ * Total time one call may spend on transient statuses, attempts and waits
+ * together: the registered default of `IX_COMMIT_TRANSIENT_RETRY_MS`, read
+ * from env.ts so the two cannot drift.
+ */
+export const TRANSIENT_RETRY_BUDGET_MS = numberDefault("IX_COMMIT_TRANSIENT_RETRY_MS");
 /** Most transient retries one call makes, whatever the budget: a `Retry-After: 0` must not loop. */
 export const TRANSIENT_MAX_RETRIES = 3;
 /** Most re-sends after a 504: the backend may still be working on the first one. */

@@ -4,6 +4,7 @@ import type { Command } from "commander";
 import { applyOssSetup } from "./oss-setup.js";
 import { proIsAbsent } from "./pro-loader.js";
 import { OSS_FALLBACK_TABLE, registerOssFallbacks } from "./oss-fallbacks.js";
+import { envFlag } from "../env.js";
 import { OSS_COMMANDS, type RegisterCommand } from "./commands.js";
 
 /**
@@ -64,7 +65,7 @@ export function planStartup(
   env: NodeJS.ProcessEnv = process.env,
   isProAbsent: () => boolean = proIsAbsent,
 ): StartupPlan {
-  if (env[LOAD_ALL_COMMANDS_ENV] === "1") return { kind: "all" };
+  if (envFlag(LOAD_ALL_COMMANDS_ENV, env)) return { kind: "all" };
   const word = args[0];
   if (word === undefined) return { kind: "all" };
   const versionOnly = args.length === 1 && (word === "--version" || word === "-V");

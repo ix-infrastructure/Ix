@@ -9,10 +9,13 @@ import { claudeCodeAdapter } from "./hosts/claude.js";
  * Every `ix hook` subcommand keeps it: it exits 0 whatever happens, prints
  * nothing or exactly the host's JSON ({@link HostAdapter.writeContext}), keeps
  * its state under `<IX_HOME>/hook-state` (`session.ts`), and has one deadline
- * for the whole run, IX_HOOK_TIMEOUT_MS ({@link runHookMain}).
+ * for the whole run, IX_HOOK_TIMEOUT_MS ({@link runHookMain}). (env.ts imports
+ * nothing.)
  */
 
-export const DEFAULT_HOOK_TIMEOUT_MS = 3000;
+import { envFlag, envNumber, numberDefault } from "../env.js";
+
+export const DEFAULT_HOOK_TIMEOUT_MS = numberDefault("IX_HOOK_TIMEOUT_MS");
 
 /**
  * claude-post-edit's stdout: Claude Code reads
@@ -25,8 +28,7 @@ export function postToolUseOutput(additionalContext: string): string {
 }
 
 export function hookTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = Number(env.IX_HOOK_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_HOOK_TIMEOUT_MS;
+  return envNumber("IX_HOOK_TIMEOUT_MS", env);
 }
 
 /** All of stdin, or "" when there is none or it does not arrive in time. */
@@ -54,7 +56,7 @@ export async function runHookMain(
 ): Promise<void> {
   const started = Date.now();
   const timeout = hookTimeoutMs();
-  const debugOn = process.env.IX_HOOK_DEBUG === "1";
+  const debugOn = envFlag("IX_HOOK_DEBUG");
   const debug = (msg: string) => { if (debugOn) process.stderr.write(`[ix hook] ${msg}\n`); };
   let out: string | undefined;
   try {

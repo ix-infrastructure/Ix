@@ -219,6 +219,7 @@ source:
 ```bash
 brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/Ix
 brew install ix
+ix upgrade   # once, to fetch the graph visualizer that `ix view` opens
 ```
 
 For the full list, including the endpoints the installer reaches and the
