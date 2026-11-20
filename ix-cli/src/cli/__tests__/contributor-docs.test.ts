@@ -188,13 +188,16 @@ describe("the architecture document (#987)", () => {
     );
   });
 
-  it("every repo path it names exists", () => {
+  it("every source path it names exists without a prior build", () => {
     // Backticked tokens rooted at a top-level directory. Placeholders
     // (`commands/<name>.ts`) and globs are illustrations, not paths.
+    // The install-layout table also names generated output directories,
+    // which need not exist when npm test runs in a fresh source checkout.
     const roots = /^(?:ix-cli|core-ingestion|docs|docs-site|scripts|skills|Formula|\.github)\//;
     const named = [...read(ARCH).matchAll(/`([^`\s]+)`/g)]
       .map((m) => m[1].replace(/\(\)$/, ""))
-      .filter((t) => roots.test(t) && !/[<>*]/.test(t));
+      .filter((t) => roots.test(t) && !/[<>*]/.test(t))
+      .filter((t) => !/^(?:ix-cli|core-ingestion)\/dist\/$/.test(t));
     expect(named.length).toBeGreaterThan(20);
     const missing = [...new Set(named)].filter((p) => !existsSync(join(ROOT, p)));
     expect(missing).toEqual([]);

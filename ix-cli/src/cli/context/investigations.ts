@@ -13,6 +13,8 @@ import { renderNote, renderSection, renderWarning, renderWarningErr, reportFailu
 import { printJson } from "../format.js";
 
 import { renderBundle } from "./render.js";
+import { renderBundle as renderCompactBundle } from "../precise-context-render.js";
+import type { ContextSelectionOptions } from "../precise-context.js";
 import type { ContextBundle } from "./types.js";
 import { cmp } from "./util.js";
 
@@ -437,9 +439,13 @@ export function loadInvestigation(id: string, format?: string): SavedInvestigati
   return { ...state, id: displayId(state.id) };
 }
 
-export function renderSavedInvestigation(id: string, format: string): void {
+export function renderSavedInvestigation(id: string, format: string, options: ContextSelectionOptions & { full?: boolean } = { full: true }): void {
   const saved = loadInvestigation(id, format);
   if (!saved) return;
+  if (!options.full && (format === "json" || format === "llm")) {
+    renderCompactBundle(saved.bundle, format, options);
+    return;
+  }
   if (format === "json") {
     printJson(saved);
     return;

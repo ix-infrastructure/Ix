@@ -135,6 +135,11 @@ export interface ContextOptions extends Partial<BudgetSnapshot> {
   fromIssue?: string;
   /** With `--from-issue`: only the trusted starting points and a few ranked files. */
   lean?: boolean;
+  full?: boolean;
+  limit?: number;
+  cursor?: string;
+  /** Transient issue text for excerpt explanations; never serialized. */
+  issueQuery?: string;
   kind?: string;
   path?: string;
   pick?: number;
@@ -247,6 +252,11 @@ export function detectContextModeConflict(
   opts: ContextModeOptions,
   target?: string,
 ): string | undefined {
+  if ((opts.limit !== undefined || opts.cursor !== undefined)
+    && (opts.full || opts.save || opts.out || opts.list || opts.diff || !["json", "llm"].includes(opts.format ?? "text"))) {
+    return "--limit and --cursor shape compact JSON/LLM context only; drop them or use --format json|llm without --full, --save, --out, --list or --diff.";
+  }
+  if (opts.full && (opts.list || opts.diff)) return "--full shapes context output, not --list or --diff; drop --full.";
   if (opts.lean && opts.fromIssue === undefined) {
     return "--lean only shapes a bundle built with --from-issue; add --from-issue <file>, or drop --lean.";
   }

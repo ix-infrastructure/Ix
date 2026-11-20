@@ -3,6 +3,10 @@
 // `ix context --from-issue`: plan an issue's starting points, build its bundle
 // section, and the `--lean` view.
 
+import { contextSourceReader } from "../precise-context-render.js";
+import { leanContextCandidates, preciseContextLlmLines, selectContextItems } from "../precise-context.js";
+import { bundleFormat, clampBudgets } from "./options.js";
+
 import type { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import type { GraphNode } from "../../client/types.js";
@@ -63,6 +67,7 @@ export async function buildIssueBundle(
 ): Promise<ContextBundle | undefined> {
   const text = await readIssueOrReport(arg, opts.format);
   if (text === undefined) return undefined;
+  opts.issueQuery = text;
   const client = createClient({ query: true });
   const plan = await planIssueWith(client, text);
   // A path start has no node yet, and the graph may not have one either: it
@@ -249,6 +254,17 @@ export async function emitLeanIssue(arg: string, opts: ContextOptions): Promise<
   if (text === undefined) return;
   const client = createClient({ query: true });
   const view = await addUsedIn(client, leanIssueView(await planIssueWith(client, text)));
+  if (!opts.full && (opts.format === "json" || opts.format === "llm")) {
+    try {
+      const options = { ...opts, issueQuery: text, read: contextSourceReader(), maxChars: clampBudgets(opts, bundleFormat(opts.format)).maxChars - 200 };
+      const page = selectContextItems(leanContextCandidates(view, options), options);
+      if (opts.format === "json") printJson({ ...page, confidence: view.confidence, reason: view.reason });
+      else printLlmLines([...preciseContextLlmLines(page), ...(view.reason ? [llmLine("diagnostic", { reason: view.reason })] : [])]);
+    } catch (error) {
+      reportFailure("context_selection", (error as Error).message, opts.format);
+    }
+    return;
+  }
   if (opts.format === "json") {
     printJson({ kind: "issue_lean", ...view });
   } else if (opts.format === "llm") {

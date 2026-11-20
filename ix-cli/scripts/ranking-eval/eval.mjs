@@ -19,6 +19,8 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import * as dist from "../../dist/cli/explain/issue.js";
+import { leanContextCandidates, selectContextItems } from "../../dist/cli/precise-context.js";
+import { contextPrecisionComparison } from "../../../bench/agent-eval/precision.mjs";
 // Gold, the file list and the `base` plan use issue.ts as it was before this
 // branch, so the baseline and the scoring stay fixed while issue.ts changes.
 import { bm25Rank, isSourcePath, pickStartingPoints, rankIssueFiles } from "./baseline-issue.mjs";
@@ -41,7 +43,8 @@ if (set === "test" && args.final !== "yes-once") {
 const split = JSON.parse(readFileSync(`${HERE}/split.json`, "utf8"));
 const ids = new Set(split[set]);
 const only = args.only ? new Set(String(args.only).split(",")) : undefined;
-const rows = readFileSync("/home/ihock/src/ix-bench/results/external/polybench_verified.jsonl", "utf8")
+if (typeof args.dataset !== "string") throw new Error("Pass --dataset <polybench_verified.jsonl>; evaluation data is not bundled with Ix");
+const rows = readFileSync(args.dataset, "utf8")
   .split("\n").filter(Boolean).map((l) => JSON.parse(l))
   .filter((r) => ids.has(r.instance_id) && (!only || only.has(r.instance_id)));
 const MODULES = { impl: dist, picks };
@@ -87,9 +90,17 @@ for (const row of rows) {
       const scores = new Map(hits.map((h) => [h.path, h.score]));
       const lib = mod ?? { pickStartingPoints, rankIssueFiles };
       const { starts } = await lib.pickStartingPoints(query, { files: all, search, fileScore: (p) => scores.get(p) ?? 0 });
-      const planned = lib.rankIssueFiles({ starts, bm25: hits, near: new Map() }).map((r) => r.path);
+      const plannedFiles = lib.rankIssueFiles({ starts, bm25: hits, near: new Map() });
+      const planned = plannedFiles.map((r) => r.path);
       rec.plan = at(planned, gold);
       rec.starts = starts.map((s) => s.path);
+      // This offline study has lexical definitions, not a backend graph. Use
+      // the production selector; graph-related precision needs agent traces.
+      const page = selectContextItems(leanContextCandidates({ confidence: "high", startingPoints: starts,
+        alsoRanked: plannedFiles, unresolved: [] }, { read: repo.read, issueQuery: query }));
+      rec.contextPrecision = contextPrecisionComparison(planned, page.items, gold);
+      rec.precise = at(page.items.map((item) => item.path), gold);
+      rec.selection = page.selection;
     }
     lines.push(rec);
   }

@@ -4,6 +4,9 @@
 // `../context/`: options, saved investigations, issue mode, bundle assembly,
 // ranking, rendering and next-step planning.
 
+import { contextItemLimit } from "../precise-context.js";
+import { contextSourceReader, renderBundle } from "../precise-context-render.js";
+
 import type { Command } from "commander";
 import { dirname, join, resolve } from "node:path";
 
@@ -47,7 +50,6 @@ import {
   detectContextModeConflict,
   parseRequestedBudgets,
 } from "../context/options.js";
-import { renderBundle } from "../context/render.js";
 import type { ContextBundle } from "../context/types.js";
 
 /**
@@ -73,6 +75,9 @@ export function registerContextCommand(program: Command): void {
       "--lean",
       "With --from-issue: only the starting points Ix trusts and the next few files, or one line saying it trusts none",
     )
+    .option("--full", "Return the legacy bundle/row contract (JSON: ix-context-bundle/1)")
+    .option("--limit <n>", "Code items per JSON/LLM page (default: 8; range: 1-50; confidence floor: 0.55)", contextItemLimit)
+    .option("--cursor <cursor>", "Continue the same JSON/LLM query using its returned cursor")
     .addOption(kindOption())
     .addOption(pathOption())
     .addOption(pickOption())
@@ -124,7 +129,7 @@ async function runContext(target: string | undefined, opts: ContextOptions): Pro
   // The output the evidence budget is charged against; --out writes JSON.
   const fmt = opts.out ? "json" : bundleFormat(opts.format);
   if (opts.resume) {
-    renderSavedInvestigation(opts.resume, opts.format);
+    renderSavedInvestigation(opts.resume, opts.format, opts);
     return;
   }
   if (opts.list) {
@@ -328,7 +333,7 @@ async function emitBundle(bundle: ContextBundle, opts: ContextOptions): Promise<
     renderNote(`Wrote ${parsed.data.entities.length} entities, ${parsed.data.relationships.length} relationships, ${parsed.data.evidence.length} evidence items to ${out}`);
     return;
   }
-  renderBundle(bundle, opts.format);
+  renderBundle(bundle, opts.format, { ...opts, read: contextSourceReader() });
 }
 
 /**
