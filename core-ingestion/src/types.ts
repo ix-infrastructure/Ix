@@ -1,5 +1,10 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+// The op shapes, node kinds and edge predicates are defined in schema.ts.
+import type { PatchOp } from './schema.js';
+
+export type { PatchOp };
+
 export interface PatchSource {
   // uri is the provenance source URI. In the client-agnostic backend design it
   // is a workspace-relative path (POSIX separators), not an absolute host path.
@@ -17,10 +22,6 @@ export interface PatchSource {
   repoId?: string;
 }
 
-export interface PatchOp {
-  type: string;
-  [key: string]: unknown;
-}
 
 export interface GraphPatchPayload {
   patchId: string;

@@ -209,6 +209,12 @@ describe("impact llm helpers", () => {
     expect(lines[0]).toBe('impact target=verify_token kind=function risk=high category=boundary system_path=Auth,Core summary="Auth check; 14 sites"');
     expect(lines[1]).toBe('behavior text="Token validation"');
   });
+  it("impactHeaderLlm puts a container's path right after kind=, and prints none without one", () => {
+    const lines = impactHeaderLlm({ kind: "file", name: "auth.ts" }, risk, [], "src/auth.ts");
+    expect(lines[0]).toBe('impact target=auth.ts kind=file path=src/auth.ts risk=high category=boundary summary="Auth check; 14 sites"');
+    const bare = impactHeaderLlm({ kind: "file", name: "auth.ts" }, risk, [], undefined);
+    expect(bare[0]).toBe('impact target=auth.ts kind=file risk=high category=boundary summary="Auth check; 14 sites"');
+  });
   it("impactPropagationLlm sorts buckets by member count and emits flow first", () => {
     const lines = impactPropagationLlm(
       [{ region: { name: "small", kind: "module" }, members: [1] }, { region: { name: "big", kind: "subsystem" }, members: [1, 2, 3] }],

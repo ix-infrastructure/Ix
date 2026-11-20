@@ -86,15 +86,16 @@ describe("ix mcp", () => {
     expect(result.tools.map((tool) => tool.name)).toEqual(IX_MCP_TOOL_NAMES);
   });
 
-  it("covers every plugin tool that is not a composite or deprecated", async () => {
+  it("serves the plugin tools that remain, including ix_neighbors", async () => {
     const client = await connect(async () => ({ ok: true, stdout: "ok", stderr: "" }), true);
     const names = (await client.listTools()).tools.map((tool) => tool.name);
 
-    // The union exposed by ix-codex/cursor/gemini/openclaw/opencode-plugin,
-    // less ix_query (deprecated), ix_neighbors and ix_docs_tool (composites of
-    // callers/callees/depends and of overview), and ix_status (gemini's name
-    // for ix_health).
-    for (const tool of ["ix_decide", "ix_ingest", "ix_health", "ix_locate", "ix_impact"]) {
+    // Dropped on purpose: ix_query (deprecated) and ix_docs_tool (a composite
+    // of ix_overview). ix_neighbors is served. ix_status is Gemini's name for
+    // ix_health. ix_decide here is the Pro decision recorder; the
+    // openclaw/opencode `ix-decide` pre-edit verdict is a different tool and
+    // is not served (#998, mcp-plugin-consolidation.test.ts).
+    for (const tool of ["ix_decide", "ix_ingest", "ix_health", "ix_locate", "ix_impact", "ix_neighbors"]) {
       expect(names).toContain(tool);
     }
   });
@@ -114,6 +115,23 @@ describe("ix mcp", () => {
     expect(calls).toEqual([["locate", "--format=llm", "--", "Widget"]]);
     expect(result.isError).toBeFalsy();
     expect(result.content).toEqual([{ type: "text", text: "match name=Widget" }]);
+  });
+
+  it("forwards ix_locate pick and path, so a caller can act on an auto-picked answer's notice", async () => {
+    // An ambiguous name is answered for its top candidate with a notice that
+    // says "Use --pick <n> or --path to choose another": over MCP that has to
+    // be reachable from ix_locate itself.
+    const calls: string[][] = [];
+    const client = await connect(async (args) => {
+      calls.push(args);
+      return { ok: true, stdout: "match name=Widget", stderr: "" };
+    });
+
+    await client.callTool({ name: "ix_locate", arguments: { symbol: "Widget", pick: 2, path: "src/b" } });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(expect.arrayContaining(["locate", "--path=src/b", "--pick=2", "Widget"]));
+    expect(calls[0].indexOf("Widget")).toBeGreaterThan(calls[0].indexOf("--"));
   });
 
   it("marks a structured LLM error as an MCP error when the CLI exits successfully", async () => {
@@ -206,7 +224,7 @@ describe("ix mcp", () => {
     const calls: string[][] = [];
     const client = await connect(async (args) => {
       calls.push(args);
-      return { ok: true, stdout: "context target=Widget entities=2\nevidence score=0 kind=target title=Widget", stderr: "" };
+      return { ok: true, stdout: "context target=Widget entities=2\nevidence kind=target title=Widget", stderr: "" };
     });
 
     const result = await client.callTool({
@@ -222,7 +240,7 @@ describe("ix mcp", () => {
     // two copies of a bundle that can run to 20 KB.
     expect(result.structuredContent).toBeUndefined();
     expect(result.content).toEqual([
-      { type: "text", text: "context target=Widget entities=2\nevidence score=0 kind=target title=Widget" },
+      { type: "text", text: "context target=Widget entities=2\nevidence kind=target title=Widget" },
     ]);
   });
 
@@ -298,6 +316,28 @@ describe("ix mcp", () => {
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toBeUndefined();
     expect(result.content).toEqual([{ type: "text", text: "not json at all" }]);
+  });
+
+  it("marks a text-only answer as an MCP error on the structured path, never as a bundle", async () => {
+    // `ix context redrivePolicy --format json` exits 0 with a text_matches
+    // record (the name is a config key, not a symbol). structured: true asked
+    // for an ix-context-bundle/1; that record is not one.
+    const record = {
+      note: "text_matches",
+      target: "redrivePolicy",
+      message: '"redrivePolicy" is not a code symbol in the graph; source files that mention it:',
+      textMatches: [{ path: "lib/sqs.js", line: 88, snippet: "const redrivePolicy = event.redrivePolicy;" }],
+      shown: 1,
+      total: 1,
+    };
+    const client = await connect(async () => ({ ok: true, stdout: JSON.stringify(record), stderr: "" }));
+
+    const result = await client.callTool({ name: "ix_context", arguments: { target: "redrivePolicy", structured: true } });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+    // The files still reach the caller, as text.
+    expect(JSON.parse((result.content as Array<{ text: string }>)[0].text)).toEqual(record);
   });
 
   it("surfaces a CLI error record from the records path", async () => {
@@ -403,6 +443,27 @@ describe("ix mcp", () => {
     // Substring, not prefix: `ix-cli/src/a.ts` is what `ix inventory --path src`
     // would have returned, and ix_smells must agree with it.
     expect(parsed.candidates).toEqual([{ file: "ix-cli/src/a.ts", smell: "orphan" }]);
+  });
+
+  it("ix_smells filters on a candidate's path when it has one: file is only a basename", async () => {
+    const candidates = [
+      { file: "util.ts", path: "app/util.ts", smell: "orphan" },
+      { file: "util.ts", path: "lib/util.ts", smell: "orphan" },
+      { file: "app.ts", path: "lib/app.ts", smell: "orphan" },
+      // No path (an older backend): the basename is all there is to match.
+      { file: "legacy.ts", smell: "orphan" },
+    ];
+    const client = await connect(async () => ({ ok: true, stdout: JSON.stringify({ count: 4, candidates }), stderr: "" }));
+    const filtered = async (path: string) => {
+      const result = await client.callTool({ name: "ix_smells", arguments: { path } });
+      const content = (result as CallToolResult).content[0];
+      return JSON.parse(content?.type === "text" ? content.text : "{}").candidates;
+    };
+
+    expect(await filtered("app")).toEqual([candidates[0], candidates[2]]);
+    expect(await filtered("app/util")).toEqual([candidates[0]]);
+    expect(await filtered("lib/util.ts")).toEqual([candidates[1]]);
+    expect(await filtered("legacy")).toEqual([candidates[3]]);
   });
 
   it("a stale ix_smells answer goes through the same path filter and limit, stale fields kept", async () => {

@@ -4,23 +4,36 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import chalk from "chalk";
 import type { IxClient } from "../client/api.js";
+import type { GraphNode } from "../client/types.js";
 import { stderr } from "./stderr.js";
 import { applyRoleFilter } from "./role-filter.js";
 import { detectSystem } from "./system.js";
 import { requireReadWorkspaceId, resolveWorkspaceId } from "./bootstrap.js";
 import { readStitchScope, resolveWorkspaceRoot, stitchScopeCachePath, writeStitchScope } from "./config.js";
 import { ixHome } from "./ix-home.js";
-import { checkGraphHealth, isUnhealthy, type GraphHealth } from "./graph-health.js";
+import { checkGraphHealth, isUnhealthy } from "./graph-health.js";
 import { reportAmbiguousTarget, reportResolutionFailure, reportResolutionNotices } from "./ui.js";
 import { relativePath } from "./format.js";
 import { isQuiet } from "./output-shape.js";
 import { disambiguationHint } from "./next-step.js";
 import { explainSymbolMiss, missProbeWouldRun } from "./miss-reason.js";
+import { strictTargets } from "./outcome.js";
+import { reportTextMatches, sourceTextMatches, type TextMatch, type TextMatchSource } from "./text-matches.js";
 import { isBackendUnreachable } from "./errors.js";
-import { findTargetCandidates, rowsInclude, type TargetCandidate } from "./target-suggestions.js";
+import { findTargetCandidates, rowsInclude } from "./target-suggestions.js";
+import { isFileStemMatch } from "./candidate-origin.js";
+import { normalizeForPathMatch } from "./path-match.js";
+import { STRUCTURAL_KINDS, type GraphKind } from "./graph-model.js";
+import { httpStatusOf } from "../client/http-error.js";
+import { hasDefinitionOf, looksTypeLikeSymbol } from "./resolve/score.js";
 import {
-  candidateOrigin, isFileStemMatch, looksLikeCodeIdentifier, requestsNonCode,
-} from "./candidate-origin.js";
+  AMBIGUOUS_HINT, allCandidatesOf, applyPick as pickAmong, buildAmbiguous, candidateOf, cmpStr,
+  fuzzyNotice, importIdsOf, isFuzzyResult, nodePath, nodeToResolved, pickBest,
+  pickFromNotice as pickInNotice, pickedOutOfRange, rememberAll, roundRobinByFile, type Candidate,
+} from "./resolve/pick.js";
+import type {
+  AmbiguousResult, ResolutionMode, ResolutionNotice, ResolvedEntity, ResolveResult, Suggestion,
+} from "./resolve/types.js";
 
 /**
  * The read scope for the current working directory: a co-ingested multi-repo system
@@ -176,55 +189,6 @@ export async function resolveReadSystemId(
   return activeReadScope().systemId;
 }
 
-export type ResolutionMode = "exact" | "preferred-kind" | "scored" | "ambiguous" | "heuristic" | "fuzzy";
-
-export interface ResolvedEntity {
-  id: string;
-  kind: string;
-  name: string;
-  path?: string;
-  resolutionMode: ResolutionMode;
-}
-
-export interface AmbiguousResult {
-  resolutionMode: "ambiguous";
-  /**
-   * `container`: the type that holds the candidate (its CONTAINS parent, never
-   * a file), when the graph names one. Added after the list is ranked.
-   */
-  candidates: Array<{ id: string; name: string; kind: string; path?: string; line?: number; score?: number; rank?: number; container?: string }>;
-  diagnostics?: Array<{ code: string; message: string }>;
-  /** How many candidates tied (the candidate list shows at most 8 of them). */
-  total?: number;
-  /** True when the search window came back full, so `total` is a lower bound. */
-  truncated?: boolean;
-}
-
-/**
- * A resolved target that was a guess worth reporting. The result still resolves
- * (exit 0); the notice says which candidates were passed over, or that the
- * match was fuzzy. It is never an `error`, so plugin runners see no failure.
- */
-export interface ResolutionNotice {
-  code: "ambiguous_target" | "fuzzy_match";
-  target: string;
-  message: string;
-  chosen: { id: string; name: string; kind: string; path?: string };
-  candidates: AmbiguousResult["candidates"];
-  total: number;
-  truncated?: boolean;
-  /** Extra diagnostics, e.g. `pick_out_of_range`. */
-  diagnostics?: Array<{ code: string; message: string }>;
-}
-
-/**
- * A near-miss worth naming when a target does not resolve.
- *
- * A miss is a dead end for the caller: an agent that gets "no entity found"
- * spends its next turn running `ix search` by hand, and a person retypes the
- * name. The candidates are already in hand (or one search away), so they are
- * cheaper to hand over than to make the caller ask for.
- */
 /**
  * What a resolver needs from its caller.
  *
@@ -249,48 +213,27 @@ export interface ResolveOpts {
   silentMiss?: boolean;
   /** The command takes `--all`, so an ambiguity's hint names it. */
   offerAll?: boolean;
+  /**
+   * `--strict`: report an ambiguous target (exit 2) or a name found only as
+   * text (exit 3) as an error, rather than answer it (`answerAmbiguous`,
+   * text-matches.ts). `IX_STRICT_TARGETS=1` does the same for every command.
+   */
+  strict?: boolean;
+  /**
+   * False: a miss is never answered with its source text matches, only
+   * reported (exit 3). For a command whose output is an artifact the caller
+   * asked for — `ix context --out` / `--save` — where a list of files is not
+   * the bundle and exit 0 would claim one was written. An ambiguous target is
+   * still answered, since that does produce the artifact.
+   */
+  textAnswer?: boolean;
+  /**
+   * The command's own `--format json` body with nothing in it (`results: []`,
+   * `tree: []`), printed under a text-matches answer so its keys are there on
+   * exit 0 (text-matches.ts `textMatchesJson`).
+   */
+  textAnswerJson?: Record<string, unknown>;
 }
-
-export interface Suggestion {
-  id: string;
-  name: string;
-  kind: string;
-  path?: string;
-}
-
-export type ResolveResult =
-  | { resolved: true; entity: ResolvedEntity; hiddenTestCount?: number; notices?: ResolutionNotice[] }
-  | { resolved: false; ambiguous: true; result: AmbiguousResult; hiddenTestCount?: number }
-  | {
-      resolved: false;
-      ambiguous: false;
-      hiddenTestCount?: number;
-      suggestions?: Suggestion[];
-      /** Did-you-mean names from the bounded probe; never the ambiguity `candidates`. */
-      didYouMean?: TargetCandidate[];
-      retryCommand?: string;
-      /**
-       * Why it missed, when that is more than "no such name": a file target
-       * that is on disk but not in the graph (`file_not_in_graph`), or on
-       * neither (`file_not_found`). The message then replaces the generic one.
-       */
-      reason?: string;
-      message?: string;
-      /** For a symbol miss with a `symbol_*` reason: the files the name appears in. */
-      files?: string[];
-      /** Set by the reporter's caller when the graph itself is empty or degraded. */
-      graph?: GraphHealth;
-    };
-
-// ── Structural kind sets ──────────────────────────────────────────────────
-
-/** High-value container kinds — typically what callers want when resolving a bare name. */
-const CONTAINER_KINDS = new Set(["file", "class", "object", "trait", "interface", "module"]);
-
-/** All kinds that represent real code structure (vs. config/doc/decision). */
-const STRUCTURAL_KINDS = new Set([
-  ...CONTAINER_KINDS, "function", "method", "constant",
-]);
 
 /**
  * Report a miss to a person, once.
@@ -325,127 +268,24 @@ function toSuggestions(nodes: any[], limit = 3): Suggestion[] {
   return out;
 }
 
-function looksTypeLikeSymbol(symbol: string): boolean {
-  return /^[A-Z][A-Za-z0-9_]*$/.test(symbol);
+// ── Scoring and picking ───────────────────────────────────────────────────
+// Pure, in resolve/score.ts and resolve/pick.ts; re-exported here so the
+// modules that import them from resolve.ts keep working while they move.
+
+export { baseScore, hasDefinitionOf, originPenalty, scoreCandidate } from "./resolve/score.js";
+export { allCandidatesOf, isFuzzyResult, roundRobinByFile } from "./resolve/pick.js";
+export type {
+  AmbiguousResult, ResolutionMode, ResolutionNotice, ResolvedEntity, ResolveResult, Suggestion,
+} from "./resolve/types.js";
+
+/** resolve/pick.ts `applyPick`, saying an out-of-range `--pick` on stderr (every format). */
+export function applyPick(result: ResolveResult, opts?: { pick?: number }): ResolveResult | null {
+  return pickAmong(result, opts, stderr);
 }
 
-function normalizeForPathMatch(value: string | undefined): string {
-  return (value ?? "").toLowerCase().replace(/\\/g, "/");
-}
-
-// ── Scoring ───────────────────────────────────────────────────────────────
-
-/**
- * Score added to a candidate that shares the name but is not the code
- * definition (see candidate-origin.ts for how each is recognised).
- *
- * - An import entity is a single-line `module`: +5 cancels the -3 container
- *   boost it gets as a `module` and leaves it +2 behind a bare exact match, so
- *   a same-named function (-1), class (-3) or defining file (0) all beat it.
- * - A CSS selector, markdown heading or JSON key (+10, only for a term that
- *   looks like a code identifier and only when the caller did not ask for that
- *   kind or language) and a copy in build output, a fixture or a sample (+10)
- *   land behind the import: an import at least points at the definition. 10
- *   is enough to put even a PascalCase CSS class (-7 with the type boost)
- *   behind a same-named function (-1).
- *
- * A demotion, never a filter — when nothing else shares the name these are
- * still the best (and only) answer.
- */
-export function originPenalty(
-  node: any,
-  symbol: string,
-  opts?: { kind?: string; language?: string },
-): number {
-  switch (candidateOrigin(node)) {
-    case "import": return 5;
-    case "generated": return 10;
-    case "non-code": return looksLikeCodeIdentifier(symbol) && !requestsNonCode(opts) ? 10 : 0;
-    default: return 0;
-  }
-}
-
-/**
- * Score a candidate node for resolution.
- * Lower is better. Combines:
- *   - exact name match (0), defining-file stem match (3), prefix (15), other (30)
- *   - exact kind match when --kind provided (-5)
- *   - strong path match when --path provided (-4)
- *   - structural kind boost (-3 for container, -1 for method/function)
- *   - penalty for an import / non-code / generated candidate (originPenalty)
- */
-export function scoreCandidate(
-  node: any,
-  symbol: string,
-  opts?: { kind?: string; path?: string; language?: string }
-): number {
-  return baseScore(node, symbol, opts) + originPenalty(node, symbol, opts);
-}
-
-/** `scoreCandidate` without the origin penalty: how well the NAME matched. */
-export function baseScore(
-  node: any,
-  symbol: string,
-  opts?: { kind?: string; path?: string }
-): number {
-  const name: string = (node.name || node.attrs?.name || "").toLowerCase();
-  const kind: string = (node.kind || "").toLowerCase();
-  const symbolLower = symbol.toLowerCase();
-  const sourceUri = normalizeForPathMatch(node.provenance?.sourceUri ?? node.provenance?.source_uri ?? "");
-
-  let score = 50; // baseline
-
-  // ── Name match ──────────────────────────────────────────────────────
-  if (name === symbolLower) {
-    score = 0; // exact name match — best tier
-  } else if (isFileStemMatch(node, symbol)) {
-    // `borderStylesReset.js` for `borderStylesReset`: the file is the
-    // definition of an anonymous default export. Behind a same-named symbol
-    // (a function nets -1, this nets 0), ahead of an import of it (+2).
-    score = 3;
-  } else if (name.startsWith(symbolLower)) {
-    score = 15; // prefix match — moderate
-  } else {
-    score = 30; // fuzzy / incidental — poor
-  }
-
-  // ── Kind match ──────────────────────────────────────────────────────
-  if (opts?.kind && kind === opts.kind.toLowerCase()) {
-    score -= 5; // exact kind requested by user
-  }
-
-  // ── Structural boost ────────────────────────────────────────────────
-  if (CONTAINER_KINDS.has(kind)) {
-    score -= 3; // containers are high-value resolution targets
-  } else if (STRUCTURAL_KINDS.has(kind)) {
-    score -= 1; // methods/functions are useful but lower than containers
-  } else if (kind === "chunk") {
-    score += 5; // chunks are retrieval units, not useful as trace starting points
-  }
-  // non-structural kinds (config_entry, doc, decision, etc.) get no boost
-
-  if (looksTypeLikeSymbol(symbol) && name === symbolLower) {
-    if (kind === "class" || kind === "interface" || kind === "trait" || kind === "object") {
-      score -= 4;
-    }
-    // No penalty for method/function: the +3 that was here caused chunks (score=0)
-    // to outscore structural entities (function/method net score=2) for PascalCase
-    // names like "Apply", "StartEtcd", "Range". Chunks are now penalised explicitly above.
-  }
-
-  // ── Path match ──────────────────────────────────────────────────────
-  if (opts?.path) {
-    const pathLower = normalizeForPathMatch(opts.path);
-    if (sourceUri.includes(pathLower)) {
-      // Specificity bonus: a longer/more specific filter string gives a larger
-      // score reduction, breaking ties when many entities share the same short
-      // path prefix (e.g. 8 structs named Handle all under "tokio/").
-      const specificityRatio = pathLower.length / Math.max(sourceUri.length, 1);
-      score -= 4 + Math.round(specificityRatio * 6); // bonus from 4 to 10
-    }
-  }
-
-  return score;
+/** resolve/pick.ts `pickFromNotice`, saying an out-of-range `--pick` on stderr (every format). */
+export function pickFromNotice(result: ResolveResult, opts?: { pick?: number }): ResolveResult {
+  return pickInNotice(result, opts, stderr);
 }
 
 // ── Public API ────────────────────────────────────────────────────────────
@@ -611,7 +451,7 @@ export async function rankEntity(
     if (picked) return { ...picked, hiddenTestCount } as ResolveResult;
     return { ...pickFromNotice(winner, opts), hiddenTestCount } as ResolveResult;
   };
-  const pickOpts = { ...opts, path: effectivePath, windowFull };
+  const pickOpts = { ...opts, path: effectivePath, windowFull, hint: disambiguationHint(AMBIGUOUS_HINT) };
 
   // Score exact-name candidates
   if (exactName.length > 0) {
@@ -658,377 +498,94 @@ export async function rankEntity(
   return { resolved: false, ambiguous: false, hiddenTestCount, ...(suggestions.length ? { suggestions } : {}) };
 }
 
-/**
- * True when some candidate is a code definition named `symbol` (or its defining file).
- *
- * Code kinds only: `candidateOrigin` calls anything it cannot place a
- * definition, and that includes the `region` nodes `ix map` names after
- * directories and modules (`Format`, `Search`, `CLI`, provenance `ix:map`).
- * Counting one would skip the lookup for the file that defines the name.
- */
-export function hasDefinitionOf(nodes: any[], symbol: string): boolean {
-  const symbolLower = symbol.toLowerCase();
-  return nodes.some((n: any) => {
-    const name = String(n.name || n.attrs?.name || "").toLowerCase();
-    const sourceUri = String(n.provenance?.sourceUri ?? n.provenance?.source_uri ?? "");
-    return (name === symbolLower || isFileStemMatch(n, symbol))
-      && STRUCTURAL_KINDS.has(String(n.kind || "").toLowerCase())
-      && !sourceUri.startsWith("ix:")
-      && candidateOrigin(n) === "definition";
-  });
-}
-
 export function mergeById<T extends { id?: unknown }>(base: T[], extra: T[]): T[] {
   const seen = new Set(base.map((n) => n.id));
   return [...base, ...extra.filter((n) => !seen.has(n.id))];
 }
 
-/** Start line of a node, for a stable candidate order. Missing sorts last. */
-function lineOf(node: any): number {
-  const v = Number(node?.attrs?.line_start ?? node?.attrs?.lineStart ?? node?.line_start);
-  return Number.isFinite(v) ? v : Number.MAX_SAFE_INTEGER;
-}
-
-function nodePath(node: any): string {
-  return normalizeForPathMatch(node?.provenance?.sourceUri ?? node?.provenance?.source_uri ?? node?.path ?? "");
-}
-
-function cmpStr(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
-}
-
-/** Tiebreak for equal candidates: (path, line, id), independent of backend order. */
-function displayOrder(a: any, b: any): number {
-  return cmpStr(nodePath(a), nodePath(b)) || lineOf(a) - lineOf(b) || cmpStr(String(a.id), String(b.id));
-}
-
 /**
- * A ranked candidate list dealt round-robin by file: the best of each file
- * (files in the order of their best), then each file's second-best, and so on.
- * Within a file the ranked order stands. Only 8 are listed, and a file that
- * defines the name eight times would otherwise fill the page alone, with the
- * definitions the caller wants in other files out of sight. This is the order
- * the list is numbered in, so `--pick n` and `--all`'s `candidate=<n>` follow it.
- * Files compare as lower-cased posix paths, so `src\a.py` and `src/a.py` are one file.
+ * Answer an ambiguous target for its top candidate, at the command layer.
+ *
+ * The ambiguous result becomes one resolved for the first candidate in the
+ * record's own order (what `--pick 1` chooses), with an `ambiguous_target`
+ * notice naming the choice and listing the candidates, numbered as `--pick`
+ * numbers them (`rememberAll`, so the full list stays reachable). A guess, but
+ * a visible one: #847 stopped *silent* guessing, and the notice is printed in
+ * every format. An error here was pure overhead to an agent, which never
+ * followed up with `--pick`.
+ *
+ * Only where a user-supplied target's failed resolution would be reported
+ * (`resolveFileOrReport`, `ix locate`); internal resolution (`pickBest`,
+ * `--from-issue` starts, rank, the post-edit hook) never calls it. Returns the
+ * result untouched when it is not ambiguous, or under `--strict` /
+ * `IX_STRICT_TARGETS=1`, and in two cases that are no tie to break:
+ *
+ * - Every candidate is a fuzzy match (no entity carries the name): the
+ *   backend matches by substring, so `timeout` "matches" `connectTimeout` and
+ *   `readTimeout`, and answering for either would be callers of a different
+ *   symbol. The caller tries the name's source text first
+ *   ({@link fuzzyTextAnswer}); otherwise the candidates are the answer, exit 2.
+ * - An explicit `--pick <n>` past the end of the list: the caller asked for
+ *   one candidate, and answering another with exit 0 would pass for it.
  */
-export function roundRobinByFile<T>(ranked: readonly T[], nodeOf: (item: T) => any = (item) => item): T[] {
-  const files = new Map<string, T[]>();
-  for (const item of ranked) {
-    const key = nodePath(nodeOf(item));
-    const group = files.get(key);
-    if (group) group.push(item);
-    else files.set(key, [item]);
-  }
-  const groups = [...files.values()];
-  const dealt: T[] = [];
-  for (let round = 0; dealt.length < ranked.length; round++) {
-    for (const group of groups) if (round < group.length) dealt.push(group[round]);
-  }
-  return dealt;
-}
-
-function entityPath(node: any): string | undefined {
-  return node.provenance?.sourceUri ?? node.provenance?.source_uri ?? node.path;
-}
-
-/** The one-line notice for a target resolved by a fuzzy (non-exact) name. */
-function fuzzyNotice(symbol: string, e: ResolvedEntity): ResolutionNotice {
-  const where = e.path ? ` (${e.path})` : "";
-  return {
-    code: "fuzzy_match",
-    target: symbol,
-    message: `No exact match for ${symbol}; using fuzzy match ${e.name}${where}`,
-    chosen: { id: e.id, name: e.name, kind: e.kind, path: e.path },
-    candidates: [{ id: e.id, name: e.name, kind: e.kind, path: e.path, rank: 1 }],
-    total: 1,
-  };
-}
-
-/**
- * The notice for a pick among equal candidates: resolved, but say what else
- * tied. `tier` is only the candidates at the chosen one's score (the true
- * ties); `lowerCount` is how many more scored close but worse. Those are only
- * counted in the message, so `total`, the listed candidates and `--pick n` all
- * describe the same set.
- */
-function tieNotice(
-  symbol: string,
-  chosen: any,
-  tier: Array<{ node: any; score: number }>,
-  windowFull: boolean | undefined,
-  lowerCount = 0,
-): ResolutionNotice {
-  const amb = buildAmbiguous(tier.map((s) => s.node), tier.map((s) => s.score), {
-    total: tier.length,
-    truncated: windowFull,
-  });
-  const where = entityPath(chosen);
-  const lower = lowerCount > 0
-    ? ` ${lowerCount} more scored lower and ${lowerCount === 1 ? "is" : "are"} not listed.`
-    : "";
+export function answerAmbiguous(target: string, result: ResolveResult, opts?: { strict?: boolean }): ResolveResult {
+  if (result.resolved || !result.ambiguous || strictTargets(opts)) return result;
+  if (isFuzzyResult(result) || pickedOutOfRange(result)) return result;
+  const amb = result.result;
+  const all = allCandidatesOf(amb);
+  const top = all[0];
+  if (!top) return result;
+  const total = amb.total ?? all.length;
+  const where = top.path ? ` (${top.path})` : "";
+  const count = `${amb.truncated ? "at least " : ""}${total}`;
   const notice: ResolutionNotice = {
     code: "ambiguous_target",
-    target: symbol,
-    message: `"${symbol}" matches ${windowFull ? "at least " : ""}${tier.length} candidates equally; using ${chosen.name || symbol}${where ? ` (${where})` : ""}.${lower}`,
-    chosen: { id: chosen.id, name: chosen.name || chosen.attrs?.name || symbol, kind: chosen.kind ?? "", path: where },
+    target,
+    message: `"${target}" matches ${count} candidates; using ${top.name}${where}.`,
+    chosen: { id: top.id, name: top.name, kind: top.kind, path: top.path },
     candidates: amb.candidates,
-    total: tier.length,
-    ...(windowFull ? { truncated: true } : {}),
+    total,
+    ...(amb.truncated ? { truncated: true } : {}),
   };
-  rememberAll(notice, amb.candidates, allCandidatesOf(amb), importIdsOf(amb));
-  return notice;
-}
-
-/**
- * Given a candidate set, score them, dedup, and either pick a winner or declare ambiguity.
- */
-function pickBest(
-  candidates: any[],
-  symbol: string,
-  preferredKinds: string[],
-  opts?: { kind?: string; path?: string; windowFull?: boolean }
-): ResolveResult | null {
-  // Score all candidates
-  const scored = candidates.map(n => ({
-    node: n,
-    score: scoreCandidate(n, symbol, opts),
-  }));
-
-  const kindRank = (n: any) => {
-    const idx = preferredKinds.indexOf(n.kind);
-    return idx >= 0 ? idx : preferredKinds.length;
-  };
-  // Sort by score ascending (lower = better); ties by preferred kind, then by
-  // (path, line, id) so the pick never depends on the order the backend sent.
-  scored.sort((a, b) => {
-    if (a.score !== b.score) return a.score - b.score;
-    return kindRank(a.node) - kindRank(b.node) || displayOrder(a.node, b.node);
-  });
-
-  // Dedup by id
-  const seen = new Set<string>();
-  const unique = scored.filter(s => {
-    if (seen.has(s.node.id)) return false;
-    seen.add(s.node.id);
-    return true;
-  });
-
-  if (unique.length === 0) return null;
-
-  // If the best candidate has a clearly better score than the second, it wins
-  const best = unique[0];
-  const second = unique[1];
-
-  // Single candidate — clear winner
-  if (unique.length === 1) {
-    return { resolved: true, entity: nodeToResolved(best.node, symbol, resolutionMode(best, symbol)) };
-  }
-
-  // Best is significantly better than second (score gap >= 3) — winner
-  if (second && best.score + 3 <= second.score) {
-    return { resolved: true, entity: nodeToResolved(best.node, symbol, resolutionMode(best, symbol)) };
-  }
-
-  // Check if all top candidates at the same score tier are the same entity
-  const topScore = best.score;
-  const topTier = unique.filter(s => s.score === topScore);
-  const topIds = new Set(topTier.map(s => s.node.id));
-  if (topIds.size === 1) {
-    return { resolved: true, entity: nodeToResolved(best.node, symbol, resolutionMode(best, symbol)) };
-  }
-
-  // Candidates within range of the top score: the ambiguous record's list.
-  const eligible = unique.filter(s => s.score <= topScore + 5);
-  // A tie rule's notice lists only the true ties (the top score tier); the
-  // near-misses below it are counted, not presented as equal.
-  const tied = (mode: ResolutionMode): ResolveResult => ({
-    resolved: true,
-    entity: nodeToResolved(best.node, symbol, mode),
-    notices: [tieNotice(symbol, best.node, topTier, opts?.windowFull, eligible.length - topTier.length)],
-  });
-
-  // If the best candidate ranks strictly higher in the kind preference list than all
-  // other top-tier candidates, auto-pick it — the preference list is the tiebreaker.
-  const topTierKindRanks = topTier.map(s => {
-    const idx = preferredKinds.indexOf((s.node.kind || "").toLowerCase());
-    return idx >= 0 ? idx : preferredKinds.length;
-  });
-  const bestKindRank = topTierKindRanks[0];
-  if (topTier.length > 1 && topTierKindRanks.every((r, i) => i === 0 || r > bestKindRank)) {
-    return tied("preferred-kind");
-  }
-
-  // If best is a container kind and second is a method/function, prefer the container
-  const bestKind = (best.node.kind || "").toLowerCase();
-  const secondKind = (second.node.kind || "").toLowerCase();
-  if (CONTAINER_KINDS.has(bestKind) && !CONTAINER_KINDS.has(secondKind)) {
-    return tied("scored");
-  }
-
-  // If path was provided and best matches path but second doesn't, best wins
-  if (opts?.path) {
-    const bestUri = normalizeForPathMatch(best.node.provenance?.sourceUri ?? best.node.provenance?.source_uri ?? "");
-    const secondUri = normalizeForPathMatch(second.node.provenance?.sourceUri ?? second.node.provenance?.source_uri ?? "");
-    const pathLower = normalizeForPathMatch(opts.path);
-    if (bestUri.includes(pathLower) && !secondUri.includes(pathLower)) {
-      return { resolved: true, entity: nodeToResolved(best.node, symbol, "scored") };
-    }
-  }
-
-  // Genuinely ambiguous — return only structurally relevant candidates
-  return {
-    resolved: false,
-    ambiguous: true,
-    result: buildAmbiguous(eligible.map(s => s.node), eligible.map(s => s.score), {
-      total: eligible.length,
-      truncated: opts?.windowFull,
-    }),
-  };
-}
-
-/**
- * When --pick is set and the result is ambiguous, select the candidate by 1-based index.
- * Returns the resolved result, an error result, or null if --pick is not set.
- */
-export function applyPick(
-  result: ResolveResult,
-  opts?: { pick?: number }
-): ResolveResult | null {
-  if (opts?.pick == null) return null;
-  if (result.resolved) return null; // already resolved, no need to pick
-  if (!result.ambiguous) return null;
-
-  // Every tied candidate, the shown 8 first: `--all` numbers past 8 (n=9...)
-  // and `--pick` must reach them by the same numbers.
-  const candidates = allCandidatesOf(result.result);
-  const idx = opts.pick - 1; // convert 1-based to 0-based
-
-  if (idx < 0 || idx >= candidates.length) {
-    const message = `--pick ${opts.pick} is out of range (1-${candidates.length}).`;
-    stderr(message);
-    return {
-      ...result,
-      result: {
-        ...result.result,
-        diagnostics: [
-          { code: "pick_out_of_range", message },
-          ...(result.result.diagnostics ?? []),
-        ],
-      },
-    };
-  }
-
-  const picked = candidates[idx];
+  // The record's "Use --pick or --path to disambiguate" is the notice's own
+  // hint line now; anything else stays.
+  const diagnostics = (amb.diagnostics ?? []).filter((d) => d.code !== "ambiguous_resolution");
+  if (diagnostics.length) notice.diagnostics = diagnostics;
+  rememberAll(notice, amb.candidates, all, importIdsOf(amb));
   return {
     resolved: true,
-    entity: {
-      id: picked.id,
-      kind: picked.kind,
-      name: picked.name,
-      path: picked.path,
-      resolutionMode: "scored",
-    },
+    entity: { id: top.id, kind: top.kind, name: top.name, path: top.path, resolutionMode: "scored" },
+    notices: [notice],
+    ...(result.hiddenTestCount ? { hiddenTestCount: result.hiddenTestCount } : {}),
   };
 }
 
 /**
- * `--pick n` on a resolved result that carries an ambiguous_target notice picks
- * among the notice's candidates. Unlike applyPick on an ambiguous result, an
- * out-of-range pick keeps the default choice and the exit code stays 0: --pick
- * must not create a new non-zero exit.
+ * The source text answer for a name whose only candidates are fuzzy matches.
+ *
+ * No entity carries the name, so it is a miss with near names, and the miss's
+ * answer applies: the source files that mention the name itself (a config
+ * key `timeout` beside `connectTimeout` and `readTimeout`), with the fuzzy
+ * candidates as the near code symbols. One bounded probe, the one a miss
+ * runs (explainSymbolMiss, under its run budget). Null, nothing printed, when
+ * the text does not answer: under `--strict`, for a file or id target, when a
+ * filter set aside an entity with the name, or when no source file has it.
  */
-export function pickFromNotice(
+export async function fuzzyTextAnswer(
+  client: IxClient,
+  target: string,
   result: ResolveResult,
-  opts?: { pick?: number },
-): ResolveResult {
-  if (opts?.pick == null || !result.resolved || !result.notices) return result;
-  const at = result.notices.findIndex((n) => n.code === "ambiguous_target");
-  if (at < 0) return result;
-  const notice = result.notices[at];
-  const candidates = allCandidatesOf(notice);
-  const idx = opts.pick - 1;
-  if (idx < 0 || idx >= candidates.length) {
-    const message = `--pick ${opts.pick} is out of range (1-${candidates.length}).`;
-    stderr(message);
-    const notices = result.notices.slice();
-    notices[at] = { ...notice, diagnostics: [{ code: "pick_out_of_range", message }, ...(notice.diagnostics ?? [])] };
-    return { ...result, notices };
-  }
-  const picked = candidates[idx];
-  const keepFuzzy = result.entity.resolutionMode === "fuzzy";
-  return {
-    ...result,
-    entity: {
-      id: picked.id,
-      kind: picked.kind,
-      name: picked.name,
-      path: picked.path,
-      resolutionMode: keepFuzzy ? "fuzzy" : "scored",
-    },
-    notices: result.notices
-      .filter((_, i) => i !== at)
-      .map((n) => {
-        if (n.code !== "fuzzy_match") return n;
-        const where = picked.path ? ` (${picked.path})` : "";
-        return {
-          ...n,
-          message: `No exact match for ${n.target}; using fuzzy match ${picked.name}${where}`,
-          chosen: { id: picked.id, name: picked.name, kind: picked.kind, path: picked.path },
-          candidates: [{ ...picked, rank: 1 }],
-        };
-      }),
-  };
-}
-
-/** "exact" only for a case-sensitive exact name; otherwise the score bands. */
-function resolutionMode(scored: { node: any; score: number }, symbol: string): ResolutionMode {
-  const name = scored.node?.name || scored.node?.attrs?.name || "";
-  if (scored.score <= 0 && name === symbol) return "exact";
-  if (scored.score <= 5) return "preferred-kind";
-  return "scored";
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────
-
-function nodeToResolved(node: any, symbol: string, mode: ResolutionMode): ResolvedEntity {
-  return {
-    id: node.id,
-    kind: node.kind,
-    name: node.name || node.attrs?.name || symbol,
-    path: node.provenance?.sourceUri ?? node.provenance?.source_uri ?? node.path,
-    resolutionMode: mode,
-  };
-}
-
-/**
- * Every tied candidate behind an ambiguous result or notice, not only the 8
- * shown. Kept beside the object rather than on it, so no json or llm renderer
- * that prints the result can leak a list of hundreds. `--all` reads it
- * (`allCandidatesOf`): the shown 8 first, numbered as `--pick` numbers them,
- * then the rest in display order. `imports` holds the ids of the candidates
- * that are imports of the name rather than definitions (candidate-origin.ts),
- * which `--all` skips when a definition is listed too.
- */
-const fullCandidates = new WeakMap<object, { all: AmbiguousResult["candidates"]; imports: Set<string> }>();
-
-function rememberAll(
-  owner: object,
-  shown: AmbiguousResult["candidates"],
-  all: AmbiguousResult["candidates"],
-  imports: Set<string> = new Set(),
-): void {
-  const shownIds = new Set(shown.map((c) => c.id));
-  fullCandidates.set(owner, { all: [...shown, ...all.filter((c) => !shownIds.has(c.id))], imports });
-}
-
-/** The full candidate list behind an ambiguous result or notice (falls back to the shown ones). */
-export function allCandidatesOf(owner: AmbiguousResult | ResolutionNotice): AmbiguousResult["candidates"] {
-  return fullCandidates.get(owner)?.all ?? owner.candidates;
-}
-
-/** The ids among `allCandidatesOf(owner)` that are imports of the name, not definitions. */
-function importIdsOf(owner: object): Set<string> {
-  return fullCandidates.get(owner)?.imports ?? new Set();
+  opts: ResolveOpts | undefined,
+): Promise<{ miss: TextMatchSource; rows: TextMatch[] } | null> {
+  if (result.resolved || !result.ambiguous || !isFuzzyResult(result) || pickedOutOfRange(result)) return null;
+  if (!answersText(opts) || isRawId(target) || looksFileLike(target) || !missProbeWouldRun(target)) return null;
+  if (await filteredOut(client, target, result, opts)) return null;
+  const why = await explainSymbolMiss(client, target, { path: opts?.path, ...activeScope() });
+  if (!why) return null;
+  const suggestions: Suggestion[] = result.result.candidates.map(({ id, name, kind, path: p }) => ({ id, name, kind, ...(p ? { path: p } : {}) }));
+  const miss: TextMatchSource = { ...why, suggestions };
+  const rows = sourceTextMatches(target, miss.matches);
+  return rows.length ? { miss, rows } : null;
 }
 
 /** At most this many names are asked for containers; candidates usually share one. */
@@ -1074,12 +631,12 @@ export async function withContainers(client: IxClient, result: ResolveResult): P
   const owners = new Map<string, Set<string>>();
   for (const answer of answers) {
     if (!answer || !Array.isArray(answer.nodes) || !Array.isArray(answer.edges)) continue;
-    const byId = new Map(answer.nodes.map((n: any) => [String(n?.id), n]));
+    const byId = new Map(answer.nodes.map((n) => [n.id, n] as const));
     for (const e of answer.edges) {
       if (e?.predicate !== "CONTAINS" || !ids.has(String(e.dst))) continue;
       const parent = byId.get(String(e.src));
       const name = parent?.name || parent?.attrs?.name;
-      if (!name || String(parent.kind ?? "").toLowerCase() === "file") continue;
+      if (!name || String(parent?.kind ?? "").toLowerCase() === "file") continue;
       const set = owners.get(String(e.dst)) ?? new Set<string>();
       set.add(String(name));
       owners.set(String(e.dst), set);
@@ -1095,65 +652,6 @@ export async function withContainers(client: IxClient, result: ResolveResult): P
   return result;
 }
 
-/** Consecutive runs of equal score, in order; no scores is one run. */
-function scoreTiers<T extends { score?: number }>(ranked: readonly T[]): T[][] {
-  const tiers: T[][] = [];
-  for (const item of ranked) {
-    const last = tiers[tiers.length - 1];
-    if (last && last[0].score === item.score) last.push(item);
-    else tiers.push([item]);
-  }
-  return tiers;
-}
-
-function buildAmbiguous(
-  nodes: any[],
-  scores?: number[],
-  extra?: { total?: number; truncated?: boolean; diagnostics?: Array<{ code: string; message: string }> },
-): AmbiguousResult {
-  // The caller's ranking dealt round-robin by file within each score tier,
-  // then the first 8 shown and numbered for --pick. A tier is a run of equal
-  // scores: spreading never puts a worse score (an import's +5) ahead of a
-  // better one, so the page is still the 8 best by score. The ranking breaks
-  // ties by (path, line, id), so `--pick n` means the same thing on every run.
-  const seen = new Set<string>();
-  const ranked: Array<{ node: any; score?: number }> = [];
-  for (let i = 0; i < nodes.length; i++) {
-    const node = nodes[i] as any;
-    if (seen.has(node.id)) continue;
-    seen.add(node.id);
-    ranked.push({ node, score: scores?.[i] });
-  }
-  const dealt = scoreTiers(ranked).flatMap((tier) => roundRobinByFile(tier, (r) => r.node));
-  const picked = dealt.slice(0, 8);
-  const candidates: AmbiguousResult["candidates"] = picked.map(({ node, score }, i) => {
-    const line = lineOf(node);
-    const rank = i + 1;
-    return {
-      id: node.id,
-      name: node.name || node.attrs?.name || "(unnamed)",
-      kind: node.kind ?? "",
-      path: entityPath(node),
-      ...(line !== Number.MAX_SAFE_INTEGER ? { line } : {}),
-      score,
-      rank,
-    };
-  });
-  const result: AmbiguousResult = {
-    resolutionMode: "ambiguous",
-    candidates,
-    ...(extra?.total != null ? { total: extra.total } : {}),
-    ...(extra?.truncated ? { truncated: true } : {}),
-    diagnostics: [
-      { code: "ambiguous_resolution", message: disambiguationHint("Use --pick <n> or --path to disambiguate.") },
-      ...(extra?.diagnostics ?? []),
-    ],
-  };
-  const imports = new Set(ranked.filter(({ node }) => candidateOrigin(node) === "import").map(({ node }) => String(node.id)));
-  rememberAll(result, candidates, dealt.map(({ node }) => candidateOf(node)), imports);
-  return result;
-}
-
 export function printAmbiguous(symbol: string, result: AmbiguousResult, opts?: { kind?: string; path?: string }): void {
   reportAmbiguousTarget(symbol, result, "text", opts);
 }
@@ -1162,13 +660,24 @@ export function printAmbiguous(symbol: string, result: AmbiguousResult, opts?: {
  * Print the resolved target before showing results (text mode only).
  * Callers should skip this when format === "json" to keep JSON strict.
  */
+/** The name to show for a resolved target: as the user qualified it, else its own name. */
+export function displayNameOf(target: { name: string; displayName?: string }): string {
+  return target.displayName ?? target.name;
+}
+
+/** A resolved target for output: `name` is the name to show, and `displayName` is gone. */
+export function shownTarget<T extends { name: string; displayName?: string }>(target: T): Omit<T, "displayName"> {
+  const { displayName, ...rest } = target;
+  return { ...rest, name: displayName ?? target.name };
+}
+
 export function printResolved(target: ResolvedEntity): void {
   if (isQuiet()) return;
   const shortId = target.id.slice(0, 8);
   const modeStr = target.resolutionMode !== "exact"
     ? chalk.dim(` (${target.resolutionMode})`)
     : "";
-  stderr(`${chalk.dim("Resolved:")} ${chalk.cyan(target.kind)} ${chalk.dim(shortId)} ${chalk.bold(target.name)}${modeStr}\n`);
+  stderr(`${chalk.dim("Resolved:")} ${chalk.cyan(target.kind)} ${chalk.dim(shortId)} ${chalk.bold(displayNameOf(target))}${modeStr}\n`);
 }
 
 /** Check if a string looks like a raw UUID (not a human-readable name). */
@@ -1272,7 +781,7 @@ async function rankFileOrEntity(
 ): Promise<ResolveResult> {
   // 1. Raw UUID
   if (isRawId(target)) {
-    let n: any;
+    let n: GraphNode | undefined;
     try {
       n = (await client.entity(target))?.node;
     } catch (err) {
@@ -1301,7 +810,7 @@ async function rankFileOrEntity(
     try {
       const fullId = await client.resolvePrefix(target);
       const details = await client.entity(fullId);
-      const n = details.node as any;
+      const n = details.node;
       return {
         resolved: true,
         entity: {
@@ -1351,7 +860,7 @@ async function rankFileOrEntity(
   // just sorts last among equal-scoring candidates. `constant` is here so a
   // module-level constant is not ranked behind every config entry and heading
   // that happens to share its name (Ix#679).
-  const allKinds = ["file", "class", "object", "trait", "interface", "module", "method", "function", "constant"];
+  const allKinds: GraphKind[] = ["file", "class", "object", "trait", "interface", "module", "method", "function", "constant"];
   if (scoped) {
     // `Class.method` / `Class#method`: a name stored with a dot (`os.path`)
     // resolves literally, so the qualified reading is tried only when the
@@ -1454,34 +963,13 @@ async function resolveQualified(
   };
   const result = await rankEntity(client, scoped.methodName, ['method', 'function'], scopedOpts);
   if (result.resolved) {
-    // Rewrite the display name to show the full scoped form, as the user typed it
+    // Show the full scoped form, as the user typed it
     return {
       ...result,
-      entity: { ...result.entity, name: `${scoped.className}${scoped.sep}${scoped.methodName}` },
+      entity: { ...result.entity, displayName: `${scoped.className}${scoped.sep}${scoped.methodName}` },
     };
   }
   return result;
-}
-
-/** A result that came from resolveEntityFull's fuzzy phase (no exact name). */
-export function isFuzzyResult(r: ResolveResult): boolean {
-  if (r.resolved) {
-    return r.entity.resolutionMode === "fuzzy" || !!r.notices?.some((n) => n.code === "fuzzy_match");
-  }
-  return r.ambiguous && !!r.result.diagnostics?.some((d) => d.code === "fuzzy_match");
-}
-
-type Candidate = AmbiguousResult["candidates"][number];
-
-function candidateOf(n: any): Candidate {
-  const line = lineOf(n);
-  return {
-    id: String(n.id),
-    name: n.name || n.attrs?.name || "",
-    kind: n.kind ?? "",
-    path: entityPath(n),
-    ...(line !== Number.MAX_SAFE_INTEGER ? { line } : {}),
-  };
 }
 
 /**
@@ -1496,11 +984,11 @@ async function membersOf(
   cls: { id: string; path?: string },
   memberName: string,
 ): Promise<{ found: Candidate[]; truncated: boolean }> {
-  const named = (n: any) => n && String(n.id) !== cls.id && (n.name || n.attrs?.name) === memberName;
-  let children: any[] | null;
+  const named = (n: GraphNode) => n && n.id !== cls.id && (n.name || n.attrs?.name) === memberName;
+  let children: GraphNode[] | null;
   try {
     const expanded = await client.expand(cls.id, { direction: "out", predicates: ["CONTAINS"] });
-    children = Array.isArray(expanded?.nodes) ? expanded.nodes.filter((n: any) => String(n?.id) !== cls.id) : null;
+    children = Array.isArray(expanded?.nodes) ? expanded.nodes.filter((n) => n?.id !== cls.id) : null;
   } catch {
     children = null;
   }
@@ -1513,7 +1001,7 @@ async function membersOf(
   const limit = 50;
   const nodes = await client.search(memberName, { limit, nameOnly: true, workspaceId, systemId, scope: cls.path });
   const found = nodes
-    .filter((n: any) => named(n) && nodePath(n) === classFile)
+    .filter((n) => named(n) && nodePath(n) === classFile)
     .map(candidateOf);
   return { found, truncated: nodes.length >= limit };
 }
@@ -1555,7 +1043,7 @@ async function resolveInClasses(
     const only = ordered[0];
     return {
       resolved: true,
-      entity: { id: only.id, kind: only.kind, name: display, path: only.path, resolutionMode: "scored" },
+      entity: { id: only.id, kind: only.kind, name: only.name, displayName: display, path: only.path, resolutionMode: "scored" },
     };
   }
   const qualifiedResult: AmbiguousResult = {
@@ -1564,13 +1052,13 @@ async function resolveInClasses(
     total: ordered.length,
     ...(truncated ? { truncated: true } : {}),
     diagnostics: [
-      { code: "ambiguous_resolution", message: disambiguationHint("Use --pick <n> or --path to disambiguate.") },
+      { code: "ambiguous_resolution", message: disambiguationHint(AMBIGUOUS_HINT) },
     ],
   };
   rememberAll(qualifiedResult, qualifiedResult.candidates, ordered);
   const ambiguous: ResolveResult = { resolved: false, ambiguous: true, result: qualifiedResult };
   const picked = applyPick(ambiguous, opts);
-  if (picked?.resolved) return { ...picked, entity: { ...picked.entity, name: display } };
+  if (picked?.resolved) return { ...picked, entity: { ...picked.entity, displayName: display } };
   return picked ?? ambiguous;
 }
 
@@ -1687,7 +1175,7 @@ export async function resolveFileOrReport(
   // The format goes in so the resolver knows whether a person will read its
   // prose, or whether the structured record below is the only copy that should
   // reach stdout.
-  const result = await resolveFileOrEntityFull(client, target, { ...opts, format });
+  const result = answerAmbiguous(target, await resolveFileOrEntityFull(client, target, { ...opts, format }), opts);
   if (result.resolved) {
     if (result.notices?.length) reportResolutionNotices(result.notices, format, opts);
     return result.entity;
@@ -1709,6 +1197,9 @@ export async function reportUnresolved(
   format: string,
 ): Promise<void> {
   if (result.ambiguous) {
+    // Fuzzy matches only: the name's own source text, if any, is the answer.
+    const text = await fuzzyTextAnswer(client, target, result, opts);
+    if (text && reportTextMatches(target, text.miss, format, opts?.textAnswerJson)) return;
     reportResolutionFailure(target, result, format, opts);
     return;
   }
@@ -1720,7 +1211,25 @@ export async function reportUnresolved(
     return;
   }
   const reason = await withMissReason(client, target, result, opts, format);
-  reportResolutionFailure(target, await withTargetCandidates(client, target, reason, opts), format, opts);
+  // The near names first: an answer from the text keeps them, as the miss does.
+  const guided = await withTargetCandidates(client, target, reason, opts);
+  // A name in source files but in no entity (a config key) is answered with
+  // those files, exit 0 (text-matches.ts); found nowhere, it is the miss.
+  if (answersText(opts) && reportTextMatches(target, guided, format, opts?.textAnswerJson)) return;
+  reportResolutionFailure(target, guided, format, opts);
+}
+
+/** The source text matches a miss will be answered with; none under `--strict` or `textAnswer: false`. */
+export function textMatchesFor(
+  target: string,
+  miss: { matches?: TextMatch[] },
+  opts?: { strict?: boolean; textAnswer?: boolean },
+): TextMatch[] {
+  return answersText(opts) ? sourceTextMatches(target, miss.matches) : [];
+}
+
+function answersText(opts?: { strict?: boolean; textAnswer?: boolean }): boolean {
+  return opts?.textAnswer !== false && !strictTargets(opts);
 }
 
 /** Add guidance at the final command miss, never during qualified-name resolution. */
@@ -1765,9 +1274,16 @@ export async function withMissReason<T extends { reason?: string; message?: stri
   const why = await explainSymbolMiss(client, target, { path: opts?.path, ...activeScope() });
   if (!why) return result;
   // The resolver already wrote the bare miss for a person; this is the part
-  // that says what to do about it. Machine formats get it in the record.
-  if (format !== "json" && format !== "llm") stderr(chalk.dim(why.message));
-  return { ...result, reason: why.reason, message: why.message, ...(why.files ? { files: why.files } : {}) };
+  // that says what to do about it. Machine formats get it in the record. A
+  // miss answered with its text matches says what it is there instead.
+  const answered = textMatchesFor(target, why, opts).length > 0;
+  if (format !== "json" && format !== "llm" && !answered) stderr(chalk.dim(why.message));
+  return {
+    ...result, reason: why.reason, message: why.message,
+    ...(why.files ? { files: why.files } : {}),
+    ...(why.matches ? { matches: why.matches } : {}),
+    ...(why.remap ? { remap: true } : {}),
+  };
 }
 
 /**
@@ -1897,14 +1413,15 @@ function candidateSet(owner: AmbiguousResult | ResolutionNotice, total?: number,
 
 /**
  * Whether an id lookup failed because the id names nothing: the backend's
- * 400/404/410 (`<status>: ...`, see `httpError`) or `resolvePrefix`'s own
+ * 400/404/410 (`IxHttpError.status`, see `httpError`) or `resolvePrefix`'s own
  * no-match and ambiguous-prefix errors. Anything else -- a refused
  * connection, a 5xx, a 401 -- is not evidence about the id.
  */
 export function isLookupMiss(err: unknown): boolean {
+  const status = httpStatusOf(err);
+  if (status === 400 || status === 404 || status === 410) return true;
   const message = err instanceof Error ? err.message : String(err);
-  return /^(400|404|410):/.test(message)
-    || message.startsWith("No entity found for prefix:")
+  return message.startsWith("No entity found for prefix:")
     || message.startsWith("Ambiguous prefix ");
 }
 
@@ -2032,7 +1549,9 @@ async function tryFileGraphMatch(
     return { resolved: true, entity: entityOf(best, best.quality === 0 ? "exact" : "scored") };
   }
   const truncated = nodes.length >= limit;
-  const amb = buildAmbiguous(tied.map((m) => m.node), undefined, { total: tied.length, truncated });
+  const amb = buildAmbiguous(tied.map((m) => m.node), undefined, {
+    hint: disambiguationHint(AMBIGUOUS_HINT), total: tied.length, truncated,
+  });
   const chosen = entityOf(best, fuzzy ? "fuzzy" : "scored");
   const notice: ResolutionNotice = {
     code: "ambiguous_target",

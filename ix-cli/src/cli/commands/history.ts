@@ -3,10 +3,10 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { createClient } from "../../client/factory.js";
-import { resolveFileOrReport, printResolved } from "../resolve.js";
+import { resolveFileOrReport, printResolved, shownTarget } from "../resolve.js";
 import { relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
-import { parsePickOption } from "../options.js";
+import { formatOption, kindOption, pathOption, pickOption, STRICT_AMBIGUOUS_HELP, strictOption } from "../options.js";
 
 /** Render an entity's provenance chain as llm records: a header then one `patch` row per revision. */
 export function renderHistoryLlm(
@@ -28,20 +28,24 @@ export function registerHistoryCommand(program: Command): void {
   program
     .command("history <target>")
     .description("Show provenance chain for a file or entity")
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(pickOption())
+    .addOption(strictOption(STRICT_AMBIGUOUS_HELP))
+    .addOption(formatOption())
     .addHelpText("after", `\nExamples:
   ix history ix-cli/src/cli/commands/decide.ts
   ix history decide.ts
   ix history IngestionService --kind class
   ix history <entity-uuid>`)
-    .action(async (target: string, opts: { kind?: string; path?: string; pick?: number; format: string }) => {
+    .action(async (target: string, opts: { kind?: string; path?: string; pick?: number; strict?: boolean; format: string }) => {
       const client = createClient();
-      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick };
-      const resolved = await resolveFileOrReport(client, target, resolveOpts, opts.format);
-      if (!resolved) return;
+      // An entity's history was asked for: a list of the files that mention
+      // a text-only name today is not one, so it stays the miss (exit 3).
+      const resolveOpts = { kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, textAnswer: false };
+      const found = await resolveFileOrReport(client, target, resolveOpts, opts.format);
+      if (!found) return;
+      const resolved = shownTarget(found);
 
       if (opts.format === "text") printResolved(resolved);
 

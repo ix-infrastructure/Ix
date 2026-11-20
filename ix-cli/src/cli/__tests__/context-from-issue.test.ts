@@ -224,6 +224,42 @@ describe("path candidates resolve against the tracked files", () => {
   });
 });
 
+describe("start resolution is internal: graph commands answering ambiguous targets do not change it", () => {
+  let dir: string | undefined;
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+    delete process.env.IX_STRICT_TARGETS;
+  });
+
+  it("still skips an ambiguous path and still picks among a name's definitions by its own rule, strict or not", async () => {
+    dir = mkdtempSync(join(tmpdir(), "ix-from-issue-ambiguous-"));
+    for (const path of ["src/a/index.ts", "src/b/index.ts", "src/table.ts", "src/grid.ts"]) {
+      mkdirSync(dirname(join(dir, path)), { recursive: true });
+      writeFileSync(join(dir, path), "export {};\n");
+    }
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["add", "src"], { cwd: dir });
+    const repo = gitRepoAccess(dir)!;
+    const text = "`renderRow` breaks in index.ts when the grid scrolls.";
+    const plan = async () => {
+      const { search } = fakeSearch({
+        renderRow: [hit("renderRow", "function", "src/table.ts"), hit("renderRow", "function", "src/grid.ts")],
+      });
+      const out = await planIssue(text, { repo, search, rank: () => [] });
+      return { starts: out.starts.map((s) => [s.token, s.path, s.via]), unresolved: out.unresolved };
+    };
+
+    delete process.env.IX_STRICT_TARGETS;
+    const answering = await plan();
+    // index.ts names two tracked files: skipped, never answered for the first.
+    expect(answering.unresolved).toContain("index.ts");
+    expect(answering.starts).toEqual([["renderRow", "src/grid.ts", "identifier in issue"]]);
+    process.env.IX_STRICT_TARGETS = "1";
+    expect(await plan()).toEqual(answering);
+  });
+});
+
 describe("readIssueText", () => {
   it("reads stdin for `-`", async () => {
     const text = await readIssueText("-", Readable.from(["The `listByKind` ", "call is slow\n"]));

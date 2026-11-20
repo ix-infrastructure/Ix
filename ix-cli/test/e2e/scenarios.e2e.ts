@@ -254,15 +254,30 @@ describe("ix verify (CL-24A)", () => {
 // The outcome contract agents route on (ix-cli/src/cli/outcome.ts), against a
 // real backend: `clamp` is defined in app/utils.py and web/src/math.ts, and
 // app/pricing.py imports it (`from app.utils import clamp`, a one-line module
-// entity the ambiguity lists as --pick 1 but --all skips).
+// entity the ambiguity ranks after both definitions, and --all skips). An
+// ambiguous name is answered for its top candidate (`--pick 1`, a definition)
+// with an `ambiguous_target` notice; exit 2 is `--strict` /
+// IX_STRICT_TARGETS=1 only.
 describe("agent outcomes", () => {
-  it("exits 0 / 2 / 3 / 4 for results, ambiguity, a miss and an unmapped directory", () => {
+  it("exits 0 / 2 / 3 / 4 for results, strict ambiguity, a miss and an unmapped directory", () => {
     const co = checkout("polyglot");
     map(env, co);
 
     expect(ix(env, co, ["locate", "slugify", "--format", "json"]).status).toBe(0);
 
-    const ambiguous = ix(env, co, ["callers", "clamp", "--format", "json"], true);
+    const answered = ix(env, co, ["callers", "clamp", "--format", "json"], true);
+    expect(answered.status).toBe(0);
+    const body = JSON.parse(answered.stdout);
+    expect(body.error).toBeUndefined();
+    const notice = body.resolutionNotices.find((n: { code: string }) => n.code === "ambiguous_target");
+    expect(notice).toMatchObject({ code: "ambiguous_target", target: "clamp" });
+    expect(notice.candidates.length).toBeGreaterThanOrEqual(2);
+    // The answer is for the candidate `--pick 1` names: a definition, never
+    // the import in app/pricing.py.
+    expect(notice.chosen.id).toBe(notice.candidates[0].id);
+    expect(notice.chosen.path).toMatch(/(?:^|\/)(?:app\/utils\.py|web\/src\/math\.ts)$/);
+
+    const ambiguous = ix(env, co, ["callers", "clamp", "--strict", "--format", "json"], true);
     expect(ambiguous.status).toBe(2);
     expect(JSON.parse(ambiguous.stdout).error).toBe("ambiguous_target");
 
@@ -275,10 +290,13 @@ describe("agent outcomes", () => {
     expect(notMapped.status).toBe(4);
     expect(JSON.parse(notMapped.stdout).error).toBe("workspace_not_mapped");
 
-    process.env.IX_LEGACY_EXIT_CODES = "1";
+    process.env.IX_STRICT_TARGETS = "1";
     try {
+      expect(ix(env, co, ["callers", "clamp", "--format", "json"], true).status).toBe(2);
+      process.env.IX_LEGACY_EXIT_CODES = "1";
       expect(ix(env, co, ["callers", "clamp", "--format", "json"], true).status).toBe(1);
     } finally {
+      delete process.env.IX_STRICT_TARGETS;
       delete process.env.IX_LEGACY_EXIT_CODES;
     }
   });
@@ -291,8 +309,12 @@ describe("agent outcomes", () => {
     expect(all.resolutionMode).toBe("all");
     expect(all.candidates.map((c: { path: string }) => c.path).sort()).toEqual(["app/utils.py", "web/src/math.ts"]);
     expect(all.results.length).toBeGreaterThan(0);
-    // Each candidate keeps the number --pick gives it in the ambiguity list.
-    const listed = JSON.parse(ix(env, co, ["callers", "clamp", "--format", "json"], true).stdout).candidates;
+    // Each candidate keeps the number --pick gives it in the ambiguity list,
+    // the same list whether it is the answer's notice or the --strict error.
+    const answered = JSON.parse(ix(env, co, ["callers", "clamp", "--format", "json"]).stdout);
+    const listed = answered.resolutionNotices.find((n: { code: string }) => n.code === "ambiguous_target").candidates;
+    const strict = JSON.parse(ix(env, co, ["callers", "clamp", "--strict", "--format", "json"], true).stdout).candidates;
+    expect(listed.map((l: { id: string }) => l.id)).toEqual(strict.map((l: { id: string }) => l.id));
     for (const c of all.candidates) {
       expect(listed.find((l: { rank: number }) => l.rank === c.n)).toMatchObject({ id: c.id });
     }
@@ -300,7 +322,8 @@ describe("agent outcomes", () => {
 
     const many = ix(env, co, ["locate", "slugify", "clamp", "definitelyNotAName", "--format", "json"], true);
     expect(many.status).toBe(3);
-    expect(JSON.parse(many.stdout).targets.map((t: { exitCode: number }) => t.exitCode)).toEqual([0, 2, 3]);
+    // The ambiguous `clamp` is answered for its top candidate; the miss keeps exit 3.
+    expect(JSON.parse(many.stdout).targets.map((t: { exitCode: number }) => t.exitCode)).toEqual([0, 0, 3]);
   });
 });
 
@@ -336,6 +359,63 @@ describe("python callers through imports", () => {
     const other = callers(co, "load", "other/mod.py");
     expect(other.resultSource).toBe("graph");
     expect(other.results.map((r) => `${r.name}@${r.path}`)).toEqual(["read_other@other/use.py"]);
+  });
+});
+
+// The lean issue view's "used in" line (fixtures/polyglot). The two named
+// symbols are defined in DIFFERENT files -- formatPercent in web/src/format.ts,
+// multiply in web/src/math.ts -- because the view keeps one start per file:
+// two names from format.ts would leave the second with no start, and the
+// batched read below would only ever carry one id. Both lines come from ONE
+// /v1/context request with both ids in its node slice. Each symbol's line is
+// checked against what `ix callers` (/v1/expand, one id at a time) says, so a
+// backend that ignored the second id, or trimmed one id's neighbours, fails
+// here, and a failure says whether the graph lacks the edge or the batched
+// read does. multiply is also called from format.ts, the FIRST symbol's own
+// file: that is excluded for formatPercent only, never for multiply.
+describe("lean issue view: where the named symbols are used", () => {
+  it("lists the files outside each symbol's own that call it, for both symbols from one request", () => {
+    const co = checkout("polyglot");
+    map(env, co);
+    const issue = join(co.dir, "..", "issue.md");
+    writeFileSync(issue, "The tax line is wrong: `formatPercent` rounds 0.085 down, because `multiply` loses precision on fractional cents.\n");
+
+    // Per symbol, the files `ix callers` finds outside the symbol's own file.
+    const callerFiles = (symbol: string, own: string): string[] => {
+      const out = JSON.parse(ix(env, co, ["callers", symbol, "--format", "json"]).stdout) as {
+        resultSource: string; results: Array<{ path?: string }>;
+      };
+      expect(out.resultSource).toBe("graph");
+      return [...new Set(out.results.flatMap((r) => (r.path && r.path !== own ? [r.path] : [])))].sort();
+    };
+    const percentCallers = callerFiles("formatPercent", "web/src/format.ts");
+    const multiplyCallers = callerFiles("multiply", "web/src/math.ts");
+    expect(percentCallers).toContain("web/src/index.ts");
+    expect(multiplyCallers).toEqual(expect.arrayContaining(["web/src/cart.ts", "web/src/format.ts"]));
+
+    const lean = JSON.parse(ix(env, co, ["context", "--from-issue", issue, "--lean", "--format", "json"]).stdout) as {
+      kind: string; confidence: string;
+      startingPoints: Array<{ name: string; path: string; usedIn?: { files: string[]; total: number } }>;
+    };
+    expect(lean.kind).toBe("issue_lean");
+    expect(lean.confidence).toBe("high");
+    expect(lean.startingPoints.map((s) => `${s.name}@${s.path}`)).toEqual([
+      "formatPercent@web/src/format.ts",
+      "multiply@web/src/math.ts",
+    ]);
+    const byName = new Map(lean.startingPoints.map((s) => [s.name, s]));
+    const percent = byName.get("formatPercent")?.usedIn;
+    const mult = byName.get("multiply")?.usedIn;
+    // Every file `ix callers` names is in the batched answer, for each id.
+    expect(percent?.files).toEqual(expect.arrayContaining(percentCallers));
+    expect(mult?.files).toEqual(expect.arrayContaining(multiplyCallers));
+    expect(percent?.files).not.toContain("web/src/format.ts");
+    expect(mult?.files).toContain("web/src/format.ts");
+    for (const s of lean.startingPoints) expect(s.usedIn?.files ?? []).not.toContain(s.path);
+
+    const text = ix(env, co, ["context", "--from-issue", issue, "--lean"]).stdout;
+    expect(text).toMatch(/\n {4}used in: .*web\/src\/index\.ts/);
+    expect(text).toMatch(/\n {4}used in: .*web\/src\/cart\.ts/);
   });
 });
 

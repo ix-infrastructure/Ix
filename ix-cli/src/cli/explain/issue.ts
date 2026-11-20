@@ -6,6 +6,7 @@ import { posix } from "node:path";
 import { isTestPath } from "./related-files.js";
 import { resolveToken, type RepoAccess } from "./text-references.js";
 import type { CompanionSource } from "./issue-companions.js";
+import type { GraphKind, KindSet } from "../graph-model.js";
 
 /**
  * From an issue's text to the files its fix starts in, for
@@ -91,8 +92,11 @@ export function isSourcePath(path: string, context?: { importable: boolean; head
 // the post-edit hook shares `isSourcePath` and still reports an edit to one.
 const GENERATED_NAME = /_pb2(?:_grpc)?\.py$/;
 
-/** `isSourcePath` for an issue, with no listing or header to go on. */
-function issueSourcePath(path: string): boolean {
+/**
+ * `isSourcePath` for an issue, with no listing or header to go on. Also how a
+ * graph command's text matches (text-matches.ts) tell source from the rest.
+ */
+export function issueSourcePath(path: string): boolean {
   return isSourcePath(path) && !GENERATED_NAME.test(path);
 }
 
@@ -487,15 +491,15 @@ export interface StartingPoint {
 }
 
 /** Kinds a definition has, most navigable first. Anything else ranks after. */
-const DEFINITION_KINDS = [
+const DEFINITION_KINDS: readonly GraphKind[] = [
   "class", "interface", "trait", "struct", "enum", "type", "object", "function", "method",
   "constant", "variable", "property", "field",
 ];
 /** Never a definition: an import (located in the importer), a chunk, a file. */
-const NOT_DEFINITIONS = new Set(["module", "chunk", "file"]);
+const NOT_DEFINITIONS: KindSet = new Set<GraphKind>(["module", "chunk", "file"]);
 
 function kindRank(kind: string): number {
-  const i = DEFINITION_KINDS.indexOf(kind.toLowerCase());
+  const i = (DEFINITION_KINDS as readonly string[]).indexOf(kind.toLowerCase());
   return i === -1 ? DEFINITION_KINDS.length : i;
 }
 
@@ -887,11 +891,28 @@ export function issueConfidence(plan: Pick<IssuePlan, "starts" | "fallback">): I
 /** Files after the starting points in a lean view. */
 export const LEAN_RANKED = 4;
 
+/**
+ * The files outside a symbol start's own file that call, import or reference
+ * it (tests excluded), best first: at most a few listed, or none and `widely`
+ * when there are too many to be worth listing. See issue-used-in.ts.
+ */
+export interface UsedIn {
+  files: string[];
+  /** Every such file, listed or not. */
+  total: number;
+  widely?: true;
+}
+
+/** A starting point of the lean view, with where it is used when Ix looked that up. */
+export interface LeanStart extends StartingPoint {
+  usedIn?: UsedIn;
+}
+
 /** `ix context --from-issue --lean`: where to start, and nothing else. */
 export interface LeanIssueView {
   confidence: "high" | "low";
   reason?: string;
-  startingPoints: StartingPoint[];
+  startingPoints: LeanStart[];
   /** The next files by BM25 against the issue, starting files excluded. */
   alsoRanked: RankedFile[];
   unresolved: string[];

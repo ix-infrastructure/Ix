@@ -4,11 +4,11 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
-import { resolveFileOrReport, printResolved, isRawId } from "../resolve.js";
+import { resolveFileOrReport, printResolved, isRawId, shownTarget } from "../resolve.js";
 import { walkTree, type TreeWalkResult } from "../tree-walk.js";
 import { compactTreeNode, relativePath, printJson } from "../format.js";
 import { llmLine, llmShortId } from "../llm.js";
-import { parsePickOption } from "../options.js";
+import { formatOption, kindOption, pathOption, pickOption, strictOption } from "../options.js";
 
 // ── Tree types ──────────────────────────────────────────────────────
 
@@ -74,6 +74,7 @@ export async function buildDependencyTree(
     maxNodes: opts?.maxNodes ?? MAX_NODES,
     predicates: activePredicates,
     expand: (nodeId, p) => client.expand(nodeId, { direction: "in", predicates: [p], hops: 1 }),
+    expandAll: (nodeId, ps) => client.expand(nodeId, { direction: "in", predicates: ps, hops: 1 }),
     // Rank before the cap, or the cap keeps whatever the graph returned
     // first. A node whose name is a raw id is a dangling reference nothing
     // can follow, and one with no path costs a `locate` before it can be
@@ -191,12 +192,13 @@ export function registerDependsCommand(program: Command): void {
   program
     .command("depends <symbol>")
     .description("Show upstream dependents of the given entity (full tree by default)")
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
     .option("--depth <n>", "Cap traversal depth")
     .option("--cap <n>", "Cap number of nodes visited")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .option("--include-tests", "Include test and fixture entities in results")
     .option("--tests-only", "Show only test and fixture entities")
     .addHelpText("after", `\nExamples:
@@ -205,18 +207,22 @@ export function registerDependsCommand(program: Command): void {
   ix depends AuthProvider --depth 2
   ix depends parser.py --kind file
   ix depends NodeKind --pick 1 --cap 500`)
-    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; depth?: string; cap?: string; format: string; includeTests?: boolean; testsOnly?: boolean }) => {
+    .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; strict?: boolean; depth?: string; cap?: string; format: string; includeTests?: boolean; testsOnly?: boolean }) => {
       const client = createClient();
 
       const resolveOpts = {
         kind: opts.kind,
         path: opts.path,
         pick: opts.pick,
+        strict: opts.strict,
         includeTests: opts.includeTests,
         testsOnly: opts.testsOnly,
+        // A text-only name's json answer keeps this command's keys, empty.
+        textAnswerJson: { semantics: "downstream_dependents", tree: [] },
       };
-      const target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
-      if (!target) return;
+      const found = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
+      if (!found) return;
+      const target = shownTarget(found);
 
       const maxDepth = opts.depth ? parseInt(opts.depth, 10) : DEFAULT_MAX_DEPTH;
       const maxNodes = opts.cap ? parseInt(opts.cap, 10) : MAX_NODES;

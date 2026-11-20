@@ -7,16 +7,16 @@ import type { IxClient } from "../../client/api.js";
 import { disambiguatingIds, lineSpan, locationLabel, printJson, sliceRanked, truncationHint } from "../format.js";
 import { llmLine } from "../llm.js";
 import { runPerTarget } from "../multi-target.js";
-import { parseCountOption, parsePickOption } from "../options.js";
-import { nextPageCommand, OFFSET_FLAG, parseOffset } from "../paging.js";
+import { formatOption, kindOption, pageLimitOption, pageOffsetOption, parseCountOption, pathOption, pickOption, strictOption } from "../options.js";
+import { nextPageCommand, parseOffset } from "../paging.js";
 import { EXIT_CODES_HELP } from "../outcome.js";
 import { isQuiet, projectRow } from "../output-shape.js";
-import { printResolved, resolveFileOrReport } from "../resolve.js";
-import { reportError } from "./around.js";
+import { displayNameOf, printResolved, resolveFileOrReport } from "../resolve.js";
+import { reportFailure } from "../ui.js";
 import { overrideFamily, type OverrideRelation, type OverrideRow } from "../type-walk.js";
 
 interface OverridesOpts {
-  kind?: string; path?: string; pick?: number; limit: string; offset: string; format: string;
+  kind?: string; path?: string; pick?: number; strict?: boolean; limit: string; offset: string; format: string;
 }
 
 /** `--limit` as a count, or undefined when it is not one (`abc`, `-1`, `10abc`). */
@@ -36,12 +36,13 @@ export function registerOverridesCommand(program: Command): void {
     .command("overrides <symbols...>")
     .alias("implementations")
     .description("Show the other definitions of a method: what it overrides or implements, its overrides, and sibling implementations")
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
-    .option("--limit <n>", "Max results to show", "50")
-    .option("--offset <n>", OFFSET_FLAG, "0")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(pickOption())
+    .addOption(strictOption())
+    .addOption(pageLimitOption())
+    .addOption(pageOffsetOption())
+    .addOption(formatOption())
     .addHelpText("after", `\nExamples:
   ix overrides handle --path src/handlers/Base.java
   ix overrides render --format llm
@@ -59,7 +60,7 @@ ${EXIT_CODES_HELP}`)
       // The root hook refuses a malformed <n> already; this holds where it is
       // not installed, so `abc` never becomes NaN and silently zero rows.
       if (parseOverridesLimit(opts.limit) === undefined) {
-        reportError("invalid_limit", `--limit must be a non-negative integer (for example, 50), not "${opts.limit}".`, opts.format);
+        reportFailure("invalid_limit", `--limit must be a non-negative integer (for example, 50), not "${opts.limit}".`, opts.format);
         return;
       }
       const client = createClient();
@@ -70,7 +71,11 @@ ${EXIT_CODES_HELP}`)
 async function overridesOne(client: IxClient, symbol: string, opts: OverridesOpts, cmd: Command): Promise<void> {
   const limit = parseOverridesLimit(opts.limit) ?? 0;
   const offset = parseOffset(opts.offset);
-  const target = await resolveFileOrReport(client, symbol, { kind: opts.kind, path: opts.path, pick: opts.pick }, opts.format);
+  const target = await resolveFileOrReport(client, symbol, {
+    kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict,
+    // A text-only name's json answer keeps this command's keys, empty.
+    textAnswerJson: { rows: [], total: 0, truncated: false, diagnostics: [] },
+  }, opts.format);
   if (!target) return;
   if (opts.format === "text") printResolved(target);
   const family = await overrideFamily(client, target);
@@ -91,7 +96,7 @@ async function overridesOne(client: IxClient, symbol: string, opts: OverridesOpt
   if (opts.format === "json") {
     printJson({
       target: symbol,
-      resolvedTarget: { id: target.id, name: target.name, kind: target.kind, ...(target.path ? { path: target.path } : {}) },
+      resolvedTarget: { id: target.id, name: displayNameOf(target), kind: target.kind, ...(target.path ? { path: target.path } : {}) },
       ...(family.owner ? { owner: family.owner } : {}),
       ...(family.root ? { root: family.root } : {}),
       ...(family.roots ? { roots: family.roots } : {}),

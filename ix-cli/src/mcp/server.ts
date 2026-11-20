@@ -11,6 +11,8 @@ import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import { isReadablePath, resolveWorkspaceRoot } from "../cli/config.js";
 import { resolveIngestRootWithSource } from "../cli/map-root.js";
+import { BUNDLE_SCHEMA } from "../cli/context-bundle-schema.js";
+import { PRO_MCP_TOOL_NAMES } from "../cli/register/pro-surface.js";
 
 import {
   createProtocolStdout,
@@ -20,17 +22,23 @@ import {
   resolveDefaultRunner,
   type IxRunner,
 } from "./runner.js";
+import { mcpCaller } from "./hints.js";
+import { withCaller } from "../cli/next-step.js";
 
 export type { IxRunner } from "./runner.js";
 
 /**
- * Tools every install can run.
+ * Tools every install can run: the full OSS catalog (`--tools=all`).
  *
- * This set is the union of what the per-host Ix plugins expose, minus three
- * deliberate drops: `ix_query` is the deprecated command the CLI docs tell
- * agents not to use, and `ix_neighbors` / `ix_docs_tool` are convenience
- * composites of `ix_callers` + `ix_callees` + `ix_depends` and of
- * `ix_overview`, all of which are here individually.
+ * A default session advertises {@link IX_MCP_CORE_TOOL_NAMES} instead. This
+ * list is the union of what the per-host Ix plugins expose, minus two
+ * deliberate drops: `ix_query`, the deprecated command the CLI docs tell
+ * agents not to use, and `ix_docs_tool`, a convenience composite of
+ * `ix_overview`. `ix_neighbors` is served — one tool for callers, callees,
+ * imports, importers and overrides. The single-relation tools
+ * (`ix_callers`, `ix_callees`, `ix_imported_by`, `ix_imports`, `ix_overrides`)
+ * stay in this catalog; `--tools=core` advertises `ix_neighbors` in their place.
+ * `ix_status` is Gemini's name for `ix_health`.
  */
 export const IX_MCP_OSS_TOOL_NAMES = [
   // First, as it is registered first: tools/list leads with where to start.
@@ -74,8 +82,11 @@ export const IX_MCP_OSS_TOOL_NAMES = [
  * unconditionally — as this server did for `ix_briefing` and `ix_decisions` —
  * hands an OSS agent tools whose every call returns "requires Ix Pro", which it
  * cannot tell apart from a real failure.
+ *
+ * The names are the MCP column of the Pro surface table
+ * (cli/register/pro-surface.ts); the handlers are registered below.
  */
-export const IX_MCP_PRO_TOOL_NAMES = ["ix_briefing", "ix_decisions", "ix_decide"] as const;
+export const IX_MCP_PRO_TOOL_NAMES = PRO_MCP_TOOL_NAMES;
 
 /** Every tool this server can serve, across both tiers. */
 export const IX_MCP_TOOL_NAMES = [...IX_MCP_OSS_TOOL_NAMES, ...IX_MCP_PRO_TOOL_NAMES] as const;
@@ -197,6 +208,25 @@ const TOOL_OUTPUT_SCHEMA: Partial<Record<(typeof IX_MCP_TOOL_NAMES)[number], z.Z
   // passing `structured: true` receives.
 };
 
+/**
+ * Tools whose result can be a JSON document. Every other tool returns
+ * `--format llm` records (`kind key=value`, one per line), which have no
+ * nested fields to read.
+ *
+ * Data only: nothing here routes on it. scripts/check-plugin-contract.mjs reads
+ * it to fail plugin skill text that tells a model to read a JSON path from a
+ * records tool, and mcp-argv-contract.test.ts checks it against the format
+ * each tool actually runs. `ix_smells` always answers in JSON, `ix_context`
+ * does with `structured: true`, and the Pro tools run `--format json`.
+ */
+export const IX_MCP_JSON_RESULT_TOOLS: readonly (typeof IX_MCP_TOOL_NAMES)[number][] = [
+  "ix_context",
+  "ix_map",
+  "ix_smells",
+  "ix_ingest",
+  ...IX_MCP_PRO_TOOL_NAMES,
+];
+
 /** Which catalog to advertise. */
 export type ToolsetName = "core" | "all";
 
@@ -302,10 +332,13 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   // process.stdout and process.exit, which a caller supplying its own runner
   // (every test, and any embedder) must not have done to it.
   let fallback: IxRunner | undefined;
-  const runIx: IxRunner =
+  const baseRunIx: IxRunner =
     options.runIx ??
     ((args, timeoutMs) =>
       (fallback ??= resolveDefaultRunner({ version, redirectIdleStdout: true }))(args, timeoutMs));
+  // Every command runs for this session's reader, so its hints name only the
+  // tools this session offers (`hintCaller`, below).
+  const runIx: IxRunner = (args, timeoutMs) => withCaller(hintCaller, () => baseRunIx(args, timeoutMs));
 
   const server = new McpServer(
     {
@@ -330,6 +363,8 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       || core.has(name)
       || (IX_MCP_PRO_TOOL_NAMES as readonly string[]).includes(name),
   };
+  // The OSS tools this session offers. Hints never name a Pro tool.
+  const hintCaller = mcpCaller(IX_MCP_OSS_TOOL_NAMES.filter((name) => ctx.advertise(name)));
 
   // First, so it heads tools/list: it is where a session should start.
   registerTool(
@@ -342,7 +377,9 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       kind: SYMBOL_TOOL_INPUT.kind,
       path: SYMBOL_TOOL_INPUT.path,
       pick: SYMBOL_TOOL_INPUT.pick,
-      as_of_rev: z.number().int().nonnegative().optional(),
+      // At least 1, as `ix context --as-of-rev` requires: a 0 the schema let
+      // through came back as a usage error naming a CLI flag.
+      as_of_rev: z.number().int().min(1).optional(),
       max_entities: z.number().int().min(1).max(500).optional(),
       max_relationships: z.number().int().min(1).max(1000).optional(),
       max_evidence: z.number().int().min(1).max(200).optional(),
@@ -404,9 +441,14 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
   registerTool(
     ctx,
     "ix_locate",
-    "Use when a name has several definitions and you want the canonical one. Returns one definition with path:lines, or the candidates when it cannot choose. For a ranked list use ix_search.",
-    { symbol: z.string().min(1) },
-    async (input) => runFormatted(runIx, "ix_locate", ix("locate", [stringArg(input, "symbol")])),
+    "Use when a name has several definitions and you want the canonical one. Returns the top match with path:lines; pick or path selects another.",
+    // The notice on an auto-picked answer says to use --pick or --path: an MCP
+    // caller needs the same two inputs to act on it. No `kind`, and pick's
+    // description dropped: both would push the full catalog past its
+    // tools/list budget (mcp-structured-output.test.ts).
+    { symbol: SYMBOL_TOOL_INPUT.symbol, ...CHOOSE_INPUT },
+    async (input) =>
+      runFormatted(runIx, "ix_locate", ix("locate", [stringArg(input, "symbol")], symbolOptions(input, { limit: false }))),
   );
   registerTool(
     ctx,
@@ -483,8 +525,9 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     ctx,
     "ix_overview",
     "Use for a one-call summary of a file, symbol or subsystem: what it is, what it holds, and what it touches. For ranked evidence around a task use ix_context.",
-    { target: z.string().min(1) },
-    async (input) => runFormatted(runIx, "ix_overview", ix("overview", [stringArg(input, "target")])),
+    { target: z.string().min(1), ...CHOOSE_INPUT },
+    async (input) =>
+      runFormatted(runIx, "ix_overview", ix("overview", [stringArg(input, "target")], chooseOptions(input))),
   );
   registerTool(
     ctx,
@@ -511,6 +554,7 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       to_rev: z.number().int().nonnegative(),
       target: z.string().min(1).optional(),
       summary: z.boolean().default(false),
+      ...CHOOSE_INPUT,
     },
     async (input) => {
       const positionals = [
@@ -518,7 +562,8 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
         numberArg(input, "to_rev").toString(),
       ];
       if (typeof input.target === "string") positionals.push(input.target);
-      return runFormatted(runIx, "ix_diff", ix("diff", positionals, input.summary === true ? ["--summary"] : []));
+      const options = input.summary === true ? ["--summary"] : [];
+      return runFormatted(runIx, "ix_diff", ix("diff", positionals, [...options, ...chooseOptions(input)]));
     },
   );
   registerTool(
@@ -561,10 +606,12 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     {
       symbol: z.string().min(1),
       depth: z.number().int().min(1).max(5).default(2),
+      ...CHOOSE_INPUT,
     },
     async (input) =>
       runFormatted(runIx, "ix_depends", ix("depends", [stringArg(input, "symbol")], [
         `--depth=${numberArg(input, "depth")}`,
+        ...chooseOptions(input),
       ])),
   );
   registerTool(
@@ -578,10 +625,12 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
       // `ix_depends` has had a `depth` since it was written and this did not,
       // so a trace through a hub ran as deep as the graph goes.
       depth: z.number().int().min(1).max(10).default(3),
+      ...CHOOSE_INPUT,
     },
     async (input) => {
       const options = [`--depth=${numberArg(input, "depth")}`];
       pushOption(options, "--to", input.to);
+      options.push(...chooseOptions(input));
       return runFormatted(runIx, "ix_trace", ix("trace", [stringArg(input, "symbol")], options));
     },
   );
@@ -662,8 +711,9 @@ export function createIxMcpServer(options: CreateServerOptions = {}): McpServer 
     ctx,
     "ix_history",
     "Which revisions touched this, and what each patch said it was doing",
-    { target: z.string().min(1) },
-    async (input) => runFormatted(runIx, "ix_history", ix("history", [stringArg(input, "target")])),
+    { target: z.string().min(1), ...CHOOSE_INPUT },
+    async (input) =>
+      runFormatted(runIx, "ix_history", ix("history", [stringArg(input, "target")], chooseOptions(input))),
   );
   registerTool(
     ctx,
@@ -787,6 +837,29 @@ const SYMBOL_TOOL_INPUT = {
   pick: z.number().int().min(1).max(50).optional().describe("Nth candidate, 1-based"),
   limit: z.number().int().min(1).max(500).optional(),
 } as const;
+
+/**
+ * What a caller needs to act on an auto-picked answer's notice ("Pass pick=<n>
+ * or path=<file substring> to choose another", ui.ts), for the tools that took
+ * a bare target and no disambiguation flags. Every command that can answer an
+ * ambiguous name for its top candidate must be able to take these back: the
+ * SDK strips an input key a tool does not declare, so an undeclared `pick=2`
+ * would silently answer candidate 1 again. No `kind` (ix trace's `--kind` is
+ * an edge kind, not an entity kind) and no descriptions: the full catalog's
+ * tools/list budget (mcp-structured-output.test.ts).
+ */
+const CHOOSE_INPUT = {
+  path: z.string().min(1).optional(),
+  pick: z.number().int().min(1).max(50).optional(),
+} as const;
+
+/** Turn {@link CHOOSE_INPUT} into CLI flags. */
+function chooseOptions(input: ToolInput): string[] {
+  const options: string[] = [];
+  pushOption(options, "--path", input.path);
+  if (typeof input.pick === "number") options.push(`--pick=${numberArg(input, "pick")}`);
+  return options;
+}
 
 /**
  * The edge tools (ix_neighbors and the four single-relation tools) page with
@@ -983,6 +1056,12 @@ async function runJsonStructured(
   if (!isRecord(parsed) || Object.keys(parsed).length === 0) {
     return textResult(text || JSON.stringify({ error: `${argv.command} produced no parseable JSON`, tool }), true);
   }
+  // `structured: true` asked for a bundle. A name the graph has no entity for
+  // but source files mention exits 0 with a `text_matches` record instead
+  // (text-matches.ts): useful to read, but not the bundle, so it goes back as
+  // text marked as an error — the failure signal a structured caller keys on —
+  // never as structuredContent posing as one.
+  if (parsed.schema !== BUNDLE_SCHEMA) return textResult(text, true);
   const { generatedAt: _perCall, ...stable } = parsed;
   return {
     content: [{ type: "text", text: JSON.stringify(stable) }],
@@ -1073,7 +1152,11 @@ async function runSmells(runIx: IxRunner, input: ToolInput): Promise<CallToolRes
       // rank). Prefix matching answered `{"count": 0}` — a confident "no
       // architecture smells here" — for the `src` an agent had just used
       // successfully against ix_inventory on files stored as `ix-cli/src/...`.
-      return normalizePath(candidate.file).includes(path);
+      // Against the file's `path` when the CLI could read it (relative to the
+      // current directory when inside it, else `~/...` or absolute): `file` is
+      // a basename, which no directory matches.
+      const location = typeof candidate.path === "string" ? candidate.path : candidate.file;
+      return normalizePath(location).includes(path);
     });
   const candidates = matched.slice(0, limit);
 

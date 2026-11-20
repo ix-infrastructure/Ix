@@ -17,7 +17,7 @@ name: ${IX_E2E_PROJECT:-ix-e2e}
 
 services:
   arangodb:
-    image: arangodb:3.12.12
+    image: arangodb:3.12.13
     networks: [backend]
     ports:
       # Published only for the graph-signature reads in graph-sig.mjs.
@@ -50,7 +50,7 @@ services:
   memory-layer:
     # Literal, so Dependabot can propose bumps. Set IX_E2E_BACKEND_IMAGE to run
     # another image (stack.mjs then adds compose.image-override.yml).
-    image: ghcr.io/ix-infrastructure/ix-memory-layer:1.0.34@sha256:57546bb4ca4abfab0ec7abadacefc92ac7d267b3226cbf763b9c3b287c38cf26
+    image: ghcr.io/ix-infrastructure/ix-memory-layer:1.0.35@sha256:a1871df0e0e21b4a693609790b4e482f8ca435d160c3ed0cf61cc6219e142cf5
     networks: [backend]
     ports:
       - "127.0.0.1:${IX_E2E_BACKEND_PORT:-8290}:8090"

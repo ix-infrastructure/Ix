@@ -13,9 +13,10 @@ vi.mock("../config.js", async (importOriginal) => ({
   resolveWorkspaceRoot: () => workspace.root,
 }));
 
-const { explainSymbolMiss, MISS_PROBE_ENV } = await import("../miss-reason.js");
+const { explainSymbolMiss, MISS_PROBE_ENV, snippetText } = await import("../miss-reason.js");
 const { runWithSignal } = await import("../../client/run-signal.js");
 const { withMissReason } = await import("../resolve.js");
+const { sourceTextMatches } = await import("../text-matches.js");
 
 const hasRipgrep = (() => {
   try { execFileSync("rg", ["--version"], { stdio: "ignore" }); return true; } catch { return false; }
@@ -124,6 +125,74 @@ describe.skipIf(!hasRipgrep)("explainSymbolMiss", () => {
     const why = await explainSymbolMiss(client([{ uri: "src/late.ts", rev: 3 }]), "frobnicate", {});
     expect(why).toMatchObject({ reason: "symbol_not_extracted", files: ["aaa/early.go", "src/late.ts"] });
     expect(why?.message).toContain("src/late.ts (indexed at rev 3)");
+  });
+
+  it("keeps each file's first matching line, and only source files answer a config key", async () => {
+    const files: Record<string, string> = {
+      "CHANGELOG.md": "# Changelog\n- Support redrivePolicy on SQS events\n",
+      "docs/events/sqs.md": "Set `redrivePolicy` to send failures to a queue.\n",
+      "lib/plugins/aws/events/sqs.js": "'use strict';\n\nconst redrivePolicy = event.redrivePolicy;\nuse(redrivePolicy);\n",
+      "lib/plugins/aws/package/compile.js": "module.exports = {\n  compile() {\n    return {\n      redrivePolicy: { deadLetterTargetArn: arn },\n    };\n  },\n};\n",
+      "test/unit/sqs.test.js": "expect(queue.redrivePolicy).toBeDefined();\n",
+    };
+    for (const [file, text] of Object.entries(files)) {
+      mkdirSync(join(workspace.root, file, ".."), { recursive: true });
+      writeFileSync(join(workspace.root, file), text);
+    }
+    const why = await explainSymbolMiss(
+      client([{ uri: "lib/plugins/aws/events/sqs.js" }, { uri: "lib/plugins/aws/package/compile.js" }]), "redrivePolicy", {},
+    );
+    expect(why?.reason).toBe("symbol_not_extracted");
+    expect(why?.matches).toEqual([
+      { path: "CHANGELOG.md", line: 2, snippet: "- Support redrivePolicy on SQS events" },
+      { path: "docs/events/sqs.md", line: 1, snippet: "Set `redrivePolicy` to send failures to a queue." },
+      { path: "lib/plugins/aws/events/sqs.js", line: 3, snippet: "const redrivePolicy = event.redrivePolicy;" },
+      { path: "lib/plugins/aws/package/compile.js", line: 4, snippet: "      redrivePolicy: { deadLetterTargetArn: arn }," },
+      { path: "test/unit/sqs.test.js", line: 1, snippet: "expect(queue.redrivePolicy).toBeDefined();" },
+    ]);
+    // The changelog, the docs page and the test are not listed: source only.
+    expect(sourceTextMatches("redrivePolicy", why?.matches)).toEqual([
+      { path: "lib/plugins/aws/events/sqs.js", line: 3, snippet: "const redrivePolicy = event.redrivePolicy;" },
+      { path: "lib/plugins/aws/package/compile.js", line: 4, snippet: "redrivePolicy: { deadLetterTargetArn: arn }," },
+    ]);
+  });
+
+  it("keeps the name in the snippet when it sits far along a long line", async () => {
+    // Past the 300 columns a line preview keeps: the snippet is the window around the name.
+    const long = `const settings = { ${"padding: 1, ".repeat(40)}visibilityTimeoutSecs: 5 };`;
+    mkdirSync(join(workspace.root, "lib", "queue"), { recursive: true });
+    writeFileSync(join(workspace.root, "lib", "queue", "long.js"), `${long}\nuse(visibilityTimeoutSecs);\n`);
+    writeFileSync(join(workspace.root, "lib", "queue", "$dollar.js"), "const x = 1; const $queueDepth = 2;\n");
+    const why = await explainSymbolMiss(client([{ uri: "lib/queue/long.js" }]), "visibilityTimeoutSecs", {});
+    expect(long.indexOf("visibilityTimeoutSecs")).toBeGreaterThan(300);
+    expect(why?.matches).toHaveLength(1);
+    expect(why?.matches?.[0]).toMatchObject({ path: "lib/queue/long.js", line: 1 });
+    expect(why?.matches?.[0].snippet).toContain("visibilityTimeoutSecs: 5 };");
+    expect(why?.matches?.[0].snippet.length).toBeLessThan(200);
+    // The line that sets the name is still recognised as one.
+    expect(sourceTextMatches("visibilityTimeoutSecs", why?.matches)[0].snippet).toContain("visibilityTimeoutSecs: 5");
+    // A `$` in the name is matched literally, as a word.
+    const dollar = await explainSymbolMiss(client([{ uri: "lib/queue/$dollar.js" }]), "$queueDepth", {});
+    expect(dollar?.matches).toEqual([{ path: "lib/queue/$dollar.js", line: 1, snippet: "const x = 1; const $queueDepth = 2;" }]);
+  });
+
+  it("keeps rg's long-line preview marker out of a window of 4-byte text", async () => {
+    // 70 four-byte characters each side is 560 bytes: past a fixed 300-byte
+    // cap, rg printed a cut preview ending in `[... 0 more matches]`.
+    const wide = "\u{1D538}".repeat(80);
+    mkdirSync(join(workspace.root, "lib", "wide"), { recursive: true });
+    writeFileSync(join(workspace.root, "lib", "wide", "emoji.js"), `// ${wide} deadLetterQueueArn ${wide}\n`);
+    const why = await explainSymbolMiss(client([{ uri: "lib/wide/emoji.js" }]), "deadLetterQueueArn", {});
+    const snippet = why?.matches?.[0].snippet ?? "";
+    expect(snippet).toContain(" deadLetterQueueArn ");
+    expect(snippet).not.toMatch(/\[\.\.\./);
+    expect([...snippet].length).toBeLessThanOrEqual(2 * 71 + "deadLetterQueueArn".length);
+  });
+
+  it("drops a preview marker, should rg ever print one", () => {
+    expect(snippetText("a = deadLetterQueueArn [... 0 more matches]\r")).toBe("a = deadLetterQueueArn");
+    expect(snippetText("x deadLetterQueueArn y [... omitted end of long line]")).toBe("x deadLetterQueueArn y");
+    expect(snippetText("list[... 3] = deadLetterQueueArn")).toBe("list[... 3] = deadLetterQueueArn");
   });
 
   it("ignores files Ix does not parse: the name only there is a plain miss", async () => {

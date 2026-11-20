@@ -16,13 +16,13 @@
     "node": ">=22.22.0"
   },
   "dependencies": {
-    "@astrojs/markdown-satteri": "^0.4.4",
-    "@astrojs/starlight": "^0.42.6",
+    "@astrojs/markdown-satteri": "^0.4.9",
+    "@astrojs/starlight": "^0.42.11",
     "@fontsource-variable/inter": "^5.3.0",
-    "astro": "^7.4.0",
-    "satteri": "^0.10.5",
+    "astro": "^7.4.11",
+    "satteri": "^0.11.7",
     "sharp": "^0.35.5",
-    "starlight-openapi": "^0.27.0"
+    "starlight-openapi": "^0.27.1"
   },
   "overrides": {
     "form-data": "^4.0.6",

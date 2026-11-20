@@ -4,9 +4,10 @@
 /**
  * API-reference parity gate for docs/api.
  *
- * docs/api/README.md claims the reference is generated from the client source.
- * This check makes that claim machine-enforced across four surfaces, each
- * failing with the item named:
+ * docs/api/README.md says the reference is written from the client source.
+ * This check enforces that across four surfaces, each failing with the item
+ * named. It never talks to a backend; test/e2e/api-reference.e2e.ts checks
+ * that every documented route exists on the pinned one.
  *
  *   1. Endpoints — every path+method the client calls (ix-cli/src/client/api.ts)
  *      must be in docs/api/openapi.yaml, and every documented endpoint must be

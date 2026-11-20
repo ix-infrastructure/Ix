@@ -11,11 +11,13 @@ import { WorkspaceNotMappedError, renderCliError, setErrorFormat } from "../erro
 import { LEGACY_EXIT_CODES_ENV, exitCodeFor, worseExitCode } from "../outcome.js";
 import { ALL_CANDIDATE_CAP } from "../resolve.js";
 import { SUGGEST_MAX_MS } from "../target-suggestions.js";
+import { IxHttpError } from "../../client/http-error.js";
 
 // The outcome contract an agent routes on (outcome.ts): 0 results, 2 ambiguous
-// (candidates returned), 3 not found (suggestions), 4 workspace not mapped,
-// 1 a real error -- the same in every graph command, and the same slug in
-// json `error` and llm `error code=`.
+// (candidates returned, under --strict), 3 not found (suggestions), 4
+// workspace not mapped, 1 a real error -- the same in every graph command, and
+// the same slug in json `error` and llm `error code=`. Without --strict an
+// ambiguous target is answered for its top candidate (target-answers.test.ts).
 
 vi.mock("../bootstrap.js", async (orig) => ({
   ...(await orig<typeof import("../bootstrap.js")>()),
@@ -33,6 +35,9 @@ vi.mock("../../client/api.js", () => ({
     async entity(id: string) {
       return { node: { id, kind: "function", name: id, attrs: { line_start: 1, line_end: 2 }, provenance: { sourceUri: `src/${id}.ts` } } };
     }
+    // explain answers an ambiguous name for its top candidate, so it gets this far.
+    async provenance(id: string) { return { entityId: id, chain: [] }; }
+    async listByKind() { return []; }
   },
 }));
 
@@ -264,8 +269,8 @@ describe.each(COMMANDS)("ix %s outcome codes", (command) => {
     expect(text.exitCode).toBe(3);
   });
 
-  it("exits 2 with ambiguous_target and the candidates for a shared name", async () => {
-    const json = await run([command, "Duplicate", "--format", "json"]);
+  it("with --strict, exits 2 with ambiguous_target and the candidates for a shared name", async () => {
+    const json = await run([command, "Duplicate", "--strict", "--format", "json"]);
     expect(json.exitCode).toBe(2);
     const body = JSON.parse(json.stdout);
     // locate's record was never an `error` (string-`error` readers treat it as
@@ -278,7 +283,7 @@ describe.each(COMMANDS)("ix %s outcome codes", (command) => {
     }
     expect(body.candidates.map((c: { id: string }) => c.id)).toEqual(["first-id", "second-id"]);
 
-    const llm = await run([command, "Duplicate", "--format", "llm"]);
+    const llm = await run([command, "Duplicate", "--strict", "--format", "llm"]);
     expect(llm.exitCode).toBe(2);
     expect(llm.stdout).toMatch(/^error code=ambiguous_target /);
     expect(llm.stdout).toContain("candidate n=2 name=Duplicate");
@@ -287,7 +292,9 @@ describe.each(COMMANDS)("ix %s outcome codes", (command) => {
   it("collapses every non-zero outcome to 1 under IX_LEGACY_EXIT_CODES=1", async () => {
     process.env[LEGACY_EXIT_CODES_ENV] = "1";
     expect((await run([command, "Missing", "--format", "json"])).exitCode).toBe(1);
-    expect((await run([command, "Duplicate", "--format", "json"])).exitCode).toBe(1);
+    expect((await run([command, "Duplicate", "--strict", "--format", "json"])).exitCode).toBe(1);
+    // Answered for its top candidate: not an error, under the switch or not.
+    expect((await run([command, "Duplicate", "--format", "json"])).exitCode).toBe(0);
   });
 });
 
@@ -301,8 +308,8 @@ describe.each(["locate", "callers", "callees", "impact", "overrides"] as const)(
 
 describe("ambiguity hints name --all where it applies", () => {
   it("callers offers --all; locate does not", async () => {
-    expect((await run(["callers", "Duplicate", "--format", "llm"])).stdout).toMatch(/hint text=".*--all/);
-    expect((await run(["locate", "Duplicate", "--format", "llm"])).stdout).not.toContain("--all");
+    expect((await run(["callers", "Duplicate", "--strict", "--format", "llm"])).stdout).toMatch(/hint text=".*--all/);
+    expect((await run(["locate", "Duplicate", "--strict", "--format", "llm"])).stdout).not.toContain("--all");
   });
 });
 
@@ -422,8 +429,8 @@ describe("--all on an ambiguous target", () => {
 
   it("covers every tied candidate, not only the 8 an ambiguity lists", async () => {
     graph({ Many: manyNamed(12) });
-    // Without --all the error still lists 8 of 12.
-    const plain = JSON.parse((await run(["callers", "Many", "--format", "json"])).stdout);
+    // Without --all the answer's notice still lists 8 of 12.
+    const plain = JSON.parse((await run(["callers", "Many", "--format", "json"])).stdout).resolutionNotices[0];
     expect(plain.candidates).toHaveLength(8);
     expect(plain.total).toBe(12);
     expect(Object.keys(plain)).not.toContain("allCandidates");
@@ -509,7 +516,7 @@ describe("--all on an ambiguous target", () => {
     // equal scores) and the definitions keep their shown numbers under --all.
     const pyAgain = { ...CLAMP_DEFS[0], id: "py2-id", attrs: { line_start: 40, line_end: 41 } };
     graph({ clamp: [CLAMP_IMPORT, ...CLAMP_DEFS, pyAgain] });
-    const plain = JSON.parse((await run(["callers", "clamp", "--format", "json"])).stdout);
+    const plain = JSON.parse((await run(["callers", "clamp", "--format", "json"])).stdout).resolutionNotices[0];
     expect(plain.candidates.map((c: { id: string; rank: number }) => [c.rank, c.id]))
       .toEqual([[1, "py-id"], [2, "ts-id"], [3, "py2-id"], [4, "import-id"]]);
 
@@ -558,7 +565,17 @@ describe("--all on an ambiguous target", () => {
 
 describe("several targets in one call", () => {
   it("locate: json groups per target, with each target's own exit code; the run exits with the worst", async () => {
-    const result = await run(["locate", "Unique", "Duplicate", "Missing", "--format", "json"]);
+    // An ambiguous target is answered for its top candidate, with its notice.
+    const answered = await run(["locate", "Unique", "Duplicate", "Missing", "--format", "json"]);
+    expect(answered.exitCode).toBe(3);
+    const groups = JSON.parse(answered.stdout);
+    expect(groups.targets.map((t: { target: string; exitCode: number }) => [t.target, t.exitCode]))
+      .toEqual([["Unique", 0], ["Duplicate", 0], ["Missing", 3]]);
+    expect(groups.targets[1].resolvedTarget).toMatchObject({ id: "first-id" });
+    expect(groups.targets[1].resolutionNotices[0]).toMatchObject({ code: "ambiguous_target", total: 2 });
+    expect(groups.summary).toEqual({ total: 3, ok: 2, ambiguous: 0, notFound: 1, notMapped: 0, failed: 0 });
+
+    const result = await run(["locate", "Unique", "Duplicate", "Missing", "--strict", "--format", "json"]);
     expect(result.exitCode).toBe(3);
     const body = JSON.parse(result.stdout);
     expect(body.targets.map((t: { target: string; exitCode: number }) => [t.target, t.exitCode]))
@@ -588,7 +605,7 @@ describe("several targets in one call", () => {
 
     // Every miss exits 1 under the switch; the summary still tells them apart.
     process.env[LEGACY_EXIT_CODES_ENV] = "1";
-    const legacy = await run(["locate", "Unique", "Duplicate", "Missing", "Elsewhere", "--format", "json"]);
+    const legacy = await run(["locate", "Unique", "Duplicate", "Missing", "Elsewhere", "--strict", "--format", "json"]);
     expect(legacy.exitCode).toBe(1);
     const legacyBody = JSON.parse(legacy.stdout);
     expect(legacyBody.targets.map((t: { exitCode: number }) => t.exitCode)).toEqual([0, 1, 1, 1]);
@@ -596,7 +613,7 @@ describe("several targets in one call", () => {
   });
 
   it("callers: llm opens each group with a target record and ends with a summary", async () => {
-    const result = await run(["callers", "Unique", "Duplicate", "--format", "llm"]);
+    const result = await run(["callers", "Unique", "Duplicate", "--strict", "--format", "llm"]);
     expect(result.exitCode).toBe(2);
     const lines = result.stdout.split("\n");
     expect(lines[0]).toBe("target n=1 name=Unique");
@@ -620,7 +637,7 @@ describe("several targets in one call", () => {
     graph({ Unique: UNIQUE, Other: [{ id: "other-id", kind: "function", name: "Other", provenance: { sourceUri: "src/other.ts" } }] });
     const base = expand.getMockImplementation()!;
     expand.mockImplementation(async (...args: unknown[]) => {
-      if (args[0] === "only-id") throw new Error('500: {"error":"query_failed","message":"backend broke"}');
+      if (args[0] === "only-id") throw new IxHttpError(500, '{"error":"query_failed","message":"backend broke"}');
       return base(...(args as [string, { direction: string }]));
     });
     const json = await run(["callers", "Unique", "Other", "--format", "json"]);
@@ -689,16 +706,16 @@ describe("an id lookup the backend could not answer", () => {
     const { resolveFileOrEntityFull } = await import("../resolve.js");
     const down = { entity: async () => { throw new Error("fetch failed: connect ECONNREFUSED 127.0.0.1:8090"); } };
     await expect(resolveFileOrEntityFull(down as never, RAW_ID, { format: "json" })).rejects.toThrow(/ECONNREFUSED/);
-    const failing = { entity: async () => { throw new Error("500: internal error"); } };
+    const failing = { entity: async () => { throw new IxHttpError(500, "internal error"); } };
     await expect(resolveFileOrEntityFull(failing as never, RAW_ID, { format: "json" })).rejects.toThrow(/^500:/);
   });
 
   it("is a miss only when the backend says the id does not exist", async () => {
     const { resolveFileOrEntityFull, isLookupMiss } = await import("../resolve.js");
-    const absent = { entity: async () => { throw new Error("404: not found"); } };
+    const absent = { entity: async () => { throw new IxHttpError(404, "not found"); } };
     expect(await resolveFileOrEntityFull(absent as never, RAW_ID, { format: "json" })).toEqual({ resolved: false, ambiguous: false });
     expect(isLookupMiss(new Error("No entity found for prefix: abcd1234"))).toBe(true);
-    expect(isLookupMiss(new Error("401: unauthorized"))).toBe(false);
+    expect(isLookupMiss(new IxHttpError(401, "unauthorized"))).toBe(false);
   });
 
   it("is a miss when the backend answers 200 without a node", async () => {
@@ -736,15 +753,15 @@ describe("subsystems and around carry the same outcome codes as their slugs", ()
     expect(exitFor({ error: "ambiguous_target", target_query: "api", candidates: [] })).toBe(1);
   });
 
-  it("around: a file not in the graph exits 3, a bad argument 1", async () => {
-    const { reportError } = await import("../commands/around.js");
+  it("reportFailure (around's failures): a file not in the graph exits 3, a bad argument 1", async () => {
+    const { reportFailure } = await import("../ui.js");
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       process.exitCode = undefined;
-      reportError("unresolved_target", "not in the graph", "llm", [["reason", "file_not_in_graph"]]);
+      reportFailure("unresolved_target", "not in the graph", "llm", [["reason", "file_not_in_graph"]]);
       expect(process.exitCode).toBe(3);
       process.exitCode = undefined;
-      reportError("invalid_line_range", "bad range", "llm");
+      reportFailure("invalid_line_range", "bad range", "llm");
       expect(process.exitCode).toBe(1);
     } finally {
       log.mockRestore();

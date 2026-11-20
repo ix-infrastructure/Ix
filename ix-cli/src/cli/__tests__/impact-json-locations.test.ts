@@ -4,7 +4,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { Command } from "commander";
 import chalk from "chalk";
 
-import { registerImpactCommand, impactRowJson } from "../commands/impact.js";
+import { registerImpactCommand, impactRowJson, distinctDependents, nestedInside } from "../commands/impact.js";
 import { BASELINE } from "./impact-json-locations.baseline.js";
 
 /**
@@ -12,7 +12,8 @@ import { BASELINE } from "./impact-json-locations.baseline.js";
  * container dependent is, from the nodes the command already holds. Additive
  * only: the same JSON with the new keys taken out is what the command printed
  * before, and llm and text output do not change at all (`BASELINE` was
- * captured from the command before the location fields were added).
+ * captured from the command before the location fields were added; its llm
+ * strings were edited once since, for #1016's header `path=`).
  */
 
 const { expand, entity, state } = vi.hoisted(() => ({
@@ -96,12 +97,14 @@ function graphExpand(id: string, opts: { direction: string; predicates: string[]
   return { nodes: GRAPH[`${id} ${opts.direction} ${opts.predicates.join(",")}`] ?? [], edges: [] };
 }
 
-type Scenario = "leaf" | "file" | "class" | "all";
+type Scenario = "leaf" | "file" | "class" | "all" | "pathless";
 const SETS: Record<Scenario, unknown> = {
   leaf: { entities: [LEAF] },
   file: { entities: [FILE] },
   class: { entities: [CLASS] },
   all: { entities: [{ ...LEAF, n: 1 }, { ...CLASS, n: 2 }], all: { total: 2 } },
+  // The file target with no path on the resolved entity.
+  pathless: { entities: [{ ...FILE, path: undefined }] },
 };
 
 async function run(scenario: Scenario, args: string[]): Promise<{ out: string; exitCode: number | null }> {
@@ -125,6 +128,11 @@ async function json(scenario: Scenario, args: string[] = []): Promise<any> {
   return JSON.parse((await run(scenario, ["--format", "json", ...args])).out);
 }
 
+/** The llm output with the `dependents_total=` field taken out again. */
+function withoutDependentsTotal(out: string): string {
+  return out.replace(/ dependents_total=\d+/g, "");
+}
+
 /** The JSON with every key this change added taken out again. */
 function withoutNewKeys(value: any): any {
   const strip = (row: any) => {
@@ -133,6 +141,10 @@ function withoutNewKeys(value: any): any {
   };
   const one = (o: any) => {
     const { dependentList: _d, ...rest } = o;
+    if (rest.summary) {
+      const { dependents: _n, ...summary } = rest.summary;
+      rest.summary = summary;
+    }
     if (rest.callerList) rest.callerList = rest.callerList.map(strip);
     if (rest.calleeList) rest.calleeList = rest.calleeList.map(strip);
     if (rest.propagationBuckets) {
@@ -236,7 +248,7 @@ describe("ix impact <container> --format json", () => {
       { kind: "method", name: "handle", path: "src/http.ts", lineStart: 7, lineEnd: 7, via: "dependent" },
       { kind: "function", name: "nowhere", via: "dependent" },
     ]);
-    expect(out.summary).toEqual({ members: 1, directImporters: 1, directDependents: 3, memberLevelCallers: 1 });
+    expect(out.summary).toEqual({ members: 1, directImporters: 1, directDependents: 3, memberLevelCallers: 1, dependents: 3 });
   });
 
   it("--limit does not cut dependentList", async () => {
@@ -289,7 +301,7 @@ describe("additive only", () => {
     for (const format of ["llm", "text"] as const) {
       it(`${scenario}: ${format} output is byte-identical`, async () => {
         const { out, exitCode } = await run(scenario, ["--format", format]);
-        expect(out).toBe(BASELINE[format][scenario]);
+        expect(format === "llm" ? withoutDependentsTotal(out) : out).toBe(BASELINE[format][scenario]);
         expect(exitCode).toBe(BASELINE.exitCode[scenario][format]);
       });
     }
@@ -299,5 +311,135 @@ describe("additive only", () => {
     const out = await json("all");
     expect(out.results[0].callerList[0]).toEqual({ kind: "method", name: "login", path: "src/auth/login.ts", lineStart: 10, lineEnd: 42 });
     expect(out.results[1].dependentList[0]).toEqual({ kind: "function", name: "boot", path: "src/boot.ts", lineStart: 3, lineEnd: 30, via: "importer" });
+  });
+});
+
+// ── summary.dependents ───────────────────────────────────────────────────────
+
+describe("summary.dependents", () => {
+  it("counts each entity once across groups and leaves out the excluded ids", () => {
+    expect(distinctDependents([[{ id: "a" }, { id: "b" }], [{ id: "b" }, { id: "c" }], [{ id: "a" }]], [])).toBe(3);
+    expect(distinctDependents([[{ id: "a" }, { id: "self" }], [{ id: "m1" }]], ["self", "m1"])).toBe(1);
+    expect(distinctDependents([[{}, { id: "a" }]], [])).toBe(1);
+    expect(distinctDependents([], [])).toBe(0);
+  });
+
+  it("file target: overlapping importers, dependents and member callers count once", async () => {
+    // Importers {app.ts, boot}, dependents {boot, handle}, member callers
+    // verify <- {boot, handle} and Session <- {handle}: three distinct entities,
+    // where the separate counts add up to 2 + 2 + 3.
+    const out = await json("file");
+    expect(out.summary).toEqual({ members: 2, directImporters: 2, directDependents: 2, memberLevelCallers: 3, dependents: 3 });
+    expect(Object.keys(out.summary).at(-1)).toBe("dependents");
+  });
+
+  it("file target: a member calling another member is not a dependent", async () => {
+    expand.mockImplementation(async (id: string, opts: { direction: string; predicates: string[] }) =>
+      id === "m2" && opts.predicates.includes("CALLS")
+        ? { nodes: [httpHandle, memberVerify, { id: "t-file", kind: "file", name: "auth.ts" }], edges: [] }
+        : graphExpand(id, opts));
+    const out = await json("file");
+    expect(out.summary.memberLevelCallers).toBe(5);
+    expect(out.summary.dependents).toBe(3);
+  });
+
+  it("file target: a method nested in a member class is not a dependent", async () => {
+    // `Session.refresh` is CONTAINed by the class, not the file, so it is not
+    // one of the file's members; it still lives in src/auth.ts.
+    const refresh = { id: "m2-refresh", kind: "method", name: "refresh", attrs: { path: "src/auth.ts", line_start: 30, line_end: 40 } };
+    expand.mockImplementation(async (id: string, opts: { direction: string; predicates: string[] }) =>
+      id === "m1" && opts.predicates.includes("CALLS")
+        ? { nodes: [boot, httpHandle, refresh], edges: [] }
+        : id === "t-file" && opts.direction === "in" && opts.predicates.includes("CALLS")
+          ? { nodes: [boot, httpHandle, refresh], edges: [] }
+          : graphExpand(id, opts));
+    const out = await json("file");
+    expect(out.summary.memberLevelCallers).toBe(4);
+    expect(out.summary.dependents).toBe(3);
+  });
+
+  it("file target with no outside users: dependents is 0", async () => {
+    const refresh = { id: "m2-refresh", kind: "method", name: "refresh", attrs: { path: "src/auth.ts", line_start: 30, line_end: 40 } };
+    expand.mockImplementation(async (id: string, opts: { direction: string; predicates: string[] }) =>
+      opts.predicates.includes("IMPORTS") ? { nodes: [], edges: [] }
+        : (id === "m1" || id === "m2") && opts.predicates.includes("CALLS") ? { nodes: [refresh], edges: [] }
+          : id === "t-file" && opts.direction === "in" && opts.predicates.includes("CALLS") ? { nodes: [refresh], edges: [] }
+            : graphExpand(id, opts));
+    expect((await json("file")).summary.dependents).toBe(0);
+  });
+
+  it("nestedInside: same file for a file target, within a member's lines otherwise", () => {
+    const at = (id: string, path: string | undefined, a?: number, b?: number) =>
+      ({ id, kind: "method", attrs: { path, line_start: a, line_end: b } });
+    const inner = at("inner", "src/s.ts", 10, 50);
+    const nodes = [at("in", "src/s.ts", 20, 30), at("other-file", "src/t.ts", 20, 30), at("same-file-outside", "src/s.ts", 60, 70), at("no-path", undefined, 20, 30), { id: "bare" }];
+    expect(nestedInside({ kind: "file", path: "src/s.ts" }, [], [nodes])).toEqual(["in", "same-file-outside"]);
+    expect(nestedInside({ kind: "class", path: "src/s.ts" }, [inner], [nodes])).toEqual(["in"]);
+    expect(nestedInside({ kind: "class", path: undefined }, [inner], [nodes])).toEqual([]);
+  });
+
+  it("leaf target: distinct callers, the target itself left out", async () => {
+    expect((await json("leaf")).summary).toEqual({ callers: 5, callees: 1, dependents: 5 });
+    expand.mockImplementation(async (id: string, opts: { direction: string; predicates: string[] }) =>
+      id === "t-verify" && opts.direction === "in" && opts.predicates.includes("CALLS")
+        ? { nodes: [login, login, { id: "t-verify", kind: "function", name: "verify" }, handle], edges: [] }
+        : graphExpand(id, opts));
+    const out = await json("leaf");
+    expect(out.summary).toEqual({ callers: 4, callees: 1, dependents: 2 });
+  });
+
+  it("llm: the counts record ends with dependents_total, the same number", async () => {
+    const file = (await run("file", ["--format", "llm"])).out.split("\n").find((l) => l.startsWith("counts "));
+    expect(file).toBe("counts members=2 importers=2 dependents=2 member_callers=3 dependents_total=3");
+    const leaf = (await run("leaf", ["--format", "llm"])).out.split("\n").find((l) => l.startsWith("counts "));
+    expect(leaf).toMatch(/^counts callers=5 callees=1 shown_callers=\d+ shown_callees=\d+ dependents_total=5$/);
+  });
+
+  it("--all: every candidate carries it", async () => {
+    const out = await json("all");
+    expect(out.results.map((r: any) => r.summary.dependents)).toEqual([5, 3]);
+  });
+});
+
+// ── llm: a container's path once ─────────────────────────────────────────────
+
+describe("llm: a container target's path is printed once (#1016)", () => {
+  const lines = async (scenario: Scenario) => (await run(scenario, ["--format", "llm"])).out.split("\n");
+
+  it("file target: the header carries path=, members in that file leave it off", async () => {
+    const out = await lines("file");
+    expect(out[0]).toMatch(/^impact target=auth\.ts kind=file path=src\/auth\.ts risk=/);
+    expect(out.filter((l) => l.startsWith("member "))).toEqual([
+      "member name=verify kind=function callers=2 lines=1-20",
+      "member name=Session kind=class callers=1 lines=22-80",
+    ]);
+  });
+
+  it("class target: a member in another file than the class keeps its own path=", async () => {
+    const out = await lines("class");
+    expect(out[0]).toMatch(/^impact target=Session kind=class path=src\/session\.ts risk=/);
+    expect(out.filter((l) => l.startsWith("member "))).toEqual([
+      "member name=Session kind=class callers=1 path=src/auth.ts lines=22-80",
+    ]);
+  });
+
+  it("a target with no path: no header path=, every member keeps its own", async () => {
+    const out = await lines("pathless");
+    expect(out[0]).not.toMatch(/ path=/);
+    expect(out.filter((l) => l.startsWith("member "))).toEqual([
+      "member name=verify kind=function callers=2 path=src/auth.ts lines=1-20",
+      "member name=Session kind=class callers=1 path=src/auth.ts lines=22-80",
+    ]);
+  });
+
+  it("leaf target: the header is unchanged, with no path=", async () => {
+    const out = await lines("leaf");
+    expect(out[0]).toBe(BASELINE.llm.leaf.split("\n")[0]);
+    expect(out[0]).not.toMatch(/ path=/);
+  });
+
+  it("json is unchanged: topImpactedMembers rows keep their path", async () => {
+    const out = await json("file");
+    expect(out.topImpactedMembers.map((m: any) => m.path)).toEqual(["src/auth.ts", "src/auth.ts"]);
   });
 });

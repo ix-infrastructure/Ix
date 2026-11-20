@@ -12,10 +12,12 @@ import { Command, CommanderError } from "commander";
 
 import { registerOssCommands, registerProStubs } from "../cli/register/oss.js";
 import { tryLoadProCommands } from "../cli/register/pro-loader.js";
+import { registerOssFallbacks } from "../cli/register/oss-fallbacks.js";
 import { resetResolutionNotices } from "../cli/format.js";
 import { resetReadScope } from "../cli/resolve.js";
 import { releaseLocksOwnedBy, setLockOwnerResolver } from "../cli/single-flight.js";
-import { IX_CALLER_ENV } from "../cli/next-step.js";
+import { currentCaller, withCaller } from "../cli/next-step.js";
+import { childHintEnv, isMcpCaller, mcpCaller, type McpCaller } from "./hints.js";
 import { runWithSignal } from "../client/run-signal.js";
 
 const execFileAsync = promisify(execFile);
@@ -284,7 +286,10 @@ async function buildProgram(version: string): Promise<Command> {
   program.name("ix").version(version);
   registerOssCommands(program);
 
-  if (!(await tryLoadProCommands(program))) registerProStubs(program);
+  if (!(await tryLoadProCommands(program))) {
+    await registerOssFallbacks(program);
+    registerProStubs(program);
+  }
 
   return program;
 }
@@ -426,11 +431,9 @@ async function executeInProcess(
   process.exitCode = undefined;
   activeRun = run;
   // Tell the command who is reading, so its hints name tools and arguments
-  // rather than CLI flags (see cli/next-step.ts). Scoped to the run: a command
-  // that outlives its timeout and prints afterwards writes into a closed run,
-  // whose output is dropped, so the restore cannot mislabel anything shown.
-  const callerSurface = process.env[IX_CALLER_ENV];
-  process.env[IX_CALLER_ENV] = "mcp";
+  // rather than CLI flags (see cli/next-step.ts). Scoped to this run's async
+  // work, so nothing else in the process sees it.
+  const caller = runCaller();
 
   // Decided before the command starts: an orphan already in flight can write
   // process.exitCode at any point during this run, and there is no way to tell
@@ -444,8 +447,8 @@ async function executeInProcess(
   // spawns takes this signal, so a timeout closes the backend connections
   // rather than leaving the command running behind the next tool call.
   const abort = new AbortController();
-  const work = runContext.run(run, () =>
-    runWithSignal(abort.signal, () => program.parseAsync(args, { from: "user" })));
+  const work = withCaller(caller, () => runContext.run(run, () =>
+    runWithSignal(abort.signal, () => program.parseAsync(args, { from: "user" }))));
   // Settles either way and never rejects, so it can be watched without adding a
   // second rejection handler to `work`.
   let commandSettled = false;
@@ -485,8 +488,6 @@ async function executeInProcess(
   } finally {
     commandExitCode = commandExitCode ?? (exitCodeIsOurs ? process.exitCode : undefined);
     process.exitCode = callerExitCode;
-    if (callerSurface === undefined) delete process.env[IX_CALLER_ENV];
-    else process.env[IX_CALLER_ENV] = callerSurface;
     if (failure !== null) {
       if (run.truncated) {
         // appendChunk is a no-op once the cap has fired, but *why* the command
@@ -621,6 +622,16 @@ export function detectPro(): Promise<boolean> {
   }));
 }
 
+/**
+ * The reader a command run serves: the MCP session that asked for it (the
+ * server scopes every call with the tools it offered), or, for a runner used
+ * on its own, a session offered nothing, whose hints name no tool.
+ */
+function runCaller(): McpCaller {
+  const caller = currentCaller();
+  return isMcpCaller(caller) ? caller : mcpCaller();
+}
+
 /** Spawn the CLI as a child process — one command per process, fully isolated. */
 export async function runCurrentIx(
   args: string[],
@@ -629,7 +640,7 @@ export async function runCurrentIx(
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, [CLI_ENTRYPOINT, ...args], {
       cwd: process.cwd(),
-      env: { ...process.env, IX_MCP_CHILD: "1", [IX_CALLER_ENV]: "mcp" },
+      env: { ...process.env, IX_MCP_CHILD: "1", ...childHintEnv(runCaller()) },
       encoding: "utf8",
       maxBuffer: MAX_OUTPUT_BYTES,
       timeout: timeoutMs,

@@ -11,11 +11,11 @@ import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 
 import { absoluteFromSourceUri, isReadablePath, resolveWorkspaceRoot } from "../config.js";
-import { resolveFileOrReport, printResolved, type ResolvedEntity } from "../resolve.js";
+import { displayNameOf, resolveFileOrReport, printResolved, type ResolvedEntity } from "../resolve.js";
 import { formatDiff, relativePath, printJson } from "../format.js";
 import { llmLine } from "../llm.js";
 import { reportFailure } from "../ui.js";
-import { parsePickOption } from "../options.js";
+import { formatOption, kindOption, pathOption, pickOption, STRICT_AMBIGUOUS_HELP, strictOption } from "../options.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 
 /**
@@ -490,10 +490,11 @@ export function registerDiffCommand(program: Command): void {
     .option("--limit <n>", "Max changes to return (default 100)")
     .option("--full", `Return all changes (up to the backend's maximum, ${DIFF_MAX_LIMIT})`)
     .option("--all", "Diff every workspace on the backend, not just this one")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
-    .option("--kind <kind>", "Filter target entity by kind")
-    .option("--path <path>", "Restrict to symbols from files matching this path substring")
-    .option("--pick <n>", "Pick Nth candidate from ambiguous results (1-based)", parsePickOption)
+    .addOption(formatOption())
+    .addOption(kindOption())
+    .addOption(pathOption())
+    .addOption(pickOption())
+    .addOption(strictOption(STRICT_AMBIGUOUS_HELP))
     .addHelpText("after", `\nExamples:
   ix diff 3 5
   ix diff 3 5 ix-cli/src/cli/commands/decide.ts
@@ -502,7 +503,7 @@ export function registerDiffCommand(program: Command): void {
   ix diff 3 5 --summary`)
     .action(async (fromRev: string, toRev: string, target: string | undefined, opts: {
       entity?: string; summary?: boolean; content?: boolean; limit?: string; full?: boolean; format: string;
-      kind?: string; path?: string; pick?: number; all?: boolean;
+      kind?: string; path?: string; pick?: number; strict?: boolean; all?: boolean;
     }) => {
       const conflict = detectDiffModeConflict(opts);
       if (conflict) {
@@ -519,6 +520,11 @@ export function registerDiffCommand(program: Command): void {
         kind: opts.kind,
         path: opts.path,
         pick: opts.pick,
+        strict: opts.strict,
+        // A revision diff of the entity was asked for: a list of the files
+        // that mention a text-only name today is not one, so it stays the
+        // miss (exit 3), as `context --out` does.
+        textAnswer: false,
       };
       let entityId: string | undefined = opts.entity;
       let resolved: ResolvedEntity | null = null;
@@ -679,7 +685,7 @@ export function registerDiffCommand(program: Command): void {
                 },
               });
             } else {
-              const name = resolved.name ?? fileUri;
+              const name = displayNameOf(resolved) ?? fileUri;
               console.log(chalk.yellow(`${name} modified (${changeCount} textual changes — not captured by parser)`));
               console.log(chalk.dim("  Use --content to see full diff."));
             }

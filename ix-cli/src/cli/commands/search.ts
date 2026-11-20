@@ -6,13 +6,16 @@ import { createClient } from "../../client/factory.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
 import { disambiguatingIds, formatNodes, lineSpan, relativePath, printJson, rowLocation } from "../format.js";
 import { baseScore, originPenalty, hasDefinitionOf, mergeById, resolveReadSystemId } from "../resolve.js";
-import { isFileStemMatch } from "../candidate-origin.js";
+import { candidateOrigin, isFileStemMatch } from "../candidate-origin.js";
 import { applyRoleFilter, roleHint } from "../role-filter.js";
 import { stderr } from "../stderr.js";
 import { llmLine } from "../llm.js";
 import { isQuiet, projectRow } from "../output-shape.js";
 import { normalizePathSeparators } from "../path-match.js";
 import { checkGraphHealth } from "../graph-health.js";
+import { STRUCTURAL_KINDS } from "../graph-model.js";
+import { formatOption } from "../options.js";
+import { hint } from "../next-step.js";
 
 /** One `ix search` row as the llm renderer takes it. */
 export interface SearchLlmRow {
@@ -85,12 +88,6 @@ export function emptySearchHint(term: string, opts: { kind?: string; path?: stri
 export const WORKSPACE_EMPTY_MESSAGE =
   "The graph for this workspace has no nodes, so no search can match. Run ix map to build it.";
 
-/** Structural kinds that should rank higher than incidental matches. */
-const STRUCTURAL_KINDS = new Set([
-  "class", "trait", "object", "interface", "function", "method", "module", "file",
-  "constant",
-]);
-
 /**
  * Compute a ranking score for a search result.
  * Lower score = better match.
@@ -105,7 +102,9 @@ const STRUCTURAL_KINDS = new Set([
  *   - An exact-name row that is not a code definition — an import entity, a
  *     CSS selector / markdown heading / JSON key for a code-like term, or a
  *     copy in build output, a fixture or a sample (`originPenalty`) — is capped
- *     at tier 2 and sorts behind the definitions in it. Demoted, not dropped.
+ *     at tier 2 and sorts behind the definitions in it. Demoted, not dropped
+ *     (an exact-name import is folded later, by `foldImportRows`, but only
+ *     when the definition itself is in the answer).
  *
  * Tiers (for JSON output):
  *   0 — exact name + exact kind
@@ -288,6 +287,42 @@ export function dropNonNameMatches(scored: Scored[]): Scored[] {
   return exact ? scored.filter((s) => s.rank.tier < NON_NAME_TIER) : scored;
 }
 
+/**
+ * Drop the import rows of the term once its definition is in the answer.
+ *
+ * Every `use App\Models\Invoice;` (and every JS/Python import) is a
+ * single-line `module` entity in the importing file, named after what it
+ * imports. They rank behind the definition (see `rankScore`), but nothing
+ * else removed them, so a name imported in many files filled every slot after
+ * the definition with rows that each say only "this file imports it" — the
+ * question `ix imported-by` answers. The caller is told how many were folded
+ * and where to list them.
+ *
+ * Only rows whose name IS the term (case-insensitive): a partial match such as
+ * an import of `InvoiceItem` for `Invoice` is a different name and stays. With
+ * no definition of the term among `scored` nothing is folded, because the
+ * imports are then the best lead there is. Pass the rows the caller will
+ * actually see (after the role filter), so a definition hidden as a test does
+ * not count.
+ */
+export function foldImportRows(scored: Scored[], term: string): { kept: Scored[]; folded: number } {
+  if (!hasDefinitionOf(scored.map((s) => s.node), term)) return { kept: scored, folded: 0 };
+  const termLower = term.toLowerCase();
+  const kept = scored.filter((s) => !(
+    candidateOrigin(s.node) === "import"
+    && String(s.node.name || s.node.attrs?.name || "").toLowerCase() === termLower
+  ));
+  return { kept, folded: scored.length - kept.length };
+}
+
+/** The `imports_folded` diagnostic: how many import rows were folded, and the command that lists them. */
+export function importsFoldedMessage(folded: number, term: string): string {
+  const rows = folded === 1 ? "row" : "rows";
+  const folding = `${folded} import ${rows} of ${term} folded behind its definition.`;
+  const importers = hint({ action: "neighbors", symbol: term, relation: "imported_by" });
+  return importers ? `${folding} Use ${importers} to list the importers.` : folding;
+}
+
 function normalizePath(value: string | undefined): string {
   return (value ?? "").toLowerCase().replace(/\\/g, "/");
 }
@@ -306,7 +341,7 @@ export function registerSearchCommand(program: Command): void {
     .option("--language <lang>", "Filter by language/file extension (e.g. scala, ts)")
     .option("--path <path>", "Filter results by file path (case-insensitive substring match)")
     .option("--as-of <rev>", "Search as of a specific revision")
-    .option("--format <fmt>", "Output format (text|json|llm)", "text")
+    .addOption(formatOption())
     .option("--include-tests", "Include test and fixture entities in results")
     .option("--tests-only", "Show only test and fixture entities")
     .option("--semantic", "Use vector-similarity (embedding) search instead of keyword matching")
@@ -317,7 +352,9 @@ export function registerSearchCommand(program: Command): void {
   3. Exact name (any kind). Same-named rows that are not the code definition
      rank here, behind it: imports of the name, CSS selectors, markdown
      headings and JSON keys (for a code-like term), and copies in build
-     output (dist/, *.min.js, *-output.*), fixtures and samples
+     output (dist/, *.min.js, *-output.*), fixtures and samples. Imports of
+     the name are folded away when its definition is listed (a diagnostic
+     says how many; ix imported-by <term> lists them)
   4. Partial name match
   5. Matched on provenance or a claim, not the name — dropped when any of
      1-3 matched; marked match=<source> in --format llm
@@ -376,7 +413,9 @@ Examples:
             // backend ignores the unknown field, and the client-side filter
             // and widening loop below still apply either way. Separators only:
             // the backend lowercases both sides itself, and the stored side is
-            // POSIX by construction (see path-match.ts).
+            // POSIX by construction (see path-match.ts). The widening for an
+            // older backend is removable once MIN_BACKEND_VERSION reaches
+            // 1.0.31 (`searchScope` in client/features.ts).
             scope: effectivePathFilter ? normalizePathSeparators(effectivePathFilter) : undefined,
           });
       let rawNodes = await fetchCandidates(fetchLimit);
@@ -456,7 +495,11 @@ Examples:
       );
       // Re-wrap with scores for trimming
       const roleFilteredScored = hygienic.filter(s => roleFiltered.includes(s.node));
-      const trimmed = roleFilteredScored.slice(0, limit);
+      // After the role filter: a definition the caller cannot see (a test,
+      // without --include-tests) must not fold the imports that stand for it.
+      // Before the cut, so the slots go to real matches.
+      const { kept: unfoldedScored, folded: importsFolded } = foldImportRows(roleFilteredScored, term);
+      const trimmed = unfoldedScored.slice(0, limit);
       const ranked = trimmed.map(s => s.node);
 
       const diagnostics: { code: string; message: string }[] = [];
@@ -477,6 +520,9 @@ Examples:
           code: "test_candidates_hidden",
           message: roleHint(hiddenTestCount)!,
         });
+      }
+      if (importsFolded > 0) {
+        diagnostics.push({ code: "imports_folded", message: importsFoldedMessage(importsFolded, term) });
       }
       // `unfiltered_search` fires on every search that did not pass `--kind`,
       // which is most of them, and says the same eighteen words each time
@@ -544,6 +590,7 @@ Examples:
         if (pathWindowLimited) stderr(chalk.dim(diagnostics.find(d => d.code === "path_search_truncated")!.message));
         const hint = roleHint(hiddenTestCount);
         if (hint) stderr(chalk.dim(hint));
+        if (importsFolded > 0 && !isQuiet()) stderr(chalk.dim(importsFoldedMessage(importsFolded, term)));
       }
     });
 }
