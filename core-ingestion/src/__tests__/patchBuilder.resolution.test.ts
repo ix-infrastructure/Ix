@@ -757,4 +757,53 @@ describe('same-file calls by receiver and scope (#1020)', () => {
     ].join('\n'));
     expect(edges).toEqual([]);
   });
+
+  /** Edge id by `src -> dst` for every CALLS edge in the patch. */
+  function callIds(patch: ReturnType<typeof buildPatchWithResolution>): Map<string, string> {
+    const ids = new Map<string, string>();
+    for (const op of patch.ops) {
+      if (op.type === 'UpsertEdge' && op.predicate === 'CALLS') ids.set(`${op.src} -> ${op.dst}`, op.id);
+    }
+    return ids;
+  }
+
+  /** The file as the parser saw it before #1020: no call carries the new flags. */
+  function withoutScopeFlags(result: FileParseResult): FileParseResult {
+    return {
+      ...result,
+      relationships: result.relationships.map(({ memberCall: _m, localCallee: _l, ...r }) => r),
+    };
+  }
+
+  it('keeps the id of a member call edge that resolveEdges resolved across files', () => {
+    // The member rule changes only the same-file fallback. An edge resolveEdges
+    // already tied to its node keeps the id an existing graph holds for it.
+    const lib = parseFile('src/lib.rs', 'pub struct Conn;\nimpl Conn { pub fn close(&self) {} }\n', { budgetMs: 0 })!;
+    const caller = parseFile('src/main.rs', 'fn useit(conn: Conn) { conn.close(); }\n', { budgetMs: 0 })!;
+    expect(caller.relationships.some(r => r.predicate === 'CALLS' && r.memberCall)).toBe(true);
+    const resolved = resolveEdges([lib, caller]);
+    const now = callIds(buildPatchWithResolution(caller, 'hash', 'ws', resolved));
+    const before = callIds(buildPatchWithResolution(withoutScopeFlags(caller), 'hash', 'ws', resolved));
+    expect([...now.keys()]).toEqual([`${deterministicId('ws:src/main.rs:useit')} -> ${deterministicId('ws:src/lib.rs:Conn.close')}`]);
+    expect(now).toEqual(before);
+  });
+
+  it('keeps the id of an edge a PHP -> call reaches that another call already wrote', () => {
+    // `$obj->handle()` used to land on the function `handle`; it now lands on
+    // Foo::handle, an edge `Foo::handle()` already writes. Whichever call is
+    // emitted first, that edge keeps its id.
+    const result = parseFile('src/Foo.php', [
+      '<?php',
+      'class Foo {',
+      '  function handle() { return 1; }',
+      '  function run($obj) { handle(); $obj->handle(); Foo::handle(); }',
+      '}',
+      'function handle() {}',
+      '',
+    ].join('\n'), { budgetMs: 0 })!;
+    const now = callIds(buildPatchWithResolution(result, 'hash', 'ws', resolveEdges([result])));
+    const before = callIds(buildPatchWithResolution(withoutScopeFlags(result), 'hash', 'ws', resolveEdges([withoutScopeFlags(result)])));
+    expect(now.size).toBe(2);
+    expect(now).toEqual(before);
+  });
 });

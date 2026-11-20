@@ -610,12 +610,32 @@ export function buildPatchWithResolution(
     return keys.length === 1 ? keys[0] : noTargetKey(name);
   }
 
+  // The destination key every edge id folded before #1020.
+  const legacyDstKey = (r: (typeof relationships)[number]): string =>
+    r.predicate === 'CONTAINS' ? resolveKey(r.dstName, r.srcName) : resolveKey(r.dstName);
+
   const relationshipDstKey = (r: (typeof relationships)[number]): string => {
-    if (r.predicate === 'CONTAINS') return resolveKey(r.dstName, r.srcName);
     // A call to a parameter or local names nothing this file declares.
     if (r.predicate === 'CALLS' && r.localCallee) return noTargetKey(r.dstName);
     if (r.predicate === 'CALLS' && r.memberCall) return resolveMemberKey(r.dstName);
-    return resolveKey(r.dstName);
+    return legacyDstKey(r);
+  };
+
+  /**
+   * The destination key an edge id folds. Ids keep the key they had before
+   * #1020 unless the member rule moved the call to another node in this file:
+   * - An edge resolveEdges tied to a node lands there whatever the same-file
+   *   key says, so it keeps the old key.
+   * - A member call the rule moved folds the member's own key, unsalted. That
+   *   key names one node, so the salt that keeps `foo()` and `Bar::foo()` apart
+   *   is not needed, and the edge gets the id another call to that member
+   *   (`Foo::handle()`) already gives it.
+   */
+  const edgeIdDstKey = (r: (typeof relationships)[number], dstKey: string, dst: ReturnType<typeof resolveDst>): string => {
+    const key = legacyDstKey(r);
+    if (dst.resolution === null && dstKey !== key) return dstKey;
+    const baseKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
+    return r.phpCallKind && (relationshipShapeCounts.get(baseKey) ?? 0) > 1 ? `${key}:${r.phpCallKind}` : key;
   };
 
   const edgeIdTuple = (srcKey: string, edgeDstKey: string, predicate: EdgePredicate): string =>
@@ -641,11 +661,8 @@ export function buildPatchWithResolution(
     for (const r of relationships) {
       const srcKey = resolveKey(r.srcName);
       const dstKey = relationshipDstKey(r);
-      const baseKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
-      const edgeDstKey = r.phpCallKind && (relationshipShapeCounts.get(baseKey) ?? 0) > 1
-        ? `${dstKey}:${r.phpCallKind}`
-        : dstKey;
       const dst = resolveDst(r, dstKey);
+      const edgeDstKey = edgeIdDstKey(r, dstKey, dst);
       // Only edges that are written can collide.
       if (!keepEdge(nodeId(idPath, srcKey), dst)) continue;
       const tuple = edgeIdTuple(srcKey, edgeDstKey, r.predicate);
@@ -662,7 +679,6 @@ export function buildPatchWithResolution(
     const srcKey = resolveKey(r.srcName);
     const dstKey = relationshipDstKey(r);
 
-    const baseResolutionKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
     const dst = resolveDst(r, dstKey);
     const { dstNodeId, externalPkg, resolution } = dst;
     if (!keepEdge(nodeId(idPath, srcKey), dst)) {
@@ -681,9 +697,7 @@ export function buildPatchWithResolution(
       });
     }
 
-    const edgeDstKey = r.phpCallKind && (relationshipShapeCounts.get(baseResolutionKey) ?? 0) > 1
-      ? `${dstKey}:${r.phpCallKind}`
-      : dstKey;
+    const edgeDstKey = edgeIdDstKey(r, dstKey, dst);
     // The phpCallKind salt above exists so `foo()` and `Bar::foo()` keep distinct
     // ids when they resolve to *different* targets. When they resolve to the same
     // node it instead mints two ids for one edge, and since the dedup downstream
