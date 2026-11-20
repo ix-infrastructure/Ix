@@ -261,7 +261,10 @@ export interface ParsedRelationship {
    * relationship is a member call that cannot denote a module-level function:
    * `x.m()` in Rust, `$x->m()` / `X::m()` in PHP, and in JS/TS and Python a
    * receiver that `this` / `self` / `super`, a parameter or a local of an
-   * enclosing function names (`conn.validate()`, `self.close()`). It resolves
+   * enclosing function names (`conn.validate()`, `self.close()`). Also set
+   * when such member calls share the relationship with calls to a parameter
+   * or local (`validate(); conn.validate()`, both parameters): those reach
+   * nothing. It resolves
    * to a method of that name (FileParseResult.bareMembers counts too) or to
    * nothing. Absent when some site's receiver may be a module-scope name
    * (`api.validate()` on a module-level object, `ns.f()` on a namespace
@@ -3607,9 +3610,12 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     const jsTsCallBareOnly = new Map<string, boolean>();
     // Same keys: whether every site is a member call that cannot reach a
     // module-level function (ParsedRelationship.memberCall), and whether every
-    // site calls a parameter or local (ParsedRelationship.localCallee).
+    // site calls a parameter or local (ParsedRelationship.localCallee), and
+    // whether every site is one or the other (`validate(); conn.validate()`
+    // with `validate` and `conn` both parameters).
     const callMemberOnly = new Map<string, boolean>();
     const callLocalOnly = new Map<string, boolean>();
+    const callMemberOrLocal = new Map<string, boolean>();
     const jsTsCallRelationship = new Map<string, ParsedRelationship>();
     // Every CALLS relationship by `${scope}\0${callKey}`, so a typed relationship
     // can join the call relationship of the same name.
@@ -4428,8 +4434,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
                 // `$x->m()` and `X::m()` never reach a function.
                 ? phpCallKind === 'member' || phpCallKind === 'static'
                 : !isBare && siteScope?.localReceiver === true);
+          const isLocal = isBare && siteScope?.localCallee === true;
           callMemberOnly.set(bareKey, (callMemberOnly.get(bareKey) ?? true) && isMember);
-          callLocalOnly.set(bareKey, (callLocalOnly.get(bareKey) ?? true) && isBare && siteScope?.localCallee === true);
+          callLocalOnly.set(bareKey, (callLocalOnly.get(bareKey) ?? true) && isLocal);
+          callMemberOrLocal.set(bareKey, (callMemberOrLocal.get(bareKey) ?? true) && (isMember || isLocal));
         }
         if (language === SupportedLanguages.Java && !builtinCall) {
           javaTypedSites.set(bareKey, (javaTypedSites.get(bareKey) ?? true) && typedReceiver?.type !== undefined);
@@ -4507,6 +4515,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       if (jsTsCallBareOnly.get(bareKey) === true) rel.bareCall = true;
       if (callMemberOnly.get(bareKey) === true) rel.memberCall = true;
       if (callLocalOnly.get(bareKey) === true) rel.localCallee = true;
+      // Some sites call a local, the rest are member calls: no site reaches a
+      // module-level function, and only the member sites reach anything, so
+      // the relationship resolves as a member call.
+      else if (callMemberOrLocal.get(bareKey) === true) rel.memberCall = true;
     }
     const receiverTypedCalls = [...javaTypedSites].filter(([key, all]) => all && callRelationships.has(key))
       .map(([key]) => `${callRelationships.get(key)!.srcName}\0${callRelationships.get(key)!.dstName}`);

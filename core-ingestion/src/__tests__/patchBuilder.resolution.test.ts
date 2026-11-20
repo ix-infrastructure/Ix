@@ -684,6 +684,23 @@ describe('same-file calls by receiver and scope (#1020)', () => {
     expect(unresolved.use).toEqual(['validate']);
   });
 
+  it('Python: a parameter call and a member call on a parameter in one function do not land on the module function', () => {
+    const { edges } = sameFileCalls('src/a.py', [
+      'def validate(x):',
+      '    return x',
+      '',
+      'class Conn:',
+      '    def validate(self):',
+      '        pass',
+      '',
+      'def use(validate, conn):',
+      '    validate(1)',
+      '    conn.validate()',
+      '',
+    ].join('\n'));
+    expect(edges).toEqual(['use -> Conn.validate']);
+  });
+
   it('TypeScript: a member call on a parameter or this never lands on a module-level function', () => {
     const { edges } = sameFileCalls('src/a.ts', [
       'export function validate(x: number) { return x; }',

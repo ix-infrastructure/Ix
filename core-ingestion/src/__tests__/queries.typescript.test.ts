@@ -234,6 +234,16 @@ describe('TypeScript call scope flags', () => {
     ].join('\n'))['mixed -> validate']).toEqual({});
   });
 
+  it('marks a member call when the other sites in the scope call a parameter or local', () => {
+    const flags = calls([
+      'export function validate() {}',
+      'export function both(validate: Fn, conn: Conn) { validate(); conn.validate(); }',
+      'export function withModule(conn: Conn) { validate(); conn.validate(); }',
+    ].join('\n'));
+    expect(flags['both -> validate']).toEqual({ memberCall: true });
+    expect(flags['withModule -> validate']).toEqual({});
+  });
+
   it('marks a plain call to a parameter or local, never to a module-scope name', () => {
     const flags = calls([
       "import { check } from './check';",

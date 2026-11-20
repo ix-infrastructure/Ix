@@ -2276,12 +2276,24 @@ const STITCH_COMMODITY = new Set(['map', 'forEach', 'reduce', 'reduceRight', 'fl
  * receiver-only typed call (ParsedRelationship.receiverOnly) names a target
  * inferred from a local receiver's type; it is written only when it resolves
  * in this workspace, so it is never a cross-repo call candidate.
+ *
+ * The stitch ties a call to a provider's exported top-level symbol, so three
+ * more calls never qualify, as resolveEdges drops them too (#1020): a call to a
+ * parameter or local (`localCallee`), a call whose name a parameter or local
+ * declaration shadows (`importBinding === false`), and a member call that
+ * cannot be a module-level function (`memberCall`: `conn.validate()` on a
+ * parameter, `self.close()`). A namespace call (`lib.validate()`) carries no
+ * `memberCall` and is still offered.
  */
 export function stitchCallEntry(
-  rel: { predicate?: unknown; dstName?: unknown; srcName?: unknown; receiverOnly?: unknown },
+  rel: {
+    predicate?: unknown; dstName?: unknown; srcName?: unknown; receiverOnly?: unknown;
+    memberCall?: unknown; localCallee?: unknown; importBinding?: unknown;
+  },
   filePath: string,
 ): { symbol: string; caller: string; callerFilePath: string } | undefined {
   if (rel.predicate !== 'CALLS' || rel.receiverOnly || typeof rel.dstName !== 'string' || typeof rel.srcName !== 'string') return undefined;
+  if (rel.memberCall === true || rel.localCallee === true || rel.importBinding === false) return undefined;
   if (STITCH_COMMODITY.has(rel.dstName)) return undefined;
   return { symbol: rel.dstName, caller: rel.srcName, callerFilePath: filePath };
 }

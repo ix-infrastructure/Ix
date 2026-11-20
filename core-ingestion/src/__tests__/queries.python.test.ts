@@ -387,4 +387,19 @@ describe('Python call scope flags', () => {
     expect(flags['nested_def -> helper']).toEqual({});
     expect(flags['default_value -> validate']).toEqual({});
   });
+
+  it('marks a member call when the other sites in the scope call a parameter or local', () => {
+    const flags = calls([
+      'def validate(x):',
+      '    return x',
+      'def both(validate, conn):',
+      '    validate(1)',
+      '    conn.validate(1)',
+      'def with_module(conn):',
+      '    validate(1)',
+      '    conn.validate(1)',
+    ].join('\n'));
+    expect(flags['both -> validate']).toEqual({ memberCall: true });
+    expect(flags['with_module -> validate']).toEqual({});
+  });
 });
