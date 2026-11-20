@@ -24,7 +24,7 @@ vi.mock("../resolve.js", async (importOriginal) => ({
   resolveFileOrReport: async (_client: unknown, name: string) => ({ id: name, name, kind: "function" }),
 }));
 
-const PREDICATES = ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "IMPLEMENTS", "CONTAINS"];
+const PREDICATES = ["CALLS", "IMPORTS", "REFERENCES", "EXTENDS", "CONTAINS"];
 
 /** `buildTraceTree` as it was before the breadth-first walk. */
 async function oldBuildTraceTree(

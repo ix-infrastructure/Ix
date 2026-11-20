@@ -17,8 +17,9 @@ export interface DependencyNode {
   name: string;
   kind: string;
   resolved: boolean;
-  relation: "called_by" | "imported_by" | "referenced_by" | "extended_by" | "implemented_by";
-  sourceEdge: "CALLS" | "IMPORTS" | "REFERENCES" | "EXTENDS" | "IMPLEMENTS";
+  /** `extended_by` covers implementers too: the parser writes `implements` as EXTENDS. */
+  relation: "called_by" | "imported_by" | "referenced_by" | "extended_by";
+  sourceEdge: "CALLS" | "IMPORTS" | "REFERENCES" | "EXTENDS";
   path?: string;
   children: DependencyNode[];
   cycle?: boolean;
@@ -43,8 +44,8 @@ const PREDICATE_META: Record<string, { relation: DependencyNode["relation"]; sou
   CALLS:      { relation: "called_by",      sourceEdge: "CALLS" },
   IMPORTS:    { relation: "imported_by",    sourceEdge: "IMPORTS" },
   REFERENCES: { relation: "referenced_by", sourceEdge: "REFERENCES" },
+  // Subclasses and implementers both: there is no IMPLEMENTS predicate (#1009).
   EXTENDS:    { relation: "extended_by",   sourceEdge: "EXTENDS" },
-  IMPLEMENTS: { relation: "implemented_by", sourceEdge: "IMPLEMENTS" },
 };
 const ALL_DEPENDENCY_PREDICATES = Object.keys(PREDICATE_META);
 
@@ -79,7 +80,7 @@ export async function buildDependencyTree(
     // first. A node whose name is a raw id is a dangling reference nothing
     // can follow, and one with no path costs a `locate` before it can be
     // read; neither should displace a node carrying both. Stable within a
-    // band, and the predicate order (CALLS before IMPLEMENTS) is untouched.
+    // band, and the predicate order (CALLS before EXTENDS) is untouched.
     order: (nodes) => [...nodes].sort((a, b) => nodePriority(a) - nodePriority(b)),
     makeNode: (n, p, { name, resolved, cycle }) => ({
       id: n.id,

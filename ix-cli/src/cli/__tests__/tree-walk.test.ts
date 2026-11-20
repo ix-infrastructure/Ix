@@ -22,7 +22,6 @@ const PREDICATE_META: Record<string, { relation: DependencyNode["relation"]; sou
   IMPORTS:    { relation: "imported_by",    sourceEdge: "IMPORTS" },
   REFERENCES: { relation: "referenced_by", sourceEdge: "REFERENCES" },
   EXTENDS:    { relation: "extended_by",   sourceEdge: "EXTENDS" },
-  IMPLEMENTS: { relation: "implemented_by", sourceEdge: "IMPLEMENTS" },
 };
 const DEPENDS_PREDICATES = Object.keys(PREDICATE_META);
 
@@ -383,7 +382,7 @@ describe("when the node cap cuts the walk", () => {
     const old = fanout();
     await oldBuildDependencyTree(old, "root", bounds);
     expect(new Set(old.expand.mock.calls.map(([id]) => id)).size).toBe(73);
-    expect(old.expand.mock.calls.length).toBe(73 * 5);
+    expect(old.expand.mock.calls.length).toBe(73 * DEPENDS_PREDICATES.length);
   });
 });
 
