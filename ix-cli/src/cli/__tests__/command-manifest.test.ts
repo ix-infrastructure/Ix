@@ -147,19 +147,22 @@ describe("choiceOption", () => {
     return root;
   }
 
-  it("declares the option with its default, and leaves the choices to the OSS setup", () => {
+  it("declares its choices and default where the option is declared", () => {
     const root = program();
     const option = root.commands[0].options[0];
     expect(option.defaultValue).toBe("a");
-    expect(option.argChoices).toBeUndefined();
+    expect(option.argChoices).toEqual(["a", "b"]);
     applyOssSetup(root);
     expect(option.argChoices).toEqual(["a", "b"]);
   });
 
-  it("is enforced once the OSS setup has run", async () => {
-    const root = program().exitOverride();
-    root.commands[0].exitOverride().configureOutput({ writeErr: () => {} });
-    applyOssSetup(root);
-    await expect(root.parseAsync(["node", "ix", "pick", "--mode", "c"])).rejects.toThrow(/Allowed choices are a, b/);
+  it("is enforced from its declaration, with or without the OSS setup", async () => {
+    for (const setup of [false, true]) {
+      const root = program().exitOverride();
+      root.commands[0].exitOverride().configureOutput({ writeErr: () => {} });
+      if (setup) applyOssSetup(root);
+      await expect(root.parseAsync(["node", "ix", "pick", "--mode", "c"]))
+        .rejects.toThrow(/Allowed choices are a, b/);
+    }
   });
 });
