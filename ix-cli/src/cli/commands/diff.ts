@@ -17,6 +17,7 @@ import { llmLine } from "../llm.js";
 import { reportFailure } from "../ui.js";
 import { formatOption, kindOption, pathOption, pickOption, STRICT_AMBIGUOUS_HELP, strictOption } from "../options.js";
 import { resolveWorkspaceId } from "../bootstrap.js";
+import { parseLimit } from "../paging.js";
 
 /**
  * The most changes the backend returns in one diff (`/v1/diff` clamps `limit`
@@ -40,7 +41,7 @@ export function diffWorkspaceScope(all: boolean | undefined, cwd = process.cwd()
 /** The `limit` to send: the backend's maximum for `--full`, else `--limit` or the server default. */
 export function diffRequestLimit(opts: { full?: boolean; limit?: string }): number | undefined {
   if (opts.full) return DIFF_MAX_LIMIT;
-  return opts.limit ? parseInt(opts.limit, 10) : undefined;
+  return opts.limit ? parseLimit(opts.limit) : undefined;
 }
 
 /** The text-mode line over a truncated diff. */

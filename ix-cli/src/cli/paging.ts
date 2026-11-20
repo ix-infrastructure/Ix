@@ -7,6 +7,19 @@ import { CLI_CALLER, hint, type Hint } from "./next-step.js";
 export const OFFSET_FLAG = "Skip the first N results (use the next: hint to page)";
 
 /**
+ * `--limit` as a number.
+ *
+ * The root option validator already rejects a typed value that is not a
+ * non-negative integer. This helper exists so commands -- and `pagingValues`
+ * -- do not each spell the conversion differently; unlike `--offset` there is
+ * no default to supply here, because the command's declaration already stores
+ * one (or leaves the option absent).
+ */
+export function parseLimit(raw: string): number {
+  return parseInt(raw, 10);
+}
+
+/**
  * `--offset` as a number. The root option validator already rejects a typed
  * value that is not a non-negative integer, so this only supplies the default.
  */

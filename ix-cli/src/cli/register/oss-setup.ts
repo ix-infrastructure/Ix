@@ -2,9 +2,13 @@
 
 /**
  * What `registerOssCommands()` does to the commands once they are registered:
- * the option choices each command declares (`choiceOption`), the configured
- * default `--format`, the shared `--pretty`/`--quiet`/`--fields` options, and
- * the `preAction` hook that applies them and validates option values.
+ * the configured default `--format`, the shared `--pretty`/`--quiet`/`--fields`
+ * options, and the `preAction` hook that applies them and validates option
+ * values.
+ *
+ * Option choices are not here: each command declares its own with
+ * `choiceOption`/`formatOption` (`../options.ts`). Only a `--format` declared by
+ * hand falls back to the shared formats below.
  *
  * Its own module so the CLI's fast path (`register/oss-table.ts`), which
  * registers only the command being run, applies exactly the same setup
@@ -12,7 +16,7 @@
  */
 
 import type { Command } from "commander";
-import { declaredChoices, validateCliOptions } from "../options.js";
+import { validateCliOptions } from "../options.js";
 import { setPrettyJson } from "../format.js";
 import { setOutputShape } from "../output-shape.js";
 import {
@@ -56,11 +60,11 @@ function configureOssOptions(root: Command): void {
     let rendersJson = false;
     for (const option of command.options) {
       // A command declares an option's values where it declares the option
-      // (`choiceOption`, `formatOption`); a `--format` that declares none
-      // takes the shared ones.
-      const declared = declaredChoices(option);
-      if (declared) option.choices([...declared]);
-      else if (option.long === "--format" && !option.argChoices) option.choices([...DEFAULT_FORMAT_CHOICES]);
+      // (`choiceOption`, `formatOption`). A hand-declared `--format` that
+      // declares none still takes the shared formats.
+      if (option.long === "--format" && !option.argChoices) {
+        option.choices([...DEFAULT_FORMAT_CHOICES]);
+      }
       const choices = option.argChoices;
       applyDefaultFormat(command, option, choices, defaultFormat);
       if (option.long === "--format") rendersRows = true;

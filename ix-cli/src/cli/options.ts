@@ -2,7 +2,7 @@
 
 import { InvalidArgumentError, Option, type Command } from "commander";
 import { DEFAULT_FORMAT_CHOICES } from "./default-format.js";
-import { OFFSET_FLAG, parseOffset } from "./paging.js";
+import { OFFSET_FLAG, parseLimit, parseOffset } from "./paging.js";
 
 /**
  * Parse a flag that must be a positive integer, rejecting anything else.
@@ -237,18 +237,15 @@ export function formatOption(formats: readonly string[] = DEFAULT_FORMAT_CHOICES
     .default("text");
 }
 
-/** The values each `choiceOption` accepts, for `applyOssSetup` to enforce. */
-const SETUP_CHOICES = new WeakMap<Option, readonly string[]>();
-
 /**
  * An option that accepts only `values`, declared on the command that owns it.
  *
- * The values are enforced by `applyOssSetup` (`register/oss-setup.ts`), on
- * every OSS command it sets up -- the full registration and the startup fast
- * path alike -- not by this declaration. That is where they were enforced
- * when they lived in one table keyed by command name, and commander's
- * `.choices()` replaces any parser the option declares: `ix context --depth`
- * has its own, which a command registered on its own still runs.
+ * `.choices()` both records the values for `--help` and installs commander's
+ * checker, so the declaration is complete here rather than completed later by
+ * `applyOssSetup`. A command that needs a different rule for an unrecognized
+ * value calls `.argParser()` after this, as `ix context --depth` does: that
+ * replaces the checker while keeping the values for help, which is what lets
+ * an old depth value warn and fall back instead of turning into a hard error.
  */
 export function choiceOption(
   flags: string,
@@ -256,15 +253,9 @@ export function choiceOption(
   values: readonly string[],
   defaultValue?: string,
 ): Option {
-  const option = new Option(flags, description);
+  const option = new Option(flags, description).choices([...values]);
   if (defaultValue !== undefined) option.default(defaultValue);
-  SETUP_CHOICES.set(option, values);
   return option;
-}
-
-/** What `choiceOption` declared for `option`, if it came from there. */
-export function declaredChoices(option: Option): readonly string[] | undefined {
-  return SETUP_CHOICES.get(option);
 }
 
 /** What `addTargetOptions` declares, as the action receives it. */
@@ -294,7 +285,8 @@ export function targetOptionValues(opts: TargetOptionValues): TargetOptionValues
 /** What `addPagingOptions` declares, as the action receives it: the raw strings commander stores. */
 export interface PagingOptionValues {
   limit: string;
-  offset: string;
+  /** Absent when a command declares `--limit` without a shared `--offset`. */
+  offset?: string;
 }
 
 /** `--limit` (default `defaultLimit`) and `--offset` (default 0). */
@@ -307,7 +299,7 @@ export function addPagingOptions(cmd: Command, defaultLimit = "50"): Command {
  * refused a typed value that is not a non-negative integer.
  */
 export function pagingValues(opts: PagingOptionValues): { limit: number; offset: number } {
-  return { limit: parseInt(opts.limit, 10), offset: parseOffset(opts.offset) };
+  return { limit: parseLimit(opts.limit), offset: parseOffset(opts.offset) };
 }
 
 /** `--format` with `formats` as its allowed values (see `formatOption`). */

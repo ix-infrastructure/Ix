@@ -16,6 +16,7 @@ import { llmLine, llmShortId } from "../llm.js";
 import { formatOption, kindOption, noSuggestOption, pathOption, pickOption, strictOption } from "../options.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
 import { CONTAINER_KINDS } from "../graph-model.js";
+import { parseLimit } from "../paging.js";
 
 
 export function registerImpactCommand(program: Command): void {
@@ -42,7 +43,7 @@ export function registerImpactCommand(program: Command): void {
         opts: { kind?: string; path?: string; pick?: number; strict?: boolean; suggest?: boolean; all?: boolean; depth: string; limit: string; format: string }
       ) => {
         const client = createClient({ query: true });
-        const limit = parseInt(opts.limit, 10);
+        const limit = parseLimit(opts.limit);
         const depth = Math.min(Math.max(parseInt(opts.depth, 10) || 1, 1), 3);
 
         const resolveOpts = { suggest: opts.suggest, suggestCommand: "impact", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all };

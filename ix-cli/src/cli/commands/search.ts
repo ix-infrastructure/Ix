@@ -15,6 +15,7 @@ import { normalizePathSeparators } from "../path-match.js";
 import { checkGraphHealth } from "../graph-health.js";
 import { STRUCTURAL_KINDS } from "../graph-model.js";
 import { formatOption } from "../options.js";
+import { parseLimit } from "../paging.js";
 import { hint } from "../next-step.js";
 
 /** One `ix search` row as the llm renderer takes it. */
@@ -376,7 +377,7 @@ Examples:
       limit: string; kind?: string; language?: string; path?: string; asOf?: string; format: string; includeTests?: boolean; testsOnly?: boolean; semantic?: boolean
     }) => {
       const client = createClient();
-      const limit = parseInt(opts.limit, 10);
+      const limit = parseLimit(opts.limit);
       // Only an explicit --path scopes results. The active workspace is already
       // applied server-side via workspaceId (below), and provenance.sourceUri is
       // workspace-RELATIVE, so defaulting this to the absolute getActiveWorkspaceRoot()

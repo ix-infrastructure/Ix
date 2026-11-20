@@ -5,12 +5,12 @@ import { createInterface } from "node:readline";
 import path from "node:path";
 import type { Command } from "commander";
 import { formatTextResults, printJson, sliceRanked, type TextResult } from "../format.js";
-import { nextPageCommand, parseOffset } from "../paging.js";
+import { nextPageCommand } from "../paging.js";
 import { isPathInsideResolvedRoot, resolveWorkspaceRoot } from "../config.js";
 import { stderr } from "../stderr.js";
 import { llmError } from "../llm.js";
 import { currentRunSignal } from "../../client/run-signal.js";
-import { formatOption, pageOffsetOption } from "../options.js";
+import { formatOption, pageOffsetOption, pagingValues } from "../options.js";
 
 /**
  * Runs ripgrep and returns at most `limit` match lines. `matched`, when given,
@@ -368,8 +368,7 @@ export function registerTextCommand(program: Command, executeRipgrep?: RunRipgre
       opts: { limit: string; offset?: string; path: string; format: string; language?: string; root?: string },
       cmd: Command,
     ) => {
-      const limit = parseInt(opts.limit, 10);
-      const offset = parseOffset(opts.offset);
+      const { limit, offset } = pagingValues(opts);
       const root = path.resolve(resolveWorkspaceRoot(opts.root));
       const searchPath = resolveTextSearchPath(root, opts.path);
       if (!isPathInsideResolvedRoot(root, searchPath)) {
