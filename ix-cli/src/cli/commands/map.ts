@@ -118,7 +118,12 @@ export async function resolveMapScope(
   return { full, workspaceId: effectiveSystemId ? undefined : resolveWorkspaceId(cwd), systemId: effectiveSystemId };
 }
 
-/** Watch opts into full patches; ordinary `ix map` keeps its topology-only ingest. */
+/**
+ * Watch opts into full patches; ordinary `ix map` keeps its topology-only
+ * ingest. The exception is a file a full `ix ingest` already committed: map
+ * keeps sending its full payload, because a bulk commit replaces all of a
+ * file's edges and a stripped patch would drop its chunk edges.
+ */
 export function mapModeForIngest(raw = process.env.IX_MAP_FULL_INGEST): boolean {
   return raw !== "1";
 }

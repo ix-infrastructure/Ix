@@ -169,36 +169,33 @@ describe("a forced full ingest after ix map writes under its own patch id (Ix#96
       for (const [uri, id] of mapIds) expect(await world.patchStatus(target, id), uri).toBe(200);
     }, 120_000);
 
-    it(`${semantics}: a full ingest, then a forced map: both send the built id, so the full patch stays`, async () => {
+    it(`${semantics}: a full ingest, then a forced map: the full payload and graph stay`, async () => {
       const target = await world.backend(semantics);
       await world.run(target, "full");
       const fullIds = new Map(target.backend.lastPatchIds);
 
       await world.run(target, "map", true);
       const mapIds = new Map(target.backend.lastPatchIds);
-      expect(mapIds).toEqual(fullIds);
+      for (const [uri, id] of fullIds) expect(mapIds.get(uri), uri).toBe(fullModePatchId(id));
       for (const [uri] of mapIds) {
-        expect(target.backend.lastOps.get(uri)!.some((op) => op.kind === "chunk"), uri).toBe(false);
+        expect(target.backend.lastOps.get(uri)!.some((op) => op.kind === "chunk"), uri).toBe(true);
       }
 
-      // The backend skips the id it holds, so the graph is the full one, as
-      // it was before the split: map mode has nothing a full patch lacks.
+      // A file already ingested in full keeps its chunks and their edges.
+      // The forced map resends the full payload under the held-content id.
       expect(target.backend.graphSignature()).toEqual(freshFull);
     }, 120_000);
   }
 
-  it("map, then an unforced full ingest: unchanged files are skipped, so it takes --force to add the chunks", async () => {
-    // The hash baseline skips an unchanged file whichever mode stored it, so
-    // the full run sends nothing; the forced run above is how chunks arrive.
+  it("map, then an unforced full ingest upgrades unchanged files to full", async () => {
+    // A mode upgrade bypasses the hash baseline even without --force.
     const target = await world.backend("head");
     await world.run(target, "map");
     const mapIds = new Map(target.backend.lastPatchIds);
-    const mapOps = new Map(target.backend.lastOps);
 
     await world.run(target, "full");
-    expect(target.backend.lastPatchIds).toEqual(mapIds);
-    expect(target.backend.lastOps).toEqual(mapOps);
-    expect(chunkNodes(target.backend.graphSignature().nodes)).toEqual([]);
+    for (const [uri, id] of mapIds) expect(target.backend.lastPatchIds.get(uri), uri).toBe(fullModePatchId(id));
+    expect(target.backend.graphSignature()).toEqual(freshFull);
   }, 120_000);
 
   it("the same source keeps one patch id, and a full run of new files sends the built one, as ix map does", async () => {
@@ -257,12 +254,13 @@ describe("an edit finds the stored patch whichever mode wrote it (Ix#965)", () =
       if (first === second) {
         expect(after).toEqual(fresh);
       } else {
-        // Across modes the topology is the fresh one. Chunks are not: a map run
-        // leaves them alone (the removed function's stays), and a full run
-        // re-sends only the edited file, so only it gains chunks.
+        // Mode upgrades refresh unchanged files too; a map run keeps files
+        // previously ingested in full at full fidelity.
         expect(withoutChunks(after)).toEqual(withoutChunks(fresh));
         if (second === "full") {
-          expect(chunkNodes(after.nodes).map((line) => line.split(" ")[2])).toEqual(["alpha"]);
+          expect(after).toEqual(fresh);
+        } else {
+          expect(after).toEqual(await world.fresh("full"));
         }
       }
       expect(after.nodes.filter((line) => line.endsWith(" beta") && !line.includes(" chunk "))).toEqual([]);

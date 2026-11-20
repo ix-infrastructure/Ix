@@ -629,6 +629,24 @@ describe("sweepOrphanNodes (IN-20 same-hash sweep)", () => {
     expect((nodes.mock.calls[0] as unknown as [string[]])[0]).not.toContain(E);
   });
 
+  it("sweeps chunks for a file a map run sends in full, and keeps them for its other files", async () => {
+    const getPatch = vi.fn(async () => ({ data: { nodeIds: [B, D] } }));
+    const nodes = vi.fn(async (ids: string[], _fields?: "full") => ({
+      rev: 1, nodes: ids.map(i => node(i, i === D ? { kind: "chunk" } : {})), missing: [],
+    }));
+    const full = { ...fileWith([]), mapMode: false };
+    const mapped = fileWith([]);
+    const orphans = await sweepOrphanNodes({ getPatch, nodes }, [full, mapped], { mapMode: true, budget: orphanSweepBudget({}) });
+    expect(orphans).toEqual([[B, D], [B]]);
+
+    const opsPatch = vi.fn(async () => ({ data: { ops: [
+      { type: "UpsertNode", id: A, kind: "function" },
+      { type: "UpsertNode", id: B, kind: "chunk" },
+    ] } }));
+    expect(await sweepOrphanNodes({ getPatch: opsPatch, nodes }, [full, mapped], { mapMode: true, budget: orphanSweepBudget({}) }))
+      .toEqual([[A, B], [A]]);
+  });
+
   it("uses the kinds a stored patch with ops recorded: no lookup for its externals or, in map mode, its chunks", async () => {
     const getPatch = vi.fn(async () => ({ data: { ops: [
       { type: "UpsertNode", id: A, kind: "function" },
