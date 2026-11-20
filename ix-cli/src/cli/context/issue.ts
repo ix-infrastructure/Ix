@@ -11,6 +11,7 @@ import { collectFacts, type ContextFacts, type EntityLocation } from "../explain
 import {
   CENTRE_FALLBACK_TRIES,
   chooseCentre,
+  ISSUE_SEARCH_LIMIT,
   leanIssueView,
   planIssue,
   rankIssueFiles,
@@ -41,8 +42,6 @@ import { collectContextFacts, fileNodeIdOrUndefined, bundleGraphHealth } from ".
 import type { BudgetSnapshot, BundleFormat, ContextOptions } from "./options.js";
 import type { ContextBundle, IssueBundleInput } from "./types.js";
 
-/** Search candidates fetched per name the issue mentions; only exact names are kept. */
-const ISSUE_SEARCH_LIMIT = 20;
 
 /**
  * `ix context --from-issue`: a bundle built from an issue's text rather than a

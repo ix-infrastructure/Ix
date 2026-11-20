@@ -447,10 +447,10 @@ describe("issue localization regressions", () => {
     const named = { token: "short.py", name: "short.py", kind: "file", path: "src/short.py", via: "path in issue" as const };
     const ranked = rankIssueFiles({ starts: [named], bm25: [...bm25, { path: "src/short.py", score: 1 }], near: new Map() });
     expect(ranked).toHaveLength(20);
-    expect(ranked[19].path).toBe("src/short.py");
-    expect(ranked[19].reason).toContain("path in issue");
-    expect(ranked.slice(0, 19).map((f) => f.path)).toEqual(bm25.slice(0, 19).map((h) => h.path));
-    // An identifier start gets the capped boost only, and may drop out.
+    expect(ranked[0].path).toBe("src/short.py");
+    expect(ranked[0].reason).toContain("path in issue");
+    expect(ranked.slice(1).map((f) => f.path)).toEqual(bm25.slice(0, 19).map((h) => h.path));
+    // An identifier without definition-frequency evidence keeps only the capped boost.
     const ident = { ...named, via: "identifier in issue" as const };
     expect(rankIssueFiles({ starts: [ident], bm25: [...bm25, { path: "src/short.py", score: 1 }], near: new Map() })
       .map((f) => f.path)).not.toContain("src/short.py");
