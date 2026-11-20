@@ -28,7 +28,8 @@ import {
 } from '../ingest-baseline.js';
 import { resolveGitHubToken } from '../github/auth.js';
 import { parseGitHubRepo, fetchGitHubData } from '../github/fetch.js';
-import { loadIngestionModules, loadSymbolIndex } from './ingestion-loader.js';
+import { loadIngestionModules, loadSymbolIndex, type IngestionModule, type PatchBuilderModule } from './ingestion-loader.js';
+import type { FileParseResult, FileSummary, GlobalResolutionIndex, ResolvedEdge } from '@ix/core-ingestion';
 import { declaredPackageDirs } from '../package-dirs.js';
 import { assertStaleWorkspacePruneAllowed, clearPendingPrune, ensureWorkspaceIdState, staleWorkspaceCleanup, workspaceStateFor, type StaleWorkspaceKeepReason } from '../bootstrap.js';
 import {
@@ -3292,12 +3293,12 @@ export async function ingestFiles(
     //   B) No baseline / force → load modules, parse + stream-commit all files.
 
     type ParsedFile = {
-      filePath: string; parsed: any; hash: string; previousHash: string | undefined;
+      filePath: string; parsed: FileParseResult; hash: string; previousHash: string | undefined;
       /** The hash the backend holds for the file, changed or not. Feeds only reconcile. */
       knownHash?: string | undefined;
     };
-    let resolveEdgesFn: Function | null = null;
-    let buildPatchFn: Function | null = null;
+    let resolveEdgesFn: IngestionModule['resolveEdges'] | null = null;
+    let buildPatchFn: PatchBuilderModule['buildPatchWithResolution'] | null = null;
 
     // ── Symbol table ─────────────────────────────────────────────────────
     // What every file defines, exports and imports, kept between runs (see
@@ -3314,9 +3315,9 @@ export async function ingestFiles(
     /** sha256 of each file this run has read, by absolute path. */
     const currentHashes = new Map<string, string>();
     const mtimeChangedSet = new Set(mtimeChangedPaths);
-    let summarize: ((parsed: any) => StoredSummary) | null = null;
+    let summarize: IngestionModule['summarizeParseResult'] | null = null;
     /** Record what a parse in this run learned about a file, for the next run. */
-    const noteSummary = (relFilePath: string, hash: string, parsed: any, mtime: number | undefined): void => {
+    const noteSummary = (relFilePath: string, hash: string, parsed: FileParseResult | null | undefined, mtime: number | undefined): void => {
       if (!summarize || !parsed) return;
       const table = symbolTable();
       const before = table.get(relFilePath);
@@ -3392,11 +3393,11 @@ export async function ingestFiles(
      * `trustMtime` is false on Path B, where there is no baseline to trust.
      */
     const buildResolutionIndex = async (
-      ingestion: { summarizeParseResult: (parsed: any) => StoredSummary; buildGlobalResolutionIndex: Function },
+      ingestion: Pick<IngestionModule, 'summarizeParseResult' | 'buildGlobalResolutionIndex'>,
       parsedInStream: Set<string>,
       singleChunk: boolean,
       trustMtime: boolean,
-    ): Promise<any> => {
+    ): Promise<GlobalResolutionIndex> => {
       summarize = ingestion.summarizeParseResult;
       const summaries = new Map<string, StoredSummary>();
       const missing: string[] = [];
@@ -3436,9 +3437,13 @@ export async function ingestFiles(
           if (entry && entry.hash === hash) summaries.set(rel, entry.summary);
         }
       }
-      return ingestion.buildGlobalResolutionIndex(resolutionPaths.map(toWorkspaceRelative), summaries);
+      // Every entry here came from `summarizeParseResult` under this extractor:
+      // `loadIngestSymbols` drops a table written by any other, and this run's
+      // entries are `noteSummary`'s. The table only types them loosely.
+      return ingestion.buildGlobalResolutionIndex(
+        resolutionPaths.map(toWorkspaceRelative), summaries as Map<string, FileSummary>);
     };
-    let globalIndex: any = undefined;
+    let globalIndex: GlobalResolutionIndex | undefined = undefined;
 
     // Smaller chunks pipeline better: resolve(N) overlaps with commit(N-1) + parse(N+1).
     // With 2000-file chunks, resolve takes 68s and dominates. With 500, resolve ~17s
@@ -3532,7 +3537,7 @@ export async function ingestFiles(
       );
     }
 
-    const emptyEdges: any[] = [];
+    const emptyEdges: ResolvedEdge[] = [];
 
     type PreparedPatch = {
       patch: GraphPatchPayload;
@@ -4343,7 +4348,7 @@ export async function ingestFiles(
     };
     const buildFilePatches = async (
       files: ParsedFile[],
-      edgesByFile: Map<string, any[]>,
+      edgesByFile: Map<string, ResolvedEdge[]>,
     ): Promise<PreparedPatch[]> => {
       const built = await mapLimit(files, RECONCILE_CONCURRENCY, async ({ parsed: p, hash, previousHash, knownHash }, j) => {
         try {
@@ -4503,7 +4508,7 @@ export async function ingestFiles(
         const resolvedEdges = resolveEdgesFn!(batch.map(f => f.parsed), resolveStats, globalIndex, resolveOpts);
         resolveEdgesMs = Math.round(performance.now() - resolveStart);
         if (stitchEnabled) collectStitch(batch.map(f => f.parsed));
-        const batchEdgesByFile = new Map<string, any[]>();
+        const batchEdgesByFile = new Map<string, ResolvedEdge[]>();
         for (const edge of resolvedEdges) {
           let arr = batchEdgesByFile.get(edge.srcFilePath);
           if (!arr) { arr = []; batchEdgesByFile.set(edge.srcFilePath, arr); }
@@ -4580,8 +4585,8 @@ export async function ingestFiles(
         const moduleStart = performance.now();
         const [ingestion, patchBuilder] = await loadIngestionModules();
         timings.moduleLoadMs = Math.round(performance.now() - moduleStart);
-        resolveEdgesFn = ingestion.resolveEdges as Function;
-        buildPatchFn = patchBuilder.buildPatchWithResolution as Function;
+        resolveEdgesFn = ingestion.resolveEdges;
+        buildPatchFn = patchBuilder.buildPatchWithResolution;
 
         // Pre-filter minified files (main thread) then parse in parallel via worker pool.
         // filePath here is the workspace-relative path (what goes to parseFile
@@ -4635,7 +4640,7 @@ export async function ingestFiles(
           );
           const batch: ParsedFile[] = [];
           for (let j = 0; j < chunk.length; j++) {
-            const parsed = parseResults[j] as any;
+            const parsed = parseResults[j];
             if (!parsed) { filesSkipped++; filesSkippedUnparsed++; unparsedRel.add(chunk[j].filePath); continue; }
             entitiesParsed += parsed.entities.length;
             batch.push({ filePath: chunk[j].filePath, parsed, hash: chunk[j].hash, previousHash: chunk[j].previousHash, knownHash: chunk[j].knownHash });
@@ -4664,8 +4669,8 @@ export async function ingestFiles(
       const moduleStart = performance.now();
       const [ingestion, patchBuilder] = await loadIngestionModules();
       timings.moduleLoadMs = Math.round(performance.now() - moduleStart);
-      resolveEdgesFn = ingestion.resolveEdges as Function;
-      buildPatchFn = patchBuilder.buildPatchWithResolution as Function;
+      resolveEdgesFn = ingestion.resolveEdges;
+      buildPatchFn = patchBuilder.buildPatchWithResolution;
 
       // Build global resolution index from all repo file paths before the parse loop
       // so cross-batch imports resolve correctly even in streaming per-chunk mode.
@@ -4695,7 +4700,7 @@ export async function ingestFiles(
         const chunk = filePaths.slice(i, i + PARSE_STREAM_CHUNK);
         type FileData = { filePath: string; source: string; hash: string; previousHash: string | undefined; knownHash: string | undefined } | null;
         const fileData: FileData[] = new Array(chunk.length).fill(null);
-        const parsePromises: Promise<unknown>[] = new Array(chunk.length).fill(Promise.resolve(null));
+        const parsePromises: Promise<FileParseResult | null>[] = new Array(chunk.length).fill(Promise.resolve(null));
 
         // Read files asynchronously and dispatch to parse pool as each file completes.
         // This keeps workers busy while I/O is still in flight for other files.
@@ -4798,7 +4803,7 @@ export async function ingestFiles(
         for (let j = 0; j < fileData.length; j++) {
           const f = fileData[j];
           if (!f) continue;
-          const parsed = parseResults[j] as any;
+          const parsed = parseResults[j];
           if (!parsed) { filesSkipped++; filesSkippedUnparsed++; unparsedRel.add(f.filePath); continue; }
           entitiesParsed += parsed.entities.length;
           batch.push({ filePath: f.filePath, parsed, hash: f.hash, previousHash: f.previousHash, knownHash: f.knownHash });
@@ -5003,8 +5008,8 @@ export async function ingestFiles(
           return parsed ? { filePath: rel, parsed, hash: sha256(bytes), previousHash: undefined } as ParsedFile : null;
         }));
         const batch = reread.filter((f): f is ParsedFile => f !== null);
-        const edges = resolveEdgesFn!(batch.map(f => f.parsed), resolveStats, globalIndex, resolveOpts) as any[];
-        const edgesByFile = new Map<string, any[]>();
+        const edges = resolveEdgesFn!(batch.map(f => f.parsed), resolveStats, globalIndex, resolveOpts);
+        const edgesByFile = new Map<string, ResolvedEdge[]>();
         for (const edge of edges) {
           let arr = edgesByFile.get(edge.srcFilePath);
           if (!arr) { arr = []; edgesByFile.set(edge.srcFilePath, arr); }

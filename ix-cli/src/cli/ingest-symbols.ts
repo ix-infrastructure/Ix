@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ingestSymbolsJournalPath, ingestSymbolsPath } from "./config.js";
+import type { FileSummary } from "@ix/core-ingestion";
 import { readStateFile, writeFileAtomic, writeStateAtomic } from "./workspace-state.js";
 
 /**
@@ -36,14 +37,15 @@ import { readStateFile, writeFileAtomic, writeStateAtomic } from "./workspace-st
 const TABLE_VERSION = 3;
 
 /**
- * What core-ingestion's `FileSummary` looks like from here: opaque except for
- * the path. What a summary means -- which names changed, which files depend on
- * them -- is core-ingestion's (`symbol-index.ts`); this module only stores it.
+ * One file's summary as the table holds it. This CLI writes only what
+ * core-ingestion's `summarizeParseResult` returned (`FileSummary`), but an
+ * entry read back from disk is checked for `filePath` alone (`isValidEntry`),
+ * so any other field may be missing. What a summary means -- which names
+ * changed, which files depend on them -- is core-ingestion's
+ * (`symbol-index.ts`, which reads every field as optional); this module only
+ * stores it.
  */
-export interface StoredSummary {
-  filePath: string;
-  [key: string]: unknown;
-}
+export type StoredSummary = FileSummary | { filePath: string; [key: string]: unknown };
 
 export interface SymbolEntry {
   /** sha256 of the file the summary describes. */
