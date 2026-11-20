@@ -732,6 +732,145 @@ namespace Second {
     expect(resolveEdges([consumer, first, second])).toEqual([]);
   });
 
+  describe('PHP inherited member calls', () => {
+    const base = () => parseFile(
+      '/repo/app/Base.php',
+      `<?php
+namespace App;
+class Base
+{
+    public function inherited(): bool { return true; }
+    public function shout(): string { return 'base'; }
+}
+      `,
+    )!;
+    const loud = () => parseFile(
+      '/repo/app/Loud.php',
+      '<?php namespace App; trait Loud { public function shout(): string { return \'x\'; } }',
+    )!;
+    const child = () => parseFile(
+      '/repo/app/Child.php',
+      `<?php
+namespace App;
+class Child extends Base
+{
+    use Loud;
+    public function go(): bool
+    {
+        $this->shout();
+        return $this->inherited();
+    }
+}
+      `,
+    )!;
+    const calls = (edges: ReturnType<typeof resolveEdges>) => edges
+      .filter(edge => edge.predicate === 'CALLS')
+      .map(edge => `${edge.srcName} -> ${edge.dstFilePath} ${edge.dstQualifiedKey} ${edge.confidence}`)
+      .sort();
+
+    it('resolves $this calls to a parent method and to a trait method ahead of the parent', () => {
+      expect(calls(resolveEdges([child(), base(), loud()]))).toEqual([
+        'Child.go -> /repo/app/Base.php Base.inherited 0.9',
+        'Child.go -> /repo/app/Loud.php Loud.shout 0.9',
+      ]);
+    });
+
+    it('matches an inherited method name without regard to case, as PHP does', () => {
+      const shouting = parseFile(
+        '/repo/app/Child.php',
+        `<?php
+namespace App;
+class Child extends Base
+{
+    public function go(): bool { return $this->INHERITED(); }
+}
+      `,
+      )!;
+
+      expect(calls(resolveEdges([shouting, base()]))).toEqual([
+        'Child.go -> /repo/app/Base.php Base.inherited 0.9',
+      ]);
+    });
+
+    it('resolves a typed receiver, imported or in the same namespace, through the class it names', () => {
+      const sameNamespace = parseFile(
+        '/repo/app/Svc.php',
+        '<?php namespace App; class Svc { public function run(Child $c): void { $c->inherited(); $c->shout(); } }',
+      )!;
+      const imported = parseFile(
+        '/repo/src/Job.php',
+        '<?php namespace Jobs; use App\\Child; function work(Child $c): void { $c->inherited(); }',
+      )!;
+
+      expect(calls(resolveEdges([sameNamespace, imported, child(), base(), loud()]))
+        .filter(call => !call.startsWith('Child.go'))).toEqual([
+        'Svc.run -> /repo/app/Base.php Base.inherited 0.9',
+        'Svc.run -> /repo/app/Loud.php Loud.shout 0.9',
+        'work -> /repo/app/Base.php Base.inherited 0.9',
+      ]);
+    });
+
+    it('walks ancestors that are outside the parse batch', () => {
+      const globalIndex = buildGlobalResolutionIndex(
+        ['/repo/app/Child.php', '/repo/app/Base.php', '/repo/app/Loud.php'],
+        new Map([base(), loud()].map(r => [r.filePath, summarizeParseResult(r)])),
+      );
+
+      expect(calls(resolveEdges([child()], undefined, globalIndex))).toEqual([
+        'Child.go -> /repo/app/Base.php Base.inherited 0.9',
+        'Child.go -> /repo/app/Loud.php Loud.shout 0.9',
+      ]);
+    });
+
+    it('stops at a parent the repo does not define', () => {
+      const model = parseFile(
+        '/repo/app/User.php',
+        `<?php
+namespace App;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model
+{
+    public function go(): bool { return $this->save(); }
+}
+        `,
+      )!;
+      const unrelated = parseFile(
+        '/repo/lib/Model.php',
+        '<?php namespace Lib; class Model { public function save(): bool { return true; } }',
+      )!;
+
+      expect(calls(resolveEdges([model, unrelated]))).toEqual([]);
+    });
+
+    it('does not take a same-named class of another namespace for the parent', () => {
+      const other = parseFile(
+        '/repo/lib/Base.php',
+        '<?php namespace Lib; class Base { public function inherited(): bool { return false; } }',
+      )!;
+
+      expect(calls(resolveEdges([child(), base(), loud(), other]))).toEqual([
+        'Child.go -> /repo/app/Base.php Base.inherited 0.9',
+        'Child.go -> /repo/app/Loud.php Loud.shout 0.9',
+      ]);
+    });
+
+    it('leaves a method the class declares itself to the same-file tier', () => {
+      const own = parseFile(
+        '/repo/app/Own.php',
+        `<?php
+namespace App;
+class Own extends Base
+{
+    public function inherited(): bool { return false; }
+    public function go(): bool { return $this->inherited(); }
+}
+        `,
+      )!;
+
+      expect(calls(resolveEdges([own, base()]))).toEqual([]);
+    });
+  });
+
   it('resolves a PHP static call to the class it names, not to a same-named method', () => {
     const consumer = parseFile(
       '/repo/app/Svc.php',
