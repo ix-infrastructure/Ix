@@ -305,6 +305,19 @@ jobs:
           echo "::endgroup::"
           node -e "const d=require('./doctor-unmapped.json');const c=(d.checks||[]).find(c=>c.name==='Workspace for this directory');if(!c){console.error('no workspace check in doctor output');process.exit(1)}if(c.ok||d.healthy){console.error('doctor reported healthy in a directory with no workspace');process.exit(1)}console.log('unmapped cwd reported:',c.detail)"
 
+      - name: Behavioral migration and persistence on the supported floor
+        working-directory: ix-cli
+        env:
+          IX_E2E: "1"
+          IX_E2E_PROJECT: ix-e2e-behavior-floor
+          IX_E2E_BACKEND_PORT: "8294"
+          IX_E2E_ARANGO_PORT: "8734"
+          IX_E2E_BACKEND_IMAGE: ghcr.io/ix-infrastructure/ix-memory-layer:1.0.30
+        run: |
+          trap 'node test/e2e/stack.mjs down' EXIT
+          node test/e2e/stack.mjs up
+          npx vitest run --config vitest.e2e.config.ts test/e2e/behavior-attributes.e2e.ts test/e2e/behavior-map.e2e.ts test/e2e/behavior-retrieval.e2e.ts
+
       # The correctness harness (ix-cli/test/e2e): edit sequences against a
       # backend pinned by digest in compose.e2e.yml, not the :latest the smoke
       # step uses, so a backend release cannot turn an unrelated CLI PR red.

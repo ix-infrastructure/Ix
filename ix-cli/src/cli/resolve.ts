@@ -198,6 +198,8 @@ export async function resolveReadSystemId(
  * means an agent running `ix … 2>&1` reads the miss twice.
  */
 export interface ResolveOpts {
+  /** Retain requested full nodes for this invocation before ranking discards their attributes. */
+  onNodes?: (nodes: GraphNode[]) => void;
   suggest?: boolean;
   /** Only these command boundaries run the bounded candidate probes. */
   suggestCommand?: string;
@@ -400,6 +402,7 @@ export async function rankEntity(
     return { resolved: false, ambiguous: false, ...(near.length ? { suggestions: near } : {}) };
   }
 
+  opts?.onNodes?.(nodes);
   // Apply role filter before scoring
   const { filtered: roleFiltered, hiddenTestCount } = applyRoleFilter(nodes, opts ?? {});
 
@@ -794,6 +797,7 @@ async function rankFileOrEntity(
       missProse(opts, `Entity not found: ${target}`);
       return { resolved: false, ambiguous: false };
     }
+    opts?.onNodes?.([n]);
     return {
       resolved: true,
       entity: {
@@ -811,6 +815,7 @@ async function rankFileOrEntity(
       const fullId = await client.resolvePrefix(target);
       const details = await client.entity(fullId);
       const n = details.node;
+      opts?.onNodes?.([n]);
       return {
         resolved: true,
         entity: {
@@ -983,6 +988,7 @@ async function membersOf(
   client: IxClient,
   cls: { id: string; path?: string },
   memberName: string,
+  onNodes?: ResolveOpts["onNodes"],
 ): Promise<{ found: Candidate[]; truncated: boolean }> {
   const named = (n: GraphNode) => n && n.id !== cls.id && (n.name || n.attrs?.name) === memberName;
   let children: GraphNode[] | null;
@@ -993,16 +999,18 @@ async function membersOf(
     children = null;
   }
   if (children && children.length > 0) {
-    return { found: children.filter(named).map(candidateOf), truncated: false };
+    const matched = children.filter(named);
+    onNodes?.(matched);
+    return { found: matched.map(candidateOf), truncated: false };
   }
   if (!cls.path) return { found: [], truncated: false };
   const classFile = normalizeForPathMatch(cls.path);
   const { workspaceId, systemId } = activeScope();
   const limit = 50;
   const nodes = await client.search(memberName, { limit, nameOnly: true, workspaceId, systemId, scope: cls.path });
-  const found = nodes
-    .filter((n) => named(n) && nodePath(n) === classFile)
-    .map(candidateOf);
+  const matched = nodes.filter((n) => named(n) && nodePath(n) === classFile);
+  onNodes?.(matched);
+  const found = matched.map(candidateOf);
   return { found, truncated: nodes.length >= limit };
 }
 
@@ -1029,7 +1037,7 @@ async function resolveInClasses(
   for (const cls of classes) {
     if (seenClasses.has(cls.id)) continue;
     seenClasses.add(cls.id);
-    const r = await membersOf(client, cls, scoped.methodName);
+    const r = await membersOf(client, cls, scoped.methodName, opts?.onNodes);
     if (r.truncated) truncated = true;
     for (const c of r.found) if (!found.has(c.id)) found.set(c.id, c);
   }

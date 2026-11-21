@@ -1099,3 +1099,9 @@ hidden implementation-detail command whose output is a completion summary.
 Programmatic consumers that need to parse output should continue to use
 `--format json`; the `llm` format is optimized for being read by a model, not
 parsed.
+
+### Mapped state writes
+
+A context `evidence` record with `kind=behavior` carries `observed_evidence`. Each write names a callable and its assigned field or local variable. A guard labels its true or false branch and includes the stored expression. Both assignment and guard spans use one-based lines and zero-based UTF-16 columns with an exclusive end. The words `candidate prior` mark an inference. An unknown prior is printed explicitly. A class record covers only returned members.
+
+Explain and impact use the `mapped_writes` record for these same source observations. Impact’s existing `behavior` records still carry heuristic risk descriptions. Structured context exposes the selected writes, guards, IDs, provenance, coverage and tagged inferences under `evidence[].behavior`. An omitted record carries no assertion about the absence of state changes.

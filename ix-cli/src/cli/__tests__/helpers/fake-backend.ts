@@ -959,7 +959,10 @@ export class FakeBackend {
       const edges = [...this.edges]
         .filter(([, e]) => e.live && (e.src === id || e.dst === id))
         .map(([edgeId, e]) => ({ id: edgeId, predicate: e.predicate, provenance: { sourceUri: e.uri } }));
-      return send(200, { node: { id, kind: node.kind, name: node.name, attrs: node.attrs ?? {} }, edges });
+      return send(200, { node: {
+        id, kind: node.kind, name: node.name, attrs: node.attrs ?? {},
+        provenance: { sourceUri: node.uri, sourceHash: node.hash, extractor: node.extractor },
+      }, edges });
     }
     // The two reads `ix verify` and `ix stats` make, answered from the stored
     // graph. Only with `semantics`: without it nothing is stored, and an empty

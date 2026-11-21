@@ -32,7 +32,10 @@ export interface EntityLocation {
   usedByCapped?: boolean;
 }
 
+import { projectBehavior, type BehaviorView } from "../behavioral-evidence.js";
+
 export interface EntityFacts {
+  behavioralEvidence?: BehaviorView;
   // Identity
   id: string;
   name: string;
@@ -702,7 +705,10 @@ export async function collectFacts(
     ? {}
     : { lineStart: lineOf(node.attrs?.line_start), lineEnd: lineOf(node.attrs?.line_end) };
 
+  const behavior = projectBehavior({ id: targetId, kind: targetKindName, provenance: node.provenance },
+    targetKindName === "class" ? membersResult.nodes : [node], targetKindName === "class" ? [...(details.edges ?? []), ...(membersResult.edges ?? [])] : []);
   const facts: EntityFacts = {
+    ...(behavior && { behavioralEvidence: behavior }),
     id: targetId,
     name: node.name || node.attrs?.name || targetName,
     kind: targetKindName,

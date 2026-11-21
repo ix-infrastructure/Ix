@@ -3,6 +3,7 @@
 // `ix context --diff`: compare a saved investigation with a fresh build of the
 // same target, and render the difference.
 
+import { isDeepStrictEqual } from "node:util";
 import { createClient } from "../../client/factory.js";
 import { llmLine, llmShortId, printLlmLines } from "../llm.js";
 import { activeReadScope, isRawId, resolveFileOrEntityFull, resolveFileOrReport, shownTarget, type ResolvedEntity } from "../resolve.js";
@@ -11,6 +12,7 @@ import { renderSection } from "../ui.js";
 import { printJson } from "../format.js";
 import { checkGraphHealth } from "../graph-health.js";
 
+import { archivedFacts, revisionBehavior, revisionTarget } from "./behavior-revision.js";
 import { buildBundle } from "./bundle.js";
 import { collectContextFacts, bundleGraphHealth } from "./collect.js";
 import type { SavedInvestigation } from "./investigations.js";
@@ -36,7 +38,7 @@ export function diffInvestigations(
   // `recent-commits`, `related-files` -- keeps its id while what it says
   // changes, and matched on id alone a new top caller or a total going from 3
   // to 40 was no change at all. A changed row is reported as removed and added.
-  const sameEvidence = (a: EvidenceItem, b: EvidenceItem) => a.id === b.id && a.title === b.title;
+  const sameEvidence = (a: EvidenceItem, b: EvidenceItem) => a.id === b.id && a.title === b.title && isDeepStrictEqual(a.behavior, b.behavior);
   const addedEvidence = fresh.evidence.filter((e) => !prev.evidence.some((p) => sameEvidence(p, e)));
   const removedEvidence = prev.evidence.filter((p) => !fresh.evidence.some((e) => sameEvidence(p, e)));
   const addedClaims = fresh.claims.filter((c) => !prev.claims.some((p) => p.id === c.id));
@@ -276,8 +278,9 @@ export async function buildFreshBundle(
   const client = createClient({ query: true });
   // The saved entity itself when it still exists; a miss on its id (the
   // graph was rebuilt) falls through to its name.
-  let resolved: ResolvedEntity | null = null;
-  if (savedId && isRawId(savedId)) {
+  const historical = await revisionTarget(client, savedId ?? target, opts.asOfRev, opts);
+  let resolved: ResolvedEntity | null = historical ?? null;
+  if (!resolved && savedId && isRawId(savedId)) {
     const byId = await resolveFileOrEntityFull(client, savedId, { format, silentMiss: true });
     if (byId.resolved) resolved = byId.entity;
   }
@@ -294,17 +297,20 @@ export async function buildFreshBundle(
   resolved = shownTarget(resolved);
 
   const asOfRev = opts.asOfRev;
-  const [facts, context, workspaceHealth] = await Promise.all([
-    collectContextFacts(client, resolved),
+  const [liveFacts, context, workspaceHealth] = await Promise.all([
+    asOfRev ? undefined : collectContextFacts(client, resolved),
     client.contextForNode(resolved.id, { asOfRev, depth: opts.depth }),
-    checkGraphHealth(client, activeReadScope()),
+    asOfRev ? undefined : checkGraphHealth(client, activeReadScope()),
   ]);
 
+  const facts = liveFacts ?? archivedFacts(resolved, context, asOfRev!);
   return buildBundle({
+    revisionBehavior: asOfRev ? await revisionBehavior(client, resolved, context, asOfRev, !!historical && historical.identityVerified, savedId ?? target) : undefined,
     resolved, facts, context, provenance: facts.provenance, asOfRev, depth: opts.depth, budgets,
     // The saved bundle's own sizing format, not the diff's render format, so --diff compares like with like.
     format: budgets.format ?? "json",
-    graphCompleted: hasCompletedSourceGraphBaseline(),
-    graphHealth: bundleGraphHealth(workspaceHealth, resolved, facts),
+    graphCompleted: !asOfRev && hasCompletedSourceGraphBaseline(),
+    isStale: asOfRev ? () => false : undefined,
+    graphHealth: workspaceHealth && bundleGraphHealth(workspaceHealth, resolved, facts),
   });
 }

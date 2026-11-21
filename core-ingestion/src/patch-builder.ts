@@ -13,6 +13,7 @@ import type {
   SymbolNodeAttrs,
   UpsertEdgeOp,
 } from './schema.js';
+import { behaviorByOwner } from './behavior.js';
 import { resolveEdges } from './index.js';
 import type { FileParseResult, ParsedEntity, ResolutionTier, ResolvedEdge } from './index.js';
 
@@ -452,6 +453,8 @@ export function buildPatchWithResolution(
     return name;
   }
 
+  const evidence = result.behavior && behaviorByOwner(result.behavior, key => nodeId(idPath, key));
+
   // UpsertNode for each entity (deduplicated by id — first occurrence wins)
   const seenNodeIds = new Set<string>();
   for (const e of entities) {
@@ -460,9 +463,10 @@ export function buildPatchWithResolution(
     if (!seenNodeIds.has(id)) {
       seenNodeIds.add(id);
       const lines = { line_start: e.lineStart, line_end: e.lineEnd, language: e.language };
+      const behavior = (e.kind === 'function' || e.kind === 'method') ? evidence?.get(qk) : undefined;
       const attrs: FileNodeAttrs | SymbolNodeAttrs = e.kind === 'file'
         ? { ...lines, role: result.fileRole.role, role_confidence: result.fileRole.role_confidence, role_signals: result.fileRole.role_signals, ...(result.hasParseErrors ? { parse_errors: true } : {}) }
-        : { ...lines, role: result.fileRole.role, role_source: 'inherited_from_file' };
+        : { ...lines, role: result.fileRole.role, role_source: 'inherited_from_file', ...(behavior && { behavior_v1: behavior }) };
       ops.push({
         type: 'UpsertNode',
         id,

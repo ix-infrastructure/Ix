@@ -164,7 +164,7 @@ export function saveIngestBaseline(
   deletedFiles: Map<string, string[]> = new Map(),
   extractor?: string | null,
   { replayedFiles = [], pendingFiles = [], parseTimeouts = [], pythonPackageEntries }: BaselineFileNotes = {},
-): void {
+): boolean {
   try {
     // Keep the last good rev rather than writing a shape the read side will
     // reject. `ix status` is the only thing that reads this number, so a bad one
@@ -196,8 +196,10 @@ export function saveIngestBaseline(
     // Atomically: a process killed mid-write left a truncated baseline,
     // which reads as none, and the next map re-ingested everything.
     writeStateAtomic(ingestMtimeCachePath(projectRoot), BASELINE_VERSION, data);
+    return true;
   } catch {
-    // The cache is an optimization and freshness hint. Ingestion itself succeeded.
+    // A failed write must leave any migration checkpoint available for recovery.
+    return false;
   }
 }
 

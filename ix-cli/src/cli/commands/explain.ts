@@ -9,6 +9,7 @@ import { isFileStale } from "../stale.js";
 import { collectFacts, resolveCallList, unresolvedCallNames, unresolvedCallsOf } from "../explain/facts.js";
 import { inferRole } from "../explain/role-inference.js";
 import { inferImportance } from "../explain/importance.js";
+import { behaviorDescription, behaviorLine, MAX_BEHAVIOR_MEMBERS, projectBehavior } from "../behavioral-evidence.js";
 import { renderExplanation } from "../explain/render.js";
 import { renderExplainLlm, renderExplainRawLlm } from "../explain/llm.js";
 import { printLlmLines } from "../llm.js";
@@ -78,7 +79,7 @@ export function registerExplainCommand(program: Command): void {
       }
 
       if (opts.format === "llm") {
-        printLlmLines([...mapStaleLlm(mapState), ...renderExplainLlm(facts, role, importance, rendered, health)]);
+        printLlmLines([...mapStaleLlm(mapState), ...renderExplainLlm(facts, role, importance, rendered, health), ...(facts.behavioralEvidence ? [behaviorLine(facts.behavioralEvidence)] : [])]);
       } else if (opts.format === "json") {
         const output: any = {
           resolvedTarget: { kind: target.kind, name: target.name },
@@ -116,6 +117,7 @@ export function registerExplainCommand(program: Command): void {
           console.log(`  ${rendered.usedBy}`);
         }
 
+        if (facts.behavioralEvidence) console.log(behaviorDescription(facts.behavioralEvidence));
         renderSection("Why it matters");
         console.log(`  ${rendered.whyItMatters}`);
 
@@ -159,6 +161,10 @@ async function rawExplain(
     e.predicate === "CONTAINS" && e.src === target.id
   );
 
+  const children = target.kind === "class" && containedEdges.length
+    ? await client.expand(target.id, { direction: "out", predicates: ["CONTAINS"], limit: MAX_BEHAVIOR_MEMBERS }).catch(() => undefined)
+    : undefined;
+  const behavior = projectBehavior(details.node, children?.nodes ?? [details.node], edges);
   const node = details.node as any;
 
   // Check staleness
@@ -217,6 +223,7 @@ async function rawExplain(
   }
 
   const result: ExplainResult & { stale?: boolean; warning?: string } = {
+    ...(behavior && {behavioralEvidence: behavior}),
     kind: node.kind,
     name: node.name || node.attrs?.name || target.name,
     id: target.id,
@@ -240,7 +247,7 @@ async function rawExplain(
   }
 
   if (format === "llm") {
-    printLlmLines(renderExplainRawLlm(result));
+    printLlmLines([...renderExplainRawLlm(result), ...(behavior ? [behaviorLine(behavior)] : [])]);
   } else if (format === "json") {
     const output: any = {
       resolvedTarget: { kind: target.kind, name: target.name },
@@ -254,6 +261,7 @@ async function rawExplain(
   } else {
     if (stale) renderWarning("Source has changed since last ingest. Run ix map to update.");
     formatExplain(result, "text");
+    if (behavior) console.log(behaviorDescription(behavior));
   }
 }
 

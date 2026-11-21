@@ -113,12 +113,35 @@ export type UnresolvedCallAttrs = {
   unresolved_call_count?: number;
 };
 
+/** Source spans are [line, UTF-16 column, end line, exclusive end column]. */
+export type BehaviorSpan = [number, number, number, number];
+export type BehaviorLiteral = { kind: 'string'; value: string };
+export interface BehaviorGuard {
+  expression: string;
+  span: BehaviorSpan;
+  arm: 'then' | 'else';
+  conditionKey: ['strictEqual', string, ['string', string]] | ['tokens', string];
+  sameSlot: boolean | null;
+}
+export interface BehavioralWriteV1 {
+  id: string;
+  slotId: string;
+  slotKind: 'instanceField' | 'local';
+  slotName: string;
+  observed: { to: BehaviorLiteral; assignment: BehaviorSpan; guards: BehaviorGuard[] };
+  inferred: { from: 'unknown' } | { from: BehaviorLiteral; basis: 'direct-same-slot-equality'; guardIndex: number };
+}
+export type BehaviorCutReason = 'visits' | 'depth' | 'writes' | 'bytes' | 'deadline' | 'conditionLength' | 'literalLength' | 'unavailable';
+export type BehaviorCoverage = { coverage: 'complete' } | { coverage: 'partial'; cutReason: BehaviorCutReason };
+export type BehaviorV1 = BehaviorCoverage & { writes: BehavioralWriteV1[] };
+
 /**
  * A node the parser found in a file other than the file itself. Symbols,
  * config entries (a config key, a Dockerfile instruction, a SQL index),
  * headings and every other parsed kind share this shape.
  */
 export type SymbolNodeAttrs = UnresolvedCallAttrs & {
+  behavior_v1?: BehaviorV1;
   line_start: number;
   line_end: number;
   language: string;

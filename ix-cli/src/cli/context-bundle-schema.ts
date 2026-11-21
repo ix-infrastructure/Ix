@@ -1,5 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { readSavedBehavior } from "./behavioral-evidence.js";
 import { createRequire } from "node:module";
 import type * as Zod from "zod";
 
@@ -145,6 +146,7 @@ function buildSchemas(z: typeof Zod.z) {
         kind: z.string(),
         source: z.string(),
         title: z.string(),
+        behavior: z.unknown().optional().transform(value => value === undefined ? undefined : readSavedBehavior(value)),
         score: z.number(),
         reason: z.string(),
         refs: z.array(z.string()),
@@ -209,6 +211,20 @@ function buildSchemas(z: typeof Zod.z) {
         rankingRule: z.string(),
       })
       .catchall(z.unknown()),
+  }).transform(bundle => {
+    bundle.evidence = bundle.evidence.filter(row => {
+      if (row.kind !== "behavior") {
+        delete row.behavior;
+        return true;
+      }
+      const view = row.behavior;
+      return view && view.revision === bundle.metadata.asOfRev && row.source === "facts.behavior" &&
+        row.id === `behavior:${bundle.target.id}` && row.refs.includes(bundle.target.id) &&
+        (view.scope === "returned-members" ? bundle.target.kind === "class" :
+          ["function", "method"].includes(bundle.target.kind) &&
+          view.slots.every(slot => slot.sites.every(site => site.ownerId === bundle.target.id)));
+    });
+    return bundle;
   });
 
   /**

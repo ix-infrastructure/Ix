@@ -200,6 +200,13 @@ export class IxClient {
     return contextResponse(await this.post<unknown>("/v1/context", { query: question, ...opts }));
   }
 
+  /** Hydrate only the selected identities at exactly the requested revision. */
+  async historicalNodes(ids: string[], asOfRev: number): Promise<StructuredContext> {
+    return contextResponse(await this.post<unknown>("/v1/context", {
+      slices: [{ type: "nodes", nodeIds: ids, expand: false, hops: 0 }], depth: "full", asOfRev,
+    }));
+  }
+
   /**
    * Context centred on a node we have already resolved.
    *

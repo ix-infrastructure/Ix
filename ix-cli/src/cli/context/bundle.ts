@@ -42,9 +42,30 @@ export function buildBundle(input: BuildInput): ContextBundle {
 
   const evidence = rankEvidence({ resolved, facts, context, relationships, prov, entities, issue });
 
+  let budgetExclusion: EvidenceItem | undefined;
+  const view = input.asOfRev === undefined ? facts.behavioralEvidence : input.revisionBehavior;
+  if (view) {
+    // Keep the leading structural navigation row. Select complete writes under the format's
+    // quarter-share before inserting the row, so an oversized guard cannot block later evidence.
+    const index = evidence.findIndex(item => item.kind === "structural");
+    const at = index < 0 ? 1 + evidence.filter(item => item.source.startsWith("issue.")).length : index + 1;
+    const row: EvidenceItem = { id: `behavior:${resolved.id}`, kind: "behavior", source: "facts.behavior",
+      title: "Mapped state writes", reason: "Assignments and guards are observed. Prior states are inferred candidates.",
+      refs: [resolved.id], score: evidence[at - 1]?.score ?? 0, behavior: view };
+    const limit = Math.floor(budgets.maxChars / 4);
+    while (sizeOfEvidence(row, format) > limit && row.behavior!.slots.length) {
+      const slots = row.behavior!.slots.slice();
+      const last = slots.pop()!;
+      if (last.sites.length > 1) slots.push({...last, sites:last.sites.slice(0,-1)});
+      row.behavior = {...row.behavior!,slots,omittedWrites:row.behavior!.omittedWrites+1};
+    }
+    if (sizeOfEvidence(row, format) <= limit) evidence.splice(at, 0, row);
+    else budgetExclusion = row;
+  }
+
   const bundle = bundleShell(input, prov, format);
   budgetEntities(bundle, input, entities, relationships);
-  budgetEvidence(bundle, evidence, budgets, format);
+  budgetEvidence(bundle, evidence, budgets, format, budgetExclusion);
   capConflicts(bundle);
   return bundle;
 }
@@ -346,7 +367,13 @@ function budgetEntities(
 }
 
 /** Keep the longest evidence prefix that fits `--max-evidence` and the character budget. */
-function budgetEvidence(bundle: ContextBundle, evidence: EvidenceItem[], budgets: BudgetSnapshot, format: BundleFormat): void {
+function sizeOfEvidence(item: EvidenceItem, format: BundleFormat): number {
+  return format === "llm" ? evidenceRecord(undefined)(item).length + 1
+    : format === "text" ? textEvidenceLines(item).reduce((sum,line) => sum + line.length + 1, 0)
+    : JSON.stringify(item).length;
+}
+
+function budgetEvidence(bundle: ContextBundle, evidence: EvidenceItem[], budgets: BudgetSnapshot, format: BundleFormat, excluded?: EvidenceItem): void {
   // Evidence is ordered by relevance, so keep the highest-priority prefix and
   // drop the tail when either the count or the character budget is exceeded.
   // Each item is sized by the text its renderer prints (the llm `evidence`
@@ -355,25 +382,23 @@ function budgetEvidence(bundle: ContextBundle, evidence: EvidenceItem[], budgets
   // For llm the header, diagnostics and `next` lines are charged too; for json
   // the budget bounds the evidence list only (entities and relationships have
   // their own count budgets).
-  const sizeOf = (item: EvidenceItem): number =>
-    format === "llm" ? evidenceRecord(undefined)(item).length + 1
-      : format === "text" ? textEvidenceLines(item).reduce((sum, line) => sum + line.length + 1, 0)
-        : JSON.stringify(item).length;
-  const sizedEvidence = evidence.map((item) => ({ item, size: sizeOf(item) }));
+  const sizedEvidence = evidence.map(item => ({item, size: sizeOfEvidence(item, format)}));
   // keptSize[n] = summed size of the first n items, so a cut at any count knows
   // its `charactersTruncated` (full minus kept, in the sizing unit of the
   // format) without a rescan.
   const keptSize = [0];
   for (const entry of sizedEvidence) keptSize.push(keptSize[keptSize.length - 1]! + entry.size);
-  const fullChars = keptSize[sizedEvidence.length]!;
+  const fullChars = keptSize[sizedEvidence.length]! + (excluded ? sizeOfEvidence(excluded, format) : 0);
   // Every counter the llm header prints is set here, including
   // `truncated_chars`, so each measurement below sees the digits that will
   // actually be emitted for that cut (or the field's absence, at zero).
   const applyCut = (count: number): void => {
     bundle.evidence = evidence.slice(0, count);
-    bundle.truncation.evidenceTruncated = evidence.length - count;
+    bundle.truncation.evidenceTruncated = evidence.length - count + (excluded ? 1 : 0);
     bundle.truncation.charactersTruncated = fullChars - keptSize[count]!;
-    const cut = summariseCut(evidence.slice(count));
+    const dropped = evidence.slice(count);
+    if (excluded) dropped.push(excluded);
+    const cut = summariseCut(dropped);
     if (cut.length > 0) bundle.truncation.cut = cut;
     else delete bundle.truncation.cut;
   };

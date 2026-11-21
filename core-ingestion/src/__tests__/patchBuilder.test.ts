@@ -6,6 +6,8 @@ import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
+import { createHash } from 'node:crypto';
+import type { BehaviorV1 } from '../schema.js';
 import { parseFile, resolveEdges } from '../index.js';
 import {
   buildPatch,
@@ -14,6 +16,7 @@ import {
   extractorName,
   PREVIOUS_EXTRACTORS,
   sourcePatchIdCandidates,
+  symbolNodeId,
 } from '../patch-builder.js';
 import {
   compareExtractorOutput,
@@ -248,5 +251,49 @@ def convert(value):
     expect(nextEdges).toHaveLength(2);
     expect(new Set(nextEdges.map(edge => edge.id)).size).toBe(2);
     expect(nextEdges[0].dst).toBe(nextEdges[1].src);
+  });
+});
+
+describe('versioned behavioral attributes', () => {
+  it('P10 binds a shared slot to its declaring graph node under solo and multi-repo identities', () => {
+    function ownerWrites(path: string, workspace: string, member = false) {
+      const parsed = parseFile(path, 'class Job { go(){this.phase="x"} stop(){this.phase="y"} }')!;
+      const { ops } = buildPatch(parsed, 'hash', workspace, undefined, member ? { repoId: 'lib' } : undefined);
+      return ['go', 'stop'].map(name => {
+        const op = ops.find(op => op.type === 'UpsertNode' && op.id === symbolNodeId(workspace, 'src/j.ts', 'Job.' + name));
+        if (op?.type !== 'UpsertNode') throw Error('missing method ' + name);
+        return (op.attrs.behavior_v1 as BehaviorV1).writes[0];
+      });
+    }
+    const solo = ownerWrites('src/j.ts', 'workspace-A');
+    const other = ownerWrites('src/j.ts', 'workspace-B');
+    const slot = createHash('sha256').update(JSON.stringify([
+      'ix-slot/1', symbolNodeId('workspace-A', 'src/j.ts', 'Job'), 'instanceField', 'phase',
+    ])).digest('hex');
+    expect(solo.map(w => w.slotId)).toEqual([slot, slot]);
+    expect(solo[0].id).not.toBe(solo[1].id);
+    expect(ownerWrites('lib/src/j.ts', 'workspace-A', true)).toEqual(solo);
+    expect(other[0].id).not.toBe(solo[0].id);
+    expect(other[0].slotId).not.toBe(slot);
+  });
+
+  it('P5 bounds serialized attributes file-wide and omits envelopes for owners with zero verified sites', () => {
+    const methods = Array.from({ length: 258 }, (_, i) =>
+      `m${i}(){ if(ok) this.status="${'é'.repeat(110)}"; }`);
+    const parsed = parseFile('job.ts', 'class Job { ' + methods.join('\n') + ' }', { budgetMs: 0 })!;
+    expect(parsed.behavior).toMatchObject({ coverage: 'partial' });
+    const patch = buildPatch(parsed, 'hash', 'ws');
+    const { behavior, ...structural } = parsed;
+    const bare = buildPatch(structural, 'hash', 'ws');
+    const delta = Buffer.byteLength(JSON.stringify(patch.ops)) - Buffer.byteLength(JSON.stringify(bare.ops));
+    expect(delta).toBeGreaterThan(0);
+    expect(delta).toBeLessThanOrEqual(256 * 1024);
+    const owners = patch.ops.filter(op => op.type === 'UpsertNode' && op.attrs.behavior_v1);
+    expect(owners).toHaveLength(behavior!.writes.length);
+    for (const op of owners) if (op.type === 'UpsertNode') {
+      expect(op.attrs.behavior_v1).toMatchObject({ coverage: 'partial', cutReason: behavior!.coverage === 'partial' && behavior!.cutReason });
+    }
+    const zero = buildPatch({ ...structural, behavior: { coverage: 'partial', cutReason: 'depth', writes: [] } }, 'hash', 'ws');
+    expect(zero.ops).toEqual(bare.ops);
   });
 });

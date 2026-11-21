@@ -4,6 +4,7 @@ import * as nodePath from 'node:path';
 import * as fs from 'node:fs';
 import * as crypto from 'node:crypto';
 import * as os from 'node:os';
+import { isDeepStrictEqual } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import type { Command } from 'commander';
 import { formatOption } from '../options.js';
@@ -324,7 +325,11 @@ export function stripMapModeOps(patch: GraphPatchPayload): GraphPatchPayload {
  * (`modeAlternatives`). Same UUID shape as the built id.
  */
 export function fullModePatchId(patchId: string): string {
-  const hash = crypto.createHash('sha256').update(`${patchId}:full`).digest('hex');
+  return derivedPatchId(`${patchId}:full`);
+}
+
+function derivedPatchId(input: string): string {
+  const hash = crypto.createHash('sha256').update(input).digest('hex');
   return [hash.slice(0, 8), hash.slice(8, 12), hash.slice(12, 16), hash.slice(16, 20), hash.slice(20, 32)].join('-');
 }
 
@@ -1503,7 +1508,7 @@ export async function commitBulkWithPayloadSplit<T, R>(
     return;
   }
 
-  handlers.onBulkCommitted(items, result);
+  await handlers.onBulkCommitted(items, result);
 }
 
 /**
@@ -1609,8 +1614,7 @@ export function persistIngestBaseline(
   // empty is a real state and is persisted; without them, it is still treated
   // as discovery having gone wrong.
   if (mtimes.size === 0 && deletedFiles.size === 0) return false;
-  saveIngestBaseline(projectRoot, mtimes, currentRev, now, deletedFiles, extractor, notes);
-  return true;
+  return saveIngestBaseline(projectRoot, mtimes, currentRev, now, deletedFiles, extractor, notes);
 }
 
 // ---------------------------------------------------------------------------
@@ -1776,6 +1780,29 @@ export type CommitOutcome =
  * `PatchCommitRoutes` / `BulkPatchCommitRoutes`.
  */
 const COMMIT_STATUS_IDEMPOTENT = 'Idempotent';
+
+/** A replay ACK can refer to history. Check live provenance and the complete attribute,
+ * including omission, before recording migration progress for a surviving source. */
+async function readLiveBehavior(client: IxClient, patch: GraphPatchPayload) {
+  let matches = true;
+  let hasEvidence = false;
+  for (const op of patch.ops) {
+    if (op.type !== 'UpsertNode' || !['file', 'method', 'function'].includes(op.kind)) continue;
+    let node: GraphNode | undefined;
+    try { node = (await client.entity(op.id))?.node; }
+    catch (err) { if (httpStatusOf(err) !== 404) throw err; }
+    const p = node?.provenance as (GraphNode['provenance'] & { source_hash?: string }) | undefined;
+    if (node && (!p?.extractor || !(p.sourceHash ?? p.source_hash) || !(p.sourceUri ?? p.source_uri) || !node.attrs)) {
+      throw Error('Incomplete live source provenance or attributes');
+    }
+    hasEvidence ||= op.attrs.behavior_v1 !== undefined || node?.attrs.behavior_v1 !== undefined;
+    matches &&= !!node && node.id === op.id && node.kind === op.kind &&
+      (p?.sourceHash ?? p?.source_hash) === patch.source.sourceHash &&
+      (p?.sourceUri ?? p?.source_uri) === patch.source.uri && p?.extractor === patch.source.extractor &&
+      isDeepStrictEqual(node.attrs.behavior_v1, op.attrs.behavior_v1);
+  }
+  return { matches, hasEvidence };
+}
 
 /**
  * The wire value for a commit the backend refused because the optimistic
@@ -3007,13 +3034,19 @@ export async function ingestFiles(
     // them. The same goes for every other whole-workspace claim -- see the
     // baseline write and the stitch below.
     const partialRun = Boolean(opts.lang) || scopedRun;
-    const baselineExtractor = partialRun ? previousBaseline?.extractor : currentExtractor;
+    const upgrading = extractorChanged(previousBaseline, currentExtractor);
+    const verifyForcedReplay = Boolean(opts.force);
+    const behaviorSource = (file: string): boolean => {
+      const language = languageFromPath(file);
+      return (language === 'typescript' || language === 'javascript') && !/\.d\.[cm]?ts$/.test(file);
+    };
     // Files a full re-ingest for this extractor has committed, recorded as they
     // land so a run cut short resumes instead of starting over; null when no
     // such re-ingest is under way.
     let rebuildProgress: Map<string, number> | null = null;
     let resumedRebuild: Map<string, number> | null = null;
-    if (!opts.force && extractorChanged(previousBaseline, currentExtractor)) {
+    if (upgrading && !partialRun && opts.force) rebuildProgress = new Map();
+    if (!opts.force && upgrading) {
       if (!partialRun) {
         const done = workspaceMigrated ? null : loadRebuildProgress(projectRoot, currentExtractor);
         if (done && done.size > 0) resumedRebuild = done;
@@ -3122,6 +3155,10 @@ export async function ingestFiles(
       filePaths,
       previousBaseline?.deletedFiles ?? new Map(),
     );
+    for (const rel of previousBaseline?.replayedFiles ?? []) {
+      const abs = nodePath.resolve(workspaceRoot, rel);
+      if (behaviorSource(rel) && !resumedRebuild?.has(abs)) forceReingestPaths.add(abs);
+    }
     const mtimeCache = (opts.force || workspaceMigrated)
       ? new Map<string, number>()
       : new Map(resumedRebuild ?? previousMtimes);
@@ -3133,19 +3170,6 @@ export async function ingestFiles(
     // like the mtime baseline, by absolute path. Built on first use, after the
     // stat loop below has filled `currentMtimes`.
     let absoluteOf: Map<string, string> | undefined;
-    const noteRebuilt = rebuildProgress === null ? undefined : (item: { filePath: string }): void => {
-      absoluteOf ??= new Map([...currentMtimes.keys()].map(abs => [toWorkspaceRelative(abs), abs]));
-      const abs = absoluteOf.get(item.filePath);
-      const mtime = abs === undefined ? undefined : currentMtimes.get(abs);
-      if (abs === undefined || mtime === undefined) return;
-      rebuildProgress!.set(abs, mtime);
-      // Throttled: the whole map is rewritten each time, and a cut-short run
-      // loses at most this much of its work.
-      if (Date.now() - rebuildSavedAt >= REBUILD_PROGRESS_SAVE_MS) {
-        rebuildSavedAt = Date.now();
-        saveRebuildProgress(projectRoot, currentExtractor, rebuildProgress!);
-      }
-    };
     const currentMtimes = new Map<string, number>();
 
     // DB-reset guard: if the mtime cache has entries but the server returns no hashes
@@ -3206,6 +3230,11 @@ export async function ingestFiles(
           filesSkippedAsUnchanged++;
           progressCurrent++;   // mtime clean — assume unchanged
         } else {
+          if (resumedRebuild?.has(filePath)) {
+            // Its recorded mtime no longer establishes that this patch is current.
+            forceReingestPaths.add(filePath);
+            rebuildProgress?.delete(filePath);
+          }
           mtimeChangedPaths.push(filePath);
         }
       } catch (err) {
@@ -3279,6 +3308,27 @@ export async function ingestFiles(
       dbResetDetected ||
       (!opts.force && !workspaceMigrated && !scopedRun && !opts.lang &&
         mtimeCache.size === 0 && hashLookupAnswered && knownHashes.size === 0);
+    // A remote graph can be populated even when this checkout has no baseline.
+    // source-hashes describes bytes only. Both incremental and streaming paths must
+    // send held JS/TS files through the new extractor at least once.
+    const bootstrapBehavior = previousBaseline === null && [...knownHashes.keys()].some(behaviorSource);
+    if (bootstrapBehavior) {
+      for (const file of knownHashes.keys()) if (behaviorSource(file)) forceReingestPaths.add(file);
+      if (!partialRun) rebuildProgress = new Map();
+    }
+    const noteRebuilt = rebuildProgress === null ? undefined : (item: { filePath: string }): void => {
+      absoluteOf ??= new Map([...currentMtimes.keys()].map(abs => [toWorkspaceRelative(abs), abs]));
+      const abs = absoluteOf.get(item.filePath);
+      const mtime = abs === undefined ? undefined : currentMtimes.get(abs);
+      if (abs === undefined || mtime === undefined) return;
+      rebuildProgress!.set(abs, mtime);
+      // Throttled: the whole map is rewritten each time, and a cut-short run
+      // loses at most this much of its work.
+      if (Date.now() - rebuildSavedAt >= REBUILD_PROGRESS_SAVE_MS) {
+        rebuildSavedAt = Date.now();
+        saveRebuildProgress(projectRoot, currentExtractor, rebuildProgress!);
+      }
+    };
     const hashed = performance.now();
     timings.hashMs = Math.round(hashed - discovered);
 
@@ -3551,6 +3601,7 @@ export async function ingestFiles(
        * the graph needed -- see `settleCommitted`.
        */
       changed: boolean;
+      behaviorRepair?: true;
     };
 
     const makePreparedPatch = (
@@ -3565,30 +3616,6 @@ export async function ingestFiles(
     const isForced = (relFilePath: string): boolean =>
       (forcedRelativePaths ??= new Set([...forceReingestPaths].map(toWorkspaceRelative))).has(relFilePath);
 
-    /**
-     * Record a patch the backend took, or one it only claims to hold.
-     *
-     * A changed file answered `Idempotent` is a replay of a patch id the backend
-     * committed before: a file reverted to earlier bytes, or deleted and
-     * restored. The backend wrote nothing, so the graph still shows the content
-     * in between (F-01). Such a patch is counted in `replayedChanges`, named in
-     * the summary, and kept away from `onCommitted`, and its file keeps its old
-     * mtime in the baseline so the next run tries again.
-     */
-    const settleCommitted = (
-      item: PreparedPatch,
-      rev: number,
-      replay: boolean,
-      onCommitted?: (item: PreparedPatch, rev: number) => void,
-    ): void => {
-      if (replay && item.changed) {
-        replayedChanges.add(item.filePath);
-        return;
-      }
-      committedRel.add(item.filePath);
-      onCommitted?.(item, rev);
-    };
-
     // Commit HTTP batches in parallel (COMMIT_CONCURRENCY workers). Each worker pulls
     // the next unsent chunk from a shared queue. JS is single-threaded so the queue
     // index increment is atomic across await boundaries — no locking needed.
@@ -3600,6 +3627,42 @@ export async function ingestFiles(
         onCommitted?: (item: PreparedPatch, rev: number) => void;
       },
     ): Promise<number> => {
+      const repairs: PreparedPatch[] = [];
+      const settleCommitted = async (
+        item: PreparedPatch, rev: number, replay: boolean, onCommitted?: (item: PreparedPatch, rev: number) => void,
+      ): Promise<void> => {
+        const forcedEvidence = replay && verifyForcedReplay &&
+          item.patch.ops.some(op => op.type === 'UpsertNode' && op.attrs.behavior_v1 !== undefined);
+        if ((item.behaviorRepair || (replay && (forcedEvidence || upgrading || !previousBaseline || item.changed))) &&
+            behaviorSource(item.filePath) && item.patch.ops.some(op => op.type === 'UpsertNode' && op.kind === 'file')) {
+          try {
+            const { matches, hasEvidence } = await readLiveBehavior(client, item.patch);
+            if (!matches || (replay && item.changed && !hasEvidence && !upgrading && !forcedEvidence && previousBaseline)) {
+              if (!matches && !item.behaviorRepair && (hasEvidence || upgrading || bootstrapBehavior || forcedEvidence)) {
+                // Older backends acknowledge an existing patch ID without reactivating its
+                // data. Reuse the normal commit pipeline once, under an ID tied to the
+                // observed head. An ACK of the repair is also checked against live data.
+                const revision = await client.currentRevision();
+                const head = typeof revision === 'object' && revision !== null && 'rev' in revision ? revision.rev : revision;
+                if (!isRev(head)) throw Error('Missing repair revision');
+                const patchId = derivedPatchId(`behavior-repair/1:${item.patch.patchId}:${head}`);
+                repairs.push({ ...item, behaviorRepair: true, patch: { ...item.patch, patchId,
+                  replaces: [...new Set([item.patch.patchId, ...(item.patch.replaces ?? [])])] } });
+              } else replayedChanges.add(item.filePath);
+              return;
+            }
+          } catch {
+            replayedChanges.add(item.filePath);
+            return;
+          }
+        } else if (replay && item.changed) {
+          replayedChanges.add(item.filePath);
+          return;
+        }
+        committedRel.add(item.filePath);
+        onCommitted?.(item, rev);
+      };
+
       if (preparedPatches.length === 0) return 0;
 
       /**
@@ -3786,7 +3849,7 @@ export async function ingestFiles(
                 patchesTheBackendTook++;
                 commitBreaker.recordSuccess();
                 if (result.status === COMMIT_STATUS_IDEMPOTENT) idempotentPatches++;
-                settleCommitted(item, result.rev, result.status === COMMIT_STATUS_IDEMPOTENT, opts?.onCommitted);
+                await settleCommitted(item, result.rev, result.status === COMMIT_STATUS_IDEMPOTENT, opts?.onCommitted);
               } catch (commitErr) {
                 // Counted apart from parseErrors: a patch that parsed fine and
                 // failed to commit means the graph is now behind the working
@@ -3986,7 +4049,7 @@ export async function ingestFiles(
             // this change exists to retire.
             if (result.status === COMMIT_STATUS_IDEMPOTENT) idempotentPatches += chunk.length;
             for (const item of chunk) {
-              settleCommitted(item, result.rev, result.status === COMMIT_STATUS_IDEMPOTENT, opts?.onCommitted);
+              await settleCommitted(item, result.rev, result.status === COMMIT_STATUS_IDEMPOTENT, opts?.onCommitted);
             }
             if (debug) process.stderr.write(`  [cutoff] bulk placed ${chunk.length} of ${items.length} held
 `);
@@ -4018,7 +4081,7 @@ export async function ingestFiles(
                   // these already, so their rev is at or below it, and
                   // `saveIngestBaseline` floors what it stores anyway.
                   // A replay by definition: the server already held these ids.
-                  for (const item of landed) settleCommitted(item, latestRev, true, opts?.onCommitted);
+                  for (const item of landed) await settleCommitted(item, latestRev, true, opts?.onCommitted);
                   // NOT `patchesTheBackendTook`. That counter's whole reason for
                   // existing is to keep 409-sourced counts from reopening a gate
                   // closed against a dead backend -- "counted only where a
@@ -4174,7 +4237,7 @@ export async function ingestFiles(
               timings.bulkCommitMs += chunkMs;
               return result;
             },
-            onBulkCommitted: (items, result) => {
+            onBulkCommitted: async (items, result) => {
               latestRev = advanceRev(latestRev, result.rev);
               // `BaseRevMismatch` wrote nothing: the backend read the latest rev
               // outside the transaction and it moved before the commit ran. It
@@ -4199,7 +4262,7 @@ export async function ingestFiles(
               // as a unit, so `Idempotent` means every patch in it was a replay.
               if (result.status === COMMIT_STATUS_IDEMPOTENT) idempotentPatches += items.length;
               for (const item of items) {
-                settleCommitted(item, result.rev, result.status === COMMIT_STATUS_IDEMPOTENT, opts?.onCommitted);
+                await settleCommitted(item, result.rev, result.status === COMMIT_STATUS_IDEMPOTENT, opts?.onCommitted);
               }
             },
             commitIndividually,
@@ -4335,7 +4398,8 @@ export async function ingestFiles(
         deferredByDeadline.length = 0;
       }
 
-      return commitMsPerChunk.reduce((a, b) => a + b, 0) + drainMs;
+      const repairMs = repairs.length ? await commitPreparedPatches(repairs, totalFiles, opts) : 0;
+      return commitMsPerChunk.reduce((a, b) => a + b, 0) + drainMs + repairMs;
     };
 
     /**
@@ -5129,6 +5193,10 @@ export async function ingestFiles(
     // A deletion whose patch did not land keeps its entry, so it is found
     // deleted again next run.
     const failedDeletions = deletedPaths.filter(abs => !committedRel.has(toWorkspaceRelative(abs)));
+    const migrationConfirmed = runClean && !partialRun && !replayedFiles.length && !pendingFiles.length &&
+      !parseTimeouts.length && !failedDeletions.length && !deferredDeletions.length &&
+      unparsedRel.size === 0 && (!hashLookupPaths.length || hashLookupAnswered);
+    const baselineExtractor = migrationConfirmed ? currentExtractor : previousBaseline?.extractor;
     const baselinePersisted = (scopedRun && !previousBaseline) ? false : persistIngestBaseline(
       projectRoot,
       retryOnNextRun(
@@ -5141,7 +5209,7 @@ export async function ingestFiles(
       nextDeletedFiles,
       // An unfinished re-ingest must not vouch for the new extractor: files
       // that failed would then be hash-clean next run and keep the old output.
-      runClean ? baselineExtractor : (previousBaseline?.extractor ?? baselineExtractor),
+      baselineExtractor,
       // A scoped run re-resolves only its own dependents, so it keeps the old
       // package list and the next full run still sees what changed outside.
       { replayedFiles, pendingFiles, parseTimeouts, pythonPackageEntries: (scopedRun ? null : pythonPackageEntries) ?? previousBaseline?.pythonPackageEntries },
@@ -5166,7 +5234,7 @@ export async function ingestFiles(
     if (rebuildProgress !== null) {
       // Finished: the baseline now records the new extractor. Otherwise keep
       // what landed, so the next run resumes from here.
-      if (baselinePersisted && runClean) clearRebuildProgress(projectRoot);
+      if (baselinePersisted && migrationConfirmed) clearRebuildProgress(projectRoot);
       else saveRebuildProgress(projectRoot, currentExtractor, rebuildProgress);
     }
 

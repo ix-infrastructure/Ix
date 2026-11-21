@@ -3,6 +3,7 @@
 // The `entity`, `evidence` and `claim` llm records, shared by the bundle
 // renderer and `--diff`.
 
+import { behaviorDescription } from "../behavioral-evidence.js";
 import { llmLine, llmShortId } from "../llm.js";
 
 import { lineRange } from "./location.js";
@@ -54,6 +55,7 @@ export function evidenceRecord(change: RecordChange) {
       score: change === undefined ? undefined : e.score,
       kind: e.kind,
       title: e.title,
+      observed_evidence: e.behavior ? behaviorDescription(e.behavior) : undefined,
       path: e.location?.path,
       lines: e.location ? lineRange(e.location) : undefined,
     });

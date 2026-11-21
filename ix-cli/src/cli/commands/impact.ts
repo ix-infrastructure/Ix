@@ -12,6 +12,8 @@ import { bucketByHierarchy, getSystemPath, formatSystemPath, hasMapData, type Bu
 import { inferRiskSemantics, humanizeLabel, type ImpactFacts, type RiskSemantics } from "../impact/risk-semantics.js";
 import { captureJson, lineSpan, printJson, relativePath, rowLocation, sliceEdgeResults, stripNulls, type Slice } from "../format.js";
 import { currentCaller, type Relation } from "../next-step.js";
+import type { GraphNode } from "../../client/types.js";
+import { behaviorDescription, behaviorLine, projectBehavior } from "../behavioral-evidence.js";
 import { llmLine, llmShortId } from "../llm.js";
 import { formatOption, kindOption, noSuggestOption, pathOption, pickOption, strictOption } from "../options.js";
 import { ensureFreshMapState, mapStaleJson, mapStaleLlm, type MapStaleState } from "../map-freshness.js";
@@ -46,7 +48,13 @@ export function registerImpactCommand(program: Command): void {
         const limit = parseLimit(opts.limit);
         const depth = Math.min(Math.max(parseInt(opts.depth, 10) || 1, 1), 3);
 
-        const resolveOpts = { suggest: opts.suggest, suggestCommand: "impact", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all };
+        const owners = new Map<string, GraphNode>();
+        const onNodes = (nodes: GraphNode[]) => {
+          for (const node of nodes) {
+            if (node?.attrs?.behavior_v1 !== undefined || node?.kind === "class") owners.set(node.id, node);
+          }
+        };
+        const resolveOpts = { onNodes, suggest: opts.suggest, suggestCommand: "impact", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all };
         const set = await resolveTargetSetOrReport(client, symbol, resolveOpts, opts.format);
         if (!set) return;
         const target = shownTarget(set.entities[0]);
@@ -69,8 +77,8 @@ export function registerImpactCommand(program: Command): void {
         // `--all` says it once, with the header grouping the candidates.
         const ownState = set.all ? {} : mapState;
         const analyse = (entity: ResolvedEntity) => CONTAINER_KINDS.has(entity.kind)
-          ? containerImpact(client, entity, limit, depth, opts.format, graph, ownState)
-          : leafImpact(client, entity, depth, limit, opts.format, graph, ownState);
+          ? containerImpact(client, entity, limit, depth, opts.format, graph, ownState, owners.get(entity.id))
+          : leafImpact(client, entity, depth, limit, opts.format, graph, ownState, owners.get(entity.id));
 
         if (set.all) await impactOfAll(symbol, set, opts.format, analyse, mapState);
         else await analyse(target);
@@ -373,6 +381,7 @@ async function containerImpact(
   format: string,
   graph?: Record<string, unknown>,
   mapState: MapStaleState = {},
+  owner?: GraphNode,
 ): Promise<void> {
   const isJson = format === "json";
   const diagnostics: string[] = [];
@@ -388,6 +397,7 @@ async function containerImpact(
   ]);
 
   const members = containsResult.nodes;
+  const behavior = projectBehavior(owner ?? target, members, containsResult.edges ?? []);
   const directImporters = importersResult.nodes;
   const directDependents = dependentsResult.nodes;
 
@@ -505,6 +515,7 @@ async function containerImpact(
         riskSummary: risk.riskSummary,
         riskLevel: risk.riskLevel,
         riskCategory: risk.category,
+        behavioralEvidence: behavior,
         atRiskBehavior: risk.behaviorAtRisk,
         nextStep: risk.nextStep || undefined,
         flowPropagation: risk.flowPropagation || undefined,
@@ -543,6 +554,7 @@ async function containerImpact(
       // With the answer, not before it (mapStaleLlm).
       ...mapStaleLlm(mapState),
       ...impactHeaderLlm(target, risk, systemPathMapped, headerPath),
+      ...(behavior ? [behaviorLine(behavior)] : []),
       llmLine("counts", [
         ["members", members.length],
         ["importers", directImporters.length],
@@ -563,6 +575,7 @@ async function containerImpact(
   } else {
     // 1. Risk summary + At-risk behavior
     renderRiskHeader(target, risk, systemPath);
+    if (behavior) console.log(behaviorDescription(behavior));
 
     // 2. Propagation
     renderPropagationBuckets(propagationBuckets, risk.flowPropagation);
@@ -720,6 +733,7 @@ async function leafImpact(
   format: string,
   graph?: Record<string, unknown>,
   mapState: MapStaleState = {},
+  owner?: GraphNode,
 ): Promise<void> {
   const isJson = format === "json";
   const [callersResult, calleesResult, systemPath, decisionsResult, tasksResult, bugsResult] = await Promise.all([
@@ -730,6 +744,7 @@ async function leafImpact(
     client.expand(target.id, { direction: "in", predicates: ["TASK_AFFECTS"] }),
     client.expand(target.id, { direction: "in", predicates: ["BUG_AFFECTS"] }),
   ]);
+  const behavior = owner ? projectBehavior(target, [owner], []) : undefined;
 
   const decisions = decisionsResult.nodes.map((n: any) => ({
     id: n.id, name: n.name || n.attrs?.name || "(unnamed)",
@@ -787,6 +802,7 @@ async function leafImpact(
         riskSummary: risk.riskSummary,
         riskLevel: risk.riskLevel,
         riskCategory: risk.category,
+        behavioralEvidence: behavior,
         atRiskBehavior: risk.behaviorAtRisk,
         nextStep: risk.nextStep || undefined,
         flowPropagation: risk.flowPropagation || undefined,
@@ -815,6 +831,7 @@ async function leafImpact(
       // With the answer, not before it (mapStaleLlm).
       ...mapStaleLlm(mapState),
       ...impactHeaderLlm(target, risk, systemPathMapped),
+      ...(behavior ? [behaviorLine(behavior)] : []),
       llmLine("counts", [
         ["callers", callerSlice.total],
         ["callees", calleeSlice.total],
@@ -833,6 +850,7 @@ async function leafImpact(
   } else {
     // 1. Risk summary + At-risk behavior
     renderRiskHeader(target, risk, systemPath);
+    if (behavior) console.log(behaviorDescription(behavior));
 
     // 2. Propagation
     renderPropagationBuckets(propagationBuckets, risk.flowPropagation);

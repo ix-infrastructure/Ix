@@ -10,6 +10,12 @@ vi.mock("../resolve.js", async (importOriginal) => ({
   resolveFileOrReport,
 }));
 
+// Flag parsing should never query a live backend, including the historical name resolver.
+vi.mock("../context/behavior-revision.js", async (load) => ({
+  ...(await load<typeof import("../context/behavior-revision.js")>()),
+  revisionTarget: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { registerContextCommand } from "../commands/context.js";
 import { parseContextDepthOption } from "../context/options.js";
 import { applyOssSetup } from "../register/oss-setup.js";
