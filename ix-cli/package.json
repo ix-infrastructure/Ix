@@ -44,7 +44,7 @@
     "@eslint/js": "^10.0.1",
     "@types/node": "^20.19.43",
     "@vitest/coverage-v8": "^4.1.12",
-    "eslint": "^10.14.0",
+    "eslint": "^10.15.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-unused-imports": "^4.4.1",
     "fast-check": "^4.10.2",
@@ -52,7 +52,7 @@
     "prettier": "^3.10.1",
     "tsx": "^4.23.15",
     "typescript": "^5.6.0",
-    "typescript-eslint": "^8.72.2",
+    "typescript-eslint": "^8.73.0",
     "vitest": "^4.1.0"
   },
   "overrides": {
