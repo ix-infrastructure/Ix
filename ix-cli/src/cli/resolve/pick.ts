@@ -9,7 +9,7 @@
  */
 
 import { candidateOrigin } from "../candidate-origin.js";
-import { CONTAINER_KINDS } from "../graph-model.js";
+import { CONTAINER_KINDS, MEMBER_KINDS, OVERLOAD_LANGUAGES } from "../graph-model.js";
 import { normalizeForPathMatch } from "../path-match.js";
 import { scoreCandidate } from "./score.js";
 import type { AmbiguousResult, ResolutionMode, ResolutionNotice, ResolvedEntity, ResolveResult } from "./types.js";
@@ -34,6 +34,68 @@ export function cmpStr(a: string, b: string): number {
 /** Tiebreak for equal candidates: (path, line, id), independent of backend order. */
 function displayOrder(a: any, b: any): number {
   return cmpStr(nodePath(a), nodePath(b)) || lineOf(a) - lineOf(b) || cmpStr(String(a.id), String(b.id));
+}
+
+/** What `laterOverloads` reads of a candidate, whichever shape it has. */
+export interface OverloadRow {
+  id: string;
+  name: string;
+  kind: string;
+  path: string;
+  /** Start line; missing sorts last. */
+  line?: number;
+  /** Graph id of the type that CONTAINS it. Without one a row is never an overload. */
+  parent?: string;
+}
+
+/**
+ * The key overloads of one method share, or null for a row that cannot be an
+ * overload: the same notion `ix overrides` has (type-walk.ts
+ * `overloads_not_distinguished`), a member kind in a language that allows
+ * overloads, declared more than once under one name in one type. The type is
+ * its graph id, never a name or the file alone: two classes of one file can
+ * each hold a method of the name, and those are different methods.
+ */
+function overloadKey(row: OverloadRow): string | null {
+  if (!row.parent || !row.name || !MEMBER_KINDS.test(row.kind) || !OVERLOAD_LANGUAGES.test(row.path)) return null;
+  return [row.parent, normalizeForPathMatch(row.path), row.kind.toLowerCase(), row.name].join("\0");
+}
+
+/** True when `rows` has two that share everything `overloadKey` reads but the type. */
+export function mayHoldOverloads(rows: readonly OverloadRow[]): boolean {
+  const seen = new Map<string, string>();
+  for (const row of rows) {
+    const key = overloadKey({ ...row, parent: "?" });
+    if (key === null) continue;
+    const first = seen.get(key);
+    if (first !== undefined && first !== row.id) return true;
+    seen.set(key, row.id);
+  }
+  return false;
+}
+
+/**
+ * The ids of every overload but the first of each overloaded method: the rows
+ * to leave out before deciding whether a name is ambiguous. Overloads of one
+ * method are one answer to its name (they were one graph node until #1139),
+ * so they count as one candidate, the first in source order (line, then id).
+ */
+export function laterOverloads(rows: readonly OverloadRow[]): Set<string> {
+  const first = new Map<string, OverloadRow>();
+  const before = (a: OverloadRow, b: OverloadRow) =>
+    (a.line ?? Number.MAX_SAFE_INTEGER) - (b.line ?? Number.MAX_SAFE_INTEGER) || cmpStr(a.id, b.id);
+  for (const row of rows) {
+    const key = overloadKey(row);
+    if (key === null) continue;
+    const kept = first.get(key);
+    if (!kept || before(row, kept) < 0) first.set(key, row);
+  }
+  const later = new Set<string>();
+  for (const row of rows) {
+    const key = overloadKey(row);
+    if (key !== null && first.get(key)!.id !== row.id) later.add(row.id);
+  }
+  return later;
 }
 
 /**

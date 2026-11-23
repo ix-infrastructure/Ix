@@ -100,3 +100,8 @@ export const REGION_KINDS: KindSet = new Set<GraphKind>([
 
 /** The kind of a source file node. */
 export const FILE_KINDS: KindSet = new Set<GraphKind>(["file"]);
+
+/** The kinds a type's member declarations have: what an overload can be. */
+export const MEMBER_KINDS = /^(method|function)$/i;
+/** Languages where one type can declare the same name several times. */
+export const OVERLOAD_LANGUAGES = /\.(java|kt|kts|cs|scala|sc|cpp|cc|cxx|c\+\+|hpp|hh|hxx|h)$/i;

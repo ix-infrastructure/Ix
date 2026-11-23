@@ -3,7 +3,7 @@
 import type { IxClient } from "../client/api.js";
 import { mapLimit } from "../client/request-memo.js";
 import { ALL_CONCURRENCY, DISPATCH_DEPTH, DISPATCH_MAX_TYPES, byName } from "./commands/callers.js";
-import { TYPE_KINDS, type GraphKind, type KindSet } from "./graph-model.js";
+import { MEMBER_KINDS, OVERLOAD_LANGUAGES, TYPE_KINDS, type GraphKind, type KindSet } from "./graph-model.js";
 import { SourceFiles } from "./edge-sites.js";
 import { expandCapped, rowLocation } from "./format.js";
 import { activeReadScope } from "./resolve.js";
@@ -41,9 +41,6 @@ export const HERITAGE_LOOKUPS = 4;
 
 /** A supertype of one of these kinds is implemented, not overridden. */
 const ABSTRACT_KINDS: KindSet = new Set<GraphKind>(["interface", "trait", "protocol"]);
-const MEMBER_KINDS = /^(method|function)$/i;
-/** Languages where one type can declare the same name several times. */
-const OVERLOAD_LANGUAGES = /\.(java|kt|kts|cs|scala|sc|cpp|cc|cxx|c\+\+|hpp|hh|hxx|h)$/i;
 
 export type OverrideRelation = "overrides" | "implements" | "overridden_by" | "sibling";
 export type HierarchyCap = "depth" | "types" | "edges";

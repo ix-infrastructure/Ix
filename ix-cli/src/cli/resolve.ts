@@ -28,8 +28,8 @@ import { httpStatusOf } from "../client/http-error.js";
 import { hasDefinitionOf, looksTypeLikeSymbol } from "./resolve/score.js";
 import {
   AMBIGUOUS_HINT, allCandidatesOf, applyPick as pickAmong, buildAmbiguous, candidateOf, cmpStr,
-  fuzzyNotice, importIdsOf, isFuzzyResult, nodePath, nodeToResolved, pickBest,
-  pickFromNotice as pickInNotice, pickedOutOfRange, rememberAll, roundRobinByFile, type Candidate,
+  fuzzyNotice, importIdsOf, isFuzzyResult, laterOverloads, mayHoldOverloads, nodePath, nodeToResolved, pickBest,
+  pickFromNotice as pickInNotice, pickedOutOfRange, rememberAll, roundRobinByFile, type Candidate, type OverloadRow,
 } from "./resolve/pick.js";
 import type {
   AmbiguousResult, ResolutionMode, ResolutionNotice, ResolvedEntity, ResolveResult, Suggestion,
@@ -455,14 +455,14 @@ export async function rankEntity(
 
   // Score exact-name candidates
   if (exactName.length > 0) {
-    const winner = pickBest(exactName, symbol, preferredKinds, pickOpts);
+    const winner = pickBest(await withoutLaterOverloads(client, exactName), symbol, preferredKinds, pickOpts);
     if (winner) return finish(winner);
   }
 
   // ── Phase 2: Fall back to all candidates ────────────────────────────
   // No candidate carries the name, so whatever wins is a fuzzy match: it
   // resolves (exit 0 as before) but is labelled, and the notice says so.
-  const winner = pickBest(filteredNodes, symbol, preferredKinds, pickOpts);
+  const winner = pickBest(await withoutLaterOverloads(client, filteredNodes), symbol, preferredKinds, pickOpts);
   if (winner) {
     if (winner.resolved) {
       const e = winner.entity;
@@ -619,16 +619,38 @@ export const CONTAINER_LOOKUP_TIMEOUT_MS = 5_000;
 export async function withContainers(client: IxClient, result: ResolveResult): Promise<ResolveResult> {
   if (result.resolved || !result.ambiguous) return result;
   const all = allCandidatesOf(result.result);
-  const ids = new Set(all.map((c) => c.id));
-  const names = [...new Set(result.result.candidates.map((c) => c.name).filter(Boolean))].slice(0, CONTAINER_NAME_LOOKUPS);
-  const answers = await Promise.all(names.map(async (name) => {
+  const owners = await containingTypes(client, result.result.candidates.map((c) => c.name), new Set(all.map((c) => c.id)));
+  // Added in place: the listed rows are the same objects as the head of the
+  // full list, so `--pick` and the shown page stay one list. Two different
+  // owners for one candidate is not an answer.
+  for (const c of all) {
+    const names = new Set(owners.get(c.id)?.values());
+    if (names.size === 1) c.container = [...names][0];
+  }
+  return result;
+}
+
+/**
+ * The types that CONTAIN each of `ids`, as graph id to name: the edges of one
+ * `/v1/expand-by-name` per distinct name in `names` (at most
+ * CONTAINER_NAME_LOOKUPS), never a request per id. A file parent is not a
+ * type and is left out. Best effort: an id the backend did not answer for (or
+ * not within CONTAINER_LOOKUP_TIMEOUT_MS) has no entry.
+ */
+async function containingTypes(
+  client: IxClient,
+  names: readonly string[],
+  ids: ReadonlySet<string>,
+): Promise<Map<string, Map<string, string>>> {
+  const asked = [...new Set(names.filter(Boolean))].slice(0, CONTAINER_NAME_LOOKUPS);
+  const answers = await Promise.all(asked.map(async (name) => {
     try {
       return await client.expandByName(name, { direction: "in", predicates: ["CONTAINS"], timeoutMs: CONTAINER_LOOKUP_TIMEOUT_MS });
     } catch {
       return null;
     }
   }));
-  const owners = new Map<string, Set<string>>();
+  const owners = new Map<string, Map<string, string>>();
   for (const answer of answers) {
     if (!answer || !Array.isArray(answer.nodes) || !Array.isArray(answer.edges)) continue;
     const byId = new Map(answer.nodes.map((n) => [n.id, n] as const));
@@ -637,19 +659,50 @@ export async function withContainers(client: IxClient, result: ResolveResult): P
       const parent = byId.get(String(e.src));
       const name = parent?.name || parent?.attrs?.name;
       if (!name || String(parent?.kind ?? "").toLowerCase() === "file") continue;
-      const set = owners.get(String(e.dst)) ?? new Set<string>();
-      set.add(String(name));
-      owners.set(String(e.dst), set);
+      const found = owners.get(String(e.dst)) ?? new Map<string, string>();
+      found.set(String(e.src), String(name));
+      owners.set(String(e.dst), found);
     }
   }
-  // Added in place: the listed rows are the same objects as the head of the
-  // full list, so `--pick` and the shown page stay one list. Two different
-  // owners for one candidate is not an answer.
-  for (const c of all) {
-    const found = owners.get(c.id);
-    if (found?.size === 1) c.container = [...found][0];
+  return owners;
+}
+
+function overloadRowOf(n: GraphNode, parent?: string): OverloadRow {
+  const { id, name, kind, path: file, line } = candidateOf(n);
+  return { id, name, kind, path: file ?? "", line, parent };
+}
+
+/**
+ * `nodes` without the later overloads of an overloaded method (pick.ts
+ * `laterOverloads`), so the overloads of one method are one candidate when a
+ * pick is made: the first in source order, which is the node every overload
+ * was until #1139.
+ *
+ * Entities carry no container attribute, and overloads are told from two
+ * same-named methods in two classes of one file only by the type that
+ * CONTAINS them. So this costs the request `withContainers` makes, one per
+ * distinct name and never one per candidate, and only when two member rows
+ * share a name and a file in a language with overloads; any other candidate
+ * set is returned as it came, with no request. A row whose type the backend
+ * did not name (or named two) is kept: the name is then ambiguous, as it is
+ * without this.
+ */
+async function withoutLaterOverloads(client: IxClient, nodes: GraphNode[]): Promise<GraphNode[]> {
+  const rows = nodes.map((n) => overloadRowOf(n));
+  if (!mayHoldOverloads(rows)) return nodes;
+  // Only the names declared twice in one file are asked for.
+  const byFile = new Map<string, OverloadRow[]>();
+  for (const row of rows) {
+    const key = `${normalizeForPathMatch(row.path)}\0${row.name}`;
+    byFile.set(key, [...(byFile.get(key) ?? []), row]);
   }
-  return result;
+  const suspects = [...byFile.values()].filter((group) => mayHoldOverloads(group)).flat();
+  const owners = await containingTypes(client, suspects.map((r) => r.name), new Set(suspects.map((r) => r.id)));
+  const later = laterOverloads(suspects.map((row) => {
+    const types = [...(owners.get(row.id)?.keys() ?? [])];
+    return types.length === 1 ? { ...row, parent: types[0] } : row;
+  }));
+  return later.size > 0 ? nodes.filter((n) => !later.has(String(n.id))) : nodes;
 }
 
 export function printAmbiguous(symbol: string, result: AmbiguousResult, opts?: { kind?: string; path?: string }): void {
@@ -993,7 +1046,12 @@ async function membersOf(
     children = null;
   }
   if (children && children.length > 0) {
-    return { found: children.filter(named).map(candidateOf), truncated: false };
+    // The class's own members, so overloads of the name are one method: the
+    // first in source order (pick.ts `laterOverloads`). The file fallback
+    // below cannot say which type holds a row, and folds nothing.
+    const members = children.filter(named);
+    const later = laterOverloads(members.map((n) => overloadRowOf(n, cls.id)));
+    return { found: members.filter((n) => !later.has(String(n.id))).map(candidateOf), truncated: false };
   }
   if (!cls.path) return { found: [], truncated: false };
   const classFile = normalizeForPathMatch(cls.path);
