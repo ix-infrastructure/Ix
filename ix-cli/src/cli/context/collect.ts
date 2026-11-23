@@ -24,7 +24,12 @@ export async function collectContextFacts(
   resolved: { id: string; name: string; kind: string },
 ): Promise<ContextFacts> {
   const facts = await collectFacts(client, resolved.id, resolved.name, resolved.kind, "context");
-  const graphRefs = await collectRelatedFiles(client, resolved, facts).catch(() => []);
+  // A class's bases and field types already name their files: as related
+  // files they would cost a second mention, so they give up their slots.
+  const typePaths = new Set(ownTypeRefs(facts).flatMap((ref) => (ref.path ? [ref.path] : [])));
+  const graphRefs = (await collectRelatedFiles(client, resolved, facts, MAX_RELATED + typePaths.size).catch(() => []))
+    .filter((ref) => !ref.path || !typePaths.has(ref.path))
+    .slice(0, MAX_RELATED);
   const textRefs = await collectTextRelated(client, facts, graphRefs).catch(() => []);
   const history = await collectHistory(client, facts, [...graphRefs, ...textRefs]).catch(() => undefined);
   // Added to the graph's files, not ranked against them. Put first and sharing
@@ -36,6 +41,11 @@ export async function collectContextFacts(
     ...(relatedRefs.length > 0 ? { relatedRefs } : {}),
     ...(history?.recent.length ? { recentCommits: history.recent } : {}),
   };
+}
+
+/** A class target's bases and referenced types, whose files the bundle already names. */
+function ownTypeRefs(facts: ContextFacts) {
+  return [...(facts.extendsRefs ?? []), ...(facts.referenceRefs ?? [])];
 }
 
 /**
@@ -52,7 +62,7 @@ async function collectHistory(
   const known = new Set<string>([facts.path]);
   for (const ref of [
     ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []), ...(facts.topCallerRefs ?? []),
-    ...(facts.topDependentRefs ?? []), ...(facts.neighbourRefs ?? []), ...related,
+    ...(facts.topDependentRefs ?? []), ...(facts.neighbourRefs ?? []), ...ownTypeRefs(facts), ...related,
   ]) {
     if (ref.path) known.add(ref.path);
   }
@@ -111,7 +121,7 @@ async function collectTextRelated(
   const known = new Set<string>();
   for (const ref of [
     ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []), ...(facts.topCallerRefs ?? []),
-    ...(facts.topDependentRefs ?? []), ...(facts.neighbourRefs ?? []), ...graphRefs,
+    ...(facts.topDependentRefs ?? []), ...(facts.neighbourRefs ?? []), ...ownTypeRefs(facts), ...graphRefs,
   ]) {
     if (ref.path) known.add(ref.path);
   }

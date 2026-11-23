@@ -239,3 +239,132 @@ describe("collectFacts member ranking", () => {
     expect(facts.members.at(-1)).toBe("resolveWorkspaceRoot");
   });
 });
+
+/**
+ * A class that extends one base, implements one interface (also written as
+ * EXTENDS), and references two field types -- one of them the base again, and
+ * one a self-reference. `edges` lets a test drop the edge list a backend
+ * returns, to check the split does not depend on it.
+ */
+function classWithTypes(calls: Call[], kind = "class", withEdges = true): IxClient {
+  const node = (id: string, name: string, k: string, path: string) => ({
+    id, name, kind: k, attrs: { line_start: 1, line_end: 9 }, provenance: { sourceUri: path },
+  });
+  const outTypes = {
+    nodes: [
+      node("t-store", "Store", "class", "src/store.ts"),
+      node("t-base", "BaseService", "class", "src/base.ts"),
+      node("t-iface", "Disposable", "interface", "src/types.ts"),
+      node("t-base", "BaseService", "class", "src/base.ts"),
+      node(TARGET, "Service", "class", "src/service.ts"),
+      node("t-clock", "Clock", "class", "src/clock.ts"),
+    ],
+    edges: [
+      { src: TARGET, dst: "t-store", predicate: "REFERENCES" },
+      { src: TARGET, dst: "t-base", predicate: "EXTENDS" },
+      { src: TARGET, dst: "t-iface", predicate: "EXTENDS" },
+      { src: TARGET, dst: "t-base", predicate: "REFERENCES" },
+      { src: TARGET, dst: TARGET, predicate: "REFERENCES" },
+      { src: TARGET, dst: "t-clock", predicate: "REFERENCES" },
+    ],
+  };
+  return {
+    async entity(id: string) {
+      calls.push({ method: "entity", id });
+      return { node: node(id, "Service", kind, "src/service.ts"), claims: [], decisions: [], edges: [] };
+    },
+    async expand(id: string, opts?: { direction?: string; predicates?: string[] }) {
+      calls.push({ method: "expand", id, predicates: opts?.predicates });
+      if (id === TARGET && opts?.direction === "out" && opts.predicates?.includes("EXTENDS")) {
+        return withEdges ? outTypes : { nodes: outTypes.nodes, edges: [] };
+      }
+      return { nodes: [], edges: [] };
+    },
+    async provenance(id: string) {
+      calls.push({ method: "provenance", id });
+      return { entityId: id, chain: [] };
+    },
+  } as unknown as IxClient;
+}
+
+describe("a class target's own types", () => {
+  it("reads what the class extends and references, for ix context", async () => {
+    const calls: Call[] = [];
+    const facts = await collectFacts(classWithTypes(calls), TARGET, "Service", "class", "context");
+
+    // One extra expand on the target, for both predicates.
+    const typeReads = calls.filter((c) => c.method === "expand" && c.id === TARGET
+                                         && c.predicates?.includes("EXTENDS"));
+    expect(typeReads).toEqual([{ method: "expand", id: TARGET, predicates: ["EXTENDS", "REFERENCES"] }]);
+    // Bases in the order ingest wrote them; a type that is both a base and a
+    // field type is a base, once; the class itself is neither.
+    expect(facts.extendsRefs?.map((r) => r.name)).toEqual(["BaseService", "Disposable"]);
+    expect(facts.extendsRefs?.[0]).toMatchObject({ id: "t-base", path: "src/base.ts", lineStart: 1, lineEnd: 9 });
+    expect(facts.referenceRefs?.map((r) => r.name).sort()).toEqual(["Clock", "Store"]);
+  });
+
+  it("treats every type as referenced when the backend returns no edges", async () => {
+    const facts = await collectFacts(classWithTypes([], "class", false), TARGET, "Service", "class", "context");
+
+    expect(facts.extendsRefs ?? []).toEqual([]);
+    expect(facts.referenceRefs?.map((r) => r.name).sort()).toEqual(["BaseService", "Clock", "Disposable", "Store"]);
+  });
+
+  it("caps them: three bases and four referenced types", async () => {
+    const many = (prefix: string, predicate: string, n: number) => Array.from({ length: n }, (_, i) => ({
+      node: { id: `${prefix}-${i}`, name: `${prefix}${i}`, kind: "class", attrs: {}, provenance: { sourceUri: `src/${prefix}${i}.ts` } },
+      edge: { src: TARGET, dst: `${prefix}-${i}`, predicate },
+    }));
+    const rows = [...many("Base", "EXTENDS", 5), ...many("Ref", "REFERENCES", 9)];
+    const client = {
+      async entity(id: string) {
+        return { node: { id, name: "Service", kind: "class", attrs: {}, provenance: { sourceUri: "src/service.ts" } }, edges: [] };
+      },
+      async expand(id: string, opts?: { direction?: string; predicates?: string[] }) {
+        if (id === TARGET && opts?.predicates?.includes("EXTENDS")) {
+          return { nodes: rows.map((r) => r.node), edges: rows.map((r) => r.edge) };
+        }
+        return { nodes: [], edges: [] };
+      },
+      async provenance(id: string) { return { entityId: id, chain: [] }; },
+    } as unknown as IxClient;
+
+    const facts = await collectFacts(client, TARGET, "Service", "class", "context");
+
+    expect(facts.extendsRefs?.map((r) => r.name)).toEqual(["Base0", "Base1", "Base2"]);
+    expect(facts.referenceRefs).toHaveLength(4);
+  });
+
+  it("keeps a class bundle when the type read fails", async () => {
+    const client = {
+      async entity(id: string) {
+        return { node: { id, name: "Service", kind: "class", attrs: {}, provenance: { sourceUri: "src/service.ts" } }, edges: [] };
+      },
+      async expand(id: string, opts?: { predicates?: string[] }) {
+        if (opts?.predicates?.includes("EXTENDS")) throw new Error("backend unavailable");
+        return { nodes: [], edges: [] };
+      },
+      async provenance(id: string) { return { entityId: id, chain: [] }; },
+    } as unknown as IxClient;
+
+    const facts = await collectFacts(client, TARGET, "Service", "class", "context");
+
+    expect(facts.name).toBe("Service");
+    expect(facts.extendsRefs ?? []).toEqual([]);
+    expect(facts.referenceRefs ?? []).toEqual([]);
+  });
+
+  it("is not read for a function or file target, or by ix explain", async () => {
+    for (const [kind, scope] of [["function", "context"], ["file", "context"], ["class", "explain"]] as const) {
+      const calls: Call[] = [];
+      const facts = scope === "context"
+        ? await collectFacts(classWithTypes(calls, kind), TARGET, "Service", kind, "context")
+        : await collectFacts(classWithTypes(calls, kind), TARGET, "Service", kind);
+      // The type read itself; explain's own dependency walk has EXTENDS reads of its own.
+      expect(calls.some((c) => c.id === TARGET && c.predicates?.join() === "EXTENDS,REFERENCES"), `${kind} ${scope}`)
+        .toBe(false);
+      expect(facts, `${kind} ${scope}`).not.toHaveProperty("extendsRefs");
+      expect(facts, `${kind} ${scope}`).not.toHaveProperty("referenceRefs");
+    }
+  });
+});

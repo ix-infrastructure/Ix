@@ -354,3 +354,104 @@ describe("--diff across a callers change", () => {
     expect(row.reason).toContain("src/cli/main.ts:10-40");
   });
 });
+
+/** A large class: ten measured members, bases, field types, callees and neighbours. */
+function bigClassFacts(): ContextFacts {
+  const memberRefs = Array.from({ length: 10 }, (_, i) =>
+    ({ ...loc(`m-${i}`, `method${i}`, "src/service.ts", [i * 20 + 1, i * 20 + 15], "method"), usedBy: 10 - i, usedFromFiles: 1 }));
+  return baseFacts({
+    id: "c-target", name: "Service", kind: "class", path: "src/service.ts", lineStart: 1, lineEnd: 300,
+    memberRefs, members: memberRefs.map((m) => m.name), memberCount: 10,
+    container: loc("f-service", "service.ts", "src/service.ts", undefined, "file"),
+    relatedRefs: [
+      { id: "r-1", name: "far.ts", kind: "file", path: "src/far.ts", score: 1, reason: "", via: ["x"] },
+      { id: "r-2", name: "farther.ts", kind: "file", path: "src/farther.ts", score: 1, reason: "", via: ["y"] },
+    ] as never,
+    extendsRefs: [loc("t-base", "BaseService", "src/base.ts", [1, 80], "class"),
+                  loc("t-iface", "Disposable", "src/types.ts", [3, 6], "interface")],
+    referenceRefs: [loc("t-store", "Store", "src/store.ts", [1, 120], "class"),
+                    loc("t-clock", "Clock", "src/clock.ts", [1, 40], "class")],
+    calleeRefs: Array.from({ length: 4 }, (_, i) => loc(`k-${i}`, `helper${i}`, `src/helpers${i}.ts`, [1, 9])),
+    neighbourRefs: Array.from({ length: 6 }, (_, i) => loc(`n-${i}`, `near${i}`, `src/near${i}.ts`, [1, 9])),
+    callerCount: 3, topCallers: ["main"],
+    topCallerRefs: [loc("c-1", "main", "src/cli/main.ts", [10, 40])],
+    usedByCount: 3,
+  });
+}
+
+describe("a class target's own types", () => {
+  it("ranks bases and referenced types after the leading members, ahead of related files", () => {
+    const bundle = bundleFor(bigClassFacts(), { claims: 6 });
+    const index = (pred: (e: (typeof bundle.evidence)[number]) => boolean) => bundle.evidence.findIndex(pred);
+
+    const base = index((e) => e.refs.includes("t-base"));
+    const store = index((e) => e.refs.includes("t-store"));
+    const fifthMember = index((e) => e.refs.includes("m-4"));
+    const sixthMember = index((e) => e.refs.includes("m-5"));
+    const relatedRow = index((e) => e.source === "facts.related");
+    expect(bundle.evidence[base]).toMatchObject({
+      id: "extends:t-base", kind: "structural", source: "facts.extends", title: "extends BaseService",
+      location: { path: "src/base.ts" },
+    });
+    expect(bundle.evidence[store]).toMatchObject({
+      id: "references:t-store", kind: "structural", source: "facts.references", title: "references Store",
+    });
+    expect(fifthMember).toBeGreaterThanOrEqual(0);
+    expect(base).toBeGreaterThan(fifthMember);
+    expect(store).toBeGreaterThan(base);
+    // Bases, then field types, then the files two steps away.
+    const typeRows = bundle.evidence.filter((e) => e.source === "facts.extends" || e.source === "facts.references");
+    expect(typeRows.map((e) => e.title)).toEqual(["extends BaseService", "extends Disposable", "references Store", "references Clock"]);
+    if (relatedRow >= 0) expect(store).toBeLessThan(relatedRow);
+    if (sixthMember >= 0) expect(store).toBeLessThan(sixthMember);
+  });
+
+  it("keeps them inside the default evidence budget when neighbours and claims overflow it", () => {
+    const bundle = bundleFor(bigClassFacts(), { claims: 6 });
+    for (const id of ["t-base", "t-iface", "t-store", "t-clock"]) {
+      expect(bundle.evidence.some((e) => e.refs.includes(id)), id).toBe(true);
+    }
+    // Something was cut, so the budget really was the constraint.
+    expect(bundle.truncation.cut?.length ?? 0).toBeGreaterThan(0);
+  });
+
+  it("does not restate a referenced type as a relationship row", () => {
+    const facts = bigClassFacts();
+    const bundle = bundleFor(facts, {
+      edges: [
+        { src: "c-target", dst: "t-store", predicate: "REFERENCES" },
+        { src: "c-target", dst: "t-base", predicate: "EXTENDS" },
+      ],
+    });
+    expect(bundle.evidence.filter((e) => e.refs.includes("t-store"))).toHaveLength(1);
+    expect(bundle.evidence.filter((e) => e.refs.includes("t-base"))).toHaveLength(1);
+  });
+
+  it("puts them among the bundle's entities, after the leading members", () => {
+    const bundle = bundleFor(bigClassFacts());
+    const ids = bundle.entities.map((e) => e.id);
+    expect(ids).toContain("t-base");
+    expect(ids).toContain("t-store");
+    expect(ids.indexOf("t-base")).toBeGreaterThan(ids.indexOf("m-9"));
+    expect(ids.indexOf("t-store")).toBeLessThan(ids.indexOf("k-0"));
+  });
+
+  it("labels the cut rows for the truncation advice", () => {
+    const facts = bigClassFacts();
+    facts.referenceRefs = Array.from({ length: 4 }, (_, i) => loc(`t-r${i}`, `Ref${i}`, `src/ref${i}.ts`, [1, 9], "class"));
+    const bundle = buildBundle({
+      resolved: { id: facts.id, name: facts.name, kind: facts.kind, resolutionMode: "exact" },
+      facts,
+      context: {
+        claims: [], conflicts: [], decisions: [], intents: [], nodes: [], edges: [],
+        metadata: { query: "", seedEntities: [], hopsExpanded: 1, asOfRev: 1 },
+      } as never,
+      provenance: {},
+      budgets: clampBudgets({ maxEvidence: 8 }, "llm"),
+      format: "llm",
+      isStale: () => false,
+    });
+    const cut = bundle.truncation.cut ?? [];
+    expect(cut.some((c) => c.what === "referenced type")).toBe(true);
+  });
+});
