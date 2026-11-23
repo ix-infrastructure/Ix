@@ -886,7 +886,9 @@ One header record, then the ranked evidence. The header always carries
 they are not zero. The rows are printed in rank order and carry no `score=`:
 the score (`--format json` has it) is `tier * 1000` plus the row's place in its
 tier, tiers in order target, issue, structural, claims, relationships,
-provenance, so a tier never runs into the next. Each entity gets one row: a
+provenance, so a tier never runs into the next. A class's `calls` rows for
+what its members call close the claims tier, after its decisions and intents.
+Each entity gets one row: a
 relationship that restates a member, import or caller row is left out, and
 edges whose titles would read the same (overloads sharing a name and a path)
 are one row ending ` (n edges)`. A target's callers and dependents share one row, titled with how many of

@@ -69,6 +69,60 @@
       "where": "ix-openclaw-plugin/tools/base.ts",
       "match": "ix did not answer",
       "why": "error message text, not an ix invocation"
+    },
+    {
+      "where": "ix-codex-plugin/agents/ix-bug-investigator.md",
+      "match": "ix bugs",
+      "why": "prose telling the agent there is no `ix bugs`; the command it runs is `ix bug list`"
+    },
+    {
+      "where": "ix-codex-plugin/ROADMAP.md",
+      "match": "os.popen",
+      "why": "roadmap prose naming a Python stdlib call, not a field of an ix result"
+    },
+    {
+      "where": "ix-codex-plugin/ROADMAP.md",
+      "match": "urllib.request",
+      "why": "roadmap prose naming Python stdlib modules, not fields of an ix result"
+    },
+    {
+      "where": "ix-cursor-plugin/mcp/tests/unit/launch.test.ts",
+      "match": "const { argv }",
+      "why": "reads the argv a fake ix on PATH echoes back, not real `ix text` output"
+    },
+    {
+      "where": "ix-openclaw-plugin/PLUGIN_SPEC.md",
+      "why": "superseded May 2026 plan, kept as a historical record; it names runtime routes and tools that were never built"
+    },
+    {
+      "where": "ix-openclaw-plugin/tests/real-ix/live/graph-tools.test.mjs",
+      "match": "locate.raw",
+      "why": "`record` and `raw` are the test's own { raw, record } wrapper around the parsed output; the fields read under `record` are in the contract"
+    },
+    {
+      "where": "ix-openclaw-plugin/tests/real-ix/live/graph-tools.test.mjs",
+      "match": "status.raw",
+      "why": "`record` and `raw` are the test's own { raw, record } wrapper around the parsed output; the fields read under `record` are in the contract"
+    },
+    {
+      "where": "ix-openclaw-plugin/tests/real-ix/live/read-tools.test.mjs",
+      "match": "located.r",
+      "why": "`record` and `raw` are the test's own { raw, record } wrapper around the parsed output; the fields read under `record` are in the contract"
+    },
+    {
+      "where": "ix-openclaw-plugin/tools/ix-smells.ts",
+      "match": "ix reported",
+      "why": "message prose, not an ix invocation"
+    },
+    {
+      "where": "ix-opencode-plugin/tools/ix-health.ts",
+      "match": "ixError.code",
+      "why": "`code` of the error envelope returned by the plugin's own parseIxError, not a field of the status record"
+    },
+    {
+      "where": "ix-opencode-plugin/tools/ix-ingest.ts",
+      "match": "(Ix commands/status.ts)",
+      "why": "doc comment naming a source file; `.ts` is a file extension"
     }
   ]
 }
