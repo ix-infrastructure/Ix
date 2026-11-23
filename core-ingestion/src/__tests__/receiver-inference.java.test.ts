@@ -257,3 +257,266 @@ describe('Java typed receivers', () => {
     expect(summarizeParseResult(result)).toMatchObject({ receiverPackage: 'com.acme.common' });
   });
 });
+
+/** Every REFERENCES edge the patches write, as `file::name` of both ends. */
+function referenceEdges(results: FileParseResult[], edges = resolveEdges(results)): Array<{ src: string; dst: string; tier?: string; confidence?: number }> {
+  const patches = results.map(r => buildPatchWithResolution(r, 'hash', 'workspace', edges));
+  const names = new Map<string, string>();
+  results.forEach((r, i) => {
+    for (const op of patches[i].ops as any[]) if (op.type === 'UpsertNode') names.set(op.id, `${r.filePath.replace('/repo/', '')}::${op.kind}:${op.name}`);
+  });
+  return patches.flatMap(p => (p.ops as any[]).filter(op => op.type === 'UpsertEdge' && op.predicate === 'REFERENCES')
+    .map(op => ({ src: names.get(op.src) ?? op.src, dst: names.get(op.dst) ?? op.dst, tier: op.attrs?.tier, confidence: op.attrs?.confidence })));
+}
+
+const references = (edges: ReturnType<typeof resolveEdges>) => edges.filter(e => e.predicate === 'REFERENCES');
+const staticRefs = (result: FileParseResult) => result.relationships.filter(r => r.predicate === 'REFERENCES' && r.receiverType);
+
+// #1137: a class used only through static calls had no incoming edge.
+describe('Java static-call receivers reference their class (#1137)', () => {
+  const GATE = `package demo.a;
+
+final class Gate {
+    private Gate() {
+    }
+
+    static boolean matches(String request) {
+        return request != null;
+    }
+
+    static boolean matches(Integer request) {
+        return request != null;
+    }
+}
+`;
+  const EVALUATOR = `package demo.a;
+
+public class Evaluator {
+    public void evaluate(String request) {
+        if (!Gate.matches(request)) {
+            throw new IllegalStateException("context is empty.");
+        }
+    }
+
+    public void evaluate(Integer request) {
+        if (!Gate.matches(request)) {
+            throw new IllegalStateException("context is empty.");
+        }
+    }
+}
+`;
+  const gate = () => parse('/repo/demo/a/Gate.java', GATE);
+  const evaluator = () => parse('/repo/demo/a/Evaluator.java', EVALUATOR);
+
+  it('links the caller to a same-package class with no import, and writes the edge', () => {
+    const files = [gate(), evaluator()];
+    expect(staticRefs(files[1])).toEqual([
+      { srcName: 'Evaluator.evaluate', dstName: 'Gate', predicate: 'REFERENCES', receiverType: 'Gate', receiverOnly: true },
+    ]);
+    const edges = resolveEdges(files);
+    expect(references(edges)).toEqual([expect.objectContaining({
+      srcFilePath: '/repo/demo/a/Evaluator.java', srcName: 'Evaluator.evaluate', dstName: 'Gate',
+      dstFilePath: '/repo/demo/a/Gate.java', dstQualifiedKey: 'Gate', tier: 'type', confidence: 0.95,
+    })]);
+    // The class node, not its same-named constructor.
+    expect(referenceEdges(files, edges)).toEqual([
+      { src: 'demo/a/Evaluator.java::method:evaluate', dst: 'demo/a/Gate.java::class:Gate', tier: 'type', confidence: 0.95 },
+    ]);
+    // The method-to-method call is still there.
+    expect(callEdges(files, edges)).toContainEqual(expect.objectContaining({ src: 'demo/a/Evaluator.java::evaluate', dst: 'demo/a/Gate.java::matches' }));
+  });
+
+  it('resolves the same way when the class is only in the index, not the batch', () => {
+    const results = [gate(), evaluator()];
+    const summaries = new Map(results.map(r => [r.filePath, summarizeParseResult(r)]));
+    const index = buildGlobalResolutionIndex([...summaries.keys()], summaries);
+    expect(summaries.get('/repo/demo/a/Evaluator.java')!.refs).toContain('Gate');
+    expect(references(resolveEdges([results[1]], undefined, index))).toEqual([expect.objectContaining({
+      dstFilePath: '/repo/demo/a/Gate.java', dstQualifiedKey: 'Gate', tier: 'type',
+    })]);
+  });
+
+  it('resolves to the class key, for a top-level and a nested class with explicit constructors', () => {
+    // A class and its constructor share one qualified key, so the name maps to a single key (what bestQKey needs).
+    const outer = parse('/repo/demo/a/Outer.java',
+      'package demo.a;\npublic class Outer {\n  public static class Inner {\n    Inner() {}\n    static void go() {}\n  }\n}\n');
+    const use = parse('/repo/demo/a/Use.java',
+      'package demo.a;\nimport demo.a.Outer.Inner;\npublic class Use {\n  void use() {\n    Gate.matches("x");\n    Inner.go();\n  }\n}\n');
+    const qkeys = (r: FileParseResult, name: string) => [...new Set(summarizeParseResult(r).qkeys.filter(([n]) => n === name).map(([, key]) => key))];
+    expect(qkeys(gate(), 'Gate')).toEqual(['Gate']);
+    expect(qkeys(outer, 'Inner')).toEqual(['Outer.Inner']);
+    const files = [gate(), outer, use];
+    const edges = resolveEdges(files);
+    expect(references(edges).map(e => [e.dstName, e.dstFilePath, e.dstQualifiedKey]).sort()).toEqual([
+      ['Gate', '/repo/demo/a/Gate.java', 'Gate'],
+      ['Inner', '/repo/demo/a/Outer.java', 'Outer.Inner'],
+    ]);
+    expect(referenceEdges(files, edges).map(e => e.dst).sort()).toEqual(['demo/a/Gate.java::class:Gate', 'demo/a/Outer.java::class:Inner']);
+  });
+
+  it('links a nested class in the same file', () => {
+    const file = parse('/repo/demo/a/Host.java',
+      'package demo.a;\npublic class Host {\n  void use() { Util.go(); }\n  static class Util {\n    static void go() {}\n  }\n}\n');
+    expect(references(resolveEdges([file]))).toEqual([expect.objectContaining({
+      srcName: 'Host.use', dstFilePath: '/repo/demo/a/Host.java', dstQualifiedKey: 'Host.Util', tier: 'type',
+    })]);
+    expect(referenceEdges([file])).toEqual([expect.objectContaining({ src: 'demo/a/Host.java::method:use', dst: 'demo/a/Host.java::class:Util' })]);
+  });
+
+  it('resolves an imported class in another package; a single-type import beats a same-package class', () => {
+    const files = [
+      parse('/repo/lib/Gate.java', 'package lib;\npublic final class Gate {\n  public static boolean matches(String s) { return true; }\n}\n'),
+      gate(),
+      parse('/repo/demo/a/Use.java', 'package demo.a;\nimport lib.Gate;\npublic class Use {\n  void use() { Gate.matches("x"); }\n}\n'),
+    ];
+    const edges = resolveEdges(files);
+    expect(references(edges)).toEqual([expect.objectContaining({ srcName: 'Use.use', dstFilePath: '/repo/lib/Gate.java', dstQualifiedKey: 'Gate', tier: 'type' })]);
+    expect(referenceEdges(files, edges)).toEqual([expect.objectContaining({ src: 'demo/a/Use.java::method:use', dst: 'lib/Gate.java::class:Gate' })]);
+  });
+
+  it('writes no edge when two on-demand imports both provide the class', () => {
+    const dup = (pkg: string) => parse(`/repo/${pkg}/Dup.java`, `package ${pkg};\npublic class Dup {\n  public static void go() {}\n}\n`);
+    const files = [dup('a'), dup('b'),
+      parse('/repo/q/Use.java', 'package q;\nimport a.*;\nimport b.*;\npublic class Use {\n  void use() { Dup.go(); }\n}\n')];
+    expect(staticRefs(files[2])).toHaveLength(1);
+    const edges = resolveEdges(files);
+    expect(references(edges)).toEqual([]);
+    expect(referenceEdges(files, edges)).toEqual([]);
+  });
+
+  it('writes nothing for a receiver the repo does not define (JDK classes)', () => {
+    const use = parse('/repo/q/Use.java',
+      'package q;\nimport java.util.Objects;\npublic class Use {\n  int use(Object o) {\n    Objects.requireNonNull(o);\n    return Math.max(1, 2);\n  }\n}\n');
+    expect(staticRefs(use).map(r => r.dstName).sort()).toEqual(['Math', 'Objects']);
+    // A same-named class elsewhere in the repo is not in scope either.
+    const elsewhere = parse('/repo/other/Objects.java', 'package other;\npublic class Objects {\n  public static void requireNonNull(Object o) {}\n}\n');
+    const files = [use, elsewhere];
+    const edges = resolveEdges(files);
+    expect(references(edges)).toEqual([]);
+    const ops = buildPatchWithResolution(use, 'hash', 'workspace', edges).ops as any[];
+    expect(ops.filter(op => op.type === 'UpsertEdge' && op.predicate === 'REFERENCES')).toEqual([]);
+    expect(JSON.stringify(ops)).not.toMatch(/references:(Math|Objects)/);
+    // Identical to the patch of the same file without the receiver references.
+    const stripped = { ...use, relationships: use.relationships.filter(r => !(r.predicate === 'REFERENCES' && r.receiverOnly)) };
+    expect(ops).toEqual(buildPatchWithResolution(stripped, 'hash', 'workspace', edges).ops);
+  });
+
+  it('writes no edge when one file nests two classes of that name', () => {
+    const file = parse('/repo/demo/a/Host.java',
+      'package demo.a;\npublic class Host {\n  static class A { static class Util { static void go() {} } }\n  static class B { static class Util {} }\n  void use() { Util.go(); }\n}\n');
+    expect(staticRefs(file)).toHaveLength(1);
+    expect(references(resolveEdges([file]))).toEqual([]);
+    expect(referenceEdges([file])).toEqual([]);
+  });
+
+  it('skips builtin type names', () => {
+    const use = parse('/repo/q/Use.java', 'package q;\npublic class Use {\n  String use(int i) { return String.valueOf(Integer.parseInt("1") + i); }\n}\n');
+    expect(staticRefs(use)).toEqual([]);
+  });
+
+  it('gives a class no reference to itself for its own static calls', () => {
+    const self = parse('/repo/demo/a/Gate.java', `package demo.a;
+final class Gate {
+  static boolean helper() { return true; }
+  static boolean matches() { return Gate.helper(); }
+  static class Nested {
+    boolean viaOuter() { return Gate.helper(); }
+  }
+  Runnable anon() {
+    return new Runnable() {
+      public void run() { Gate.helper(); }
+    };
+  }
+}
+`);
+    expect(staticRefs(self)).toEqual([]);
+    expect(references(resolveEdges([self]))).toEqual([]);
+    expect(referenceEdges([self])).toEqual([]);
+    // The typed call itself is unaffected.
+    expect(self.relationships).toContainEqual(expect.objectContaining({ srcName: 'Gate.matches', predicate: 'CALLS', receiverType: 'Gate' }));
+  });
+
+  it('marks only a bare type name: not variables, this, super, chains or qualified receivers', () => {
+    const base = parse('/repo/demo/a/Base.java', 'package demo.a;\npublic class Base {\n  void run() {}\n  static Gate make() { return null; }\n}\n');
+    const use = parse('/repo/demo/a/Use.java', `package demo.a;
+public class Use extends Base {
+  Gate field;
+  void own() {}
+  void use(Gate param) {
+    Gate local = param;
+    param.matches("a");
+    local.matches("b");
+    field.matches("c");
+    this.field.matches("d");
+    this.own();
+    own();
+    super.run();
+    Base.make().matches("e");
+    demo.a.Gate.matches("f");
+    lower.matches("g");
+    new Gate().matches("h");
+  }
+  void shadow() {
+    Object Gate = null;
+    Gate.toString();
+  }
+}
+`);
+    // `Base.make()` is itself a static call on Base; the chained `.matches` adds nothing.
+    expect(staticRefs(use)).toEqual([
+      { srcName: 'Use.use', dstName: 'Base', predicate: 'REFERENCES', receiverType: 'Base', receiverOnly: true },
+    ]);
+    // The `Gate` type references in `use` are plain, as before.
+    expect(use.relationships.filter(r => r.predicate === 'REFERENCES' && r.dstName === 'Gate')
+      .every(r => r.receiverType === undefined && r.receiverOnly === undefined)).toBe(true);
+    void base;
+  });
+
+  it('merges with a type reference to the same class in the same scope, in either order', () => {
+    const before = parse('/repo/demo/a/Use.java',
+      'package demo.a;\npublic class Use {\n  void use() {\n    Gate g = null;\n    Gate.matches("x");\n  }\n}\n');
+    const after = parse('/repo/demo/a/Use.java',
+      'package demo.a;\npublic class Use {\n  void use() {\n    Gate.matches("x");\n    Gate g = null;\n  }\n}\n');
+    for (const use of [before, after]) {
+      // One relationship: a type reference in its own right, so not receiver-only.
+      expect(use.relationships.filter(r => r.predicate === 'REFERENCES' && r.dstName === 'Gate')).toEqual([
+        { srcName: 'Use.use', dstName: 'Gate', predicate: 'REFERENCES', receiverType: 'Gate' },
+      ]);
+      const files = [gate(), use];
+      const edges = resolveEdges(files);
+      expect(references(edges)).toEqual([expect.objectContaining({ dstFilePath: '/repo/demo/a/Gate.java', dstQualifiedKey: 'Gate', tier: 'type' })]);
+      expect(referenceEdges(files, edges)).toEqual([
+        { src: 'demo/a/Use.java::method:use', dst: 'demo/a/Gate.java::class:Gate', tier: 'type', confidence: 0.95 },
+      ]);
+    }
+  });
+
+  it('keeps a merged type reference resolving by name when the receiver type is out of scope', () => {
+    // `Dup` is ambiguous as a receiver; the plain type reference behaves as it did before.
+    const dup = (pkg: string) => parse(`/repo/${pkg}/Dup.java`, `package ${pkg};\npublic class Dup {\n  public static void go() {}\n}\n`);
+    const source = (call: string) => `package q;\nimport a.*;\nimport b.*;\npublic class Use {\n  void use() {\n    Dup d = null;\n    ${call}\n  }\n}\n`;
+    const withCall = [dup('a'), dup('b'), parse('/repo/q/Use.java', source('Dup.go();'))];
+    const without = [dup('a'), dup('b'), parse('/repo/q/Use.java', source(''))];
+    expect(references(resolveEdges(withCall))).toEqual(references(resolveEdges(without)));
+    expect(referenceEdges(withCall)).toEqual(referenceEdges(without));
+  });
+
+  it('leaves a same-file type reference as it was when a static call joins it', () => {
+    const source = (call: string) => `package demo.a;\npublic class Host {\n  void use() {\n    Util u = null;\n    ${call}\n  }\n  static class Util {\n    static void go() {}\n  }\n}\n`;
+    const withCall = parse('/repo/demo/a/Host.java', source('Util.go();'));
+    const without = parse('/repo/demo/a/Host.java', source(''));
+    expect(referenceEdges([withCall])).toEqual(referenceEdges([without]));
+    expect(referenceEdges([withCall])).toEqual([expect.objectContaining({ dst: 'demo/a/Host.java::class:Util' })]);
+  });
+
+  it('emits one reference per caller however many static calls it makes', () => {
+    const use = parse('/repo/demo/a/Use.java',
+      'package demo.a;\npublic class Use {\n  void one() { Gate.matches("a"); Gate.matches(1); }\n  void two() { Gate.matches("b"); }\n}\n');
+    expect(staticRefs(use).map(r => r.srcName)).toEqual(['Use.one', 'Use.two']);
+  });
+
+  it('adds no reference in other languages', () => {
+    const ts = parseFile('/repo/use.ts', 'class Gate { static matches(): boolean { return true; } }\nexport function use() { return Gate.matches(); }\n')!;
+    expect(ts.relationships.filter(r => r.predicate === 'REFERENCES' && (r.receiverType || r.receiverOnly))).toEqual([]);
+  });
+});

@@ -9,6 +9,13 @@ export interface ReceiverType {
    * `getB`). Each step's declared return type is the next receiver.
    */
   chain?: string[];
+  /**
+   * Java: the receiver is a bare type name (`Gate.matches()`), not a variable,
+   * `this`, `super`, a chain or a qualified name, and no type declaration
+   * around the call has that name (a class calling its own static method).
+   * The caller then also references the type itself.
+   */
+  staticType?: true;
 }
 
 export interface ReceiverFacts {
@@ -510,6 +517,16 @@ function javaTypeAt(types: Array<{ start: number; end: number; name?: string; su
   return undefined;
 }
 
+/** Whether a Java type declaration named `name` contains `pos`. */
+function javaEnclosedBy(types: Array<{ start: number; end: number; name?: string }>, pos: number, name: string): boolean {
+  // Document order, so no range after the first one starting past `pos` contains it.
+  for (const type of types) {
+    if (type.start > pos) break;
+    if (type.end > pos && type.name === name) return true;
+  }
+  return false;
+}
+
 function javaFacts(root: any, facts: {
   factories: Array<[string, string]>;
   heritage: Array<[string, string]>;
@@ -538,7 +555,7 @@ function javaFacts(root: any, facts: {
         if (bound) return bound;
         // Not a variable in scope: an uppercase name is a type (`URL.valueOf()`),
         // which resolution only accepts when exactly one class in scope has it.
-        return /^[A-Z]/.test(name) ? { type: name } : {};
+        return /^[A-Z]/.test(name) ? { type: name, staticType: true } : {};
       }
       case 'field_access': {
         const object = node.childForFieldName('object');
@@ -578,7 +595,13 @@ function javaFacts(root: any, facts: {
       if (calls.has(call.id)) return calls.get(call.id);
       const object = call.childForFieldName('object');
       const info = qualifiedSuper(call, object) ? {} : object ? lookup(object) : { type: enclosing(call)?.name };
-      const receiver = info.type ? { type: info.type, ...(info.chain ? { chain: info.chain } : {}), receiver: object?.text ?? 'this' } : undefined;
+      // A bare type name, unless the call sits inside a type of that name
+      // (nested and anonymous classes included): that is the type's own code.
+      const staticType = object?.type === 'identifier' && info.staticType === true && !!info.type && !info.chain
+        && !javaEnclosedBy(javaTypes, call.startIndex, info.type);
+      const receiver = info.type
+        ? { type: info.type, ...(info.chain ? { chain: info.chain } : {}), ...(staticType ? { staticType: true as const } : {}), receiver: object?.text ?? 'this' }
+        : undefined;
       calls.set(call.id, receiver);
       return receiver;
     },
