@@ -305,20 +305,45 @@ source, in every mode and under `--strict` (exit 0), with a notice that says
 so and lists every overload:
 
 ```
-diagnostic code=overloaded_target target=put chosen=put overloads=3 message="\"put\" has 3 overloads; answering for the first, put(String) (src/main/java/app/Store.java:10). Pass another overload's id as the target to answer for it."
-overload name=put(String) line=10 id=1111aaaa1111aaaa1111aaaa1111aaaa chosen=true
-overload name=put() line=20 id=2222bbbb2222bbbb2222bbbb2222bbbb
-overload name=put(String,int) line=30 id=3333cccc3333cccc3333cccc3333cccc
+diagnostic code=overloaded_target target=put chosen=put overloads=3 answered=3 message="\"put\" has 3 overloads; answering for all 3 together. Pass one overload's id as the target to answer for it alone."
+overload name=put(String) line=10 id=1111aaaa1111aaaa1111aaaa1111aaaa chosen=true answered=true
+overload name=put() line=20 id=2222bbbb2222bbbb2222bbbb2222bbbb answered=true
+overload name=put(String,int) line=30 id=3333cccc3333cccc3333cccc3333cccc answered=true
 ```
 
-The answer is for the first overload alone. Another is addressed by its id,
-given in full on each `overload` record, as the target; `--pick <n>` does not
-count overloads, because the name is one candidate. In a list of candidates
+What the answer covers depends on the command, and `answered=<n>` says which:
+
+- A command that answers from the method's edges answers for every overload
+  together, as it did when the overloads were one node: `ix callers`,
+  `ix callees`, `ix imports`, `ix imported-by`, `ix contains`, `ix depends`,
+  `ix impact`, `ix trace` (either end of `--to`) and the callers, callees and
+  dependents of `ix explain`. Rows are merged and listed once, and counts are
+  of the merged list. `answered` is the number of overloads, each `overload`
+  record ends `answered=true`, and a `ref` row of `callers`, `callees` and the
+  other one-hop commands ends `overload=<name(signature)>`, the overload the
+  row is an edge of (several joined by ` | `; json: `overload` on the row).
+  Only the named target is a group: a traversal that reaches an overloaded
+  method by an edge follows that one overload. At most 16 overloads are
+  expanded; past that `answered` is 16, the message says "the first 16", and
+  the result is marked truncated (`capped` in a one-hop summary), since the
+  rest were not asked.
+- A command that shows the definition, or is seeded by one node, answers for
+  the first overload alone: `ix read`, `ix locate`, `ix overview`,
+  `ix context`, `ix explain --raw`, `ix history`, `ix diff`, `ix overrides`.
+  `answered=1`, only the first `overload` record is marked (`chosen=true`),
+  and the message reads `answering for the first, put(String) (<path>:<line>).
+  Pass another overload's id as the target to answer for it.`
+
+One overload is addressed by its id, given in full on each `overload` record,
+as the target: an id names one node, the first overload's id included, so the
+answer is then for that overload alone and carries no notice. `--pick <n>`
+does not count overloads, because the name is one candidate. In a list of candidates
 (an ambiguous name that is also overloaded in one of its classes) the method
 is one row, numbered once. json carries the notice in `resolutionNotices` as
 `code: "overloaded_target"` with an `overloads` array of `{ id, line,
 signature }` (the chosen one first; `signature` is the parameter types as
-written, without generics, `""` for none), `candidates` holding the chosen
+written, without generics, `""` for none), `answered` (how many of them, from
+the first, the answer is for), `candidates` holding the chosen
 row and `total: 1`; a candidate row of any list that stands for an overloaded
 method carries the same `overloads` array. Text prints the notice and the
 overloads on stderr; `--quiet` drops them. Overloads are known from an

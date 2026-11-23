@@ -116,7 +116,7 @@ function multiTarget<K extends string>(answer: readonly K[]) {
 }
 
 const NOTICE = [
-  ...under("resolutionNotices[]", ["code", "target", "message", "chosen", "candidates", "total", "truncated", "overloads", "diagnostics"]),
+  ...under("resolutionNotices[]", ["code", "target", "message", "chosen", "candidates", "total", "truncated", "overloads", "answered", "diagnostics"]),
   ...under("resolutionNotices[].chosen", NAMED),
   ...candidate("resolutionNotices[].candidates[]"),
   ...under("resolutionNotices[].overloads[]", OVERLOAD),

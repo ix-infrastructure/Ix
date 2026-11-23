@@ -139,33 +139,86 @@ export function overloadLabel(name: string, overload: OverloadRef): string {
 }
 
 /**
+ * The most overloads of one method a command expands when it answers for the
+ * whole group. Each is at least one backend query per edge question the
+ * command asks, so a method with dozens of overloads must not turn one call
+ * into hundreds of round trips; the rest are reached by their ids.
+ */
+export const OVERLOAD_EXPAND_CAP = 16;
+
+/**
+ * The overloads a command that answers for the whole group expands: every one
+ * of the entity's group up to `OVERLOAD_EXPAND_CAP`, the entity's own first.
+ * Empty for an entity that stands for no group (a method with one signature,
+ * anything addressed by its id).
+ */
+export function expandedOverloads(entity: { overloads?: OverloadRef[] }): OverloadRef[] {
+  const overloads = entity.overloads ?? [];
+  return overloads.length > 1 ? overloads.slice(0, OVERLOAD_EXPAND_CAP) : [];
+}
+
+function overloadMessage(target: string, name: string, path: string | undefined, overloads: readonly OverloadRef[], answered: number): string {
+  const head = `"${target}" has ${overloads.length} overloads; `;
+  if (answered > 1) {
+    const which = answered === overloads.length
+      ? `all ${answered} together`
+      : `the first ${answered} together (at most ${OVERLOAD_EXPAND_CAP} are expanded)`;
+    return `${head}answering for ${which}. Pass one overload's id as the target to answer for it alone.`;
+  }
+  const first = overloads[0];
+  const where = path ? ` (${path}${first.line != null ? `:${first.line}` : ""})` : "";
+  return `${head}answering for the first, ${overloadLabel(name, first)}${where}. Pass another overload's id as the target to answer for it.`;
+}
+
+/**
  * A resolved result with the `overloaded_target` notice its entity calls for:
  * one when the entity stands for several overloads, none otherwise. Applied
  * last, after any `--pick`, so the notice is always about the entity returned.
- * The answer is for the first overload, the node all of them were before each
- * became its own, so this is no guess and never changes the exit code; it says
- * that there are others and gives their ids, which is how one is addressed.
+ * It is no guess and never changes the exit code; it says that there are
+ * several, how many of them the answer is for (`answered`), and gives their
+ * ids, which is how one is addressed. As written here the answer is for the
+ * first overload alone, which is what a command that shows the definition
+ * gives; a command that answers from every overload's edges says so with
+ * `answeringForOverloadGroup`.
  */
 export function withOverloadNotice(result: ResolveResult, target: string): ResolveResult {
   if (!result.resolved) return result;
   const entity = result.entity;
   const others = (result.notices ?? []).filter((n) => n.code !== "overloaded_target");
-  const overloads = entity.overloads;
-  if (!overloads || overloads.length < 2) {
+  const found = entity.overloads;
+  if (!found || found.length < 2) {
     return others.length === (result.notices ?? []).length ? result : { ...result, notices: others };
   }
-  const first = overloads.find((o) => o.id === entity.id) ?? overloads[0];
-  const where = entity.path ? ` (${entity.path}${first.line != null ? `:${first.line}` : ""})` : "";
+  // The entity's own overload first, whatever order the group came in.
+  const first = found.find((o) => o.id === entity.id) ?? found[0];
+  const overloads = [first, ...found.filter((o) => o !== first)];
   const notice: ResolutionNotice = {
     code: "overloaded_target",
     target,
-    message: `"${target}" has ${overloads.length} overloads; answering for the first, ${overloadLabel(entity.name, first)}${where}. Pass another overload's id as the target to answer for it.`,
+    message: overloadMessage(target, entity.name, entity.path, overloads, 1),
     chosen: { id: entity.id, name: entity.name, kind: entity.kind, path: entity.path },
     candidates: [{ id: entity.id, name: entity.name, kind: entity.kind, path: entity.path, rank: 1 }],
     total: 1,
     overloads,
+    answered: 1,
   };
   return { ...result, notices: [...others, notice] };
+}
+
+/**
+ * `notices` as a command that answers for the whole overload group reports
+ * them: each `overloaded_target` notice says the answer is for every overload
+ * (`answered` of them, `expandedOverloads`), not the first. The same array
+ * when there is no such notice.
+ */
+export function answeringForOverloadGroup(notices: readonly ResolutionNotice[]): readonly ResolutionNotice[] {
+  if (!notices.some((n) => n.code === "overloaded_target")) return notices;
+  return notices.map((n) => {
+    if (n.code !== "overloaded_target" || !n.overloads) return n;
+    const answered = expandedOverloads(n).length;
+    if (answered < 2) return n;
+    return { ...n, answered, message: overloadMessage(n.target, n.chosen.name, n.chosen.path, n.overloads, answered) };
+  });
 }
 
 /**

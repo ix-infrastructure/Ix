@@ -65,8 +65,8 @@ export type NodeRow = NodeLocation & Pick<GraphNode, "id" | "kind"> & { name?: s
 
 /**
  * A row of an edge query (`/v1/expand` nodes): every field may be missing, as
- * a dangling reference has only an id. Commands add `site`, `candidate` and
- * `dispatchVia` on the way to the renderer.
+ * a dangling reference has only an id. Commands add `site`, `candidate`,
+ * `dispatchVia` and `overload` on the way to the renderer.
  */
 export interface EdgeRow extends NodeLocation {
   id?: string;
@@ -77,6 +77,11 @@ export interface EdgeRow extends NodeLocation {
   candidate?: number;
   /** The supertype member a dispatch row's call targets. */
   dispatchVia?: string;
+  /**
+   * For a target answered for all its overloads: the overload this row is an
+   * edge of, as `name(signature)`; several joined by ` | `.
+   */
+  overload?: string;
 }
 
 /**

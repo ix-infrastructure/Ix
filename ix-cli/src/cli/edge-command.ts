@@ -16,7 +16,8 @@ import {
 import { nextPageCommand } from "./paging.js";
 import { displayNameOf, printResolved, resolveFileOrReport, resolveTargetSetOrReport, type TargetSet } from "./resolve.js";
 import { emptyEdgeResultsJson } from "./text-matches.js";
-import { edgeTargetFor, withEdgeSites } from "./edge-sites.js";
+import { edgeTargetsFor, SourceFiles, withEdgeSites } from "./edge-sites.js";
+import { overloadGraph, overloadOfRow, withOverloadOfRows } from "./overload-group.js";
 
 /** What a one-hop edge command's action receives. */
 export interface EdgeCommandOpts extends TargetOptionValues, PagingOptionValues {
@@ -86,33 +87,38 @@ export function registerEdgeCommand(program: Command, spec: EdgeCommandSpec): Co
 }
 
 async function runEdgeCommand(spec: EdgeCommandSpec, symbol: string, opts: EdgeCommandOpts, cmd: Command): Promise<void> {
-  const client = createClient();
+  const base = createClient();
   const { limit, offset } = pagingValues(opts);
-  const resolveOpts = { ...targetOptionValues(opts), textAnswerJson: emptyEdgeResultsJson() };
+  const resolveOpts = { ...targetOptionValues(opts), textAnswerJson: emptyEdgeResultsJson(), overloads: "all" as const };
 
   let target;
   if (spec.all) {
-    const set = await resolveTargetSetOrReport(client, symbol, { ...resolveOpts, all: opts.all }, opts.format);
+    const set = await resolveTargetSetOrReport(base, symbol, { ...resolveOpts, all: opts.all }, opts.format);
     if (!set) return;
     if (set.all) {
-      await spec.all.run(client, symbol, set, limit, offset, opts.format, cmd);
+      await spec.all.run(base, symbol, set, limit, offset, opts.format, cmd);
       return;
     }
     target = set.entities[0];
   } else {
-    target = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
+    target = await resolveFileOrReport(base, symbol, resolveOpts, opts.format);
     if (!target) return;
   }
+  // A name that is an overloaded method: the edges of every overload (#1139).
+  const client = overloadGraph(base, [target]);
 
   if (opts.format === "text") printResolved(target);
   const settle = spec.diagnose?.(client);
   // Expand by entity id, not by name: a name would aggregate every same-named entity.
   const result = await client.expand(target.id, { direction: spec.direction, predicates: spec.predicates });
   const diagnostics = settle ? await settle(result.nodes.length, opts.format) : undefined;
-  const slice = sliceEdgeResults(result.nodes, limit, offset, expandCapped(result));
+  const slice = sliceEdgeResults(withOverloadOfRows(result, target.name), limit, offset, expandCapped(result));
   if (slice.nextOffset !== undefined) slice.next = nextPageCommand(cmd, [symbol], slice.nextOffset);
-  const rows = spec.withSites
-    ? withEdgeSites(slice.rows, spec.name, await edgeTargetFor(client, target, spec.name))
-    : slice.rows;
+  let rows = slice.rows;
+  if (spec.withSites) {
+    const site = await edgeTargetsFor(client, target, spec.name, slice.rows, overloadOfRow(result));
+    const files = new SourceFiles();
+    rows = slice.rows.map((row) => withEdgeSites([row], spec.name, site(row), { files })[0]);
+  }
   formatEdgeResults({ ...slice, rows }, spec.name, displayNameOf(target), opts.format, target, "graph", diagnostics);
 }

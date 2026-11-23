@@ -208,12 +208,13 @@ describe("overloads of one method are one target", () => {
         candidates: [{ id: PUT_1, name: "put", kind: "method", path: STORE, rank: 1 }],
         total: 1,
         overloads: GROUP,
+        answered: 1,
       }]);
       expect(expandByName).not.toHaveBeenCalled();
     });
   }
 
-  it("callers --strict answers for the first overload", async () => {
+  it("callers --strict resolves to the first overload, exit 0 (it answers for all: overload-group.test.ts)", async () => {
     graph(PUTS);
     const result = await run(["callers", "put", "--strict", "--format", "json"]);
     expect(result.exitCode).toBe(0);
@@ -228,7 +229,7 @@ describe("overloads of one method are one target", () => {
     const result = await run(["locate", "put", "--format", "llm"]);
     expect(result.exitCode).toBe(0);
     const lines = result.stdout.split("\n");
-    expect(lines[0]).toMatch(/^diagnostic code=overloaded_target target=put chosen=put overloads=3 message="/);
+    expect(lines[0]).toMatch(/^diagnostic code=overloaded_target target=put chosen=put overloads=3 answered=1 message="/);
     expect(lines.slice(1, 4)).toEqual([
       `overload name=put(String) line=10 id=${PUT_1} chosen=true`,
       `overload name=put() line=20 id=${PUT_2}`,

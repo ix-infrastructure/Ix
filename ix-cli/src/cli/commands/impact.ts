@@ -1,5 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { answeredIds, overloadGraph } from "../overload-group.js";
 import type { Command } from "commander";
 import chalk from "chalk";
 import { renderSection, renderKeyValue, renderNote, renderResolvedHeader, renderWarning, colorizeKind } from "../ui.js";
@@ -42,13 +43,16 @@ export function registerImpactCommand(program: Command): void {
         symbol: string,
         opts: { kind?: string; path?: string; pick?: number; strict?: boolean; suggest?: boolean; all?: boolean; depth: string; limit: string; format: string }
       ) => {
-        const client = createClient({ query: true });
+        const base = createClient({ query: true });
         const limit = parseLimit(opts.limit);
         const depth = Math.min(Math.max(parseInt(opts.depth, 10) || 1, 1), 3);
 
-        const resolveOpts = { suggest: opts.suggest, suggestCommand: "impact", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all };
-        const set = await resolveTargetSetOrReport(client, symbol, resolveOpts, opts.format);
+        const resolveOpts = { suggest: opts.suggest, suggestCommand: "impact", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all, overloads: "all" as const };
+        const set = await resolveTargetSetOrReport(base, symbol, resolveOpts, opts.format);
         if (!set) return;
+        // A target that is an overloaded method is analysed as one method:
+        // the callers and callees of every overload (#1139).
+        const client = overloadGraph(base, set.entities);
         const target = shownTarget(set.entities[0]);
 
         if (opts.format === "text" && !set.all) printResolved(target);
@@ -752,7 +756,8 @@ async function leafImpact(
   const callerNames = callersResult.nodes.map((n: any) => n.name || n.attrs?.name || "(unnamed)");
   const calleeNames = calleesResult.nodes.map((n: any) => n.name || n.attrs?.name || "(unnamed)");
   // A recursive call is not a dependent.
-  const dependents = distinctDependents([callersResult.nodes], [target.id]);
+  // Nor is one overload of the target calling another.
+  const dependents = distinctDependents([callersResult.nodes], answeredIds(client, target.id));
 
   // Infer risk semantics
   const riskFacts: ImpactFacts = {

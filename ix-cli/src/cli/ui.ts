@@ -340,23 +340,27 @@ export function reportResolutionNotices(
       }
       if (notice.code === "overloaded_target") {
         const overloads = notice.overloads ?? [];
+        const answered = notice.answered ?? 1;
         lines.push(llmLine("diagnostic", [
           ["code", "overloaded_target"],
           ["target", notice.target],
           ["chosen", notice.chosen.name],
           ["overloads", String(overloads.length)],
+          ["answered", String(answered)],
           ["message", notice.message],
         ]));
         // Full ids: an id is how another overload is addressed, and `--pick`
         // does not count these rows.
-        for (const overload of overloads) {
+        overloads.forEach((overload, i) => {
           lines.push(llmLine("overload", [
             ["name", overloadLabel(notice.chosen.name, overload)],
             ["line", overload.line != null ? String(overload.line) : undefined],
             ["id", overload.id],
             ["chosen", overload.id === notice.chosen.id ? "true" : undefined],
+            // Only a group answer marks its rows: the first-only one is `chosen`.
+            ["answered", answered > 1 && i < answered ? "true" : undefined],
           ]));
-        }
+        });
         continue;
       }
       lines.push(llmLine("diagnostic", [
@@ -391,11 +395,11 @@ export function reportResolutionNotices(
   for (const notice of notices) {
     console.error(chalk.dim(notice.message));
     if (notice.code === "overloaded_target") {
-      for (const overload of notice.overloads ?? []) {
+      (notice.overloads ?? []).forEach((overload, i) => {
         const line = overload.line != null ? `line ${overload.line}` : "";
-        const mark = overload.id === notice.chosen.id ? "  (answered)" : "";
+        const mark = i < (notice.answered ?? 1) ? "  (answered)" : "";
         console.error(chalk.dim(`  ${overload.id}  ${line.padEnd(10)} ${overloadLabel(notice.chosen.name, overload)}${mark}`));
-      }
+      });
       continue;
     }
     if (notice.code !== "ambiguous_target") continue;

@@ -114,12 +114,22 @@ answers and are pinned by the same test.
 overloads (Java) resolves to the first overload, exit 0 also under `--strict`,
 with a `resolutionNotices` entry of `code: "overloaded_target"`. Its
 `overloads` array lists every overload as `{ id, line, signature }`, the
-answered one first; `candidates` is the answered row alone and `total` is 1,
-since `--pick <n>` counts the method once. Pass another overload's `id` as the
-target to answer for it. In any `candidates` list, a row that stands for an
+resolved one first; `candidates` is the resolved row alone and `total` is 1,
+since `--pick <n>` counts the method once. `answered` is how many overloads,
+from the first, the answer is for. Commands that answer from edges (`callers`,
+`callees`, `imports`, `imported-by`, `contains`, `depends`, `impact`, `trace`,
+and the callers, callees and dependents of `explain`) answer for all of them
+together (at most 16): rows are merged, counts are of the merged list, and a
+one-hop row carries `overload` (`"put(String,int)"`, several joined by ` | `),
+the overload it is an edge of. Commands that show the definition or are
+seeded by one node (`read`, `locate`, `overview`, `context`, `history`,
+`diff`, `overrides`) answer for the first alone: `answered: 1`. Pass one
+overload's `id` as the target to answer for it alone; an id is always one
+node and carries no notice. In any `candidates` list, a row that stands for an
 overloaded method carries the same `overloads` array. llm prints `diagnostic
-code=overloaded_target ... overloads=<n>` and one `overload name=... line=...
-id=<full id>` record each.
+code=overloaded_target ... overloads=<n> answered=<n>` and one `overload
+name=... line=... id=<full id>` record each, ending `answered=true` when the
+answer is for the group.
 
 Two records predate the envelope and keep their shape for now:
 

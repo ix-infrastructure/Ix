@@ -27,7 +27,7 @@ import { STRUCTURAL_KINDS, type GraphKind } from "./graph-model.js";
 import { httpStatusOf } from "../client/http-error.js";
 import { hasDefinitionOf, looksTypeLikeSymbol } from "./resolve/score.js";
 import {
-  AMBIGUOUS_HINT, allCandidatesOf, applyPick as pickAmong, attachOverloads, buildAmbiguous, cmpStr,
+  AMBIGUOUS_HINT, allCandidatesOf, answeringForOverloadGroup, applyPick as pickAmong, attachOverloads, buildAmbiguous, cmpStr,
   foldOverloads, foldedCandidates, fuzzyNotice, importIdsOf, isFuzzyResult, nodePath, nodeToResolved, overloadsField, pickBest,
   pickFromNotice as pickInNotice, pickedOutOfRange, rememberAll, roundRobinByFile, withOverloadNotice, type Candidate,
 } from "./resolve/pick.js";
@@ -233,6 +233,12 @@ export interface ResolveOpts {
    * exit 0 (text-matches.ts `textMatchesJson`).
    */
   textAnswerJson?: Record<string, unknown>;
+  /**
+   * "all": the command answers from the edges of every overload of a method
+   * the name resolves to (overload-group.ts `overloadGraph`), so the
+   * `overloaded_target` notice says that, not "the first".
+   */
+  overloads?: "all";
 }
 
 /**
@@ -1179,6 +1185,11 @@ export async function resolveFileOrEntity(
   return null;
 }
 
+/** A resolved target's notices as the command answers it: for a whole overload group, or its first overload. */
+export function noticesFor(notices: readonly ResolutionNotice[], opts: Pick<ResolveOpts, "overloads"> | undefined): readonly ResolutionNotice[] {
+  return opts?.overloads === "all" ? answeringForOverloadGroup(notices) : notices;
+}
+
 export async function resolveFileOrReport(
   client: IxClient,
   target: string,
@@ -1191,7 +1202,7 @@ export async function resolveFileOrReport(
   // reach stdout.
   const result = answerAmbiguous(target, await resolveFileOrEntityFull(client, target, { ...opts, format }), opts);
   if (result.resolved) {
-    if (result.notices?.length) reportResolutionNotices(result.notices, format, opts);
+    if (result.notices?.length) reportResolutionNotices(noticesFor(result.notices, opts), format, opts);
     return result.entity;
   }
   await reportUnresolved(client, target, result, opts, format);
@@ -1364,7 +1375,7 @@ export async function resolveTargetSetOrReport(
   if (result.resolved) {
     const tie = result.notices?.find((n) => n.code === "ambiguous_target");
     if (!tie || tie.candidates.length <= 1) {
-      if (result.notices?.length) reportResolutionNotices(result.notices, format, opts);
+      if (result.notices?.length) reportResolutionNotices(noticesFor(result.notices, opts), format, opts);
       return { entities: [result.entity] };
     }
     return candidateSet(tie, tie.total, tie.truncated);

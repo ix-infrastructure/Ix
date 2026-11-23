@@ -18,17 +18,17 @@ import { runPerTarget } from "../multi-target.js";
 import type { IxClient } from "../../client/api.js";
 import { stderr } from "../stderr.js";
 import { llmLine } from "../llm.js";
-import { edgeTargetFor, rankTextUses, SourceFiles, withEdgeSites } from "../edge-sites.js";
+import { edgeTargetFor, edgeTargetsFor, rankTextUses, SourceFiles, withEdgeSites } from "../edge-sites.js";
+import { overloadGraph, overloadOfRow, withOverloadOfRows } from "../overload-group.js";
 import { renderWarning } from "../ui.js";
 import { currentRunSignal } from "../../client/run-signal.js";
-import { mapLimit } from "../../client/request-memo.js";
+import { ALL_CONCURRENCY, mapLimit } from "../../client/request-memo.js";
 import { clipSnippet } from "./text.js";
 import { TYPE_KINDS } from "../graph-model.js";
 
 const execFileAsync = promisify(execFile);
 
-/** Edge queries `--all` keeps in flight at once: a 200-way tie is not a 400-request burst. */
-export const ALL_CONCURRENCY = 4;
+export { ALL_CONCURRENCY };
 
 /** Rows per page of the text fallback. --limit does not apply to it. */
 export const TEXT_FALLBACK_PAGE = 10;
@@ -142,9 +142,10 @@ const ALL_FLAG = "When the symbol is ambiguous, answer for every candidate; rows
  * list printed with them). The whole blast radius of a name in one call,
  * still attributable row by row. No text fallback: an empty union is the
  * graph's answer for every candidate.
+ * A candidate that is an overloaded method is answered for all its overloads.
  */
 async function edgesOfAll(
-  client: IxClient,
+  base: IxClient,
   symbol: string,
   set: TargetSet,
   relation: "callers" | "callees",
@@ -153,6 +154,7 @@ async function edgesOfAll(
   format: string,
   cmd: Command,
 ): Promise<void> {
+  const client = overloadGraph(base, set.entities);
   const healthCheck = checkGraphHealth(client, activeReadScope());
   // `n` is the candidate's `--pick` number (resolve.ts candidateSet).
   const candidates: EdgeCandidate[] = set.entities.map((e, i) => ({ n: e.n ?? i + 1, id: e.id, name: e.name, kind: e.kind, path: e.path }));
@@ -161,19 +163,22 @@ async function edgesOfAll(
     predicates: ["CALLS", "REFERENCES"],
   }));
   // Callers of a Java method also include its dispatch callers, per candidate.
+  const direct = expanded.map((r, i) => withOverloadOfRows(r, set.entities[i].name));
   const merged = relation === "callers"
-    ? await mapLimit(set.entities, ALL_CONCURRENCY, (e, i) => withDispatch(client, e, expanded[i].nodes))
-    : expanded.map((r) => ({ rows: r.nodes, capped: false }));
+    ? await mapLimit(set.entities, ALL_CONCURRENCY, (e, i) => withDispatch(client, e, direct[i]))
+    : direct.map((rows) => ({ rows, capped: false }));
   const rows = merged.flatMap((result, i) => result.rows.map((n: any) => ({ ...n, candidate: candidates[i].n })));
   const health = await healthDiagnostics(healthCheck);
   bannerOverRows(health, format, rows.length);
   const slice = sliceEdgeResults(rows, limit, offset, expanded.some((r) => expandCapped(r)) || merged.some((m) => m.capped));
   if (slice.nextOffset !== undefined) slice.next = nextPageCommand(cmd, [symbol], slice.nextOffset);
   // Call sites are looked up against the candidate the row belongs to.
-  const sites = await mapLimit(set.entities, ALL_CONCURRENCY, (e) => edgeTargetFor(client, e, relation));
+  const sites = await mapLimit(set.entities, ALL_CONCURRENCY, (e, i) => edgeTargetsFor(
+    client, e, relation, slice.rows.filter((row: any) => row.candidate === candidates[i].n), overloadOfRow(expanded[i]),
+  ));
   const files = new SourceFiles();
   const siteOf = new Map(candidates.map((c, i) => [c.n, sites[i]]));
-  const sited = slice.rows.map((row: any) => withEdgeSites([row], relation, siteOf.get(row.candidate)!, { files })[0]);
+  const sited = slice.rows.map((row: any) => withEdgeSites([row], relation, siteOf.get(row.candidate)!(row), { files })[0]);
   const diagnostics = [...(health.diagnostics ?? [])];
   const cut = candidatesCut(set, candidates.length, "Answered for");
   if (cut) diagnostics.push({ code: "candidates_truncated", message: cut });
@@ -235,16 +240,18 @@ ${EXIT_CODES_HELP}`,
   });
 }
 
-async function callersOne(client: IxClient, symbol: string, opts: EdgeOpts, cmd: Command): Promise<void> {
+async function callersOne(base: IxClient, symbol: string, opts: EdgeOpts, cmd: Command): Promise<void> {
   const { limit, offset } = pagingValues(opts);
-  const resolveOpts = { suggest: opts.suggest, suggestCommand: "callers", kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all, textAnswerJson: emptyEdgeResultsJson() };
-  const set = await resolveTargetSetOrReport(client, symbol, resolveOpts, opts.format);
+  const resolveOpts = { overloads: "all" as const, suggest: opts.suggest, suggestCommand: "callers", kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, all: opts.all, textAnswerJson: emptyEdgeResultsJson() };
+  const set = await resolveTargetSetOrReport(base, symbol, resolveOpts, opts.format);
   if (!set) return;
   if (set.all) {
-    await edgesOfAll(client, symbol, set, "callers", limit, offset, opts.format, cmd);
+    await edgesOfAll(base, symbol, set, "callers", limit, offset, opts.format, cmd);
     return;
   }
   const target = set.entities[0];
+  // A name that is an overloaded method: the callers of every overload (#1139).
+  const client = overloadGraph(base, [target]);
   if (opts.format === "text") printResolved(target);
   const healthCheck = checkGraphHealth(client, activeReadScope());
   // Use expand by entity ID to avoid aggregating results across all same-named entities
@@ -252,7 +259,7 @@ async function callersOne(client: IxClient, symbol: string, opts: EdgeOpts, cmd:
     direction: "in",
     predicates: ["CALLS", "REFERENCES"],
   });
-  const merged = await withDispatch(client, target, direct.nodes);
+  const merged = await withDispatch(client, target, withOverloadOfRows(direct, target.name));
   const result = { ...direct, nodes: merged.rows };
   const health = await healthDiagnostics(healthCheck);
   bannerOverRows(health, opts.format, result.nodes.length);

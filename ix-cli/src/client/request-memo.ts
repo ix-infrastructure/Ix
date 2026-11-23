@@ -79,6 +79,13 @@ export class Limiter {
 }
 
 /**
+ * Requests a command keeps in flight when it asks one edge question of several
+ * nodes (every `--all` candidate, every overload of a method): a 200-way tie
+ * is not a 400-request burst.
+ */
+export const ALL_CONCURRENCY = 4;
+
+/**
  * `fn` over `items` with at most `limit` calls in flight, results in input
  * order. The order of completion never reaches the result, so a caller that
  * renders it renders the same thing on every run.

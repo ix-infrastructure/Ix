@@ -1,10 +1,11 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { answeredIds, overloadGraph } from "../overload-group.js";
 import type { Command } from "commander";
 import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
-import { answerAmbiguous, resolveFileOrEntityFull, resolveFileOrReport, shownTarget, activeReadScope, ensureReadScope } from "../resolve.js";
+import { answerAmbiguous, noticesFor, resolveFileOrEntityFull, resolveFileOrReport, shownTarget, activeReadScope, ensureReadScope } from "../resolve.js";
 import type { ResolvedEntity } from "../resolve.js";
 import {
   renderSection,
@@ -237,6 +238,8 @@ export async function searchPath(
   // that is the budget talking, not evidence that no route exists.
   if (maxNodes < 1) return { path: null, cut: true, cutReason: "node-cap" };
   if (fromId === toId) return { path: [{ id: fromId, name: "", kind: "" }], cut: false };
+  // An end resolved to an overloaded method is reached at any of its overloads.
+  const goals = new Set(answeredIds(client, toId));
   const nodeMap = new Map<string, { name: string; kind: string }>();
   // How each visited node was first reached from its BFS parent.
   const linkMap = new Map<string, { via: string; reversed: boolean }>();
@@ -309,7 +312,7 @@ export async function searchPath(
           if (via) linkMap.set(n.id, { via, reversed });
         }
 
-        if (n.id === toId) {
+        if (goals.has(n.id)) {
           const fullPath = [...path, n.id];
           return {
             path: fullPath.map((nodeId) => {
@@ -595,14 +598,17 @@ export function registerTraceCommand(program: Command): void {
           }
           const fromTarget = shownTarget(fromResult.entity);
           const toTarget = shownTarget(toResult.entity);
+          // An end that is an overloaded method stands for all its overloads:
+          // a route may leave from, or arrive at, any of them (#1139).
           for (const r of [fromResult, toResult]) {
-            if (r.notices?.length) reportResolutionNotices(r.notices, opts.format, resolveOpts);
+            if (r.notices?.length) reportResolutionNotices(noticesFor(r.notices, { overloads: "all" }), opts.format, resolveOpts);
           }
+          const graph = overloadGraph(client, [fromResult.entity, toResult.entity]);
 
           const relKind = opts.kind ?? "mixed";
           const predicates = kindToPredicates(opts.kind);
 
-          const { path: rawPath, cut: pathCut, cutReason } = await searchPath(client, fromTarget.id, toTarget.id, predicates, maxDepth, maxNodes);
+          const { path: rawPath, cut: pathCut, cutReason } = await searchPath(graph, fromTarget.id, toTarget.id, predicates, maxDepth, maxNodes);
           const bounded = Number.isFinite(maxDepth) || Number.isFinite(maxNodes);
           const noPathMessage = `No route found from ${fromTarget.name} to ${toTarget.name}${bounded ? " within the requested search limits" : ""}.`;
           // Coded like the directional modes' cuts, so a caller knows whether to
@@ -693,8 +699,11 @@ export function registerTraceCommand(program: Command): void {
         }
 
         // ── Directional mode ────────────────────────────────────────
-        const resolvedTarget = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
+        const resolvedTarget = await resolveFileOrReport(client, symbol, { ...resolveOpts, overloads: "all" }, opts.format);
         if (!resolvedTarget) return;
+        // An overloaded method is traced from all its overloads (#1139);
+        // below the root each node is walked as itself.
+        const graph = overloadGraph(client, [resolvedTarget]);
         let target: ResolvedEntity = shownTarget(resolvedTarget);
 
         const predicates = kindToPredicates(opts.kind);
@@ -720,8 +729,8 @@ export function registerTraceCommand(program: Command): void {
           // One limiter for both walks, so the in-flight bound is per command.
           const limiter = createLimiter(EXPAND_CONCURRENCY);
           const [upResult, downResult] = await Promise.all([
-            buildTraceTree(client, target.id, { direction: "in", predicates, maxDepth, maxNodes, limiter }),
-            buildTraceTree(client, target.id, { direction: "out", predicates, maxDepth, maxNodes, limiter }),
+            buildTraceTree(graph, target.id, { direction: "in", predicates, maxDepth, maxNodes, limiter }),
+            buildTraceTree(graph, target.id, { direction: "out", predicates, maxDepth, maxNodes, limiter }),
           ]);
 
           // ── JSON ──────────────────────────────────────────────
@@ -813,8 +822,8 @@ export function registerTraceCommand(program: Command): void {
 
         // ── Single direction ────────────────────────────────────────
         const { tree, truncated, depthLimited, nodesVisited, maxDepthReached } = doUpstream
-          ? await buildTraceTree(client, target.id, { direction: "in", predicates, maxDepth, maxNodes })
-          : await buildTraceTree(client, target.id, { direction: "out", predicates, maxDepth, maxNodes });
+          ? await buildTraceTree(graph, target.id, { direction: "in", predicates, maxDepth, maxNodes })
+          : await buildTraceTree(graph, target.id, { direction: "out", predicates, maxDepth, maxNodes });
 
         // ── JSON ────────────────────────────────────────────────────
         if (opts.format === "json") {

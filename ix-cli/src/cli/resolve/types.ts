@@ -36,9 +36,11 @@ export interface ResolvedEntity {
   resolutionMode: ResolutionMode;
   /**
    * Set when the name is an overloaded method: every overload among the
-   * candidates, this entity (the first) first, the rest in source order. The
-   * answer is for this entity alone; a command that wants every overload's
-   * edges reads the ids here.
+   * candidates, this entity (the first) first, the rest in source order. A
+   * command that shows the definition answers for this entity alone; one that
+   * answers from graph edges answers for all of them (overload-group.ts), as
+   * it did while they were one node. Absent for a target given as an id: an
+   * id names one node.
    */
   overloads?: OverloadRef[];
 }
@@ -65,9 +67,11 @@ export interface AmbiguousResult {
  * match was fuzzy. It is never an `error`, so plugin runners see no failure.
  *
  * `overloaded_target` is not a guess among candidates: the name is one method
- * with several overloads, and the answer is for the first. Its `candidates`
- * is that one row (what `--pick` counts) and `overloads` lists every overload
- * with its id, which is how another one is addressed.
+ * with several overloads. `answered` says how many of them the answer is for:
+ * 1, the first, from a command that shows the definition; all of them (up to
+ * a cap) from a command that answers from graph edges. Its `candidates` is
+ * the one row (what `--pick` counts) and `overloads` lists every overload
+ * with its id, which is how one is addressed alone.
  */
 export interface ResolutionNotice {
   code: "ambiguous_target" | "fuzzy_match" | "overloaded_target";
@@ -79,6 +83,8 @@ export interface ResolutionNotice {
   truncated?: boolean;
   /** `overloaded_target` only: every overload of the chosen method, the chosen one first. */
   overloads?: OverloadRef[];
+  /** `overloaded_target` only: how many of `overloads`, from the first, the answer is for. */
+  answered?: number;
   /** Extra diagnostics, e.g. `pick_out_of_range`. */
   diagnostics?: Array<{ code: string; message: string }>;
 }
