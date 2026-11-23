@@ -1,7 +1,5 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import * as net from "node:net";
-import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { FakeBackend, SMALL_READ_GRAPH } from "./helpers/fake-backend.js";
 import { runCommand, type RunCommandResult } from "./helpers/run-command.js";
@@ -30,8 +28,8 @@ import { normalise } from "./helpers/normalise-output.js";
  * Commands run in-process through `runCommand` (helpers/run-command.ts, which
  * lists its limits: no Pro, no rg/git on PATH, no TTY). Output is normalised by
  * helpers/normalise-output.ts: the run's temp directory becomes `<TMP>` and the
- * FakeBackend's port `<PORT>`; the down endpoint's port, which is also picked
- * per run, becomes `<DOWN_PORT>`. No duration is printed by any of these
+ * FakeBackend's port `<PORT>`; the down endpoint's fixed port becomes
+ * `<DOWN_PORT>`. No duration is printed by any of these
  * outputs today; if one appears, the snapshot fails and the new value should
  * be normalised.
  */
@@ -41,26 +39,19 @@ const FORMATS = ["text", "json", "llm"] as const;
 const backend = new FakeBackend();
 backend.readGraph = SMALL_READ_GRAPH;
 let backendPort = "";
-/** A loopback endpoint nothing listens on: connecting is refused at once. */
-let downEndpoint = "";
-let downPort = "";
-
-/** A port that was free a moment ago: bind it, note it, release it. */
-async function closedLoopbackPort(): Promise<number> {
-  const server = net.createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const { port } = server.address() as AddressInfo;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  return port;
-}
+/**
+ * A loopback endpoint nothing listens on: connecting is refused at once. A
+ * fixed low port, as in error-format.test.ts, not one taken from `listen(0)`
+ * and closed again: the kernel can hand that port to another test file's fake
+ * backend running in parallel, which then answers these "backend down" runs
+ * with a 404. Port 2 is outside every OS's ephemeral range. Not port 1 (or 9):
+ * fetch refuses those as "bad port" before connecting.
+ */
+const downPort = "2";
+const downEndpoint = `http://127.0.0.1:${downPort}`;
 
 beforeAll(async () => {
   backendPort = new URL(await backend.start()).port;
-  downPort = String(await closedLoopbackPort());
-  downEndpoint = `http://127.0.0.1:${downPort}`;
 });
 afterAll(async () => {
   await backend.stop();

@@ -99,6 +99,7 @@ export async function collectRelatedFiles(
     path?: string;
     memberRefs?: EntityLocation[];
     calleeRefs?: EntityLocation[];
+    memberCalleeRefs?: EntityLocation[];
     topCallerRefs?: EntityLocation[];
     topDependentRefs?: EntityLocation[];
     importRefs?: EntityLocation[];
@@ -128,9 +129,14 @@ export async function collectRelatedFiles(
       target.id,
       // Seeded from the unranked samples when the collector kept them: see
       // `walkSeeds`. The ranked lists are for display.
-      ...(facts.walkSeeds
-        ? [...facts.walkSeeds.callers, ...facts.walkSeeds.dependents, ...facts.walkSeeds.callees]
-        : [...(facts.topCallerRefs ?? []), ...(facts.topDependentRefs ?? []), ...(facts.calleeRefs ?? [])])
+      // A class's own node calls nothing, so what its methods call stands in
+      // for its callees, in whatever seed slots are left.
+      ...[
+        ...(facts.walkSeeds
+          ? [...facts.walkSeeds.callers, ...facts.walkSeeds.dependents, ...facts.walkSeeds.callees]
+          : [...(facts.topCallerRefs ?? []), ...(facts.topDependentRefs ?? []), ...(facts.calleeRefs ?? [])]),
+        ...(facts.memberCalleeRefs ?? []),
+      ]
         .slice(0, MAX_NEIGHBOUR_SEEDS)
         .map((ref) => ref.id),
     ];
@@ -203,8 +209,9 @@ export async function collectRelatedFiles(
   }
   if (targetPath) candidates.delete(targetPath);
   for (const ref of [
-    ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []), ...(facts.topCallerRefs ?? []),
-    ...(facts.topDependentRefs ?? []), ...(facts.neighbourRefs ?? []), ...(facts.memberRefs ?? []),
+    ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []), ...(facts.memberCalleeRefs ?? []),
+    ...(facts.topCallerRefs ?? []), ...(facts.topDependentRefs ?? []), ...(facts.neighbourRefs ?? []),
+    ...(facts.memberRefs ?? []),
   ]) {
     if (ref.path) candidates.delete(ref.path);
   }
