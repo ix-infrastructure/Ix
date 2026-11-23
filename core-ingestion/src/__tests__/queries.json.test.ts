@@ -100,11 +100,33 @@ describe('JSON parsing', () => {
     const source = JSON.stringify(Object.fromEntries(keys.map((k) => [k, 1])));
     expect(configEntries('/repo/many.json', source).map((e) => e.name)).toEqual(keys.slice(0, 500));
     expectConsistent('/repo/many.json', source);
-    // The limit counts second-level keys too, and can fall inside an object.
-    const nested = JSON.stringify({ a: Object.fromEntries(keys.map((k) => [k, 1])), z: 1 });
-    expect(configEntries('/repo/nested.json', nested).map((e) => e.name))
-      .toEqual(['a', ...keys.slice(0, 499)]);
-    expectConsistent('/repo/nested.json', nested);
+    expect(parseFile('/repo/many.json', source)!.configEntriesCapped).toBe(true);
+  });
+
+  it('keeps every top-level key before a large object takes the rest of the limit', () => {
+    const keys = Array.from({ length: 600 }, (_, i) => `k${i}`);
+    const source = JSON.stringify({
+      components: Object.fromEntries(keys.map((k) => [k, 1])),
+      paths: { '/users': 1 },
+      info: 'x',
+    });
+    expect(pairs(configEntries('/repo/openapi.json', source))).toEqual([
+      [undefined, 'components'],
+      ...keys.slice(0, 497).map((k) => ['components', k]),
+      [undefined, 'paths'],
+      [undefined, 'info'],
+    ]);
+    expectConsistent('/repo/openapi.json', source);
+    expect(parseFile('/repo/openapi.json', source)!.configEntriesCapped).toBe(true);
+  });
+
+  it('says a file was capped only when the limit dropped a key', () => {
+    const keys = Array.from({ length: 500 }, (_, i) => `k${i}`);
+    const exactly = JSON.stringify(Object.fromEntries(keys.map((k) => [k, 1])));
+    expect(parseFile('/repo/exact.json', exactly)!.configEntriesCapped).toBeUndefined();
+    // Depth and arrays are the rule, not the limit.
+    const deep = JSON.stringify({ a: { b: { c: 1 } }, list: [{ x: 1 }] });
+    expect(parseFile('/repo/deep.json', deep)!.configEntriesCapped).toBeUndefined();
   });
 
   it('keeps the keys of a package.json and a tsconfig.json', () => {

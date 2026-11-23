@@ -5,8 +5,8 @@ import { describe, expect, it } from 'vitest';
 import { parseFile } from '../index.js';
 
 // One data file may not flood the graph: a JSON, YAML or TOML file emits at
-// most 500 config entries, the first in document order. The JSON rules are in
-// queries.json.test.ts.
+// most 500 config entries (YAML and TOML the first in document order) and says
+// so. The JSON rules are in queries.json.test.ts.
 
 const keys = (n: number): string[] => Array.from({ length: n }, (_, i) => `k${i}`);
 const entries = (filePath: string, source: string) =>
@@ -50,6 +50,17 @@ describe('the per-file limit on config entries', () => {
     expect(entries('/repo/a.yaml', keys(500).map(k => `${k}: 1`).join('\n'))).toHaveLength(500);
     expect(entries('/repo/a.toml', keys(500).map(k => `${k} = 1`).join('\n'))).toHaveLength(500);
     expect(entries('/repo/a.json', JSON.stringify(Object.fromEntries(keys(500).map(k => [k, 1]))))).toHaveLength(500);
+  });
+
+  it('says a YAML or TOML file was capped only when a key was dropped', () => {
+    const capped = (filePath: string, source: string) => parseFile(filePath, source)!.configEntriesCapped;
+    expect(capped('/repo/a.yaml', keys(501).map(k => `${k}: 1`).join('\n'))).toBe(true);
+    expect(capped('/repo/a.toml', keys(501).map(k => `${k} = 1`).join('\n'))).toBe(true);
+    // Exactly at the limit, with only comments and blank lines after it.
+    expect(capped('/repo/b.yaml', [...keys(500).map(k => `${k}: 1`), '# end', ''].join('\n'))).toBeUndefined();
+    expect(capped('/repo/b.toml', [...keys(500).map(k => `${k} = 1`), '# end', ''].join('\n'))).toBeUndefined();
+    // A dotted header whose parent took the last place.
+    expect(capped('/repo/c.toml', [...keys(499).map(k => `${k} = 1`), '[outer.inner]'].join('\n'))).toBe(true);
   });
 
   it('YAML and TOML keep their depth', () => {

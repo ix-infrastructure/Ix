@@ -340,6 +340,12 @@ export interface FileParseResult {
    * file parsed cleanly.
    */
   hasParseErrors?: true;
+  /**
+   * A JSON, YAML or TOML file had more config entries than one file may emit
+   * (`MAX_CONFIG_ENTRIES_PER_FILE`), so the rest are not in `entities`. Keys
+   * left out by JSON's depth or array rule do not count. Absent otherwise.
+   */
+  configEntriesCapped?: true;
   receiverFactories?: Array<[string, string]>;
   receiverHeritage?: Array<[string, string]>;
   receiverPackage?: string;
@@ -1248,8 +1254,9 @@ function computeLineStarts(source: string): number[] {
 const MAX_JSON_KEY_DEPTH = 2;
 
 /**
- * The most `config_entry` nodes one JSON, YAML or TOML file may emit, in
- * document order. A guard against a single data file flooding the graph.
+ * The most `config_entry` nodes one JSON, YAML or TOML file may emit. A guard
+ * against a single data file flooding the graph. YAML and TOML keep the first
+ * in document order; JSON keeps every top-level key before any key below one.
  */
 const MAX_CONFIG_ENTRIES_PER_FILE = 500;
 
@@ -1271,12 +1278,16 @@ function parseYamlFile(filePath: string, source: string): FileParseResult {
   const lines = source.split(/\r?\n/);
   const stack: Array<{ indent: number; key: string }> = [];
   const keyLinePattern = /^(\s*)(?:-\s+)?([A-Za-z0-9_.-]+)\s*:.*$/;
+  let capped = false;
 
   for (let index = 0; index < lines.length; index++) {
-    if (configEntriesFull(entities)) break;
     const line = lines[index];
     const match = keyLinePattern.exec(line);
     if (!match) continue;
+    if (configEntriesFull(entities)) {
+      capped = true;
+      break;
+    }
 
     const indent = match[1].replace(/\t/g, '  ').length;
     const listPrefixWidth = line.trimStart().startsWith('- ') ? 2 : 0;
@@ -1344,6 +1355,7 @@ function parseYamlFile(filePath: string, source: string): FileParseResult {
     chunks,
     relationships,
     fileRole,
+    ...(capped ? { configEntriesCapped: true as const } : {}),
   };
 }
 
@@ -1368,14 +1380,18 @@ function parseTomlFile(filePath: string, source: string): FileParseResult {
 
   let currentTable: string | null = null;
   const seenTablePaths = new Set<string>();
+  let capped = false;
 
   for (let i = 0; i < lines.length; i++) {
-    if (configEntriesFull(entities)) break;
     const line = lines[i];
     const trimmed = line.trimStart();
     if (!trimmed || trimmed.startsWith('#')) continue;
 
     const tableMatch = tableHeaderPattern.exec(line);
+    if (configEntriesFull(entities) && (tableMatch || keyPattern.test(line))) {
+      capped = true;
+      break;
+    }
     if (tableMatch) {
       const tablePath = tableMatch[1].trim();
       currentTable = tablePath;
@@ -1384,8 +1400,7 @@ function parseTomlFile(filePath: string, source: string): FileParseResult {
       const startByte = lineStarts[i] ?? 0;
 
       // Emit intermediate nodes for each prefix segment (e.g. [a.b.c] → emit a, a.b)
-      for (let p = 1; p < parts.length; p++) {
-        if (configEntriesFull(entities)) break;
+      for (let p = 1; p < parts.length && !configEntriesFull(entities); p++) {
         const prefixPath = parts.slice(0, p).join('.');
         if (!seenTablePaths.has(prefixPath)) {
           seenTablePaths.add(prefixPath);
@@ -1408,7 +1423,10 @@ function parseTomlFile(filePath: string, source: string): FileParseResult {
       }
 
       // The prefixes took the last places: the table itself is past the limit.
-      if (configEntriesFull(entities)) break;
+      if (configEntriesFull(entities)) {
+        capped = true;
+        break;
+      }
 
       const key = parts[parts.length - 1];
       const parent = parts.length > 1 ? parts.slice(0, -1).join('.') : null;
@@ -1487,7 +1505,10 @@ function parseTomlFile(filePath: string, source: string): FileParseResult {
     });
   }
 
-  return { filePath, language, entities, chunks, relationships, fileRole };
+  return {
+    filePath, language, entities, chunks, relationships, fileRole,
+    ...(capped ? { configEntriesCapped: true as const } : {}),
+  };
 }
 
 function cleanHeadingName(raw: string): string {
@@ -2240,56 +2261,78 @@ function parseJsonFile(filePath: string, source: string): FileParseResult {
   const chunks: ParsedChunk[] = [];
   const relationships: ParsedRelationship[] = [];
 
-  // Walk the parsed JSON value, emitting one entity+chunk per object key, down
-  // to MAX_JSON_KEY_DEPTH. An array is a list of records, not configuration:
-  // the key holding it is emitted and nothing inside it is.
-  // `path` is the fully qualified key ancestry for the current object.
-  const walk = (
-    value: unknown,
-    path: string,
-    lineHint: number,
-    depth: number,
-  ): void => {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) return;
-    if (depth > MAX_JSON_KEY_DEPTH) return;
+  const isObject = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === 'object' && !Array.isArray(value);
 
-    for (const key of Object.keys(value as Record<string, unknown>)) {
-      if (configEntriesFull(entities)) return;
-      const fullPath = path ? `${path}.${key}` : key;
-      entities.push({
-        name: key,
-        kind: 'config_entry',
-        lineStart: lineHint,
-        lineEnd: lineHint,
-        language,
-        container: path || undefined,
-      });
-      chunks.push({
-        name: key,
-        chunkKind: 'config_key',
-        lineStart: lineHint,
-        lineEnd: lineHint,
-        startByte: 0,
-        endByte: 0,
-        contentHash: crypto
-          .createHash('sha256')
-          .update(`${fullPath}=${JSON.stringify((value as Record<string, unknown>)[key])}`)
-          .digest('hex'),
-        language,
-        container: path || undefined,
-      });
-      relationships.push({
-        srcName: path || fileName,
-        dstName: key,
-        predicate: 'CONTAINS',
-      });
-      walk((value as Record<string, unknown>)[key], fullPath, lineHint, depth + 1);
-    }
+  // One entity+chunk+edge for one object key. `path` is its parent's fully
+  // qualified key, empty at the top level.
+  const emit = (key: string, value: unknown, path: string, lineHint: number): void => {
+    const fullPath = path ? `${path}.${key}` : key;
+    entities.push({
+      name: key,
+      kind: 'config_entry',
+      lineStart: lineHint,
+      lineEnd: lineHint,
+      language,
+      container: path || undefined,
+    });
+    chunks.push({
+      name: key,
+      chunkKind: 'config_key',
+      lineStart: lineHint,
+      lineEnd: lineHint,
+      startByte: 0,
+      endByte: 0,
+      contentHash: crypto
+        .createHash('sha256')
+        .update(`${fullPath}=${JSON.stringify(value)}`)
+        .digest('hex'),
+      language,
+      container: path || undefined,
+    });
+    relationships.push({
+      srcName: path || fileName,
+      dstName: key,
+      predicate: 'CONTAINS',
+    });
   };
 
+  let capped = false;
   try {
     const parsed: unknown = JSON.parse(source);
-    walk(parsed, '', 1, 1);
+    // An array is a list of records, not configuration: the key holding it is
+    // emitted and nothing inside it is, so neither is a top-level array's.
+    if (isObject(parsed)) {
+      // The limit is spent level by level, so one large object cannot starve
+      // the top-level keys after it.
+      const kept = new Map<Record<string, unknown>, string[]>();
+      let room = MAX_CONFIG_ENTRIES_PER_FILE;
+      let level = [parsed];
+      for (let depth = 1; depth <= MAX_JSON_KEY_DEPTH; depth++) {
+        const next: Array<Record<string, unknown>> = [];
+        for (const object of level) {
+          const keys = Object.keys(object);
+          const taken = keys.slice(0, room);
+          if (taken.length < keys.length) capped = true;
+          room -= taken.length;
+          kept.set(object, taken);
+          for (const key of taken) {
+            const child = object[key];
+            if (isObject(child)) next.push(child);
+          }
+        }
+        level = next;
+      }
+      // Emitted in document order, each key right after its parent.
+      const emitKept = (object: Record<string, unknown>, path: string): void => {
+        for (const key of kept.get(object) ?? []) {
+          const child = object[key];
+          emit(key, child, path, 1);
+          if (isObject(child)) emitKept(child, path ? `${path}.${key}` : key);
+        }
+      };
+      emitKept(parsed, '');
+    }
   } catch {
     // Unparseable JSON: fall through to file_body chunk below
   }
@@ -2307,7 +2350,10 @@ function parseJsonFile(filePath: string, source: string): FileParseResult {
     });
   }
 
-  return { filePath, language, entities, chunks, relationships, fileRole };
+  return {
+    filePath, language, entities, chunks, relationships, fileRole,
+    ...(capped ? { configEntriesCapped: true as const } : {}),
+  };
 }
 
 function parseSqlFile(filePath: string, source: string): FileParseResult {

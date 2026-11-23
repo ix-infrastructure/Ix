@@ -32,7 +32,7 @@ SQL table or a proto message like any other symbol. The node kind is given in br
 | Format | What Ix extracts |
 |---|---|
 | **YAML** | Every mapping key (`config_entry`), nested under its parent key, up to 500 per file in document order. |
-| **JSON** | Object keys of the first two levels (`config_entry`), nested under their parent key, up to 500 per file in document order. The key that holds an array is kept, and nothing inside the array is. Keys are not tied to a line. A file that is not strict JSON (comments, trailing commas) is kept as a file with no keys. |
+| **JSON** | Object keys of the first two levels (`config_entry`), nested under their parent key, up to 500 per file, with every top-level key kept before any key below one. The key that holds an array is kept, and nothing inside the array is. Keys are not tied to a line. A file that is not strict JSON (comments, trailing commas) is kept as a file with no keys. |
 | **TOML** | Every `[table]` and `[[array of tables]]` header and every `key = value` (`config_entry`), nested under its table, up to 500 per file in document order. Dotted table names add each level. |
 | **SQL** | `CREATE TABLE` (`table`), `CREATE VIEW` (`view`), `CREATE FUNCTION`, `PROCEDURE` and `TRIGGER` (`function`) and `CREATE INDEX` (`config_entry`). Views, functions, procedures and triggers reference the tables they read or write, and an index references the table it is on. |
 | **Protocol Buffers** | `message` and `enum` definitions (`class`), `service` definitions (`interface`), their `rpc` methods (`method`) and the `package` (`module`). Imports link files, and a message field or rpc request and response type references the message it names. |
