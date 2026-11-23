@@ -169,6 +169,11 @@ function structuralEvidence(
   // target. Measured on ix-bench, 0.55 of the expected files were in the
   // bundle and 0.32 in the text an agent is shown.
   pushMembers(leadingMembers.slice(0, MEMBERS_BEFORE_OUTWARD));
+  // A class's own shape: what it extends, then the types its fields hold. One
+  // step out and part of the target's definition, so ahead of the files two
+  // steps out; as relationship rows they ranked after every claim and were
+  // the budget's first cut, while those files and neighbours' members stayed.
+  for (const [item, ref] of ownTypeRows(input)) pushOne(item, ref);
   // Two steps out: a neighbour's import, or a file that depends on what the
   // target depends on. Before the imports, which the target's own header
   // lists; these are the files a one-hop bundle cannot name at all.
@@ -240,6 +245,24 @@ function recentCommitsRow(input: RankInput): Structural | undefined {
     reason: `newest first (${commits.map((c) => c.date).join(", ")}); \`git show <sha>\` for the change`,
     refs: [],
   };
+}
+
+/** What a class target extends, then the types it references, each with its entity. */
+function ownTypeRows(input: RankInput): Array<[Structural, EntityLocation]> {
+  const rows: Array<[Structural, EntityLocation]> = [];
+  for (const ref of input.facts.extendsRefs ?? []) {
+    rows.push([{
+      id: rowId("extends", ref.name, ref), source: "facts.extends", title: `extends ${ref.name}`,
+      reason: "the target extends or implements this", refs: [ref.id], ...locationField(ref),
+    }, ref]);
+  }
+  for (const ref of input.facts.referenceRefs ?? []) {
+    rows.push([{
+      id: rowId("references", ref.name, ref), source: "facts.references", title: `references ${ref.name}`,
+      reason: "a type the target's own body names, such as a field's type", refs: [ref.id], ...locationField(ref),
+    }, ref]);
+  }
+  return rows;
 }
 
 /** The target's imports, then its callees, then what neighbouring files define, each with its entity. */

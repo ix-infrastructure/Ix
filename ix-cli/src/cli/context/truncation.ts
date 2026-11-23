@@ -13,6 +13,8 @@ const CUT_LABELS: Record<string, string> = {
   "issue.ranking": "ranked files row",
   "facts.container": "container",
   "facts.members": "member",
+  "facts.extends": "base type",
+  "facts.references": "referenced type",
   "facts.imports": "import",
   "facts.callees": "call",
   "facts.neighbours": "neighbouring definition",
