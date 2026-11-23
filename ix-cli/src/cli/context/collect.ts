@@ -61,7 +61,8 @@ async function collectHistory(
   const git = gitRunner(resolveWorkspaceRoot());
   const known = new Set<string>([facts.path]);
   for (const ref of [
-    ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []), ...(facts.topCallerRefs ?? []),
+    ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []), ...(facts.memberCalleeRefs ?? []),
+    ...(facts.topCallerRefs ?? []),
     ...(facts.topDependentRefs ?? []), ...(facts.neighbourRefs ?? []), ...ownTypeRefs(facts), ...related,
   ]) {
     if (ref.path) known.add(ref.path);
@@ -120,7 +121,8 @@ async function collectTextRelated(
   ];
   const known = new Set<string>();
   for (const ref of [
-    ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []), ...(facts.topCallerRefs ?? []),
+    ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []), ...(facts.memberCalleeRefs ?? []),
+    ...(facts.topCallerRefs ?? []),
     ...(facts.topDependentRefs ?? []), ...(facts.neighbourRefs ?? []), ...ownTypeRefs(facts), ...graphRefs,
   ]) {
     if (ref.path) known.add(ref.path);

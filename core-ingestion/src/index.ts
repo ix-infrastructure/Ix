@@ -1503,8 +1503,9 @@ function invokedArgumentRoots(args: any[]): Array<string[] | undefined> {
  * UMD factory dependency holds a module (MODULE_ROOT), as surely as
  * `const utils = require('./utils')` does; an IIFE parameter
  * (`(function (lib) {})(require('./a'))`, `.call(this, a)`,
- * `.apply(this, [a])`) aliases its argument (invokedArgumentRoots). A
- * function with no entry keeps each parameter's own default.
+ * `.apply(this, [a])`) aliases its argument (invokedArgumentRoots); the
+ * callback of a dynamic import's `then` (`import('./a').then(a => ...)`) takes
+ * the module. A function with no entry keeps each parameter's own default.
  *
  * Read from the call, which the walk meets before the function inside it, so
  * nothing climbs the tree: `.parent` costs the depth of the node, which made
@@ -1542,6 +1543,14 @@ function recordInvocations(call: any, callee: any, out: Map<number, Array<string
   }
   if (calleeType !== 'member_expression') return;
   const method = callee.childForFieldName?.('property')?.text;
+  if (method === 'then') {
+    // `import('./api').then(api => api.validate())`: the promise of a module
+    // hands its callback the module.
+    if (!jsTsLoadsModule(callee.childForFieldName?.('object'))) return;
+    const onFulfilled = callArguments(call)[0];
+    if (JS_TS_INVOKABLE_LITERALS.has(onFulfilled?.type)) out.set(onFulfilled.id, [[MODULE_ROOT]]);
+    return;
+  }
   if (method !== 'call' && method !== 'apply') return;
   const fn = unwrapParens(callee.childForFieldName?.('object'));
   if (!JS_TS_INVOKABLE_LITERALS.has(fn?.type)) return;

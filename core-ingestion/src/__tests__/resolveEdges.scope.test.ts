@@ -446,6 +446,21 @@ describe('member calls and calls to locals across files (#1020)', () => {
     ]);
   });
 
+  it('JavaScript: the callback of a dynamic import takes the module', () => {
+    const lib = parse('src/api.js', 'export function validate(x) { return x; }\n');
+    const caller = parse('src/b.js', [
+      "export function arrow() { return import('./api').then(api => api.validate(1)); }",
+      "export function named() { return import('./api').then(function (api) { return api.validate(1); }); }",
+      "export function picked() { return import('./api').then(({ validate }) => validate(1)); }",
+      // A promise of anything else hands over an ordinary value.
+      'export function other(p) { return p.then(conn => conn.validate(1)); }',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.js').sort()).toEqual([
+      'arrow -> src/api.js:validate', 'named -> src/api.js:validate', 'picked -> src/api.js:validate',
+    ]);
+  });
+
   it('TypeScript: a local assigned a namespace import after its declaration still reaches the module function', () => {
     const lib = parse('src/a.ts', 'export function validate(x: number) { return x; }\n');
     const caller = parse('src/b.ts', [

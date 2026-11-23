@@ -10,7 +10,7 @@ import { getSystemPath } from "../hierarchy.js";
 import type { CommitRef } from "./history.js";
 import { isTestPath, type RelatedRef } from "./related-files.js";
 import { hint, suggestedCommand } from "../next-step.js";
-import { TYPE_KINDS, type GraphKind, type KindSet } from "../graph-model.js";
+import { CALLABLE_KINDS, TYPE_KINDS, type GraphKind, type KindSet } from "../graph-model.js";
 import { featureOff, markFeatureOff, routeMissing } from "../../client/features.js";
 
 /** A related entity and where it is defined. */
@@ -108,6 +108,18 @@ export interface EntityFacts {
    */
   importRefs?: EntityLocation[];
   calleeRefs?: EntityLocation[];
+  /**
+   * For a class-like target: what its methods call outside it. The parser
+   * attributes a call to the innermost function, method or constant around
+   * it, and to the class only for a call outside all of those (a class-level
+   * initialiser), so `calleeRefs` is empty or nearly so for a class, and a
+   * bundle could not say what the class uses (#1138). A callee may be in both
+   * lists; the bundle shows it once. Read by `ix context` only, and not for
+   * file targets.
+   */
+  memberCalleeRefs?: EntityLocation[];
+  /** The member -> callee CALLS edges behind `memberCalleeRefs`, for the bundle's relationships. */
+  memberCalls?: Array<{ src: string; dst: string; predicate: "CALLS" }>;
 
   /**
    * What a class-like target is built from: the types it extends or implements
@@ -217,6 +229,25 @@ const MAX_CALLEE_REFS = 4;
 /** A class target's bases and referenced types kept: its own shape, in few rows. */
 const MAX_EXTENDS_REFS = 3;
 const MAX_REFERENCE_REFS = 4;
+/**
+ * A class-like target's member callees kept, and the callable members whose
+ * outbound calls are read. More than `MAX_CALLEE_REFS`: a class that wires
+ * other things together is defined by what it calls.
+ */
+const MAX_MEMBER_CALLEE_REFS = 8;
+const MEMBER_CALLEE_POOL = 20;
+/**
+ * Callees read per member. Bounds each of the up to `MEMBER_CALLEE_POOL`
+ * expands the way `MEMBER_USE_CAP` bounds the usage probes: a generated or
+ * dispatch-table method can call hundreds of things, and only the
+ * `MAX_MEMBER_CALLEE_REFS` most-called across the members are kept.
+ */
+const MEMBER_CALLEE_CAP = 50;
+/**
+ * Members whose outbound calls are read: the callable kinds, and constants,
+ * which the parser also makes the source of the calls in their initialisers.
+ */
+const CALL_SOURCE_KINDS: KindSet = new Set<GraphKind>([...CALLABLE_KINDS, "constant"]);
 
 /** Members probed for usage; the rest keep their structural order after them. */
 const MEMBER_USE_POOL = 40;
@@ -435,6 +466,71 @@ function rankUsers(nodes: any[], edges: any[] | undefined, targetPath: string | 
     .map((k) => k.n);
 }
 
+/**
+ * What a class-like target's methods call outside it (#1138).
+ *
+ * One outbound CALLS expand per callable or constant member, for at most
+ * `MEMBER_CALLEE_POOL` of them in structural order (declarations, then the
+ * big ones), so it runs alongside the usage ranking rather than after it.
+ * Calls that stay inside the target -- to one of its members, or to anything
+ * defined within its span -- are dropped. The rest are ranked like callees
+ * (`rankUsers`), with the number of members calling one as its degree, and the
+ * first `MAX_MEMBER_CALLEE_REFS` kept with the edges that reach them.
+ */
+async function collectMemberCallees(
+  client: IxClient,
+  target: { id: string; path?: string; lineStart?: number; lineEnd?: number },
+  members: EntityLocation[],
+): Promise<{ refs: EntityLocation[]; edges: Array<{ src: string; dst: string; predicate: "CALLS" }> }> {
+  const memberIds = new Set(members.map((m) => m.id));
+  const pool = structuralMemberOrder(members.filter((m) => CALL_SOURCE_KINDS.has(m.kind))).slice(0, MEMBER_CALLEE_POOL);
+  const inside = (n: any): boolean => {
+    if (target.lineStart === undefined || target.lineEnd === undefined) return false;
+    const path = relativePath(n.provenance?.sourceUri ?? n.provenance?.source_uri);
+    const line = lineOf(n.attrs?.line_start);
+    return path !== undefined && path === target.path && line !== undefined &&
+      line >= target.lineStart && line <= target.lineEnd;
+  };
+  const found: any[][] = new Array(pool.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < pool.length) {
+      const index = next++;
+      try {
+        const result = await client.expand(pool[index].id, {
+          direction: "out", predicates: ["CALLS"], limit: MEMBER_CALLEE_CAP,
+        });
+        found[index] = uniqueById(result.nodes).filter((n: any) =>
+          n.id !== target.id && !memberIds.has(n.id) && !inside(n));
+      } catch {
+        found[index] = [];  // one unreadable member must not lose the others
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(MEMBER_USE_CONCURRENCY, pool.length) }, worker));
+
+  const edges: Array<{ src: string; dst: string; predicate: "CALLS" }> = [];
+  const callees = new Map<string, any>();
+  pool.forEach((member, index) => {
+    for (const n of found[index] ?? []) {
+      if (!callees.has(n.id)) callees.set(n.id, n);
+      edges.push({ src: member.id, dst: n.id, predicate: "CALLS" });
+    }
+  });
+  const refs: EntityLocation[] = [];
+  for (const n of rankUsers([...callees.values()], edges, target.path)) {
+    if (refs.length >= MAX_MEMBER_CALLEE_REFS) break;
+    const name = n.name || n.attrs?.name || "";
+    if (name && !isRawId(name)) refs.push(toLocation(n));
+  }
+  const kept = new Set(refs.map((r) => r.id));
+  const str = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  return {
+    refs,
+    edges: edges.filter((e) => kept.has(e.dst)).sort((a, b) => str(a.src, b.src) || str(a.dst, b.dst)),
+  };
+}
+
 /** The entity that contains the target, or undefined when it cannot be read. */
 async function lookUpContainer(client: IxClient, containerId: string): Promise<EntityLocation | undefined> {
   try {
@@ -650,15 +746,21 @@ export async function collectFacts(
     (e: any) => e.predicate === "CALLS" && e.src === targetId,
   );
 
+  const targetKindName = node.kind || targetKind;
+  const targetLines = targetKindName === "file"
+    ? {}
+    : { lineStart: lineOf(node.attrs?.line_start), lineEnd: lineOf(node.attrs?.line_end) };
+  const memberLocations = membersResult.nodes.map(toLocation);
+
   // The second round of reads. Each step needs only the first round, not the
   // others, so they run together: this used to be three or four round trips
   // one after another, plus one per neighbouring file.
-  const [container, memberRefs, neighbourRefs, callList] = await Promise.all([
+  const [container, memberRefs, neighbourRefs, callList, memberCallees] = await Promise.all([
     containsEdge ? lookUpContainer(client, containsEdge.src) : Promise.resolve(undefined),
     // Members. `ix context` ranks them by use; `ix explain` keeps graph order.
     forExplain
-      ? Promise.resolve(membersResult.nodes.map(toLocation))
-      : rankMembersByUse(client, membersResult.nodes.map(toLocation)),
+      ? Promise.resolve(memberLocations)
+      : rankMembersByUse(client, memberLocations),
     // One level into the files around the target -- imports first, then the
     // files that import it. `ix explain` describes one entity and does not need
     // it, so it is not paid for there.
@@ -667,6 +769,13 @@ export async function collectFacts(
       : collectNeighbourMembers(client, [...importRefs, ...walkSeeds.dependents], targetId),
     forExplain && calleeEdges.length > 0 && calleeEdges.length <= 20
       ? resolveCallList(client, calleeEdges)
+      : Promise.resolve(undefined),
+    // What a class's methods call: the class node's own CALLS edges are only
+    // its class-level calls, if any. `ix context` only, and not for files, whose bundles reach their
+    // members' calls through the related-files walk.
+    !forExplain && TYPE_KINDS.has(targetKindName)
+      ? collectMemberCallees(client, { id: targetId, path, ...targetLines }, memberLocations)
+          .catch(() => undefined)
       : Promise.resolve(undefined),
   ]);
   const memberNames = memberRefs.map((m) => m.name);
@@ -718,11 +827,6 @@ export async function collectFacts(
   const subsystemName = hierarchyPath.find((n: any) => n.kind === "subsystem")?.name;
   const moduleName = hierarchyPath.find((n: any) => n.kind === "module")?.name;
 
-  const targetKindName = node.kind || targetKind;
-  const targetLines = targetKindName === "file"
-    ? {}
-    : { lineStart: lineOf(node.attrs?.line_start), lineEnd: lineOf(node.attrs?.line_end) };
-
   const facts: EntityFacts = {
     id: targetId,
     name: node.name || node.attrs?.name || targetName,
@@ -747,6 +851,7 @@ export async function collectFacts(
     topDependentRefs,
     importRefs,
     calleeRefs,
+    ...(memberCallees ? { memberCalleeRefs: memberCallees.refs, memberCalls: memberCallees.edges } : {}),
     neighbourRefs,
     introducedRev: node.createdRev ?? node.created_rev,
     historyLength: history?.chain?.length ?? 0,
