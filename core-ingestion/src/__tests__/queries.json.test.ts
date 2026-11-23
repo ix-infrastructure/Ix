@@ -55,15 +55,81 @@ describe('JSON parsing', () => {
     });
   });
 
-  it('parses keys inside array items', () => {
-    const result = parseFile(
-      '/repo/servers.json',
-      JSON.stringify({ servers: [{ host: 'a.example.com' }, { host: 'b.example.com' }] }),
-    );
+  const configEntries = (filePath: string, source: string) =>
+    parseFile(filePath, source)!.entities.filter((e) => e.kind === 'config_entry');
+  const pairs = (entries: Array<{ name: string; container?: string }>) =>
+    entries.map((e) => [e.container, e.name]);
 
-    expect(result).not.toBeNull();
-    const hostEntities = result!.entities.filter((e) => e.name === 'host');
-    expect(hostEntities.length).toBe(2);
+  /** Every chunk and CONTAINS edge belongs to an emitted entry, and each entry has both. */
+  const expectConsistent = (filePath: string, source: string) => {
+    const result = parseFile(filePath, source)!;
+    const entries = result.entities.filter((e) => e.kind === 'config_entry');
+    const chunks = result.chunks.filter((c) => c.chunkKind === 'config_key');
+    expect(chunks.map((c) => [c.container, c.name])).toEqual(pairs(entries));
+    const names = new Set(entries.map((e) => e.name));
+    const contains = result.relationships.filter((r) => r.predicate === 'CONTAINS');
+    expect(contains).toHaveLength(entries.length);
+    for (const relationship of contains) expect(names.has(relationship.dstName)).toBe(true);
+  };
+
+  it('emits keys of the first two levels and nothing deeper', () => {
+    const source = JSON.stringify({ a: { b: { c: { d: 1 } }, e: 2 }, f: 3 });
+    expect(pairs(configEntries('/repo/deep.json', source))).toEqual([
+      [undefined, 'a'],
+      ['a', 'b'],
+      ['a', 'e'],
+      [undefined, 'f'],
+    ]);
+    expectConsistent('/repo/deep.json', source);
+  });
+
+  it('emits the key holding an array and nothing inside the array', () => {
+    const source = JSON.stringify({ servers: [{ host: 'a.example.com' }, { host: 'b.example.com' }] });
+    expect(pairs(configEntries('/repo/servers.json', source))).toEqual([[undefined, 'servers']]);
+    expectConsistent('/repo/servers.json', source);
+  });
+
+  it('keeps a file whose top level is an array, with no keys', () => {
+    const result = parseFile('/repo/records.json', JSON.stringify([{ id: 1 }, { id: 2 }]))!;
+    expect(result.entities.map((e) => e.kind)).toEqual(['file']);
+    expect(result.chunks.map((c) => c.chunkKind)).toEqual(['file_body']);
+  });
+
+  it('stops at 500 entries, the first in document order', () => {
+    const keys = Array.from({ length: 600 }, (_, i) => `k${i}`);
+    const source = JSON.stringify(Object.fromEntries(keys.map((k) => [k, 1])));
+    expect(configEntries('/repo/many.json', source).map((e) => e.name)).toEqual(keys.slice(0, 500));
+    expectConsistent('/repo/many.json', source);
+    // The limit counts second-level keys too, and can fall inside an object.
+    const nested = JSON.stringify({ a: Object.fromEntries(keys.map((k) => [k, 1])), z: 1 });
+    expect(configEntries('/repo/nested.json', nested).map((e) => e.name))
+      .toEqual(['a', ...keys.slice(0, 499)]);
+    expectConsistent('/repo/nested.json', nested);
+  });
+
+  it('keeps the keys of a package.json and a tsconfig.json', () => {
+    const pkg = JSON.stringify({
+      name: 'app',
+      scripts: { build: 'tsc', test: 'vitest' },
+      dependencies: { react: '^19.0.0' },
+      files: ['dist'],
+    });
+    expect(pairs(configEntries('/repo/package.json', pkg))).toEqual([
+      [undefined, 'name'],
+      [undefined, 'scripts'],
+      ['scripts', 'build'],
+      ['scripts', 'test'],
+      [undefined, 'dependencies'],
+      ['dependencies', 'react'],
+      [undefined, 'files'],
+    ]);
+    const tsconfig = JSON.stringify({ compilerOptions: { strict: true, target: 'ES2022' }, include: ['src'] });
+    expect(pairs(configEntries('/repo/tsconfig.json', tsconfig))).toEqual([
+      [undefined, 'compilerOptions'],
+      ['compilerOptions', 'strict'],
+      ['compilerOptions', 'target'],
+      [undefined, 'include'],
+    ]);
   });
 
   it('uses fully qualified containers for repeated nested keys', () => {
@@ -71,7 +137,7 @@ describe('JSON parsing', () => {
       '/repo/countries.json',
       JSON.stringify({
         name: { common: 'Aruba' },
-        currencies: { AWG: { name: 'Aruban florin' } },
+        currencies: { name: 'Aruban florin' },
       }),
     );
 
@@ -80,34 +146,13 @@ describe('JSON parsing', () => {
       expect.objectContaining({ name: 'common', container: 'name' }),
     );
     expect(result!.entities).toContainEqual(
-      expect.objectContaining({ name: 'name', container: 'currencies.AWG' }),
+      expect.objectContaining({ name: 'name', container: 'currencies' }),
     );
     expect(result!.relationships).toContainEqual({
-      srcName: 'currencies.AWG',
+      srcName: 'currencies',
       dstName: 'name',
       predicate: 'CONTAINS',
     });
-  });
-
-  it('parses geojson-style keys nested inside array items', () => {
-    const result = parseFile(
-      '/repo/abw.geo.json',
-      JSON.stringify({
-        type: 'FeatureCollection',
-        features: [{ type: 'Feature', properties: { cca2: 'aw' } }],
-      }),
-    );
-
-    expect(result).not.toBeNull();
-    expect(result!.entities).toContainEqual(
-      expect.objectContaining({ name: 'features', kind: 'config_entry' }),
-    );
-    expect(result!.entities).toContainEqual(
-      expect.objectContaining({ name: 'properties', container: 'features' }),
-    );
-    expect(result!.entities).toContainEqual(
-      expect.objectContaining({ name: 'cca2', container: 'features.properties' }),
-    );
   });
 
   it('falls back to file_body chunk for invalid JSON', () => {

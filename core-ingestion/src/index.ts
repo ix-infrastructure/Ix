@@ -1239,6 +1239,24 @@ function computeLineStarts(source: string): number[] {
   return lineStarts;
 }
 
+/**
+ * How deep a JSON file's keys become graph nodes: top-level keys and the keys
+ * one level below them. That is a file's configuration surface
+ * (`scripts.build`, `compilerOptions.strict`); what lies deeper in a report,
+ * fixture or API dump is data, and says nothing about the architecture.
+ */
+const MAX_JSON_KEY_DEPTH = 2;
+
+/**
+ * The most `config_entry` nodes one JSON, YAML or TOML file may emit, in
+ * document order. A guard against a single data file flooding the graph.
+ */
+const MAX_CONFIG_ENTRIES_PER_FILE = 500;
+
+/** `entities` holds the file node and then this file's config entries. */
+const configEntriesFull = (entities: readonly ParsedEntity[]): boolean =>
+  entities.length > MAX_CONFIG_ENTRIES_PER_FILE;
+
 function parseYamlFile(filePath: string, source: string): FileParseResult {
   const language = SupportedLanguages.YAML;
   const fileName = nodePath.basename(filePath);
@@ -1255,6 +1273,7 @@ function parseYamlFile(filePath: string, source: string): FileParseResult {
   const keyLinePattern = /^(\s*)(?:-\s+)?([A-Za-z0-9_.-]+)\s*:.*$/;
 
   for (let index = 0; index < lines.length; index++) {
+    if (configEntriesFull(entities)) break;
     const line = lines[index];
     const match = keyLinePattern.exec(line);
     if (!match) continue;
@@ -1351,6 +1370,7 @@ function parseTomlFile(filePath: string, source: string): FileParseResult {
   const seenTablePaths = new Set<string>();
 
   for (let i = 0; i < lines.length; i++) {
+    if (configEntriesFull(entities)) break;
     const line = lines[i];
     const trimmed = line.trimStart();
     if (!trimmed || trimmed.startsWith('#')) continue;
@@ -1365,6 +1385,7 @@ function parseTomlFile(filePath: string, source: string): FileParseResult {
 
       // Emit intermediate nodes for each prefix segment (e.g. [a.b.c] → emit a, a.b)
       for (let p = 1; p < parts.length; p++) {
+        if (configEntriesFull(entities)) break;
         const prefixPath = parts.slice(0, p).join('.');
         if (!seenTablePaths.has(prefixPath)) {
           seenTablePaths.add(prefixPath);
@@ -1385,6 +1406,9 @@ function parseTomlFile(filePath: string, source: string): FileParseResult {
           });
         }
       }
+
+      // The prefixes took the last places: the table itself is past the limit.
+      if (configEntriesFull(entities)) break;
 
       const key = parts[parts.length - 1];
       const parent = parts.length > 1 ? parts.slice(0, -1).join('.') : null;
@@ -2216,23 +2240,21 @@ function parseJsonFile(filePath: string, source: string): FileParseResult {
   const chunks: ParsedChunk[] = [];
   const relationships: ParsedRelationship[] = [];
 
-  // Walk the parsed JSON value, emitting one entity+chunk per object key.
+  // Walk the parsed JSON value, emitting one entity+chunk per object key, down
+  // to MAX_JSON_KEY_DEPTH. An array is a list of records, not configuration:
+  // the key holding it is emitted and nothing inside it is.
   // `path` is the fully qualified key ancestry for the current object.
   const walk = (
     value: unknown,
     path: string,
     lineHint: number,
+    depth: number,
   ): void => {
-    if (value === null || typeof value !== 'object') return;
-
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        walk(item, path, lineHint);
-      }
-      return;
-    }
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return;
+    if (depth > MAX_JSON_KEY_DEPTH) return;
 
     for (const key of Object.keys(value as Record<string, unknown>)) {
+      if (configEntriesFull(entities)) return;
       const fullPath = path ? `${path}.${key}` : key;
       entities.push({
         name: key,
@@ -2261,13 +2283,13 @@ function parseJsonFile(filePath: string, source: string): FileParseResult {
         dstName: key,
         predicate: 'CONTAINS',
       });
-      walk((value as Record<string, unknown>)[key], fullPath, lineHint);
+      walk((value as Record<string, unknown>)[key], fullPath, lineHint, depth + 1);
     }
   };
 
   try {
     const parsed: unknown = JSON.parse(source);
-    walk(parsed, '', 1);
+    walk(parsed, '', 1, 1);
   } catch {
     // Unparseable JSON: fall through to file_body chunk below
   }
