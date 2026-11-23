@@ -14,7 +14,7 @@ import type {
   UpsertEdgeOp,
 } from './schema.js';
 import { resolveEdges } from './index.js';
-import { selectJavaOverloads } from './java-overloads.js';
+import { javaMayInherit, selectJavaOverloads } from './java-overloads.js';
 import type { FileParseResult, ParsedEntity, ParsedRelationship, ResolutionTier, ResolvedEdge } from './index.js';
 
 // ---------------------------------------------------------------------------
@@ -629,6 +629,27 @@ export function buildPatchWithResolution(
     (dst.resolution !== null || dst.externalPkg !== null || seenNodeIds.has(dst.dstNodeId));
 
   /**
+   * Whether the class of the Java method `key` may inherit a method of that
+   * name which this file's overload table does not list (`javaMayInherit`).
+   * Only this file is known here, so a supertype is seen when it is declared
+   * in it; one declared anywhere else may hold such a method.
+   */
+  const mayInheritHere = (key: string): boolean => {
+    const dot = key.lastIndexOf('.');
+    // Heritage is recorded by a class's simple name.
+    const simple = (type: string): string => type.slice(type.lastIndexOf('.') + 1);
+    return javaMayInherit<string>(
+      key.slice(0, Math.max(dot, 0)),
+      key.slice(dot + 1),
+      child => (result.receiverHeritage ?? [])
+        .filter(([name]) => name === simple(child))
+        .map(([, parent]) => (allQKeys.has(parent) ? parent : undefined)),
+      (type, member) => allQKeys.has(`${type}.${member}`),
+      type => type,
+    );
+  };
+
+  /**
    * Every destination of a relationship: `resolveDst`'s, unless it is a Java
    * call whose sites select overloads other than the first (#1139). Then there
    * is one destination per overload selected. The first overload's is
@@ -653,7 +674,7 @@ export function buildPatchWithResolution(
     // is made here, from the same table by the same rule.
     const signatures = r.callShapes?.length ? localOverloads.get(dstKey) : undefined;
     if (!signatures) return [first];
-    return selectJavaOverloads(signatures, r.callShapes!).map(index => index === 0
+    return selectJavaOverloads(signatures, r.callShapes!, mayInheritHere(dstKey)).map(index => index === 0
       ? first
       : { ...first, dstNodeId: nodeId(idPath, `${dstKey}(${signatures[index]})`), overload: true as const });
   };

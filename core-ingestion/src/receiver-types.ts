@@ -412,8 +412,8 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
       frames.push(frame);
     }
   }
-  // `lookupName` for Java, by position: the scopes around `pos`, innermost first.
-  const javaLookupName = (pos: number, name: string, field = false): ReceiverBinding | undefined => {
+  // The innermost Java scope around `pos`, an index into `javaScopes`; -1 at the root.
+  const javaScopeAt = (pos: number): number => {
     let lo = 0;
     let hi = javaScopes.length;
     while (lo < hi) {
@@ -424,6 +424,18 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
     // before it or one of that scope's ancestors.
     let at = lo - 1;
     while (at >= 0 && javaScopes[at].end <= pos) at = javaScopes[at].parent;
+    return at;
+  };
+  // `named` is a type parameter of a method or class around `pos` (`T`, `Q`).
+  const javaTypeParameterAt = (pos: number, named: string): boolean => {
+    for (let j = javaScopeAt(pos); j >= 0; j = javaScopes[j].parent) {
+      if (typeParameters.get(javaScopes[j].id)?.has(named)) return true;
+    }
+    return false;
+  };
+  // `lookupName` for Java, by position: the scopes around `pos`, innermost first.
+  const javaLookupName = (pos: number, name: string, field = false): ReceiverBinding | undefined => {
+    const at = javaScopeAt(pos);
     for (let i = at; ; i = javaScopes[i].parent) {
       const scope = i >= 0 ? javaScopes[i] : { id: root.id, type: root.type };
       const skip = field && !classes.has(scope.type) && scope.type !== 'class_body';
@@ -432,9 +444,7 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
         if (info.available !== undefined && info.available > pos) return {};
         // `T t`, and `T[] ts` for the declared type an argument is read by.
         const named = info.type ?? info.declared?.replace(/[\[\]\s]+$/, '');
-        if (named) for (let j = at; j >= 0; j = javaScopes[j].parent) {
-          if (typeParameters.get(javaScopes[j].id)?.has(named)) return {};
-        }
+        if (named && javaTypeParameterAt(pos, named)) return {};
         return info;
       }
       // `this` stops at the innermost class, named or anonymous.
@@ -489,7 +499,11 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
   // Java method results, only for methods that can return a class: a getter
   // returning `int` is never a chained receiver, so it costs no summary space.
   for (const [method, returns] of javaReturns) if ([...returns].some(Boolean)) for (const type of returns) factories.push([method, type]);
-  if (java) return javaFacts(root, { factories, heritage, typedNames, scopes, javaTypes, lookupName: javaLookupName });
+  if (java) {
+    return javaFacts(root, {
+      factories, heritage, typedNames, scopes, javaTypes, lookupName: javaLookupName, typeParameterAt: javaTypeParameterAt,
+    });
+  }
   return {
     factories, heritage, typedNames,
     // Chained Scala clauses (`package a` then `package b`) declare package `a.b`.
@@ -537,8 +551,9 @@ function javaFacts(root: any, facts: {
   scopes: Map<number, Map<string, ReceiverBinding>>;
   javaTypes: Array<{ start: number; end: number; name?: string; superclass?: string }>;
   lookupName(pos: number, name: string, field?: boolean): ReceiverBinding | undefined;
+  typeParameterAt(pos: number, named: string): boolean;
 }): ReceiverFacts {
-  const { scopes, javaTypes, lookupName } = facts;
+  const { scopes, javaTypes, lookupName, typeParameterAt } = facts;
   // Every name a declaration binds, typed or not: any of them can shadow a type name.
   const boundNames = new Set<string>();
   for (const bindings of scopes.values()) for (const name of bindings.keys()) boundNames.add(name);
@@ -607,8 +622,13 @@ function javaFacts(root: any, facts: {
         const sign = /^[-+]$/.test(node.childForFieldName('operator')?.text ?? '');
         return sign && /_literal$/.test(operand?.type ?? '') && operand.type !== 'character_literal' ? argumentType(operand) : undefined;
       }
-      case 'object_creation_expression':
-      case 'cast_expression': return node.childForFieldName('type')?.text;
+      case 'object_creation_expression': return node.childForFieldName('type')?.text;
+      case 'cast_expression': {
+        // `(Q) o`, `(Q[]) o`: a type variable says nothing of the type passed,
+        // as for a variable declared `Q q`.
+        const type = node.childForFieldName('type')?.text;
+        return type && !typeParameterAt(node.startIndex, type.replace(/[\[\]\s]+$/, '')) ? type : undefined;
+      }
       case 'array_creation_expression': {
         // `new int[]{1}`, `new String[2][]`: the element type and one `[]` per dimension.
         const element = node.childForFieldName('type')?.text;

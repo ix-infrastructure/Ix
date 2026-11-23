@@ -178,7 +178,7 @@ import { classifyFileRole } from './role-classifier.js';
 import type { RoleClassification } from './role-classifier.js';
 import { callReceiver, collectReceiverFacts } from './receiver-types.js';
 import { summarySignature, type FileSummary } from './symbol-index.js';
-import { selectJavaOverloads, type CallShape } from './java-overloads.js';
+import { javaMayInherit, selectJavaOverloads, type CallShape } from './java-overloads.js';
 export type { CallShape } from './java-overloads.js';
 export type { FileSummary } from './symbol-index.js';
 
@@ -5778,6 +5778,36 @@ export function resolveEdges(
     if (!receiverProviderCache.has(key)) receiverProviderCache.set(key, findReceiverProviders(context, type));
     return receiverProviderCache.get(key)!;
   }
+
+  // Java: whether the class of the method `key` in `fp` may inherit a method
+  // of that name its own overload table does not list (`javaMayInherit`). A
+  // supertype is seen when its name resolves to one Java type of the repo.
+  const javaInheritCache = new Map<string, boolean>();
+  function javaMayInheritMember(fp: string, key: string): boolean {
+    const cacheKey = `${fp}\0${key}`;
+    let known = javaInheritCache.get(cacheKey);
+    if (known === undefined) {
+      const dot = key.lastIndexOf('.');
+      type JavaType = { fp: string; type: string };
+      // Heritage is recorded by a class's simple name.
+      const simple = (type: string): string => type.slice(type.lastIndexOf('.') + 1);
+      known = javaMayInherit<JavaType>(
+        { fp, type: key.slice(0, Math.max(dot, 0)) },
+        key.slice(dot + 1),
+        child => (summaries.get(child.fp)?.receiverHeritage ?? [])
+          .filter(([name]) => name === simple(child.type))
+          .map(([, parent]) => {
+            const providers = receiverProviders(child.fp, parent);
+            return providers.length === 1 && summaries.get(providers[0].fp)?.language === SupportedLanguages.Java
+              ? providers[0] : undefined;
+          }),
+        (type, member) => (fileQKeys.get(type.fp)?.get(member) ?? []).includes(`${type.type}.${member}`),
+        type => `${type.fp}\0${type.type}`,
+      );
+      javaInheritCache.set(cacheKey, known);
+    }
+    return known;
+  }
   const goReceiverFiles = new Map<string, string[]>();
   const goPackageKey = (fp: string): string => `${nodePath.dirname(fp)}\0${summaries.get(fp)?.receiverPackage ?? ''}`;
   for (const [fp, summary] of summaries) if (summary.language === SupportedLanguages.Go) {
@@ -6184,7 +6214,8 @@ export function resolveEdges(
         if (!signatures) { resolved.push(edge); continue; }
         // The caller's own overloads share `srcName`: say which one this is.
         if (rel.srcIdentityKey) edge.srcIdentityKey = rel.srcIdentityKey;
-        for (const index of selectJavaOverloads(signatures, rel.callShapes!)) {
+        const mayInherit = javaMayInheritMember(edge.dstFilePath, edge.dstQualifiedKey);
+        for (const index of selectJavaOverloads(signatures, rel.callShapes!, mayInherit)) {
           resolved.push(index === 0 ? edge : { ...edge, dstIdentityKey: `${edge.dstQualifiedKey}(${signatures[index]})` });
         }
       }

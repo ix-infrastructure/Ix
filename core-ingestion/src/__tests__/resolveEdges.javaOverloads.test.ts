@@ -432,6 +432,114 @@ public class User {
     expect(callDsts(user, id('User', 'User.maybe'))).toEqual([id('Sub', 'Sub.mix(String,String)')]);
   });
 
+  it('does not read the type of a cast to a type parameter', () => {
+    const results = [
+      parse('Sink', `public class Sink {
+    public void put(String text) {}
+    public void put(Q item) {}
+    public void put(Q[] items) {}
+}
+`),
+      parse('Q', 'public class Q {}\n'),
+      parse('User', `public class User<C> {
+    <Q> void variable(Sink sink, Object o) { sink.put((Q) o); }
+    <Q> void variables(Sink sink, Object o) { sink.put((Q[]) o); }
+    void ofTheClass(Sink sink, Object o) { sink.put((C) o); }
+    void real(Sink sink, Object o) { sink.put((Q) o); }
+    void reals(Sink sink, Object o) { sink.put((Q[]) o); }
+}
+`),
+    ];
+    const user = patchesOf(results).get('User')!;
+    // `Q` is the method's type variable there, not the class Q: nothing is known of the argument.
+    expect(callDsts(user, id('User', 'User.variable'))).toEqual([id('Sink', 'Sink.put')]);
+    expect(callDsts(user, id('User', 'User.variables'))).toEqual([id('Sink', 'Sink.put')]);
+    expect(callDsts(user, id('User', 'User.ofTheClass'))).toEqual([id('Sink', 'Sink.put')]);
+    expect(callDsts(user, id('User', 'User.real'))).toEqual([id('Sink', 'Sink.put(Q)')]);
+    expect(callDsts(user, id('User', 'User.reals'))).toEqual([id('Sink', 'Sink.put(Q[])')]);
+    const shapes = results[2].relationships.filter(r => r.dstName.endsWith('put')).flatMap(r => r.callShapes ?? []);
+    expect(shapes).toContainEqual({ argc: 1 });
+    expect(shapes.flatMap(shape => shape.argTypes ?? [])).toEqual(expect.arrayContaining(['Q', 'Q[]']));
+    expect(shapes.flatMap(shape => shape.argTypes ?? [])).not.toContain('C');
+  });
+
+  describe('a class that may inherit an overload its own table does not list', () => {
+    const BASE = 'public class Base {\n    public void own(int n) {}\n}\n';
+    const OWN = `    public void own(String s) {}
+    public void own(long n) {}
+`;
+    const user = (type: string) => parse('User', `public class User {
+    void widened(${type} s) { s.own(1); }
+    void exact(${type} s) { s.own(1L); }
+    void first(${type} s) { s.own("a"); }
+}
+`);
+    const dsts = (results: FileParseResult[], method: string): string[] =>
+      callDsts(patchesOf(results).get('User')!, id('User', `User.${method}`));
+
+    it('stays on the first overload when the argument only widens to one of the class\'s own', () => {
+      // Java calls the inherited `Base.own(int)` for `s.own(1)`, not `Sub.own(long)`.
+      const results = [parse('Base', BASE), parse('Sub', `public class Sub extends Base {\n${OWN}}\n`), user('Sub')];
+      expect(dsts(results, 'widened')).toEqual([id('Sub', 'Sub.own')]);
+      // Nothing inherited is closer than a parameter of the argument's own type.
+      expect(dsts(results, 'exact')).toEqual([id('Sub', 'Sub.own(long)')]);
+      expect(dsts(results, 'first')).toEqual([id('Sub', 'Sub.own')]);
+    });
+
+    it('looks through a superclass that does not declare the name to one that does', () => {
+      const results = [
+        parse('Base', BASE), parse('Mid', 'public class Mid extends Base {}\n'),
+        parse('Sub', `public class Sub extends Mid {\n${OWN}}\n`), user('Sub'),
+      ];
+      expect(dsts(results, 'widened')).toEqual([id('Sub', 'Sub.own')]);
+      expect(dsts(results, 'exact')).toEqual([id('Sub', 'Sub.own(long)')]);
+    });
+
+    it('still picks when every supertype is in the repo and none declares the name', () => {
+      const results = [
+        parse('Plain', 'public class Plain {\n    public void other(int n) {}\n}\n'),
+        parse('Marker', 'public interface Marker {}\n'),
+        parse('Sub', `public class Sub extends Plain implements Marker {\n${OWN}}\n`), user('Sub'),
+      ];
+      expect(dsts(results, 'widened')).toEqual([id('Sub', 'Sub.own(long)')]);
+    });
+
+    it('stays on the first overload when a supertype is outside the repo, an interface included', () => {
+      for (const clause of ['extends java.util.ArrayList<String>', 'implements Runnable']) {
+        const body = clause.startsWith('implements') ? '    public void run() {}\n' : '';
+        const results = [parse('Sub', `public class Sub ${clause} {\n${OWN}${body}}\n`), user('Sub')];
+        expect(dsts(results, 'widened')).toEqual([id('Sub', 'Sub.own')]);
+        expect(dsts(results, 'exact')).toEqual([id('Sub', 'Sub.own(long)')]);
+      }
+    });
+
+    it('makes the same choice for a call inside the declaring file, which sees only that file', () => {
+      const inside = `    void widened() { own(1); }
+    void exact() { own(1L); }
+`;
+      const own = (results: FileParseResult[], method: string): string[] =>
+        callDsts(patchesOf(results).get('Sub')!, id('Sub', `Sub.${method}`), true);
+      // The superclass is in another file: it may declare `own(int)`.
+      const apart = [parse('Base', BASE), parse('Sub', `public class Sub extends Base {\n${OWN}${inside}}\n`)];
+      expect(own(apart, 'widened')).toEqual([id('Sub', 'Sub.own')]);
+      expect(own(apart, 'exact')).toEqual([id('Sub', 'Sub.own(long)')]);
+      // In the same file it is seen: it declares the name, or it does not.
+      const together = (base: string) => [parse('Sub', `public class Sub extends Base {\n${OWN}${inside}}\n\nclass Base {\n${base}}\n`)];
+      expect(own(together('    public void own(int n) {}\n'), 'widened')).toEqual([id('Sub', 'Sub.own')]);
+      expect(own(together('    public void other(int n) {}\n'), 'widened')).toEqual([id('Sub', 'Sub.own(long)')]);
+      // No supertype at all: decided as before.
+      expect(own([parse('Sub', `public class Sub {\n${OWN}${inside}}\n`)], 'widened')).toEqual([id('Sub', 'Sub.own(long)')]);
+    });
+
+    it('keeps the issue\'s boxed call on handle(Integer): Over has no supertype', () => {
+      const results = [parse('Over', OVER), parse('User', USER)];
+      expect(results[0].receiverHeritage).toBeUndefined();
+      const patch = patchesOf(results).get('User')!;
+      expect(callDsts(patch, id('User', 'User.useText'))).toEqual([id('Over', 'Over.handle')]);
+      expect(callDsts(patch, id('User', 'User.useNumber'))).toEqual([id('Over', 'Over.handle(Integer)')]);
+    });
+  });
+
   it('leaves a new expression on the class node, whichever constructor it calls', () => {
     const results = [
       parse('Point', `public class Point {
@@ -539,6 +647,26 @@ describe('selectJavaOverload', () => {
     // A parameter that may be a type parameter takes anything.
     expect(pick(['String', 'T'], ['int'])).toBe('T');
     expect(pick(['String', 'T', 'Integer'], ['int'])).toBe('String');
+  });
+
+  it('takes only an exact overload when the class may inherit one it does not list', () => {
+    const inherited = (signatures: string[], argTypes: Array<string | null>): string =>
+      signatures[selectJavaOverload(signatures, { argc: argTypes.length, ...(argTypes.some(t => t !== null) ? { argTypes } : {}) }, true)];
+    // Widening, boxing, Object, a supertype and varargs spreading: an inherited overload could be closer.
+    expect(inherited(['String', 'long'], ['int'])).toBe('String');
+    expect(inherited(['String', 'Integer'], ['int'])).toBe('String');
+    expect(inherited(['String', 'Object'], ['int'])).toBe('String');
+    expect(inherited(['String', 'Animal'], ['Dog'])).toBe('String');
+    expect(inherited(['String', 'int...'], ['int', 'int'])).toBe('String');
+    expect(inherited(['String', 'double', 'long'], ['int'])).toBe('String');
+    // Exact for every argument: nothing is closer.
+    expect(inherited(['String', 'long'], ['long'])).toBe('long');
+    expect(inherited(['String', 'int', 'long'], ['int'])).toBe('int');
+    expect(inherited(['String', 'int,String'], ['int', 'String'])).toBe('int,String');
+    expect(inherited(['String', ''], [])).toBe('');
+    expect(inherited(['int', 'String[]'], ['String[]'])).toBe('String[]');
+    // Types that are not known are decided by argument count, as without it.
+    expect(inherited(['String', 'int,int'], [null, null])).toBe('int,int');
   });
 
   it('matches arrays and the varargs position', () => {

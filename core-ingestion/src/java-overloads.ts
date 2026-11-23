@@ -5,7 +5,8 @@
  * call site shows on its face: how many arguments, and the type of each
  * argument that is evident without inference. This is a small part of Java's
  * overload resolution, deliberately: it never follows a method's return type,
- * a generic bound or a class hierarchy. Whatever it cannot decide goes to the
+ * a generic bound or a class hierarchy (it only asks whether the class may
+ * inherit an overload it cannot see, `javaMayInherit`). Whatever it cannot decide goes to the
  * first overload, which is where every call went before overloads had nodes
  * of their own.
  */
@@ -155,6 +156,41 @@ function onlyOverload(applications: Application[]): number {
   return applications.length > 0 && applications.every(a => a.index === applications[0].index) ? applications[0].index : 0;
 }
 
+/** The methods every class has from `Object`, whatever it extends. */
+const OBJECT_METHODS = new Set(['equals', 'hashCode', 'toString', 'getClass', 'notify', 'notifyAll', 'wait', 'clone', 'finalize']);
+
+/**
+ * Whether `type` may inherit a method named `member` that its own overload
+ * table does not list: the name is one of `Object`'s, or some supertype
+ * declares it, or some supertype cannot be seen (it is outside the repo, or
+ * its name does not say which type it is). `supertypes` gives a type's
+ * declared supertypes, `undefined` for one that cannot be seen; `declares`
+ * says whether a type that can be seen declares the method itself.
+ */
+export function javaMayInherit<T>(
+  type: T,
+  member: string,
+  supertypes: (type: T) => Array<T | undefined>,
+  declares: (type: T, member: string) => boolean,
+  keyOf: (type: T) => string,
+): boolean {
+  if (OBJECT_METHODS.has(member)) return true;
+  const seen = new Set<string>([keyOf(type)]);
+  const pending = [type];
+  for (let i = 0; i < pending.length; i++) {
+    for (const parent of supertypes(pending[i])) {
+      if (parent === undefined || declares(parent, member)) return true;
+      if (seen.has(keyOf(parent))) continue;
+      seen.add(keyOf(parent));
+      pending.push(parent);
+    }
+  }
+  return false;
+}
+
+/** The application takes every argument as exactly its own type. */
+const exact = (a: Application): boolean => !a.variable && a.fits.every(f => typeof f === 'object' && f.rank === 4);
+
 /**
  * The overload a call of this shape calls: an index into `signatures`, the
  * erased parameter lists of one `Container.name` in declaration order (see
@@ -172,19 +208,27 @@ function onlyOverload(applications: Application[]): number {
  * 5. Otherwise Java's phases: without boxing, then with it, then spreading
  *    over varargs. The first phase with a fit decides, and within it the
  *    overload more specific than every other; when there is none, 0.
+ *
+ * `mayInherit`: the class may inherit a method of this name that `signatures`
+ * does not list (`javaMayInherit`). An inherited `own(int)` is what
+ * `s.own(1)` calls, though the class's own table has only `own(String)` and
+ * `own(long)` and one of them can take the argument. So an overload chosen by
+ * 3 or 5 then stands only when it takes every argument as exactly its own
+ * type, which nothing inherited can be closer than; one that needs widening,
+ * boxing, a supertype or varargs spreading is 0.
  */
-export function selectJavaOverload(signatures: readonly string[], shape: CallShape): number {
+export function selectJavaOverload(signatures: readonly string[], shape: CallShape, mayInherit = false): number {
   const byCount = applicationsByCount(signatures, shape);
   const viable = byCount.filter(a => !a.fits.includes('no'));
   if (viable.length === 0) return 0;
 
   const allKnown = (shape.argTypes ?? []).filter(t => t != null).length === shape.argc;
   if (!allKnown) return byCount.every(a => a.index === byCount[0].index) ? byCount[0].index : 0;
-  if (viable.every(a => a.index === viable[0].index)) return viable[0].index;
+  if (viable.every(a => a.index === viable[0].index)) return !mayInherit || viable.some(exact) ? viable[0].index : 0;
 
   if (viable.some(a => a.fits.includes('maybe'))) {
     // Nothing is more specific than an exact fit, whatever the others turn out to be.
-    return onlyOverload(viable.filter(a => !a.variable && a.fits.every(f => typeof f === 'object' && f.rank === 4)));
+    return onlyOverload(viable.filter(exact));
   }
 
   // Every fit is definite from here on.
@@ -195,13 +239,14 @@ export function selectJavaOverload(signatures: readonly string[], shape: CallSha
   // More specific: no argument fits worse, and one fits better.
   const beats = (a: Application, b: Application): boolean =>
     fitsOf(a).every((f, i) => f.rank >= fitsOf(b)[i].rank) && fitsOf(a).some((f, i) => f.rank > fitsOf(b)[i].rank);
-  return onlyOverload(inPhase.filter(a => inPhase.every(b => b.index === a.index || beats(a, b))));
+  const best = inPhase.filter(a => inPhase.every(b => b.index === a.index || beats(a, b)));
+  return !mayInherit || best.some(exact) ? onlyOverload(best) : 0;
 }
 
 /**
  * The overloads the call sites of one relationship call: the distinct indices
  * `selectJavaOverload` gives its shapes, ascending.
  */
-export function selectJavaOverloads(signatures: readonly string[], shapes: readonly CallShape[]): number[] {
-  return [...new Set(shapes.map(shape => selectJavaOverload(signatures, shape)))].sort((a, b) => a - b);
+export function selectJavaOverloads(signatures: readonly string[], shapes: readonly CallShape[], mayInherit = false): number[] {
+  return [...new Set(shapes.map(shape => selectJavaOverload(signatures, shape, mayInherit)))].sort((a, b) => a - b);
 }
