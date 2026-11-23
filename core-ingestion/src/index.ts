@@ -5583,8 +5583,8 @@ export function resolveEdges(
   /**
    * A Java type name in scope, in the order Java looks: this file, a
    * single-type import, this package, an on-demand import (`import p.*`,
-   * summarized as `p`). The first that has it decides; several files there
-   * mean no type. A qualified `p.T` names its package (or `Outer.T` a nested
+   * summarized as `p`); the last two give top-level types only. The first
+   * that has it decides; several files there mean no type. A qualified `p.T` names its package (or `Outer.T` a nested
    * type of a type in scope). Summaries without Java facts have no package,
    * so they provide nothing.
    */
@@ -5614,9 +5614,12 @@ export function resolveEdges(
     // A single-type import shadows the package, even of a type not in the repo.
     const single = imports.filter(fq => fq.endsWith(`.${type}`));
     if (single.length) return as(single.flatMap(named));
-    const samePackage = summary?.receiverPackage ? inPackage(summary.receiverPackage, type) : [];
+    // A package or an on-demand import puts its top-level types in scope, not
+    // the types nested in them (`Outer.List` is not `List` to another file).
+    const topLevel = (fps: string[]): string[] => fps.filter(fp => fileQKeys.get(fp)?.get(type)?.includes(type));
+    const samePackage = summary?.receiverPackage ? topLevel(inPackage(summary.receiverPackage, type)) : [];
     if (samePackage.length) return as(samePackage);
-    return as(imports.flatMap(pkg => inPackage(pkg, type)));
+    return as(topLevel(imports.flatMap(pkg => inPackage(pkg, type))));
   }
 
   const receiverProviderCache = new Map<string, Array<{ fp: string; type: string }>>();

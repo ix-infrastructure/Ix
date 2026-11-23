@@ -456,6 +456,29 @@ public class Evaluator {
       }
     });
 
+    // Another file's nested type is not in scope by its bare name, whatever it is called.
+    it('is not referenced when it is nested in another class', () => {
+      const nested = (pkg: string, name: string) => parse(`/repo/${pkg.replace('.', '/')}/Outer.java`,
+        `package ${pkg};\npublic class Outer {\n  public static final class ${name} {\n    public static Object of() { return null; }\n  }\n}\n`);
+      const user = (imports: string, name: string) => parse('/repo/demo/a/Use.java',
+        `package demo.a;\n${imports}public class Use {\n  Object use() { return ${name}.of(); }\n}\n`);
+      for (const name of ['List', 'Gate']) {
+        for (const [pkg, imports] of [['demo.a', ''], ['demo.a', 'import java.util.*;\n'], ['other', 'import other.*;\n']]) {
+          const files = [nested(pkg, name), user(imports, name)];
+          expect(references(resolveEdges(files))).toEqual([]);
+          expect(referenceEdges(files)).toEqual([]);
+        }
+      }
+    });
+
+    it('is referenced when nested and named through a single-type import or its outer class', () => {
+      const outer = parse('/repo/other/Outer.java',
+        'package other;\npublic class Outer {\n  public static final class List {\n    public static List of() { return null; }\n  }\n}\n');
+      const imported = parse('/repo/demo/a/Use.java',
+        'package demo.a;\nimport other.Outer.List;\npublic class Use {\n  Object use() { return List.of(); }\n}\n');
+      expect(referenceEdges([outer, imported])).toEqual([expect.objectContaining({ dst: 'other/Outer.java::class:List', tier: 'type' })]);
+    });
+
     it('still gets no plain type reference, as before', () => {
       const typed = parse('/repo/demo/a/Typed.java', 'package demo.a;\npublic class Typed {\n  List field;\n  void use(List p) { List l = p; }\n}\n');
       expect(typed.relationships.filter(r => r.predicate === 'REFERENCES')).toEqual([]);
