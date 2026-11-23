@@ -419,6 +419,129 @@ describe('member calls and calls to locals across files (#1020)', () => {
     expect(callsFrom(resolveEdges([lib, caller]), 'src/b.js')).toEqual(['use -> src/api.js:validate']);
   });
 
+  // A local declared first and given the module later is still a module.
+  it('JavaScript: a local assigned a module after its declaration still reaches the module function', () => {
+    const lib = parse('src/api.js', 'function validate(x) { return x; }\nmodule.exports = { validate };\n');
+    const caller = parse('src/b.js', [
+      'function guarded(x) {',
+      '  let api;',
+      "  try { api = require('./api'); } catch (e) {}",
+      '  return api.validate(x);',
+      '}',
+      'function hoisted(x) {',
+      '  var api;',
+      "  if (x) api = require('./api');",
+      '  return api.validate(x);',
+      '}',
+      'async function dynamic(x) {',
+      '  let api = null;',
+      "  api = await import('./api');",
+      '  return api.validate(x);',
+      '}',
+      'module.exports = { guarded, hoisted, dynamic };',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.js').sort()).toEqual([
+      'dynamic -> src/api.js:validate', 'guarded -> src/api.js:validate', 'hoisted -> src/api.js:validate',
+    ]);
+  });
+
+  it('TypeScript: a local assigned a namespace import after its declaration still reaches the module function', () => {
+    const lib = parse('src/a.ts', 'export function validate(x: number) { return x; }\n');
+    const caller = parse('src/b.ts', [
+      "import * as a from './a';",
+      'export function late() { let m; m = a; return m.validate(1); }',
+      'export function either(o: any) { let m = null; m = o ? o : a; return m.validate(1); }',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts').sort()).toEqual([
+      'either -> src/a.ts:validate', 'late -> src/a.ts:validate',
+    ]);
+  });
+
+  it('JavaScript: a local reassigned from another local or parameter is still a non-module receiver', () => {
+    const lib = parse('src/a.js', 'export function validate(x) { return x; }\n');
+    const caller = parse('src/b.js', [
+      "import { validate } from './a';",
+      'export function swap(conn, other) { let c; c = conn; c = other; return c.validate(1); }',
+      'export function made() { let c = make(); c = make(); return c.validate(1); }',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.js').filter(e => e.endsWith(':validate'))).toEqual([]);
+  });
+
+  it('JavaScript: a module stored on a this field still reaches the module function', () => {
+    const lib = parse('src/api.js', 'function validate(x) { return x; }\nmodule.exports = { validate };\n');
+    const caller = parse('src/b.js', [
+      "const api = require('./api');",
+      'class Lazy {',
+      "  constructor() { this.api = require('./api'); }",
+      '  run() { return this.api.validate(1); }',
+      '}',
+      'class Either {',
+      '  constructor(f) { this.u = f ?? api; }',
+      '  run() { return this.u.validate(1); }',
+      '}',
+      'module.exports = { Lazy, Either };',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.js').sort()).toEqual([
+      'Either.run -> src/api.js:validate', 'Lazy.run -> src/api.js:validate',
+    ]);
+  });
+
+  it('TypeScript: a parameter property defaulting to a module still reaches the module function', () => {
+    const lib = parse('src/a.ts', 'export function validate(x: number) { return x; }\n');
+    const caller = parse('src/b.ts', [
+      "import * as a from './a';",
+      'export class Holder {',
+      '  constructor(private u = a) {}',
+      '  run() { return this.u.validate(1); }',
+      '}',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts')).toEqual(['Holder.run -> src/a.ts:validate']);
+  });
+
+  it('Python: a module stored on self, or imported inside a function with a fallback, still reaches the module function', () => {
+    const lib = parse('pkg/api.py', 'def validate(x):\n    return x\n');
+    const caller = parse('pkg/b.py', [
+      'import importlib',
+      'from pkg import api',
+      '',
+      'class Either:',
+      '    def __init__(self, impl):',
+      '        self.api = impl or api',
+      '    def run(self):',
+      '        return self.api.validate(1)',
+      '',
+      'class Dyn:',
+      '    def __init__(self):',
+      "        self.api = importlib.import_module('pkg.api')",
+      '    def run(self):',
+      '        return self.api.validate(1)',
+      '',
+      'def optional(x):',
+      '    try:',
+      '        from pkg import api',
+      '    except ImportError:',
+      '        api = None',
+      '    return api.validate(x)',
+      '',
+      'def renamed(x):',
+      '    try:',
+      '        import pkg.api as mod',
+      '    except ImportError:',
+      '        mod = None',
+      '    return mod.validate(x)',
+      '',
+    ].join('\n'));
+    expect([...new Set(callsFrom(resolveEdges([lib, caller]), 'pkg/b.py'))].sort()).toEqual([
+      'Dyn.run -> pkg/api.py:validate', 'Either.run -> pkg/api.py:validate',
+      'optional -> pkg/api.py:validate', 'renamed -> pkg/api.py:validate',
+    ]);
+  });
+
   // AMD binds each callback parameter, by position, to the module its
   // dependency array names: as much a module as a `require(...)` local.
   it('JavaScript: a member call on an AMD define() dependency still reaches the module function', () => {

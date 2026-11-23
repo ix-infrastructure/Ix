@@ -1234,7 +1234,7 @@ const PY_SCOPE_FUNCTIONS = new Set(['function_definition', 'lambda']);
 const PY_SCOPE_COMPREHENSIONS = new Set(['list_comprehension', 'set_comprehension', 'dictionary_comprehension', 'generator_expression']);
 const PY_SCOPE_WALK = [...PY_SCOPE_FUNCTIONS, ...PY_SCOPE_COMPREHENSIONS, 'class_definition',
   'assignment', 'augmented_assignment', 'for_statement', 'for_in_clause', 'as_pattern', 'named_expression',
-  'global_statement', 'call'];
+  'global_statement', 'call', 'import_statement', 'import_from_statement'];
 
 /** Every name a JS/TS binding pattern (parameter, declarator name) binds. */
 function jsTsPatternNames(node: any, out: Set<string>): void {
@@ -1520,6 +1520,9 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
     if (!prop) return;
     const root = referenceRoot(value, python);
     if (typeof root === 'string') pendingProperties.push({ prop, start, frame: frames[frames.length - 1], name: root });
+    else if (root === undefined) {
+      for (const name of valueRoots(value, python) ?? []) pendingProperties.push({ prop, start, frame: frames[frames.length - 1], name });
+    }
   };
   const bindAlias = (frame: CallScopeFrame | undefined, names: Set<string>, roots: string[]): void => {
     if (!frame || frame.moduleLike) return;
@@ -1553,7 +1556,11 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
       const names = new Set<string>();
       if (python) pythonTargetNames(param, names);
       else jsTsPatternNames(param, names);
-      bindValue(frame, names, index++ < modules ? [MODULE_ROOT] : parameterRoots(param, python));
+      const paramRoots = index++ < modules ? [MODULE_ROOT] : parameterRoots(param, python);
+      bindValue(frame, names, paramRoots);
+      if (!python && paramRoots && param?.namedChildren?.some((c: any) => c.type === 'accessibility_modifier')) {
+        for (const name of names) for (const r of paramRoots) pendingProperties.push({ prop: name, start: param.startIndex, frame: frame.outer, name: r });
+      }
     }
   };
   // The innermost function (Python: or class) a `var` / assignment belongs to.
@@ -1616,6 +1623,20 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
       } else if (type === 'named_expression') {
         pythonTargetNames(node.childForFieldName?.('name'), names);
         bind(functionFrame(), names);
+      } else if (type === 'import_statement' || type === 'import_from_statement') {
+        // An import inside a function binds a module (or a name from one), not
+        // a non-module local, even when another branch rebinds the name
+        // (`try: import api` / `except ImportError: api = None`).
+        const module = type === 'import_from_statement' ? node.childForFieldName?.('module_name') : undefined;
+        for (const child of node.namedChildren) {
+          if (child.id === module?.id) continue;
+          if (child.type === 'aliased_import') names.add(child.childForFieldName?.('alias')?.text ?? '');
+          // `import a.b` binds `a`.
+          else if (child.type === 'dotted_name') names.add(child.namedChild(0)?.text ?? '');
+        }
+        names.delete('');
+        const frame = functionFrame();
+        if (frame && frame.type !== 'class_definition') bindAlias(frame, names, [MODULE_ROOT]);
       } else if (type === 'global_statement') {
         const frame = functionFrame();
         if (frame) {
@@ -1698,6 +1719,20 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
       const left = node.childForFieldName?.('left');
       if (left?.type === 'member_expression') {
         assignProperty(left.childForFieldName?.('property')?.text, node.childForFieldName?.('right'), node.startIndex);
+      } else if (left?.type === 'identifier') {
+        const roots = valueRoots(node.childForFieldName?.('right'), false);
+        if (roots !== undefined) {
+          for (let f: CallScopeFrame | undefined = frames[frames.length - 1]; f; f = f.outer) {
+            if (f.hidden || f.moduleLike) continue;
+            if (f.names.has(left.text) || f.aliases?.has(left.text)) {
+              const merged = [...(f.aliases?.get(left.text) ?? []), ...roots];
+              f.names.delete(left.text);
+              f.calleeNames.delete(left.text);
+              bindAlias(f, new Set([left.text]), merged);
+              break;
+            }
+          }
+        }
       }
     } else if (type === 'public_field_definition' || type === 'field_definition') {
       // A class field holding a reference: `validate = validate`.
