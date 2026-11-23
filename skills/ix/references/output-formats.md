@@ -110,6 +110,17 @@ answer (exit 0) adds `resolutionNotices`: one record per guess, with `code`
 match also sets `resolutionMode: "fuzzy"`. These keys are part of the typed
 answers and are pinned by the same test.
 
+**An overloaded method is one target.** A name that is one method with several
+overloads (Java) resolves to the first overload, exit 0 also under `--strict`,
+with a `resolutionNotices` entry of `code: "overloaded_target"`. Its
+`overloads` array lists every overload as `{ id, line, signature }`, the
+answered one first; `candidates` is the answered row alone and `total` is 1,
+since `--pick <n>` counts the method once. Pass another overload's `id` as the
+target to answer for it. In any `candidates` list, a row that stands for an
+overloaded method carries the same `overloads` array. llm prints `diagnostic
+code=overloaded_target ... overloads=<n>` and one `overload name=... line=...
+id=<full id>` record each.
+
 Two records predate the envelope and keep their shape for now:
 
 - `ix locate --strict` on an ambiguous name puts the slug in `code`, not
