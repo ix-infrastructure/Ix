@@ -446,6 +446,20 @@ describe('member calls and calls to locals across files (#1020)', () => {
     ]);
   });
 
+  it('JavaScript: a named function expression still reaches itself', () => {
+    const file = parse('src/b.js', 'export const fact = function fact(n) { return n ? fact(n - 1) : 1; };\n');
+    const patch = buildPatchWithResolution(file, 'hash', 'ws', resolveEdgesWithTier([file]));
+    const calls = patch.ops.filter((op: any) => op.type === 'UpsertEdge' && op.predicate === 'CALLS') as any[];
+    expect(calls).toHaveLength(1);
+    expect(calls[0].src).toBe(calls[0].dst);
+  });
+
+  it('JavaScript: a parameter named like its function expression is still the parameter', () => {
+    const lib = parse('src/a.js', 'export function run(x) { return x; }\n');
+    const caller = parse('src/b.js', "import { run } from './a';\nexport const f = function run(run) { return run(1); };\n");
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.js')).toEqual([]);
+  });
+
   it('JavaScript: the callback of a dynamic import takes the module', () => {
     const lib = parse('src/api.js', 'export function validate(x) { return x; }\n');
     const caller = parse('src/b.js', [

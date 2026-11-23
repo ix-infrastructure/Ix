@@ -1865,12 +1865,13 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
     }
     if (JS_TS_SCOPE_FUNCTIONS.has(type)) {
       const frame = newFrame(node, type, node.childForFieldName?.('body'));
-      // A named function expression's own name is visible only inside it.
+      // A named function expression's own name is visible only inside it. It
+      // names an entity the parser extracts, so a plain call of it stays a call
+      // of that function (recursion), like `const helper = () => ...`.
       if (type === 'function_expression' || type === 'function' || type === 'generator_function') {
         const own = node.childForFieldName?.('name');
         if (own) frame.names.add(own.text);
       }
-      for (const name of frame.names) frame.calleeNames.add(name);
       bindParameters(frame, node.childForFieldName?.('parameters') ?? node.childForFieldName?.('parameter'), invocations.get(node.id));
       frames.push(frame);
     } else if (JS_TS_SCOPE_BLOCKS.has(type)) {
