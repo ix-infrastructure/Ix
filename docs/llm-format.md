@@ -788,9 +788,9 @@ item name=parseFile kind=method
 ```
 context target=Widget target_kind=class target_path=src/widget.ts stale=false classification=current entities=2 relationships=1 claims=1 evidence=7
 evidence kind=target title="Widget (class)" path=src/widget.ts
+evidence kind=structural title="calls: mount (src/dom.ts:8-20)"
 evidence kind=structural title="member render" path=src/widget.ts lines=12-40
 evidence kind=claim title="renders to DOM"
-evidence kind=relationship title="Widget --calls--> mount"
 ```
 
 One header record, then the ranked evidence. The header always carries
@@ -807,6 +807,12 @@ how many (`used by (3 of 214): ...`); `--format json` carries the two numbers
 as `count: { shown, total }`. The entity, relationship and claim
 lists stay counts here — `llm` is the token-minimal surface and the ranked
 evidence is what it exists to deliver; `--format json` carries the rest.
+
+For a class target, direct outgoing `EXTENDS`, `REFERENCES` and `CALLS` edges
+become structural rows ahead of members, two-step related files and neighbouring
+definitions. Destinations are grouped four per row, with locations when known;
+callees beyond the facts collector's first four remain eligible for the evidence
+budget when their edges are in the bundle.
 
 `path=` and `lines=` say where an item is defined, when the graph knows, so a
 reader can open it instead of searching for it. For a file target, members are
