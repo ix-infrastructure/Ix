@@ -43,6 +43,18 @@ describe("issue companion expansion", () => {
     expect(result[2].score).toBeLessThan(primary[0].score);
   });
 
+  it("scales companions off the strongest primary score, not a pinned leader's", async () => {
+    const files = repo({ "pkg/worker.py": "def run_job(): pass", "pkg/__init__.py": "from .worker import run_job\n", "other.py": "x = 1" });
+    const primary: RankedFile[] = [
+      { path: "pkg/worker.py", score: 3, reason: "pinned" }, { path: "other.py", score: 300, reason: "bm25" },
+    ];
+    const result = await expandIssueCompanions("The job fails", primary, { repo: files });
+    const companion = result.find((r) => r.companion);
+    expect(companion?.path).toBe("pkg/__init__.py");
+    expect(companion!.score).toBeGreaterThan(primary[0].score);
+    expect(companion!.score).toBeLessThan(300);
+  });
+
   it.each([
     ["pkg/worker.py", "from .types import JobError as JobFailure\ndef run_job(): pass", "pkg/types.py", "class JobError(Exception): pass"],
     ["src/worker.ts", 'import { JobError as JobFailure } from "./types.js";\nexport function runJob() {}', "src/types.ts", "export class JobError {}"],
