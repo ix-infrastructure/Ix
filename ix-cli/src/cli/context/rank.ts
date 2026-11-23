@@ -150,6 +150,12 @@ function structuralEvidence(
       ...locationField(container),
     }, container);
   }
+  // A class's own dependencies precede its members and two-step neighbours.
+  // Read the bundle's edges as well as the sampled facts: calleeRefs only
+  // holds four, and REFERENCES/EXTENDS are not collected as outward facts.
+  if (input.resolved.kind === "class") {
+    structural.push(...classOutwardRows(input, fresh, show));
+  }
   const leadingMembers = related(input.facts.members, input.facts.memberRefs, LEADING_MEMBERS);
   const pushMembers = (members: typeof leadingMembers) => {
     for (const { name, ref } of members) {
@@ -211,6 +217,46 @@ function structuralEvidence(
     });
   });
   return items;
+}
+
+/** Fold direct class dependencies into small rows, without a flat callee cap. */
+function classOutwardRows(
+  input: RankInput,
+  fresh: (id: string | undefined) => boolean,
+  show: (ids: string[]) => void,
+): Structural[] {
+  const rows: Structural[] = [];
+  const byId = new Map<string, EntityLocation>(input.entities.map((ref) => [ref.id, ref]));
+  // Located facts survive even when the context service omits a callee from
+  // its graph slice, and carry more precise locations than node summaries.
+  for (const ref of input.facts.calleeRefs ?? []) byId.set(ref.id, ref);
+  const target = input.resolved.id;
+  for (const predicate of ["EXTENDS", "REFERENCES", "CALLS"]) {
+    const ids = new Set(input.relationships
+      .filter((edge) => edge.src === target && edge.predicate === predicate)
+      .map((edge) => edge.dst));
+    if (predicate === "CALLS") for (const ref of input.facts.calleeRefs ?? []) ids.add(ref.id);
+    const refs = [...ids].filter((id) => id !== target && fresh(id)).sort(cmp);
+    // Four destinations per row bounds an individual row's size, rather than
+    // discarding all calls after the first four. Normal evidence budgets cut
+    // the remaining rows when a class has more dependencies than can fit.
+    for (let index = 0; index < refs.length; index += 4) {
+      const chunk = refs.slice(index, index + 4);
+      const names = chunk.map((id) => {
+        const ref = byId.get(id);
+        if (!ref) return id;
+        const where = ref.path ? formatLocation(locationFields(ref) as EvidenceLocation) : undefined;
+        return where ? `${ref.name} (${where})` : ref.name;
+      });
+      rows.push({
+        id: `outward:${predicate}:${chunk[0]}`, source: "context.edges",
+        title: `${predicate.toLowerCase()}: ${names.join(", ")}`,
+        reason: "one step outward from the target class", refs: chunk,
+      });
+      show(chunk);
+    }
+  }
+  return rows;
 }
 
 /** One row naming every related file not already shown. */
