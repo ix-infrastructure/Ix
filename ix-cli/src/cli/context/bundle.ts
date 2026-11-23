@@ -33,9 +33,14 @@ export function buildBundle(input: BuildInput): ContextBundle {
   const prov = provenanceSource(provenance);
 
   const gathered = gatherEntities(input);
-  // Relationships: graph edges, ordered deterministically.
+  // Relationships: graph edges, ordered deterministically. A class's members'
+  // calls out of it are added: the backend's slice is the class's CONTAINS
+  // neighbourhood, so without them nothing says what the class uses (#1138).
   const contextEdges = context.edges.length > 0 ? context.edges : (context.edgeSummaries ?? []);
-  const relationships = [...contextEdges]
+  const edgeKey = (e: { src: string; dst: string; predicate: string }) => `${e.src}\u0000${e.dst}\u0000${e.predicate}`;
+  const contextKeys = new Set(contextEdges.map(edgeKey));
+  const memberCalls = (facts.memberCalls ?? []).filter((e) => !contextKeys.has(edgeKey(e)));
+  const relationships = [...contextEdges, ...memberCalls]
     .sort((a, b) => cmp(a.src, b.src) || cmp(a.dst, b.dst) || cmp(a.predicate, b.predicate))
     .map((edge) => ({ src: edge.src, dst: edge.dst, predicate: edge.predicate }));
   const entities = placeIssueEntities(input, gathered.entities, relationships, gathered.discoveredOnly);
@@ -170,6 +175,11 @@ function leadingRefs(input: BuildInput): EntityLocation[] {
     ...(facts.neighbourRefs ?? []),
     ...(facts.topCallerRefs ?? []),
     ...(facts.topDependentRefs ?? []),
+    // For a class, what its methods call: the class node calls little or
+    // nothing itself. After the callers and dependents, which say who relies
+    // on the class: there can be eight of these, and ahead of those they
+    // cut them first at a low `--max-entities`.
+    ...(facts.memberCalleeRefs ?? []),
     // Two steps out, ranked. After everything one step out, and ahead of the
     // backend's context nodes, which are ordered by kind and name only.
     ...(facts.relatedRefs ?? []),

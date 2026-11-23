@@ -9,10 +9,12 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref so rapid pushes don't pile up runners.
+# Cancel superseded runs on the same ref so rapid pushes don't pile up runners - but PRs only. For push, github.ref is refs/heads/main, so cancelling would let
+# each merge kill the CI run of the merge before it, leaving commits on main with
+# no completed result (same reasoning as codeql.yml).
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ── Fast static gate ─────────────────────────────────────────────────────
