@@ -177,6 +177,8 @@ import { LANGUAGE_QUERIES } from './queries.js';
 import { classifyFileRole } from './role-classifier.js';
 import type { RoleClassification } from './role-classifier.js';
 import { callReceiver, collectReceiverFacts } from './receiver-types.js';
+import { javaArgumentTypes, javaOverloadSignatures, selectJavaOverload } from './java-overloads.js';
+import { qualifiedKey } from './symbol-key.js';
 import { summarySignature, type FileSummary } from './symbol-index.js';
 export type { FileSummary } from './symbol-index.js';
 
@@ -186,6 +188,8 @@ export type { FileSummary } from './symbol-index.js';
 
 export interface ParsedEntity {
   name: string;
+  /** Java overload parameter types, e.g. `(String,int)`. Absent for other symbols. */
+  signature?: string;
   /** One of `NODE_KINDS` (schema.ts): "class", "function", "method", etc. */
   kind: NodeKind;
   lineStart: number;
@@ -205,6 +209,8 @@ export interface ParsedEntity {
 export interface ParsedChunk {
   /** Semantic name of the chunk (function/class/trait name), or null for file_body. */
   name: string | null;
+  /** Same overload identity as the entity this chunk defines. */
+  signature?: string;
   /** Chunk kind: "function" | "method" | "class" | "interface" | "trait" | "module_block" | "file_body" */
   chunkKind: string;
   lineStart: number;
@@ -239,6 +245,8 @@ export interface ParsedRelationship {
   importAliased?: boolean;
   /** PHP call shape used to distinguish constructors from same-named functions. */
   phpCallKind?: 'constructor' | 'function' | 'member' | 'static';
+  /** Java typed calls: argument hints for every distinct invocation of this member. */
+  javaArguments?: Array<Array<string | null>>;
   /**
    * JS/TS only: whether this identifier use is lexically bound to its matching
    * import. False means a parameter or local declaration shadows that import.
@@ -2942,6 +2950,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       endByte: number;
       language: SupportedLanguages;
       container?: string;
+      signature?: string;
     }> = [];
 
     // Track class ranges for containment: [name, startLine, endLine]
@@ -2970,6 +2979,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     };
     // Track seen calls per enclosing scope to avoid duplicate CALLS edges
     const seenCalls = new Map<string, Set<string>>();
+    const javaArgumentVariants = new Map<ParsedRelationship, Set<string>>();
     // Track seen type references per enclosing class/file to avoid duplicate REFERENCES edges
     const seenRefs = new Map<string, Set<string>>();
     // Map function name → (param name → declared type) for typed-parameter qualifier substitution
@@ -3070,6 +3080,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       }
     }
     const seenSignatures = new Set<string>();
+    const javaSignatures = language === SupportedLanguages.Java ? javaOverloadSignatures(pass1Matches) : new Map<number, string>();
 
     // --- First pass: collect definitions ---
     for (const match of pass1Matches) {
@@ -3135,6 +3146,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         }
 
         const defNode = defCapture.node;
+        const signature = javaSignatures.get(defNode.id);
         const lineStart = defNode.startPosition.row + 1;
         const lineEnd = defNode.endPosition.row + 1;
         const startByte = defNode.startIndex;
@@ -3144,7 +3156,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         // For Go methods the receiver type IS the container — methods are defined
         // outside the struct body so findEnclosing() always returns null for them.
         // The receiver.type capture (emitted by the Go method queries) overrides this.
-        const enclosing = findEnclosing(classRanges, lineStart, name);
+        // Overloaded Java constructors have the class's name; retain the owner
+        // when assigning their new keys. Other declarations keep existing ids.
+        const enclosing = findEnclosing(classRanges, lineStart,
+          signature && defCapture.name === 'definition.constructor' ? '' : name);
         const receiverCapture = match.captures.find((c: any) => c.name === 'receiver.type');
         // heritageClassCapture is set by the Go interface method query, where @heritage.class
         // captures the interface name and serves as the container (like receiver.type for structs).
@@ -3157,6 +3172,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
 
         entities.push({
           name,
+          ...(signature ? { signature } : {}),
           kind,
           lineStart,
           lineEnd,
@@ -3171,6 +3187,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
 
         pendingChunks.push({
           name,
+          ...(signature ? { signature } : {}),
           chunkKind: kind,
           lineStart,
           lineEnd,
@@ -3185,7 +3202,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         }
 
         if (effectiveContainer) {
-          relationships.push({ srcName: effectiveContainer, dstName: name, predicate: 'CONTAINS' });
+          relationships.push({ srcName: effectiveContainer, dstName: signature ? qualifiedKey({ name, container: effectiveContainer, signature }) : name, predicate: 'CONTAINS' });
         } else {
           relationships.push({ srcName: fileName, dstName: name, predicate: 'CONTAINS' });
         }
@@ -3840,6 +3857,17 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
             relationships.push(rel);
             callRelationships.set(typedKey, rel);
           }
+          if (language === SupportedLanguages.Java && callCapture) {
+            const rel = callRelationships.get(typedKey);
+            if (rel) {
+              const args = javaArgumentTypes(callCapture.node, node => receiverFacts!.lookup(node));
+              const variants = rel.javaArguments ??= [];
+              const seen = javaArgumentVariants.get(rel) ?? new Set<string>();
+              const key = JSON.stringify(args);
+              if (!seen.has(key)) { seen.add(key); variants.push(args); }
+              javaArgumentVariants.set(rel, seen);
+            }
+          }
         }
         continue;
       }
@@ -4016,11 +4044,6 @@ export type ResolutionTier = 'type' | 'binding' | 'import' | 'transitive' | 'qua
 // ---------------------------------------------------------------------------
 // resolveEdges helpers
 // ---------------------------------------------------------------------------
-
-/** Build the qualified key for an entity (mirrors buildPatch's entityQKey logic). */
-function qualifiedKey(e: ParsedEntity): string {
-  return e.container ? `${e.container}.${e.name}` : e.name;
-}
 
 const PHP_TYPE_KINDS = new Set(['class', 'interface', 'trait', 'enum']);
 
@@ -5602,13 +5625,11 @@ export function resolveEdges(
       return targets.length === 1 ? targets : [];
     }
     const php = summaries.get(fp)?.language === SupportedLanguages.PHP;
+    const java = summaries.get(fp)?.language === SupportedLanguages.Java;
     const exact = php
       ? phpQualifiedKeys(fp, name, member)
-      : (fileQKeys.get(fp)?.get(member) ?? []).filter(q => q === key);
-    const java = summaries.get(fp)?.language === SupportedLanguages.Java;
-    // Multiple definitions include overloads. Do not guess a signature. Java
-    // overloads in one class are one node (one key), so they are one target.
-    if (exact.length) return exact.length === 1 || java ? [{ fp, key: exact[0] }] : [];
+      : (fileQKeys.get(fp)?.get(member) ?? []).filter(q => q === key || (java && q.startsWith(`${key}(`)));
+    if (exact.length) return java ? [...new Set(exact)].map(key => ({ fp, key })) : exact.length === 1 ? [{ fp, key: exact[0] }] : [];
     const parents = (summaries.get(fp)?.receiverHeritage ?? []).filter(([child]) => child === name);
     if (java || summaries.get(fp)?.language === SupportedLanguages.PHP) {
       // The nearest declaration: the superclass chain (listed first), then
@@ -5640,15 +5661,17 @@ export function resolveEdges(
 
   /**
    * Java `a.getB().m()`: the receiver after each call in `chain`, from the
-   * declared return type of the one method that call resolves to. Stops at the
-   * first step that does not resolve or does not return a class type.
+   * declared return type. Overloads may agree on that type even when the
+   * intermediate call's signature is unknown. Otherwise the chain stops.
    */
   function javaChainReceiver(context: string, type: string, chain: string[]): { context: string; type: string } | undefined {
     let at = { context, type };
     for (const method of chain) {
       const targets = receiverMembers(at.context, at.type, method);
-      if (targets.length !== 1) return;
-      const { fp, key } = targets[0];
+      if (!targets.length) return;
+      const fp = targets[0].fp;
+      const key = targets[0].key.split('(')[0];
+      if (targets.some(t => t.fp !== fp || t.key.split('(')[0] !== key)) return;
       const returns = new Set((summaries.get(fp)?.receiverFactories ?? []).filter(([fn]) => fn === key).map(([, t]) => t));
       const [returned] = returns;
       // Overloads with different results (or a primitive one) are not guessed.
@@ -5658,14 +5681,22 @@ export function resolveEdges(
     return at;
   }
 
-  /** The one member a typed CALLS relationship names, if it names exactly one. */
-  function typedCallTarget(srcFilePath: string, rel: ParsedRelationship): { fp: string; key: string } | undefined {
+  function typedCallMembers(srcFilePath: string, rel: ParsedRelationship): Array<{ fp: string; key: string }> {
     const receiver = rel.receiverType
       ? rel.receiverChain ? javaChainReceiver(srcFilePath, rel.receiverType, rel.receiverChain) : { context: srcFilePath, type: rel.receiverType }
       : factoryReceiver(srcFilePath, rel.receiverFactory!);
     const member = rel.dstName.slice(rel.dstName.lastIndexOf('.') + 1);
-    const targets = receiver ? receiverMembers(receiver.context, receiver.type, member) : [];
-    return targets.length === 1 ? targets[0] : undefined;
+    return receiver ? receiverMembers(receiver.context, receiver.type, member) : [];
+  }
+
+  /** Each invocation must select a unique member; distinct sites may select different overloads. */
+  function typedCallTargets(srcFilePath: string, rel: ParsedRelationship): Array<{ fp: string; key: string }> {
+    const targets = typedCallMembers(srcFilePath, rel);
+    if (targets.length === 1 && !targets[0].key.includes('(')) return targets;
+    if (!targets.length || !rel.javaArguments?.length) return [];
+    const selected = rel.javaArguments.map(args => selectJavaOverload(targets.map(t => t.key), args));
+    // Keep known sites even when another invocation cannot be inferred.
+    return targets.filter(t => selected.includes(t.key));
   }
 
   function factoryReceiver(context: string, factory: string): { context: string; type: string } | undefined {
@@ -6115,14 +6146,15 @@ export function resolveEdges(
       // A typed receiver resolves to its exact member. Otherwise a receiver-only
       // relationship stops here, and any other resolves by its own name below.
       if (rel.predicate === 'CALLS' && (rel.receiverType || rel.receiverFactory)) {
-        const target = typedCallTarget(srcFilePath, rel);
-        if (target) {
-          resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: target.fp, dstName: rel.dstName,
+        const targets = typedCallTargets(srcFilePath, rel);
+        if (targets.length) {
+          for (const target of targets) resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: target.fp, dstName: rel.dstName,
             dstQualifiedKey: target.key, predicate: 'CALLS', confidence: 0.95, tier: 'type' });
-          stats.resolvedType = (stats.resolvedType ?? 0) + 1;
+          stats.resolvedType = (stats.resolvedType ?? 0) + targets.length;
           continue;
         }
         if (rel.receiverOnly) continue;
+        if (rel.javaArguments && typedCallMembers(srcFilePath, rel).some(t => t.key.includes('('))) continue;
       }
       const origDstName = rel.dstName;
       // Z: resolve a renamed-import call by the provider's public symbol, but keep the
@@ -6152,14 +6184,17 @@ export function resolveEdges(
       // resolved to a member in another file, a same-named method here is
       // some other class's. The call goes to a typed target (which its typed
       // relationship writes anyway), never to this file.
-      if (hasSameFileDefinition && rel.predicate === 'CALLS' && typedCalls?.has(`${rel.srcName}\0${rel.dstName}`)) {
-        const sites = typedSites(rel.srcName, rel.dstName).map(site => typedCallTarget(srcFilePath, site));
-        if (sites.length && sites.every(t => t && t.fp !== srcFilePath)) {
-          resolved.push({ srcFilePath, srcName, dstFilePath: sites[0]!.fp, dstName: origDstName,
-            dstQualifiedKey: sites[0]!.key, predicate: 'CALLS', confidence: 0.95, tier: 'type' });
-          stats.resolvedType = (stats.resolvedType ?? 0) + 1;
+      if (rel.predicate === 'CALLS' && typedCalls?.has(`${rel.srcName}\0${rel.dstName}`)) {
+        const typed = typedSites(rel.srcName, rel.dstName);
+        const overloaded = typed.some(site => typedCallMembers(srcFilePath, site).some(t => t.key.includes('(')));
+        const sites = typed.flatMap(site => typedCallTargets(srcFilePath, site));
+        if (hasSameFileDefinition && sites.length) {
+          for (const site of sites) resolved.push({ srcFilePath, srcName, dstFilePath: site.fp, dstName: origDstName,
+            dstQualifiedKey: site.key, predicate: 'CALLS', confidence: 0.95, tier: 'type' });
+          stats.resolvedType = (stats.resolvedType ?? 0) + sites.length;
           continue;
         }
+        if (overloaded) continue;
       }
       if (
         hasSameFileDefinition &&
@@ -6609,5 +6644,5 @@ function findEnclosingDefinition(
       }
     }
   }
-  return best ? (best.container ? `${best.container}.${best.name}` : best.name) : null;
+  return best ? qualifiedKey(best) : null;
 }

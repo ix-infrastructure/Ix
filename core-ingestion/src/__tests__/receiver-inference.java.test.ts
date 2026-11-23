@@ -52,7 +52,7 @@ describe('Java typed receivers (fixture)', () => {
   it('resolves a member call through a typed local, parameter, field and this.field to the declared class', () => {
     expect(edges).toContainEqual(expect.objectContaining({
       srcName: 'TimeoutFilter.invoke', dstName: 'URL.getMethodParameter',
-      dstFilePath: '/repo/com/acme/common/URL.java', dstQualifiedKey: 'URL.getMethodParameter', tier: 'type', confidence: 0.95,
+      dstFilePath: '/repo/com/acme/common/URL.java', dstQualifiedKey: 'URL.getMethodParameter(String,String)', tier: 'type', confidence: 0.95,
     }));
   });
 
@@ -72,7 +72,7 @@ describe('Java typed receivers (fixture)', () => {
 
   it('resolves super.m() to the superclass, never the overriding method itself', () => {
     expect(edges).toContainEqual(expect.objectContaining({
-      srcName: 'ServiceUrl.getMethodParameter', dstFilePath: '/repo/com/acme/common/URL.java', dstQualifiedKey: 'URL.getMethodParameter', tier: 'type',
+      srcName: 'ServiceUrl.getMethodParameter', dstFilePath: '/repo/com/acme/common/URL.java', dstQualifiedKey: 'URL.getMethodParameter(String,String)', tier: 'type',
     }));
     expect(callEdges(results, edges)).not.toContainEqual(expect.objectContaining({
       src: 'com/acme/rpc/ServiceUrl.java::getMethodParameter', dst: 'com/acme/rpc/ServiceUrl.java::getMethodParameter',
@@ -81,7 +81,7 @@ describe('Java typed receivers (fixture)', () => {
 
   it('resolves this.m() and a bare m() through the enclosing class and its supertypes', () => {
     expect(typedEdges(edges, 'ServiceUrl.describe').map(e => e.dstQualifiedKey).sort()).toEqual(['AbstractURL.getProtocol', 'URL.getHost']);
-    expect(edges).toContainEqual(expect.objectContaining({ srcName: 'URL.isAvailable', dstQualifiedKey: 'URL.getMethodParameter', tier: 'type' }));
+    expect(edges).toContainEqual(expect.objectContaining({ srcName: 'URL.isAvailable', dstQualifiedKey: 'URL.getMethodParameter(String,String)', tier: 'type' }));
   });
 
   it('resolves static Type.m() calls on an imported and a same-package class', () => {
@@ -98,13 +98,15 @@ describe('Java typed receivers (fixture)', () => {
     // `invoker.getUrl()` is Invoker.getUrl, declared to return URL.
     expect(edges).toContainEqual(expect.objectContaining({
       srcName: 'TimeoutFilter.invoke', dstName: 'Invoker.getUrl().getMethodParameter',
-      dstFilePath: '/repo/com/acme/common/URL.java', dstQualifiedKey: 'URL.getMethodParameter', tier: 'type',
+      dstFilePath: '/repo/com/acme/common/URL.java', dstQualifiedKey: 'URL.getMethodParameter(String,String)', tier: 'type',
     }));
   });
 
-  it('writes one edge per caller to a method with several overloads', () => {
+  it('writes a separate edge to each overload invoked by the same caller', () => {
     const toUrl = callEdges(results, edges).filter(e => e.src === 'com/acme/rpc/TimeoutFilter.java::invoke' && e.dst === 'com/acme/common/URL.java::getMethodParameter');
-    expect(toUrl).toEqual([{ src: 'com/acme/rpc/TimeoutFilter.java::invoke', dst: 'com/acme/common/URL.java::getMethodParameter', tier: 'type' }]);
+    expect(toUrl).toHaveLength(3);
+    const targets = new Set(typedEdges(edges, 'TimeoutFilter.invoke').filter(e => e.dstName === 'URL.getMethodParameter').map(e => e.dstQualifiedKey));
+    expect([...targets].sort()).toEqual(['URL.getMethodParameter(String,String)', 'URL.getMethodParameter(String,String,String)', 'URL.getMethodParameter(String,String,int)']);
   });
 
   it('no longer lets the same-file method claim calls typed as another class', () => {
@@ -240,10 +242,10 @@ describe('Java typed receivers', () => {
     expect(edges.map(e => e.dstName).sort()).toEqual(['Target.count', 'Target.self', 'Target.self().run']);
   });
 
-  it('keeps the same-file claim when the typed receiver does not resolve', () => {
+  it('does not substitute an unrelated same-file method when the typed receiver does not resolve', () => {
     const use = parse('/repo/q/Use.java',
       'package q;\npublic class Use {\n  void run() {}\n  void use(Missing m) {\n    m.run();\n  }\n}\n');
-    expect(callEdges([use])).toContainEqual(expect.objectContaining({ src: 'q/Use.java::use', dst: 'q/Use.java::run' }));
+    expect(callEdges([use])).toEqual([]);
   });
 
   it('records heritage, package and class-returning method results as summary facts', () => {
