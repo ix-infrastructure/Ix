@@ -4,6 +4,7 @@ import type { Command } from "commander";
 import { createClient } from "../config.js";
 import { formatPatches } from "../format.js";
 import { formatOption } from "../options.js";
+import { parseLimit } from "../paging.js";
 
 /**
  * `ix patches`.
@@ -29,7 +30,7 @@ export function registerPatchesCommand(program: Command): void {
     .addOption(formatOption())
     .action(async (opts: { limit: string; format: string }) => {
       const client = await createClient();
-      const patches = await client.listPatches({ limit: parseInt(opts.limit, 10) });
+      const patches = await client.listPatches({ limit: parseLimit(opts.limit) });
       formatPatches(patches, opts.format);
     });
 }

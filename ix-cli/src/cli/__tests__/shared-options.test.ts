@@ -10,13 +10,15 @@ import {
   addFormatOption,
   addPagingOptions,
   addTargetOptions,
+  choiceOption,
   formatOption,
   pagingValues,
   STRICT_AMBIGUOUS_HELP,
   STRICT_TARGET_HELP,
   targetOptionValues,
 } from "../options.js";
-import { OFFSET_FLAG } from "../paging.js";
+import { parseLimit, OFFSET_FLAG } from "../paging.js";
+import { applyOssSetup } from "../register/oss-setup.js";
 
 const cliDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const commandsDir = join(cliDir, "commands");
@@ -55,6 +57,11 @@ describe("shared option declarations", () => {
       expect(readFileSync(join(commandsDir, file), "utf8")).not.toContain(".action(");
     }
   });
+
+  it("parses --limit through the shared paging helper, not a local parseInt", () => {
+    const copies = sources().filter(({ text }) => text.includes("parseInt(opts.limit, 10)"));
+    expect(copies.map(({ file }) => file)).toEqual([]);
+  });
 });
 
 describe("option helpers", () => {
@@ -92,6 +99,36 @@ describe("option helpers", () => {
     expect([offset.flags, offset.description, offset.defaultValue]).toEqual(["--offset <n>", OFFSET_FLAG, "0"]);
     expect(pagingValues({ limit: "20", offset: "0" })).toEqual({ limit: 20, offset: 0 });
     expect(pagingValues({ limit: "5", offset: "15" })).toEqual({ limit: 5, offset: 15 });
+    // A command whose --limit has its own help and no --offset still gets the
+    // same conversion, with the offset default supplied.
+    expect(pagingValues({ limit: "20" })).toEqual({ limit: 20, offset: 0 });
+    expect(parseLimit("0")).toBe(0);
+    expect(parseLimit("7")).toBe(7);
+  });
+
+  it("choiceOption declares its choices where the option is declared", () => {
+    const option = choiceOption("--mode <mode>", "Mode (a|b)", ["a", "b"], "a");
+    expect([option.argChoices, option.defaultValue]).toEqual([["a", "b"], "a"]);
+  });
+
+  it("a custom parser after choiceOption still supplies the fallback after setup", async () => {
+    const seen: string[] = [];
+    const program = new Command("ix").exitOverride();
+    program
+      .command("x")
+      .addOption(
+        choiceOption("--depth <depth>", "Depth (compact|standard)", ["compact", "standard"])
+          .argParser((value) => (value === "compact" ? value : "standard")),
+      )
+      .action((opts: { depth: string }) => { seen.push(opts.depth); });
+
+    // `applyOssSetup` used to apply `.choices()` a second time here, replacing
+    // the parser above. The custom parser is the option's rule.
+    applyOssSetup(program);
+    await program.parseAsync(["x", "--depth", "legacy"], { from: "user" });
+
+    expect(seen).toEqual(["standard"]);
+    expect(program.commands[0]!.options[0]!.argChoices).toEqual(["compact", "standard"]);
   });
 
   it("formatOption names the values it accepts, defaults to text and rejects anything else", async () => {
