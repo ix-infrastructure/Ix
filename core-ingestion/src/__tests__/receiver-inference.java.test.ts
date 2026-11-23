@@ -409,9 +409,177 @@ public class Evaluator {
     expect(referenceEdges([file])).toEqual([]);
   });
 
-  it('skips builtin type names', () => {
-    const use = parse('/repo/q/Use.java', 'package q;\npublic class Use {\n  String use(int i) { return String.valueOf(Integer.parseInt("1") + i); }\n}\n');
+  it('skips java.lang type names', () => {
+    const use = parse('/repo/q/Use.java',
+      'package q;\npublic class Use {\n  String use(int i) { return String.valueOf(Integer.parseInt("1") + i + Integer.MAX_VALUE); }\n  Object f() { return (java.util.function.Function<Object, String>) String::valueOf; }\n}\n');
     expect(staticRefs(use)).toEqual([]);
+  });
+
+  // Names the shared builtin list drops as type references (`List`, `Result`, `Map`).
+  describe('a repo class with a builtin-listed name', () => {
+    const list = (pkg: string) => parse(`/repo/${pkg.replace('.', '/')}/List.java`, `package ${pkg};\npublic final class List {\n  public static List of() { return null; }\n}\n`);
+    const use = (imports: string) => parse('/repo/demo/a/Use.java', `package demo.a;\n${imports}public class Use {\n  Object use() { return List.of(); }\n}\n`);
+
+    it('is referenced by a static use in its package', () => {
+      const files = [list('demo.a'), use('')];
+      expect(staticRefs(files[1])).toEqual([
+        { srcName: 'Use.use', dstName: 'List', predicate: 'REFERENCES', receiverType: 'List', receiverOnly: true },
+      ]);
+      expect(referenceEdges(files)).toEqual([
+        { src: 'demo/a/Use.java::method:use', dst: 'demo/a/List.java::class:List', tier: 'type', confidence: 0.95 },
+      ]);
+    });
+
+    it('is not referenced when a single-type import names a class outside the repo', () => {
+      const files = [list('demo.a'), use('import java.util.List;\n')];
+      expect(staticRefs(files[1])).toHaveLength(1);
+      expect(references(resolveEdges(files))).toEqual([]);
+      expect(referenceEdges(files)).toEqual([]);
+    });
+
+    it('is referenced beside an on-demand import: the package comes before java.util.*', () => {
+      const files = [list('demo.a'), use('import java.util.*;\n')];
+      expect(referenceEdges(files)).toEqual([expect.objectContaining({ dst: 'demo/a/List.java::class:List', tier: 'type' })]);
+    });
+
+    it('is not referenced from another package that does not import it', () => {
+      const files = [list('other'), use(''), use('import java.util.*;\n'), use('import java.util.List;\n')];
+      for (const user of files.slice(1)) {
+        expect(references(resolveEdges([files[0], user]))).toEqual([]);
+        expect(referenceEdges([files[0], user])).toEqual([]);
+      }
+    });
+
+    it('is referenced through its own single-type or on-demand import', () => {
+      for (const imports of ['import other.List;\n', 'import other.*;\n']) {
+        expect(referenceEdges([list('other'), use(imports)])).toEqual([expect.objectContaining({ dst: 'other/List.java::class:List', tier: 'type' })]);
+      }
+    });
+
+    it('still gets no plain type reference, as before', () => {
+      const typed = parse('/repo/demo/a/Typed.java', 'package demo.a;\npublic class Typed {\n  List field;\n  void use(List p) { List l = p; }\n}\n');
+      expect(typed.relationships.filter(r => r.predicate === 'REFERENCES')).toEqual([]);
+    });
+  });
+
+  describe('static fields and method references', () => {
+    const UTIL = 'package demo.a;\npublic final class Util {\n  public static final int MAX = 1;\n  public static final Object INSTANCE = new Object();\n  public static int parse(String s) { return 0; }\n  void run() {}\n}\n';
+    const util = () => parse('/repo/demo/a/Util.java', UTIL);
+    const ref = (src: string) => ({ srcName: src, dstName: 'Util', predicate: 'REFERENCES', receiverType: 'Util', receiverOnly: true });
+    const edge = { dst: 'demo/a/Util.java::class:Util', tier: 'type', confidence: 0.95 };
+
+    it('links a static field access to its class, wherever the expression sits', () => {
+      const use = parse('/repo/demo/a/Use.java', `package demo.a;
+public class Use {
+  static final int LIMIT = Util.MAX;
+  int plain() { return Util.MAX; }
+  void argument() { System.out.println(Util.MAX + 1); }
+  void chained() { Util.INSTANCE.toString(); }
+  @Deprecated
+  int[] array() { return new int[Util.MAX]; }
+}
+`);
+      expect(staticRefs(use).filter(r => r.dstName === 'Util')).toEqual([ref('Use'), ref('Use.plain'), ref('Use.argument'), ref('Use.chained'), ref('Use.array')]);
+      expect(referenceEdges([util(), use])).toEqual([
+        { src: 'demo/a/Use.java::class:Use', ...edge },
+        ...['plain', 'argument', 'chained', 'array'].map(m => ({ src: `demo/a/Use.java::method:${m}`, ...edge })),
+      ]);
+    });
+
+    it('links a method reference and a constructor reference to the class', () => {
+      const use = parse('/repo/demo/a/Use.java', `package demo.a;
+import java.util.function.Function;
+import java.util.function.Supplier;
+public class Use {
+  Function<String, Integer> method() { return Util::parse; }
+  Supplier<Object> constructor() { return Util::new; }
+}
+`);
+      expect(staticRefs(use)).toEqual([ref('Use.method'), ref('Use.constructor')]);
+      expect(referenceEdges([util(), use]).filter(e => e.dst.endsWith(':Util'))).toEqual([
+        { src: 'demo/a/Use.java::method:method', ...edge }, { src: 'demo/a/Use.java::method:constructor', ...edge },
+      ]);
+    });
+
+    it('shares one reference per scope with a static call and a type reference', () => {
+      const calls = parse('/repo/demo/a/Use.java', 'package demo.a;\npublic class Use {\n  int use() { return Util.parse("1") + Util.MAX + java.util.List.of("1").stream().mapToInt(Util::parse).sum(); }\n}\n');
+      expect(calls.relationships.filter(r => r.predicate === 'REFERENCES')).toEqual([ref('Use.use')]);
+      const typed = parse('/repo/demo/a/Use.java', 'package demo.a;\npublic class Use {\n  int use() {\n    Util u = null;\n    return Util.MAX;\n  }\n}\n');
+      expect(typed.relationships.filter(r => r.predicate === 'REFERENCES')).toEqual([
+        { srcName: 'Use.use', dstName: 'Util', predicate: 'REFERENCES', receiverType: 'Util' },
+      ]);
+      expect(referenceEdges([util(), typed])).toEqual([{ src: 'demo/a/Use.java::method:use', ...edge }]);
+    });
+
+    it('takes no variable, lowercase name, qualified name, this or generic type as a class', () => {
+      const use = parse('/repo/demo/a/Use.java', `package demo.a;
+import java.util.ArrayList;
+import java.util.function.Supplier;
+public class Use {
+  Util Field;
+  int own;
+  int variables(Util Param) {
+    Util Local = Param;
+    Supplier<Object> s = Local::toString;
+    return Param.MAX + Local.MAX + Field.MAX + this.Field.MAX + this.own + Use.this.own;
+  }
+  int qualified(Util util) { return demo.a.Util.MAX + util.MAX; }
+  Supplier<Object> generic() { return ArrayList<String>::new; }
+  Supplier<Object> viaThis() { return this::toString; }
+}
+`);
+      expect(staticRefs(use)).toEqual([]);
+    });
+
+    it('writes nothing for a JDK class, an ambiguous name, or a same-named class out of scope', () => {
+      const dup = (pkg: string) => parse(`/repo/${pkg}/Dup.java`, `package ${pkg};\npublic class Dup {\n  public static final int MAX = 1;\n  public static void go() {}\n}\n`);
+      const use = parse('/repo/q/Use.java',
+        'package q;\nimport a.*;\nimport b.*;\nimport java.util.Collections;\npublic class Use {\n  Object use() { Runnable r = Dup::go; return Dup.MAX + Collections.EMPTY_LIST.size() + Util.MAX; }\n}\n');
+      expect(staticRefs(use).map(r => r.dstName).sort()).toEqual(['Collections', 'Dup', 'Util']);
+      const files = [dup('a'), dup('b'), util(), use];
+      const edges = resolveEdges(files);
+      expect(references(edges)).toEqual([]);
+      expect(referenceEdges(files, edges)).toEqual([]);
+      const stripped = { ...use, relationships: use.relationships.filter(r => !(r.predicate === 'REFERENCES' && r.receiverOnly)) };
+      expect(buildPatchWithResolution(use, 'hash', 'workspace', edges).ops).toEqual(buildPatchWithResolution(stripped, 'hash', 'workspace', edges).ops);
+    });
+
+    it('gives a class no reference to itself, nested and anonymous code included', () => {
+      const self = parse('/repo/demo/a/Util.java', `package demo.a;
+public final class Util {
+  public static final int MAX = 1;
+  static int parse(String s) { return Util.MAX; }
+  java.util.function.Function<String, Integer> f = Util::parse;
+  static class Nested {
+    int viaOuter() { return Util.MAX; }
+  }
+  Runnable anon() {
+    return new Runnable() {
+      public void run() { int x = Util.MAX; }
+    };
+  }
+}
+`);
+      expect(staticRefs(self)).toEqual([]);
+      expect(referenceEdges([self])).toEqual([]);
+    });
+
+    it('references the outer class of a nested receiver, not the nested class', () => {
+      const outer = parse('/repo/demo/a/Outer.java',
+        'package demo.a;\npublic class Outer {\n  public static class Inner {\n    public static final int MAX = 1;\n    static void go() {}\n  }\n}\n');
+      const use = parse('/repo/demo/a/Use.java', 'package demo.a;\npublic class Use {\n  int use() { Outer.Inner.go(); return Outer.Inner.MAX; }\n}\n');
+      expect(staticRefs(use)).toEqual([{ srcName: 'Use.use', dstName: 'Outer', predicate: 'REFERENCES', receiverType: 'Outer', receiverOnly: true }]);
+      expect(referenceEdges([outer, use])).toEqual([
+        { src: 'demo/a/Use.java::method:use', dst: 'demo/a/Outer.java::class:Outer', tier: 'type', confidence: 0.95 },
+      ]);
+    });
+
+    it('adds no reference for a static-import call or a package-qualified receiver (known gaps)', () => {
+      const use = parse('/repo/q/Use.java',
+        'package q;\nimport static demo.a.Util.parse;\npublic class Use {\n  int use() { return parse("1") + demo.a.Util.parse("2") + demo.a.Util.MAX; }\n}\n');
+      expect(staticRefs(use)).toEqual([]);
+      expect(referenceEdges([util(), use])).toEqual([]);
+    });
   });
 
   it('gives a class no reference to itself for its own static calls', () => {
@@ -518,5 +686,9 @@ public class Use extends Base {
   it('adds no reference in other languages', () => {
     const ts = parseFile('/repo/use.ts', 'class Gate { static matches(): boolean { return true; } }\nexport function use() { return Gate.matches(); }\n')!;
     expect(ts.relationships.filter(r => r.predicate === 'REFERENCES' && (r.receiverType || r.receiverOnly))).toEqual([]);
+    const fieldUse = parseFile('/repo/use2.ts', 'class Gate { static MAX = 1; }\nexport function use() { return Gate.MAX; }\n')!;
+    expect(fieldUse.relationships.filter(r => r.predicate === 'REFERENCES' && (r.receiverType || r.receiverOnly))).toEqual([]);
+    const scala = parseFile('/repo/Use.scala', 'package q\nobject Gate { val Max = 1 }\nobject Use { def use(): Int = Gate.Max }\n')!;
+    expect(scala.relationships.filter(r => r.predicate === 'REFERENCES' && (r.receiverType || r.receiverOnly))).toEqual([]);
   });
 });

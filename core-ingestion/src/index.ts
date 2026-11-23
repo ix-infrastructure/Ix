@@ -464,6 +464,11 @@ const TYPE_BUILTINS = new Set([
   'int16_t', 'int32_t', 'int64_t',
 ]);
 
+// Java: the `java.lang` types among TYPE_BUILTINS. A static use of one of them
+// (`String.valueOf()`) is never looked up as a repo class.
+const JAVA_LANG_TYPES = new Set(['String', 'Integer', 'Long', 'Double', 'Float', 'Boolean', 'Byte', 'Short',
+  'Character', 'Object', 'Void', 'Number', 'Iterable']);
+
 // Builtins to exclude from CALLS edges — split by language family to avoid
 // suppressing valid method names in other languages (e.g. `filter` is a Python
 // builtin but also a common ORM method; `warn`/`error` are JS console methods
@@ -2977,6 +2982,27 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     // Java: each REFERENCES by `src\0type`, so a static call's reference to its
     // class and a type reference to the same class share one relationship.
     const refRelationships = new Map<string, ParsedRelationship>();
+    // Java: `src` names the type `type` only to reach a static member of it
+    // (`Gate.matches()`, `Gate.MAX`, `Gate::matches`). The reference is
+    // receiver-only: it is written when exactly one class of that name is in
+    // scope, so a JDK type writes nothing. That also makes names in
+    // TYPE_BUILTINS safe here (a repo's own `List` or `Result`), except the
+    // `java.lang` ones, which every file sees without an import.
+    const referenceStaticType = (src: string, type: string): void => {
+      if (JAVA_LANG_TYPES.has(type) || type.length <= 1) return;
+      const refKey = `${src}\x00${type}`;
+      const named = refRelationships.get(refKey);
+      if (named) {
+        // A type reference in this scope already names it: try the type first.
+        if (!named.receiverType) named.receiverType = type;
+        return;
+      }
+      if (!seenRefs.has(src)) seenRefs.set(src, new Set());
+      seenRefs.get(src)!.add(type);
+      const rel: ParsedRelationship = { srcName: src, dstName: type, predicate: 'REFERENCES', receiverType: type, receiverOnly: true };
+      relationships.push(rel);
+      refRelationships.set(refKey, rel);
+    };
     // Map function name → (param name → declared type) for typed-parameter qualifier substitution
     const paramTypeMap = new Map<string, Map<string, string>>();
     // Python: map function name → (variable name → assigned type) for untyped-param qualifier substitution
@@ -3848,20 +3874,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         }
         // Java `Gate.matches()`: the caller also references the class `Gate`,
         // which a static-only class would otherwise never be linked to (#1137).
-        const staticType = language === SupportedLanguages.Java && typedReceiver?.staticType ? typedReceiver.type : undefined;
-        if (staticType && !TYPE_BUILTINS.has(staticType) && staticType.length > 1) {
-          const refKey = `${caller}\x00${staticType}`;
-          const named = refRelationships.get(refKey);
-          if (named) {
-            // A type reference in this scope already names it: try the type first.
-            if (!named.receiverType) named.receiverType = staticType;
-          } else {
-            if (!seenRefs.has(caller)) seenRefs.set(caller, new Set());
-            seenRefs.get(caller)!.add(staticType);
-            const rel: ParsedRelationship = { srcName: caller, dstName: staticType, predicate: 'REFERENCES', receiverType: staticType, receiverOnly: true };
-            relationships.push(rel);
-            refRelationships.set(refKey, rel);
-          }
+        if (language === SupportedLanguages.Java && typedReceiver?.staticType && typedReceiver.type) {
+          referenceStaticType(caller, typedReceiver.type);
         }
         continue;
       }
@@ -3895,6 +3909,12 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         }
         continue;
       }
+    }
+
+    // Java `Util.MAX` and `Util::parse` reference the class like a static call does.
+    for (const use of receiverFacts?.staticTypeUses?.() ?? []) {
+      checkBudget();
+      referenceStaticType(findEnclosingDefinition(entities, use.line) ?? findEnclosing(classRanges, use.line, '') ?? fileName, use.type);
     }
 
     for (const [bareKey, rel] of jsTsCallRelationship) {
