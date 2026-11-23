@@ -1210,6 +1210,20 @@ interface CallSiteScopes {
   propertyReferences: Set<string>;
 }
 
+/**
+ * Whether a call's name node is the member of `super.m()` (JS/TS) or
+ * `super().m()` / `super(Cls, self).m()` (Python).
+ */
+function isSuperReceiverCall(nameNode: any, python: boolean): boolean {
+  const parent = nameNode?.parent;
+  if (python) {
+    if (parent?.type !== 'attribute') return false;
+    const object = parent.childForFieldName?.('object');
+    return object?.type === 'call' && object.childForFieldName?.('function')?.text === 'super';
+  }
+  return parent?.type === 'member_expression' && parent.childForFieldName?.('object')?.type === 'super';
+}
+
 /** Mixin helpers that copy properties onto their first argument (`Object.assign`, `_.extend`). */
 const MIXIN_FUNCTIONS = new Set(['assign', 'extend', 'merge', 'defaults', 'assignIn']);
 
@@ -4690,6 +4704,14 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           }
           return `${qualifier}.${callee}`;
         })();
+
+        // `super.m()` / `super().m()` under a class with one known base: the
+        // qualifier pattern names the call `<Base>.m`. The bare-name pattern's
+        // `m` for the same call can only land on a same-named member of this
+        // class (the override itself) or a module function, never on the base,
+        // so it is not emitted.
+        if (!qualifierCapture && (isJsTs || language === SupportedLanguages.Python) &&
+          isSuperReceiverCall(callName.node, language === SupportedLanguages.Python) && soleBaseAt(callLine)) continue;
 
         if (!builtinCall && !qualifierCapture && !namespaceCapture && effectiveCallee === callee) {
           recordJsTsImportUse('CALLS', caller, effectiveCallee, callName.node, callee);

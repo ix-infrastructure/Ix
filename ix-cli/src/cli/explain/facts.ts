@@ -122,17 +122,6 @@ export interface EntityFacts {
   memberCalls?: Array<{ src: string; dst: string; predicate: "CALLS" }>;
 
   /**
-   * What a class-like target is built from: the types it extends or implements
-   * (both are EXTENDS edges), then the types its body names outside any method
-   * -- field and property types (REFERENCES). `ix context` only, and only for
-   * `TYPE_KINDS` targets. Without them the only trace of a class's own field
-   * types was a relationship row, ranked after every structural row and claim,
-   * so the budget cut it first.
-   */
-  extendsRefs?: EntityLocation[];
-  referenceRefs?: EntityLocation[];
-
-  /**
    * What the neighbouring files define. Members are otherwise collected for the
    * target alone, so a bundle answered "which function does X" with a file name
    * and nothing in it: measured over 11 benchmark tasks, symbol recall was 0.00
@@ -226,9 +215,6 @@ const NEIGHBOUR_USE_POOL = 8;
 /** Outbound facts kept: enough to navigate by, few enough to leave room for the rest. */
 const MAX_IMPORT_REFS = 12;
 const MAX_CALLEE_REFS = 4;
-/** A class target's bases and referenced types kept: its own shape, in few rows. */
-const MAX_EXTENDS_REFS = 3;
-const MAX_REFERENCE_REFS = 4;
 /**
  * A class-like target's member callees kept, and the callable members whose
  * outbound calls are read. More than `MAX_CALLEE_REFS`: a class that wires
@@ -659,12 +645,9 @@ export async function collectFacts(
 ): Promise<EntityFacts | ContextFacts> {
   const diagnostics: Diagnostic[] = [];
   const forExplain = scope === "explain";
-  // What a class is built from. One read for both predicates, split by edge
-  // below; best-effort, so a failure costs the rows and not the bundle.
-  const readTypes = !forExplain && TYPE_KINDS.has(targetKind);
 
   // Run parallel graph queries (including, for explain, a bounded downstream tree)
-  const [details, callersResult, calleesResult, importsResult, dependentsResult, importersResult, membersResult, provenance, downstream, hierarchyPath, typesResult] =
+  const [details, callersResult, calleesResult, importsResult, dependentsResult, importersResult, membersResult, provenance, downstream, hierarchyPath] =
     await Promise.all([
       client.entity(targetId),
       client.expand(targetId, { direction: "in", predicates: ["CALLS"] }),
@@ -678,9 +661,6 @@ export async function collectFacts(
         ? buildDependencyTree(client, targetId, { maxDepth: 4, maxNodes: 100 }).catch(() => NO_DOWNSTREAM)
         : Promise.resolve(NO_DOWNSTREAM),
       forExplain ? getSystemPath(client, targetId).catch(() => []) : Promise.resolve([]),
-      readTypes
-        ? client.expand(targetId, { direction: "out", predicates: ["EXTENDS", "REFERENCES"] }).catch(() => undefined)
-        : Promise.resolve(undefined),
     ]);
 
   const node = details.node as any;
@@ -733,7 +713,6 @@ export async function collectFacts(
     MAX_IMPORT_REFS);
   const calleeRefs = outward(
     forExplain ? calleesResult.nodes : ranked(uniqueById(calleesResult.nodes), calleesResult.edges), MAX_CALLEE_REFS);
-  const typeRefs = typesResult ? ownTypeRefs(typesResult, targetId, outward, ranked) : undefined;
   // What the walks below fan out from: unranked, so they fetch what they did.
   const walkSeeds = {
     callers: extractRefs(callersResult.nodes, 3),
@@ -874,32 +853,5 @@ export async function collectFacts(
     moduleName: _moduleName,
     ...contextFacts
   } = facts;
-  return { ...contextFacts, usedByCount, walkSeeds, provenance, ...typeRefs };
-}
-
-/**
- * Split one outbound EXTENDS + REFERENCES read into the target's bases and the
- * types it references. Bases keep the order ingest wrote them (the superclass,
- * then interfaces); a type that is both is a base, once. With no edge list to
- * tell them apart, every type counts as referenced rather than being dropped.
- */
-function ownTypeRefs(
-  result: { nodes: unknown[]; edges?: unknown[] },
-  targetId: string,
-  outward: (nodes: any[], limit: number) => EntityLocation[],
-  ranked: (nodes: any[], rankEdges: any[] | undefined) => any[],
-): { extendsRefs: EntityLocation[]; referenceRefs: EntityLocation[] } {
-  const nodes = uniqueById(result.nodes as any[]);
-  const edges = (result.edges ?? []) as any[];
-  const byId = new Map(nodes.map((n: any) => [n.id, n]));
-  const baseIds = [...new Set(edges
-    .filter((e) => e?.predicate === "EXTENDS" && e.src === targetId && typeof e.dst === "string")
-    .map((e) => e.dst as string))];
-  const bases = baseIds.flatMap((id) => (byId.has(id) ? [byId.get(id)] : []));
-  const isBase = new Set(baseIds);
-  const referenced = nodes.filter((n: any) => !isBase.has(n.id));
-  return {
-    extendsRefs: outward(bases, MAX_EXTENDS_REFS),
-    referenceRefs: outward(ranked(referenced, edges.filter((e) => e?.predicate === "REFERENCES")), MAX_REFERENCE_REFS),
-  };
+  return { ...contextFacts, usedByCount, walkSeeds, provenance };
 }

@@ -166,9 +166,6 @@ function leadingRefs(input: BuildInput): EntityLocation[] {
       .filter((s) => s.id && s.id !== resolved.id)
       .map((s) => ({ id: s.id!, name: s.name, kind: s.kind, ...locationFields(s) })),
     ...memberRefs.slice(0, LEADING_MEMBERS),
-    // A class's bases and field types: part of its own shape.
-    ...(facts.extendsRefs ?? []),
-    ...(facts.referenceRefs ?? []),
     // What the target reaches, before what reaches it: an agent starting from
     // an entry point is looking for where to go next.
     ...(facts.importRefs ?? []),
