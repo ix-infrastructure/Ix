@@ -9,10 +9,10 @@
  */
 
 import { candidateOrigin } from "../candidate-origin.js";
-import { CONTAINER_KINDS, MEMBER_KINDS, OVERLOAD_LANGUAGES } from "../graph-model.js";
+import { CONTAINER_KINDS } from "../graph-model.js";
 import { normalizeForPathMatch } from "../path-match.js";
 import { scoreCandidate } from "./score.js";
-import type { AmbiguousResult, ResolutionMode, ResolutionNotice, ResolvedEntity, ResolveResult } from "./types.js";
+import type { AmbiguousResult, OverloadRef, ResolutionMode, ResolutionNotice, ResolvedEntity, ResolveResult } from "./types.js";
 
 /** The ambiguous record's hint as a person at a shell reads it. */
 export const AMBIGUOUS_HINT = "Use --pick <n> or --path to disambiguate.";
@@ -36,66 +36,136 @@ function displayOrder(a: any, b: any): number {
   return cmpStr(nodePath(a), nodePath(b)) || lineOf(a) - lineOf(b) || cmpStr(String(a.id), String(b.id));
 }
 
-/** What `laterOverloads` reads of a candidate, whichever shape it has. */
-export interface OverloadRow {
-  id: string;
-  name: string;
-  kind: string;
-  path: string;
-  /** Start line; missing sorts last. */
-  line?: number;
-  /** Graph id of the type that CONTAINS it. Without one a row is never an overload. */
-  parent?: string;
+// ── Overloads ─────────────────────────────────────────────────────────────
+
+/**
+ * `nodes` with the overloads of one method folded into its first overload.
+ *
+ * Ingest writes each overload after the first as its own node whose
+ * `overload_of` attribute is the id of the first one's node (#1139). A row
+ * whose `overload_of` is the id of another row in the same set is a later
+ * overload of that row: it is left out, and `groups` maps the first row's id
+ * to every overload of the group, the first one first and the rest in source
+ * order (line, then id). The overloads of one method are then one candidate
+ * when a pick is made, as they were while they were one node.
+ *
+ * The attribute is all this reads: no request, no language or kind test. Rows
+ * without it (a graph mapped before the attribute, any other language) are
+ * returned as they came, and so is a later overload whose first one is not
+ * among the rows.
+ */
+export function foldOverloads<T extends { id: unknown }>(
+  nodes: readonly T[],
+): { nodes: T[]; groups: Map<string, OverloadRef[]> } {
+  const groups = new Map<string, OverloadRef[]>();
+  const byId = new Map<string, T>();
+  for (const node of nodes) if (!byId.has(String(node.id))) byId.set(String(node.id), node);
+  const firstOf = (node: T): string | undefined => {
+    const first = (node as { attrs?: { overload_of?: unknown } }).attrs?.overload_of;
+    return typeof first === "string" && first !== String(node.id) && byId.has(first) ? first : undefined;
+  };
+  const later = new Map<string, T[]>();
+  const folded = new Set<string>();
+  for (const [id, node] of byId) {
+    const first = firstOf(node);
+    // A first overload is never itself a later one; a chain folds nothing.
+    if (first === undefined || firstOf(byId.get(first)!) !== undefined) continue;
+    later.set(first, [...(later.get(first) ?? []), node]);
+    folded.add(id);
+  }
+  if (folded.size === 0) return { nodes: nodes as T[], groups };
+  for (const [first, rest] of later) {
+    rest.sort((a, b) => lineOf(a) - lineOf(b) || cmpStr(String(a.id), String(b.id)));
+    groups.set(first, [byId.get(first)!, ...rest].map(overloadRefOf));
+  }
+  return { nodes: nodes.filter((node) => !folded.has(String(node.id))), groups };
+}
+
+function overloadRefOf(node: any): OverloadRef {
+  const line = lineOf(node);
+  const signature = node?.attrs?.overload_signature;
+  return {
+    id: String(node.id),
+    ...(line !== Number.MAX_SAFE_INTEGER ? { line } : {}),
+    ...(typeof signature === "string" ? { signature } : {}),
+  };
+}
+
+/** `foldOverloads` for rows that become candidates directly: one per method, with its `overloads`. */
+export function foldedCandidates(nodes: readonly any[]): Candidate[] {
+  const { nodes: kept, groups } = foldOverloads(nodes);
+  return kept.map((node) => {
+    const candidate = candidateOf(node);
+    const overloads = groups.get(candidate.id);
+    return overloads ? { ...candidate, overloads } : candidate;
+  });
 }
 
 /**
- * The key overloads of one method share, or null for a row that cannot be an
- * overload: the same notion `ix overrides` has (type-walk.ts
- * `overloads_not_distinguished`), a member kind in a language that allows
- * overloads, declared more than once under one name in one type. The type is
- * its graph id, never a name or the file alone: two classes of one file can
- * each hold a method of the name, and those are different methods.
+ * Put each folded group (`foldOverloads`) on what stands for it in `result`:
+ * the resolved entity, and the row of every candidate list (a notice's or an
+ * ambiguous record's, shown or not). The rows are marked in place: the shown
+ * page and the full list share them.
  */
-function overloadKey(row: OverloadRow): string | null {
-  if (!row.parent || !row.name || !MEMBER_KINDS.test(row.kind) || !OVERLOAD_LANGUAGES.test(row.path)) return null;
-  return [row.parent, normalizeForPathMatch(row.path), row.kind.toLowerCase(), row.name].join("\0");
+export function attachOverloads(result: ResolveResult | null, groups: ReadonlyMap<string, OverloadRef[]>): ResolveResult | null {
+  if (!result || groups.size === 0) return result;
+  const mark = (candidate: Candidate) => {
+    const overloads = groups.get(candidate.id);
+    if (overloads) candidate.overloads = overloads;
+  };
+  if (result.resolved) {
+    for (const notice of result.notices ?? []) {
+      notice.candidates.forEach(mark);
+      allCandidatesOf(notice).forEach(mark);
+    }
+    const overloads = groups.get(result.entity.id);
+    return overloads ? { ...result, entity: { ...result.entity, overloads } } : result;
+  }
+  if (result.ambiguous) {
+    result.result.candidates.forEach(mark);
+    allCandidatesOf(result.result).forEach(mark);
+  }
+  return result;
 }
 
-/** True when `rows` has two that share everything `overloadKey` reads but the type. */
-export function mayHoldOverloads(rows: readonly OverloadRow[]): boolean {
-  const seen = new Map<string, string>();
-  for (const row of rows) {
-    const key = overloadKey({ ...row, parent: "?" });
-    if (key === null) continue;
-    const first = seen.get(key);
-    if (first !== undefined && first !== row.id) return true;
-    seen.set(key, row.id);
-  }
-  return false;
+/** A candidate's overload group, as the field of the entity it becomes. */
+export function overloadsField(candidate: { overloads?: OverloadRef[] }): { overloads?: OverloadRef[] } {
+  return candidate.overloads ? { overloads: candidate.overloads } : {};
+}
+
+/** An overload as it is shown: `put(String,int)`, or the bare name when its node has no signature. */
+export function overloadLabel(name: string, overload: OverloadRef): string {
+  return overload.signature === undefined ? name : `${name}(${overload.signature})`;
 }
 
 /**
- * The ids of every overload but the first of each overloaded method: the rows
- * to leave out before deciding whether a name is ambiguous. Overloads of one
- * method are one answer to its name (they were one graph node until #1139),
- * so they count as one candidate, the first in source order (line, then id).
+ * A resolved result with the `overloaded_target` notice its entity calls for:
+ * one when the entity stands for several overloads, none otherwise. Applied
+ * last, after any `--pick`, so the notice is always about the entity returned.
+ * The answer is for the first overload, the node all of them were before each
+ * became its own, so this is no guess and never changes the exit code; it says
+ * that there are others and gives their ids, which is how one is addressed.
  */
-export function laterOverloads(rows: readonly OverloadRow[]): Set<string> {
-  const first = new Map<string, OverloadRow>();
-  const before = (a: OverloadRow, b: OverloadRow) =>
-    (a.line ?? Number.MAX_SAFE_INTEGER) - (b.line ?? Number.MAX_SAFE_INTEGER) || cmpStr(a.id, b.id);
-  for (const row of rows) {
-    const key = overloadKey(row);
-    if (key === null) continue;
-    const kept = first.get(key);
-    if (!kept || before(row, kept) < 0) first.set(key, row);
+export function withOverloadNotice(result: ResolveResult, target: string): ResolveResult {
+  if (!result.resolved) return result;
+  const entity = result.entity;
+  const others = (result.notices ?? []).filter((n) => n.code !== "overloaded_target");
+  const overloads = entity.overloads;
+  if (!overloads || overloads.length < 2) {
+    return others.length === (result.notices ?? []).length ? result : { ...result, notices: others };
   }
-  const later = new Set<string>();
-  for (const row of rows) {
-    const key = overloadKey(row);
-    if (key !== null && first.get(key)!.id !== row.id) later.add(row.id);
-  }
-  return later;
+  const first = overloads.find((o) => o.id === entity.id) ?? overloads[0];
+  const where = entity.path ? ` (${entity.path}${first.line != null ? `:${first.line}` : ""})` : "";
+  const notice: ResolutionNotice = {
+    code: "overloaded_target",
+    target,
+    message: `"${target}" has ${overloads.length} overloads; answering for the first, ${overloadLabel(entity.name, first)}${where}. Pass another overload's id as the target to answer for it.`,
+    chosen: { id: entity.id, name: entity.name, kind: entity.kind, path: entity.path },
+    candidates: [{ id: entity.id, name: entity.name, kind: entity.kind, path: entity.path, rank: 1 }],
+    total: 1,
+    overloads,
+  };
+  return { ...result, notices: [...others, notice] };
 }
 
 /**
@@ -331,6 +401,7 @@ export function applyPick(
       name: picked.name,
       path: picked.path,
       resolutionMode: "scored",
+      ...overloadsField(picked),
     },
   };
 }
@@ -370,6 +441,7 @@ export function pickFromNotice(
       name: picked.name,
       path: picked.path,
       resolutionMode: keepFuzzy ? "fuzzy" : "scored",
+      ...overloadsField(picked),
     },
     notices: result.notices
       .filter((_, i) => i !== at)

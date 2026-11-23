@@ -27,12 +27,12 @@ import { STRUCTURAL_KINDS, type GraphKind } from "./graph-model.js";
 import { httpStatusOf } from "../client/http-error.js";
 import { hasDefinitionOf, looksTypeLikeSymbol } from "./resolve/score.js";
 import {
-  AMBIGUOUS_HINT, allCandidatesOf, applyPick as pickAmong, buildAmbiguous, candidateOf, cmpStr,
-  fuzzyNotice, importIdsOf, isFuzzyResult, laterOverloads, mayHoldOverloads, nodePath, nodeToResolved, pickBest,
-  pickFromNotice as pickInNotice, pickedOutOfRange, rememberAll, roundRobinByFile, type Candidate, type OverloadRow,
+  AMBIGUOUS_HINT, allCandidatesOf, applyPick as pickAmong, attachOverloads, buildAmbiguous, cmpStr,
+  foldOverloads, foldedCandidates, fuzzyNotice, importIdsOf, isFuzzyResult, nodePath, nodeToResolved, overloadsField, pickBest,
+  pickFromNotice as pickInNotice, pickedOutOfRange, rememberAll, roundRobinByFile, withOverloadNotice, type Candidate,
 } from "./resolve/pick.js";
 import type {
-  AmbiguousResult, ResolutionMode, ResolutionNotice, ResolvedEntity, ResolveResult, Suggestion,
+  AmbiguousResult, OverloadRef, ResolutionMode, ResolutionNotice, ResolvedEntity, ResolveResult, Suggestion,
 } from "./resolve/types.js";
 
 /**
@@ -275,7 +275,7 @@ function toSuggestions(nodes: any[], limit = 3): Suggestion[] {
 export { baseScore, hasDefinitionOf, originPenalty, scoreCandidate } from "./resolve/score.js";
 export { allCandidatesOf, isFuzzyResult, roundRobinByFile } from "./resolve/pick.js";
 export type {
-  AmbiguousResult, ResolutionMode, ResolutionNotice, ResolvedEntity, ResolveResult, Suggestion,
+  AmbiguousResult, OverloadRef, ResolutionMode, ResolutionNotice, ResolvedEntity, ResolveResult, Suggestion,
 } from "./resolve/types.js";
 
 /** resolve/pick.ts `applyPick`, saying an out-of-range `--pick` on stderr (every format). */
@@ -446,23 +446,31 @@ export async function rankEntity(
 
   // Finish a pick: --pick selects among an ambiguous result's candidates, or
   // among the candidates a resolved result's notice passed over.
+  // Last, an entity that stands for several overloads says so.
   const finish = (winner: ResolveResult): ResolveResult => {
     const picked = applyPick(winner, opts);
-    if (picked) return { ...picked, hiddenTestCount } as ResolveResult;
-    return { ...pickFromNotice(winner, opts), hiddenTestCount } as ResolveResult;
+    if (picked) return withOverloadNotice({ ...picked, hiddenTestCount } as ResolveResult, symbol);
+    return withOverloadNotice({ ...pickFromNotice(winner, opts), hiddenTestCount } as ResolveResult, symbol);
+  };
+  // The overloads of one method are one candidate, its first overload: the
+  // node they all were (#1139). Read off the rows' own attributes, so this
+  // asks the backend nothing; the group rides on whatever stands for it.
+  const pick = (candidates: GraphNode[]): ResolveResult | null => {
+    const { nodes: folded, groups } = foldOverloads(candidates);
+    return attachOverloads(pickBest(folded, symbol, preferredKinds, pickOpts), groups);
   };
   const pickOpts = { ...opts, path: effectivePath, windowFull, hint: disambiguationHint(AMBIGUOUS_HINT) };
 
   // Score exact-name candidates
   if (exactName.length > 0) {
-    const winner = pickBest(await withoutLaterOverloads(client, exactName), symbol, preferredKinds, pickOpts);
+    const winner = pick(exactName);
     if (winner) return finish(winner);
   }
 
   // ── Phase 2: Fall back to all candidates ────────────────────────────
   // No candidate carries the name, so whatever wins is a fuzzy match: it
   // resolves (exit 0 as before) but is labelled, and the notice says so.
-  const winner = pickBest(await withoutLaterOverloads(client, filteredNodes), symbol, preferredKinds, pickOpts);
+  const winner = pick(filteredNodes);
   if (winner) {
     if (winner.resolved) {
       const e = winner.entity;
@@ -481,12 +489,12 @@ export async function rankEntity(
       const picked = applyPick(winner, opts);
       if (picked?.resolved) {
         const e = picked.entity;
-        return {
+        return withOverloadNotice({
           ...picked,
           entity: { ...e, resolutionMode: "fuzzy" },
           notices: [fuzzyNotice(symbol, e)],
           hiddenTestCount,
-        };
+        }, symbol);
       }
     }
     return finish(winner);
@@ -552,12 +560,12 @@ export function answerAmbiguous(target: string, result: ResolveResult, opts?: { 
   const diagnostics = (amb.diagnostics ?? []).filter((d) => d.code !== "ambiguous_resolution");
   if (diagnostics.length) notice.diagnostics = diagnostics;
   rememberAll(notice, amb.candidates, all, importIdsOf(amb));
-  return {
+  return withOverloadNotice({
     resolved: true,
-    entity: { id: top.id, kind: top.kind, name: top.name, path: top.path, resolutionMode: "scored" },
+    entity: { id: top.id, kind: top.kind, name: top.name, path: top.path, resolutionMode: "scored", ...overloadsField(top) },
     notices: [notice],
     ...(result.hiddenTestCount ? { hiddenTestCount: result.hiddenTestCount } : {}),
-  };
+  }, target);
 }
 
 /**
@@ -619,38 +627,16 @@ export const CONTAINER_LOOKUP_TIMEOUT_MS = 5_000;
 export async function withContainers(client: IxClient, result: ResolveResult): Promise<ResolveResult> {
   if (result.resolved || !result.ambiguous) return result;
   const all = allCandidatesOf(result.result);
-  const owners = await containingTypes(client, result.result.candidates.map((c) => c.name), new Set(all.map((c) => c.id)));
-  // Added in place: the listed rows are the same objects as the head of the
-  // full list, so `--pick` and the shown page stay one list. Two different
-  // owners for one candidate is not an answer.
-  for (const c of all) {
-    const names = new Set(owners.get(c.id)?.values());
-    if (names.size === 1) c.container = [...names][0];
-  }
-  return result;
-}
-
-/**
- * The types that CONTAIN each of `ids`, as graph id to name: the edges of one
- * `/v1/expand-by-name` per distinct name in `names` (at most
- * CONTAINER_NAME_LOOKUPS), never a request per id. A file parent is not a
- * type and is left out. Best effort: an id the backend did not answer for (or
- * not within CONTAINER_LOOKUP_TIMEOUT_MS) has no entry.
- */
-async function containingTypes(
-  client: IxClient,
-  names: readonly string[],
-  ids: ReadonlySet<string>,
-): Promise<Map<string, Map<string, string>>> {
-  const asked = [...new Set(names.filter(Boolean))].slice(0, CONTAINER_NAME_LOOKUPS);
-  const answers = await Promise.all(asked.map(async (name) => {
+  const ids = new Set(all.map((c) => c.id));
+  const names = [...new Set(result.result.candidates.map((c) => c.name).filter(Boolean))].slice(0, CONTAINER_NAME_LOOKUPS);
+  const answers = await Promise.all(names.map(async (name) => {
     try {
       return await client.expandByName(name, { direction: "in", predicates: ["CONTAINS"], timeoutMs: CONTAINER_LOOKUP_TIMEOUT_MS });
     } catch {
       return null;
     }
   }));
-  const owners = new Map<string, Map<string, string>>();
+  const owners = new Map<string, Set<string>>();
   for (const answer of answers) {
     if (!answer || !Array.isArray(answer.nodes) || !Array.isArray(answer.edges)) continue;
     const byId = new Map(answer.nodes.map((n) => [n.id, n] as const));
@@ -659,50 +645,19 @@ async function containingTypes(
       const parent = byId.get(String(e.src));
       const name = parent?.name || parent?.attrs?.name;
       if (!name || String(parent?.kind ?? "").toLowerCase() === "file") continue;
-      const found = owners.get(String(e.dst)) ?? new Map<string, string>();
-      found.set(String(e.src), String(name));
-      owners.set(String(e.dst), found);
+      const set = owners.get(String(e.dst)) ?? new Set<string>();
+      set.add(String(name));
+      owners.set(String(e.dst), set);
     }
   }
-  return owners;
-}
-
-function overloadRowOf(n: GraphNode, parent?: string): OverloadRow {
-  const { id, name, kind, path: file, line } = candidateOf(n);
-  return { id, name, kind, path: file ?? "", line, parent };
-}
-
-/**
- * `nodes` without the later overloads of an overloaded method (pick.ts
- * `laterOverloads`), so the overloads of one method are one candidate when a
- * pick is made: the first in source order, which is the node every overload
- * was until #1139.
- *
- * Entities carry no container attribute, and overloads are told from two
- * same-named methods in two classes of one file only by the type that
- * CONTAINS them. So this costs the request `withContainers` makes, one per
- * distinct name and never one per candidate, and only when two member rows
- * share a name and a file in a language with overloads; any other candidate
- * set is returned as it came, with no request. A row whose type the backend
- * did not name (or named two) is kept: the name is then ambiguous, as it is
- * without this.
- */
-async function withoutLaterOverloads(client: IxClient, nodes: GraphNode[]): Promise<GraphNode[]> {
-  const rows = nodes.map((n) => overloadRowOf(n));
-  if (!mayHoldOverloads(rows)) return nodes;
-  // Only the names declared twice in one file are asked for.
-  const byFile = new Map<string, OverloadRow[]>();
-  for (const row of rows) {
-    const key = `${normalizeForPathMatch(row.path)}\0${row.name}`;
-    byFile.set(key, [...(byFile.get(key) ?? []), row]);
+  // Added in place: the listed rows are the same objects as the head of the
+  // full list, so `--pick` and the shown page stay one list. Two different
+  // owners for one candidate is not an answer.
+  for (const c of all) {
+    const found = owners.get(c.id);
+    if (found?.size === 1) c.container = [...found][0];
   }
-  const suspects = [...byFile.values()].filter((group) => mayHoldOverloads(group)).flat();
-  const owners = await containingTypes(client, suspects.map((r) => r.name), new Set(suspects.map((r) => r.id)));
-  const later = laterOverloads(suspects.map((row) => {
-    const types = [...(owners.get(row.id)?.keys() ?? [])];
-    return types.length === 1 ? { ...row, parent: types[0] } : row;
-  }));
-  return later.size > 0 ? nodes.filter((n) => !later.has(String(n.id))) : nodes;
+  return result;
 }
 
 export function printAmbiguous(symbol: string, result: AmbiguousResult, opts?: { kind?: string; path?: string }): void {
@@ -718,9 +673,15 @@ export function displayNameOf(target: { name: string; displayName?: string }): s
   return target.displayName ?? target.name;
 }
 
-/** A resolved target for output: `name` is the name to show, and `displayName` is gone. */
-export function shownTarget<T extends { name: string; displayName?: string }>(target: T): Omit<T, "displayName"> {
-  const { displayName, ...rest } = target;
+/**
+ * A resolved target for output: `name` is the name to show, and `displayName`
+ * is gone. So is `overloads`, which is for the command and is printed once,
+ * in the `overloaded_target` notice.
+ */
+export function shownTarget<T extends { name: string; displayName?: string; overloads?: OverloadRef[] }>(
+  target: T,
+): Omit<T, "displayName" | "overloads"> {
+  const { displayName, overloads: _overloads, ...rest } = target;
   return { ...rest, name: displayName ?? target.name };
 }
 
@@ -1045,22 +1006,17 @@ async function membersOf(
   } catch {
     children = null;
   }
+  // Overloads of the name are one method, its first overload (pick.ts
+  // `foldOverloads`), in the class's children and in its file alike.
   if (children && children.length > 0) {
-    // The class's own members, so overloads of the name are one method: the
-    // first in source order (pick.ts `laterOverloads`). The file fallback
-    // below cannot say which type holds a row, and folds nothing.
-    const members = children.filter(named);
-    const later = laterOverloads(members.map((n) => overloadRowOf(n, cls.id)));
-    return { found: members.filter((n) => !later.has(String(n.id))).map(candidateOf), truncated: false };
+    return { found: foldedCandidates(children.filter(named)), truncated: false };
   }
   if (!cls.path) return { found: [], truncated: false };
   const classFile = normalizeForPathMatch(cls.path);
   const { workspaceId, systemId } = activeScope();
   const limit = 50;
   const nodes = await client.search(memberName, { limit, nameOnly: true, workspaceId, systemId, scope: cls.path });
-  const found = nodes
-    .filter((n) => named(n) && nodePath(n) === classFile)
-    .map(candidateOf);
+  const found = foldedCandidates(nodes.filter((n) => named(n) && nodePath(n) === classFile));
   return { found, truncated: nodes.length >= limit };
 }
 
@@ -1099,10 +1055,10 @@ async function resolveInClasses(
     || cmpStr(a.id, b.id)));
   if (ordered.length === 1) {
     const only = ordered[0];
-    return {
+    return withOverloadNotice({
       resolved: true,
-      entity: { id: only.id, kind: only.kind, name: only.name, displayName: display, path: only.path, resolutionMode: "scored" },
-    };
+      entity: { id: only.id, kind: only.kind, name: only.name, displayName: display, path: only.path, resolutionMode: "scored", ...overloadsField(only) },
+    }, display);
   }
   const qualifiedResult: AmbiguousResult = {
     resolutionMode: "ambiguous",
@@ -1116,7 +1072,7 @@ async function resolveInClasses(
   rememberAll(qualifiedResult, qualifiedResult.candidates, ordered);
   const ambiguous: ResolveResult = { resolved: false, ambiguous: true, result: qualifiedResult };
   const picked = applyPick(ambiguous, opts);
-  if (picked?.resolved) return { ...picked, entity: { ...picked.entity, displayName: display } };
+  if (picked?.resolved) return withOverloadNotice({ ...picked, entity: { ...picked.entity, displayName: display } }, display);
   return picked ?? ambiguous;
 }
 
@@ -1460,7 +1416,7 @@ function candidateSet(owner: AmbiguousResult | ResolutionNotice, total?: number,
   const skipped = numbered.length - kept.length;
   const answered = kept.slice(0, ALL_CANDIDATE_CAP);
   return {
-    entities: answered.map(({ c, n }) => ({ id: c.id, kind: c.kind, name: c.name, path: c.path, resolutionMode: "ambiguous", n })),
+    entities: answered.map(({ c, n }) => ({ id: c.id, kind: c.kind, name: c.name, path: c.path, resolutionMode: "ambiguous", n, ...overloadsField(c) })),
     all: {
       total: Math.max((total ?? numbered.length) - skipped, kept.length),
       ...(truncated ? { truncated: true } : {}),

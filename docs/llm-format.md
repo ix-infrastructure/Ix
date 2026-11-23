@@ -299,6 +299,32 @@ the probe searches its last segment only, so those hits are not about it.
 they promise a bundle, a revision diff or an entity's history, and a list of
 files is none of them.
 
+A name that is one method with several overloads is not ambiguous. Each Java
+overload is its own graph node, and the name resolves to the first one in the
+source, in every mode and under `--strict` (exit 0), with a notice that says
+so and lists every overload:
+
+```
+diagnostic code=overloaded_target target=put chosen=put overloads=3 message="\"put\" has 3 overloads; answering for the first, put(String) (src/main/java/app/Store.java:10). Pass another overload's id as the target to answer for it."
+overload name=put(String) line=10 id=1111aaaa1111aaaa1111aaaa1111aaaa chosen=true
+overload name=put() line=20 id=2222bbbb2222bbbb2222bbbb2222bbbb
+overload name=put(String,int) line=30 id=3333cccc3333cccc3333cccc3333cccc
+```
+
+The answer is for the first overload alone. Another is addressed by its id,
+given in full on each `overload` record, as the target; `--pick <n>` does not
+count overloads, because the name is one candidate. In a list of candidates
+(an ambiguous name that is also overloaded in one of its classes) the method
+is one row, numbered once. json carries the notice in `resolutionNotices` as
+`code: "overloaded_target"` with an `overloads` array of `{ id, line,
+signature }` (the chosen one first; `signature` is the parameter types as
+written, without generics, `""` for none), `candidates` holding the chosen
+row and `total: 1`; a candidate row of any list that stands for an overloaded
+method carries the same `overloads` array. Text prints the notice and the
+overloads on stderr; `--quiet` drops them. Overloads are known from an
+attribute `ix map` writes on the nodes, so a graph mapped before it lists each
+overload as its own candidate until the file is mapped again.
+
 `Class.method` and `Class#method` resolve only to a member of that class: one
 of the class's `CONTAINS` children in the graph or, when the graph has none
 for it, a symbol in the class's own source file (the same path, not a

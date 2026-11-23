@@ -180,6 +180,64 @@ describe('Java overloads: one node each (#1139)', () => {
   });
 });
 
+describe('Java overloads: the relation is written on the nodes', () => {
+  const over = buildPatch(parse(OVER_PATH, OVER), 'hash', WS).ops as Op[];
+  const handles = symbols(over, 'handle');
+  const overloadAttrs = (node: Op) => [node.attrs?.overload_of, node.attrs?.overload_signature];
+  const marked = (ops: Op[]) => ops.filter(op =>
+    op.type === 'UpsertNode' && ('overload_of' in op.attrs! || 'overload_signature' in op.attrs!));
+
+  it('points each later overload at the first one\'s node and gives it its signature', () => {
+    const first = symbolNodeId(WS, OVER_PATH, 'Over.handle');
+    expect(handles[0].id).toBe(first);
+    expect(handles.slice(1).map(overloadAttrs)).toEqual([[first, 'Integer'], [first, 'String,Integer']]);
+  });
+
+  it('gives the first overload its signature and no overload_of', () => {
+    expect(overloadAttrs(handles[0])).toEqual([undefined, 'String']);
+    expect('overload_of' in handles[0].attrs!).toBe(false);
+  });
+
+  it('writes neither attribute anywhere else', () => {
+    expect(marked(over).map(n => n.name)).toEqual(['handle', 'handle', 'handle']);
+    // The attrs of a method that is not overloaded are the keys they always were.
+    expect(Object.keys(symbols(over, 'other')[0].attrs!)).toEqual(
+      ['line_start', 'line_end', 'language', 'role', 'role_source', 'unresolved_calls', 'unresolved_call_count']);
+    expect(Object.keys(handles[1].attrs!).slice(0, 7)).toEqual(
+      ['line_start', 'line_end', 'language', 'role', 'role_source', 'overload_of', 'overload_signature']);
+  });
+
+  it('writes an empty signature for no parameters', () => {
+    const ops = buildPatch(parse('demo/Run.java',
+      'package demo;\n\nclass Run {\n    void go(int a) {}\n\n    void go() {}\n}\n'), 'hash', WS).ops as Op[];
+    expect(symbols(ops, 'go').map(overloadAttrs)).toEqual([
+      [undefined, 'int'],
+      [symbolNodeId(WS, 'demo/Run.java', 'Run.go'), ''],
+    ]);
+  });
+
+  it('points a later constructor at the class node, which holds the first one', () => {
+    const ops = buildPatch(parse('demo/Point.java',
+      'package demo;\n\npublic class Point {\n    public Point() {}\n\n    public Point(int x) {}\n}\n'), 'hash', WS).ops as Op[];
+    const classNode = symbols(ops, 'Point').find(n => n.kind === 'class')!;
+    const later = symbols(ops, 'Point').filter(n => n.kind === 'method');
+    expect(later.map(overloadAttrs)).toEqual([[classNode.id, 'int']]);
+    // A class is not an overload: it says nothing of the first constructor's parameters.
+    expect(marked(ops)).toEqual(later);
+  });
+
+  it('marks nothing when declarations of one signature stay one node', () => {
+    const ops = buildPatch(parse('demo/Twice.java',
+      'package demo;\n\nclass Twice {\n    Runnable a = new Runnable() { public void run() {} };\n    Runnable b = new Runnable() { public void run() {} };\n}\n'), 'hash', WS).ops as Op[];
+    expect(marked(ops)).toEqual([]);
+  });
+
+  it('always points at a node the same patch writes', () => {
+    const written = new Set(over.filter(op => op.type === 'UpsertNode').map(op => op.id));
+    for (const node of marked(over)) if (node.attrs!.overload_of) expect(written.has(node.attrs!.overload_of as string)).toBe(true);
+  });
+});
+
 describe('Java overloads: calls and unresolved calls per overload', () => {
   const source = `package demo;
 
@@ -464,6 +522,7 @@ describe('overloads in other languages are untouched', () => {
   const noIdentity = (result: FileParseResult) => {
     expect(result.entities.some(e => e.identityKey !== undefined)).toBe(false);
     expect(result.chunks.some(c => c.identityKey !== undefined)).toBe(false);
+    expect(result.entities.some(e => e.overloadSignature !== undefined)).toBe(false);
     expect(result.relationships.some(r => r.srcIdentityKey !== undefined || r.dstIdentityKey !== undefined)).toBe(false);
   };
 
@@ -494,6 +553,11 @@ class Adapter:
     const result = parseFile(file, source);
     expect(result).not.toBeNull();
     noIdentity(result!);
+    for (const op of buildPatch(result!, 'hash', WS).ops as Op[]) {
+      if (op.type !== 'UpsertNode') continue;
+      expect(op.attrs).not.toHaveProperty('overload_of');
+      expect(op.attrs).not.toHaveProperty('overload_signature');
+    }
   });
 });
 
