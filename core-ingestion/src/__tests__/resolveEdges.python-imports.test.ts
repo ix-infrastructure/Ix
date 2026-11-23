@@ -346,7 +346,7 @@ describe('Python typed receivers inside methods', () => {
       '        return q.filter()',
       '',
     ].join('\n'));
-    expect(caller.relationships).toContainEqual({ srcName: 'Service.run', dstName: 'Query.filter', predicate: 'CALLS' });
+    expect(caller.relationships).toContainEqual({ srcName: 'Service.run', dstName: 'Query.filter', predicate: 'CALLS', receiverType: 'db.query.Query' });
     const edges = resolveEdges([caller, query(), decoy()]);
 
     expect(callsTo(edges, '/repo/db/query.py')).toContainEqual(
@@ -365,7 +365,7 @@ describe('Python typed receivers inside methods', () => {
       '        return x.build()',
       '',
     ].join('\n'));
-    expect(caller.relationships).toContainEqual({ srcName: 'Service.run', dstName: 'Builder.build', predicate: 'CALLS' });
+    expect(caller.relationships).toContainEqual({ srcName: 'Service.run', dstName: 'Builder.build', predicate: 'CALLS', receiverType: 'db.builder.Builder' });
     const edges = resolveEdges([caller, builder(), decoy()]);
 
     expect(callsTo(edges, '/repo/db/builder.py')).toContainEqual(

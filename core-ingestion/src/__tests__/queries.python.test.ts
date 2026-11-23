@@ -67,11 +67,13 @@ def top_level():
     // The qualifier pattern also emits the fully-qualified form so Tier-1b
     // resolution can resolve e.g. Session.execute → session.py when the
     // qualifier is a class name present in the caller's imports. Inside a
-    // method too, a typed parameter's qualifier is its declared type.
+    // method too, a typed parameter's qualifier is its declared type. The
+    // inferred receiver (python-receivers) rides on that same relationship.
     expect(result!.relationships).toContainEqual({
       srcName: 'Service.run',
       dstName: 'User.save',
       predicate: 'CALLS',
+      receiverType: '.models.User',
     });
   });
 
