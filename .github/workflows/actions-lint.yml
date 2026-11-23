@@ -13,7 +13,8 @@ permissions:
 
 concurrency:
   group: actions-lint-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # PRs only: on main, cancelling would let each merge kill the audit of the merge before it, so a push could land with no completed workflow audit (see codeql.yml).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   zizmor:
