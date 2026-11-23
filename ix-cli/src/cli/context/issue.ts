@@ -149,6 +149,12 @@ export async function issueBundleSection(
     for (const ref of oneHopRefs(n.facts)) {
       if (ref.path !== n.start.path) mark(ref.path, 1, `one hop from ${n.start.name}`);
     }
+    // Same closeness as a direct reference, but named for what it is. `mark`
+    // keeps the first reason at equal weight, so a file that is also one hop
+    // away keeps that label.
+    for (const ref of n.facts?.memberCalleeRefs ?? []) {
+      if (ref.path !== n.start.path) mark(ref.path, 1, `called by a member of ${n.start.name}`);
+    }
     // Neighbour members and text/history-related files do not establish a
     // direct graph edge. Only the facts' direct references fill missing hops.
     for (const ref of [
@@ -339,7 +345,7 @@ async function startNeighbourhood(
 function oneHopRefs(facts: ContextFacts | undefined): EntityLocation[] {
   if (!facts) return [];
   return [
-    ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []), ...(facts.memberCalleeRefs ?? []),
+    ...(facts.importRefs ?? []), ...(facts.calleeRefs ?? []),
     ...(facts.topCallerRefs ?? []), ...(facts.topDependentRefs ?? []), ...(facts.neighbourRefs ?? []),
   ];
 }

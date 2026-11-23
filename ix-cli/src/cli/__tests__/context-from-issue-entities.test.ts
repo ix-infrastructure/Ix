@@ -474,6 +474,30 @@ describe("issue bundle section, as --from-issue wires it", () => {
     expect(Object.fromEntries(issue.distances!)).toEqual({ start: 0, near: 1, "via-member": 2 });
   });
 
+  it("says a file reached through a member's call is that, not one hop away", async () => {
+    const direct = "src/direct.py", viaMember = "src/evict.py";
+    const issue = await issueBundleSection({ listByKind: vi.fn(async () => []) }, {
+      text: "expired entries",
+      plan: { bm25: [{ path: direct, score: 1 }, { path: viaMember, score: 1 }], unresolved: [], fallback: false },
+      starts: [start], walked: false,
+      neighbourhoods: [{
+        start,
+        facts: {
+          calleeRefs: [{ id: "d", name: "load", kind: "function", path: direct }],
+          memberCalleeRefs: [
+            { id: "via-member", name: "evict", kind: "function", path: viaMember },
+            { id: "d", name: "load", kind: "function", path: direct },
+          ],
+        } as unknown as ContextFacts,
+        related: [],
+      }],
+      scope: {},
+    });
+    const reason = (p: string) => issue.rankedFiles.find(f => f.path === p)?.reason;
+    expect(reason(viaMember)).toContain("called by a member of Cache");
+    expect(reason(direct)).toContain("one hop from Cache");
+  });
+
   it("lists definitions in the active read scope and reads only tracked files", async () => {
     const { issue, listByKind, read } = await section();
     expect(listByKind).toHaveBeenCalledWith("method", { workspaceId: "ws", scope: path, limit: ISSUE_ENTITIES_PER_KIND });
