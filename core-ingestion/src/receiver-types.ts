@@ -4,6 +4,8 @@
 export interface ReceiverType {
   type?: string;
   factory?: string;
+  /** Java: an explicit, unshadowed type name rather than an instance receiver. */
+  typeReference?: true;
   /**
    * Java: methods called in turn on `type` (`a.getB().m()` is `A` then
    * `getB`). Each step's declared return type is the next receiver.
@@ -538,7 +540,7 @@ function javaFacts(root: any, facts: {
         if (bound) return bound;
         // Not a variable in scope: an uppercase name is a type (`URL.valueOf()`),
         // which resolution only accepts when exactly one class in scope has it.
-        return /^[A-Z]/.test(name) ? { type: name } : {};
+        return /^[A-Z]/.test(name) ? { type: name, typeReference: true } : {};
       }
       case 'field_access': {
         const object = node.childForFieldName('object');
@@ -578,7 +580,7 @@ function javaFacts(root: any, facts: {
       if (calls.has(call.id)) return calls.get(call.id);
       const object = call.childForFieldName('object');
       const info = qualifiedSuper(call, object) ? {} : object ? lookup(object) : { type: enclosing(call)?.name };
-      const receiver = info.type ? { type: info.type, ...(info.chain ? { chain: info.chain } : {}), receiver: object?.text ?? 'this' } : undefined;
+      const receiver = info.type ? { type: info.type, ...(info.typeReference ? { typeReference: true as const } : {}), ...(info.chain ? { chain: info.chain } : {}), receiver: object?.text ?? 'this' } : undefined;
       calls.set(call.id, receiver);
       return receiver;
     },

@@ -299,13 +299,14 @@ function memberCalleeEvidence(
 /** Which of the target's members call a member callee, by name. */
 function memberCallReason(input: RankInput, ref: EntityLocation): string {
   const names = new Map((input.facts.memberRefs ?? []).map((m) => [m.id, m.name]));
-  const callers = [...new Set((input.facts.memberCalls ?? [])
-    .filter((e) => e.dst === ref.id)
+  const edges = (input.facts.memberCalls ?? []).filter((e) => e.dst === ref.id);
+  const verbs = edges.some((e) => e.predicate === "REFERENCES") ? ["uses", "use"] : ["calls", "call"];
+  const callers = [...new Set(edges
     .map((e) => names.get(e.src))
     .filter((name): name is string => !!name))].sort(cmp);
   return callers.length > 0
-    ? `the target's ${callers.length === 1 ? "member" : "members"} ${callers.join(", ")} ${callers.length === 1 ? "calls" : "call"} this`
-    : "a member of the target calls this";
+    ? `the target's ${callers.length === 1 ? "member" : "members"} ${callers.join(", ")} ${verbs[callers.length === 1 ? 0 : 1]} this`
+    : `a member of the target ${verbs[0]} this`;
 }
 
 /** Claims, decisions and intents, from the context service. */
