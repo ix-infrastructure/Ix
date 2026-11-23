@@ -36,11 +36,11 @@ public class Service extends BaseService implements Runnable {
       dstName: 'Runnable',
       predicate: 'EXTENDS',
     });
-    expect(result!.relationships).toContainEqual({
+    expect(result!.relationships).toContainEqual(expect.objectContaining({
       srcName: 'Service.run',
       dstName: 'helper',
       predicate: 'CALLS',
-    });
+    }));
   });
 
   it('captures extends and implements with generic types', () => {
@@ -145,16 +145,16 @@ public class Consumer {
     );
 
     expect(result).not.toBeNull();
-    expect(result!.relationships).toContainEqual({
+    expect(result!.relationships).toContainEqual(expect.objectContaining({
       srcName: 'Consumer.process',
       dstName: 'checkNotNull',
       predicate: 'CALLS',
-    });
-    expect(result!.relationships).toContainEqual({
+    }));
+    expect(result!.relationships).toContainEqual(expect.objectContaining({
       srcName: 'Consumer.process',
       dstName: 'checkArgument',
       predicate: 'CALLS',
-    });
+    }));
   });
 
   it('methods after annotated varargs param are contained in their class', () => {
@@ -207,10 +207,10 @@ public class Factory {
     );
 
     expect(result).not.toBeNull();
-    expect(result!.relationships).toContainEqual({
+    expect(result!.relationships).toContainEqual(expect.objectContaining({
       srcName: 'Factory.create',
       dstName: 'Widget',
       predicate: 'CALLS',
-    });
+    }));
   });
 });

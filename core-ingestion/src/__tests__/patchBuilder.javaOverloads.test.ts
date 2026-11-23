@@ -12,8 +12,9 @@ import { buildPatch, buildPatchWithResolution, symbolNodeId } from '../patch-bui
  * folded from that key alone, so a class's overloads were one node: the first
  * one's lines, holding the calls of all of them (#1139). Each overload with its
  * own parameter signature is now its own node. The first keeps the bare key, so
- * its id, the id of every method that is not overloaded, and every cross-file
- * edge (resolution still knows one key per name) are what they were.
+ * its id and the id of every method that is not overloaded are what they were.
+ * Resolution still knows one key per name; which overload a caller's edge
+ * lands on is decided from its call sites (resolveEdges.javaOverloads.test.ts).
  */
 
 const WS = 'workspace';
@@ -153,17 +154,17 @@ describe('Java overloads: one node each (#1139)', () => {
     expect(handles.map(n => claims(over, n.id!, 'calls'))).toEqual([['one'], ['two'], ['three']]);
   });
 
-  it('still resolves every cross-file caller to the one key, the first overload', () => {
+  it('still resolves every cross-file caller to the one key, and lands it on the overload it calls', () => {
     const edges = resolveEdges(results).filter(e => e.dstFilePath === OVER_PATH && e.predicate === 'CALLS');
     // Each call resolves by its name and by its receiver's type, to the same key.
     expect([...new Set(edges.map(e => `${e.srcName} -> ${e.dstQualifiedKey}`))].sort()).toEqual([
       'User.useNumber -> Over.handle',
       'User.useText -> Over.handle',
     ]);
+    // Which overload is the call site's to say (resolveEdges.javaOverloads.test.ts).
     const user = patches.get('src/main/java/demo/User.java')!;
-    for (const method of ['useText', 'useNumber']) {
-      expect(edgesFrom(user, id('User', `User.${method}`), 'CALLS').map(e => e.dst)).toEqual([handles[0].id]);
-    }
+    expect(edgesFrom(user, id('User', 'User.useText'), 'CALLS').map(e => e.dst)).toEqual([handles[0].id]);
+    expect(edgesFrom(user, id('User', 'User.useNumber'), 'CALLS').map(e => e.dst)).toEqual([handles[1].id]);
   });
 
   it('resolves exactly what it resolved when the overloads were one node', () => {
