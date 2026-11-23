@@ -220,6 +220,7 @@ async function emitTargetBundle(target: string, opts: ContextOptions, fmt: Bundl
     kind: opts.kind,
     path: opts.path,
     pick: opts.pick,
+    ...(opts.asOfRev !== undefined && {historicalMissRev: opts.asOfRev, textAnswer:false}),
     strict: opts.strict,
     // --out / --save promise a bundle: a text-only name has none to
     // write, so it stays the miss (exit 3) rather than a file list and 0.

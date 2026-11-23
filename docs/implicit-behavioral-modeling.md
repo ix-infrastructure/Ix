@@ -311,7 +311,14 @@ The final Node 26 CLI regression run reported 5,301 passes, one expected failure
 
 ## Step 4 — Agent-facing retrieval
 
-After an ordinary map, a default MCP call such as `ix_context({"target":"Job"})` can show both the assignment inside `start`’s true branch and the assignment in `stop`. On the benchmark fixture, the mapped source records `this.status = "running"` at `job.ts [2,42,2,65]` under the guard `this.status === "queued"` at `[2,16,2,40]`. The candidate prior is `"queued"`. The unguarded write of `"done"` at `[3,11,3,31]` has an unknown prior. The two methods share one slot ID. These facts describe assignments in source. Runtime ordering, reachability, initial states, and terminal states remain unknown.
+In the real 1.0.35 demonstration a TypeScript project was mapped with `ix map .`. The next operation was the default stdio MCP call `{"name":"ix_context","arguments":{"target":"Job"}}`. The agent received both writes and their citations without reading the file or requesting structured output.
+
+| Callable writing `this.status` | Observed assignment in `job.ts` | Observed controlling branch | Inferred candidate prior |
+| --- | --- | --- | --- |
+| `Job.start` | `"running"` at `[5,34,5,57]` | True arm of `this.status === "queued"` at `[5,8,5,32]` | `"queued"` |
+| `Job.stop` | `"done"` at `[9,4,9,24]` | Unguarded | Unknown |
+
+A structured call to the same tool confirmed both owning methods in one slot, `a4369e3dbb35559c2cecd8a0c54128fe8023b63fac501dd7e1e0a7bbf3c5b7e3`, for this checkout. IDs depend on workspace identity. The default record states that the class view covers returned members only. Runtime ordering, reachability and terminal states remain unknown.
 
 | Entry point | Behavior and read cost |
 | --- | --- |
@@ -329,3 +336,65 @@ Both released backends provide complete attributes and provenance on entity and 
 An in-place remap can retire the old containment edges even while a previous method revision is readable by UUID. Historical name search can also omit deleted namesakes. A verified historical class view requires historical membership. Use a full owner UUID for the most reliable historical read. A historical name requires an exact source path, with a verified containing class for a method. An ambiguous or unanchored name, missing relationship, unsupported producer or failed historical hydration yields unavailable behavioral evidence. Historical issue starting points can depend on working-tree data and therefore do not establish a behavioral identity. Saved investigations retain a verified ID for rebuilding their historical side. The projection takes its source citations from graph provenance at the requested revision.
 
 [Decoder and projector](../ix-cli/src/cli/behavioral-evidence.ts) · [Revision checks](../ix-cli/src/cli/context/behavior-revision.ts) · [Context assembly and budgets](../ix-cli/src/cli/context/bundle.ts) · [Live compatibility tests](../ix-cli/test/e2e/behavior-retrieval.e2e.ts) · [Paired stdio benchmark](../ix-cli/scripts/behavior-retrieval-perf.mjs)
+
+### Release measurements
+
+The comparison uses the compiled Step 3 baseline and Step 4 candidate, Node 26.12.0, the same mapped TypeScript fixture, two persistent MCP stdio clients, and separate, identically staged distributions. Each workload warms both clients six times and alternates their execution order on successive pairs. Latency covers the complete MCP call. Requests are counted by instrumenting actual fetches. Tokens are estimates for MCP text content at Ix’s 2.14 characters per token. The byte count includes the serialized JSON-RPC result and newline. Structured output carries a second machine-readable copy. Ranges of one byte reflect request-ID width.
+
+**1.0.35, 60 pairs per workload.** Times are milliseconds, with Step 3 first. The no-evidence ceiling is +5% median. Evidence-bearing ceilings are +10% median and +15% p95. No-evidence responses matched byte for byte in their text content.
+
+| Workload | Median | p95 | Min–max, before / after | Requests | Estimated tokens | MCP frame bytes | Initial gate |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | --- |
+| Context, no evidence | 203.8 → 207.9 (+2.0%) | 432.0 → 378.3 (-12.4%) | 83–954 / 60–657 | 15 → 15 | 336 → 336 | 820–821 → 820–821 | Pass |
+| Context, class | 196.2 → 192.5 (-1.9%) | 451.0 → 343.1 (-23.9%) | 67–543 / 85–420 | 17 → 17 | 392 → 556 | 946–947 → 1334–1335 | Pass |
+| Structured context, class | 238.0 → 250.8 (+5.4%) | 403.0 → 409.7 (+1.7%) | 80–726 / 69–643 | 17 → 17 | 1536 → 1979 | 7089 → 9095 | Pass |
+| Impact, no evidence | 73.0 → 79.6 (+8.9%) | 174.8 → 147.3 (-15.7%) | 20–377 / 40–185 | 8 → 8 | 116 → 116 | 332 → 332 | Median exceeded |
+| Impact, class | 114.1 → 133.3 (+16.9%) | 216.7 → 227.9 (+5.2%) | 59–372 / 51–632 | 11 → 11 | 120 → 262 | 339 → 679 | Median exceeded |
+| Impact, method | 77.6 → 79.2 (+2.0%) | 122.6 → 130.6 (+6.5%) | 15–275 / 17–167 | 8 → 8 | 115 → 198 | 330 → 534 | Pass |
+| Explain, no evidence | 117.6 → 127.4 (+8.4%) | 242.7 → 208.8 (-14.0%) | 38–459 / 55–232 | 13 → 13 | 129 → 129 | 354 → 354 | Median exceeded |
+| Explain, class | 101.5 → 100.9 (-0.6%) | 157.1 → 153.8 (-2.1%) | 27–191 / 22–199 | 13 → 13 | 163 → 305 | 429 → 769 | Pass |
+
+The 20-pair 1.0.30 pilot passed the eight latency comparisons and had the same request counts. Its timings include concurrent release checks. Structured-context p95 was 5.72 s for Step 3 and 4.77 s for Step 4 during that run. The isolated 1.0.35 measurements above are the primary comparison.
+
+For the three exceeded medians, a second 60-pair experiment on 1.0.35 staged the **same Step 3 build** on both sides. Median differences were −10.6% for plain impact, +10.3% for class impact, and −17.3% for plain explain. For class impact, the union of time spent in backend requests moved from 94.7 to 105.5 ms while median time outside those requests moved from 4.75 to 4.88 ms. Even the identical builds crossed the class-impact threshold. The release check retains the original thresholds.
+
+From `ix-cli`, after building both distributions and starting a disposable E2E stack, run `IX_E2E=1 node scripts/behavior-retrieval-perf.mjs /path/to/built-step-3 60`. The benchmark resets that stack. Set `IX_RETRIEVAL_CASE` to a comma-separated subset such as `ix_impact/plain/text,ix_impact/Job/text,ix_explain/plain/text` to reproduce the follow-up. Add `IX_RETRIEVAL_CONTROL=1` for the identical-build control. The ordinary pinned nine-workload request and response-byte gate also passed. Its context scenarios made 110 requests for `IxClient` and 131 from an issue. Impact on `resolveWorkspaceRoot` made 26.
+
+A 160-pair repeat used the same thresholds and compared the complete method/path request multiset for every pair. Plain impact measured 63.90 → 61.04 ms median (−4.5%) and 108.50 → 107.82 ms p95. Class impact measured 105.47 → 102.46 ms median (−2.8%) and 169.41 → 157.19 ms p95 (−7.2%). Plain explain again exceeded the median gate at 88.77 → 99.51 ms (+12.1%), with 143.24 → 142.08 ms p95. Its median time with a backend read outstanding was 84.60 → 95.50 ms. Time outside backend reads was 4.06 → 3.96 ms. All 13 requests and their routes matched. Each of these experiments used one persistent pair of clients per workload, which confounds build identity with the individual processes and their persistent connections. The final plain-explain check uses eight independently started client pairs, alternates which build starts first and pools all 240 measured calls per build.
+
+The eight-session plain-explain comparison measured **94.17 → 101.05 ms median (+7.3%)**, above the approved +5% ceiling. The p95 was 145.63 → 150.43 ms (+3.3%). Individual session medians ranged from 73.8 to 100.3 ms for Step 3 and 71.3 to 105.6 ms for Step 4. Both builds made the same 13 requests, returned the same 129 estimated text tokens, and sent 352–353 bytes per MCP frame. Median time with a backend read outstanding moved from 89.50 to 96.00 ms. Median time outside those reads moved from 4.96 to 5.04 ms. The timing data localizes most of the difference to intervals with outstanding reads. It does not establish a cause inside the separately maintained backend. The shared host and the identical-build control limit attribution. **The no-evidence explain latency gate remains a rollout blocker.** Reproduce this check with `IX_RETRIEVAL_CASE=ix_explain/plain/text` and pass `30 8` after the baseline path.
+
+A missing historical identity uses the existing unresolved-target outcome and identifies the requested revision. Saved-bundle validation discards a behavioral row whose target, revision or owner conflicts with its bundle. Other selected evidence remains available.
+
+### Step 4 file inventory
+
+| Area | Files |
+| --- | --- |
+| Decode, project and hydrate | [Behavioral evidence](../ix-cli/src/cli/behavioral-evidence.ts), [historical identity and reads](../ix-cli/src/cli/context/behavior-revision.ts), [existing client](../ix-cli/src/client/api.ts) |
+| Context, saved bundles and rendering | [Context command](../ix-cli/src/cli/commands/context.ts), [assembly](../ix-cli/src/cli/context/bundle.ts), [types](../ix-cli/src/cli/context/types.ts), [schema](../ix-cli/src/cli/context-bundle-schema.ts), [records](../ix-cli/src/cli/context/records.ts), [text rendering](../ix-cli/src/cli/context/render.ts), [truncation](../ix-cli/src/cli/context/truncation.ts), [issue mode](../ix-cli/src/cli/context/issue.ts), [investigation diffs](../ix-cli/src/cli/context/investigation-diff.ts) |
+| Impact and explain | [Target resolution](../ix-cli/src/cli/resolve.ts), [shared fact collection](../ix-cli/src/cli/explain/facts.ts), [impact](../ix-cli/src/cli/commands/impact.ts), [explain](../ix-cli/src/cli/commands/explain.ts) |
+| Verification and format contract | [Unit tests](../ix-cli/src/cli/__tests__/behavioral-evidence.test.ts), [flag-test isolation](../ix-cli/src/cli/__tests__/context-pick-validation.test.ts), [E2E](../ix-cli/test/e2e/behavior-retrieval.e2e.ts), [paired benchmark](../ix-cli/scripts/behavior-retrieval-perf.mjs), [floor-release CI](../.github/workflows/ci.yml), [LLM format](llm-format.md), this document |
+
+### Verification results
+
+The full release 1.0.35 E2E suite passed all 58 tests. All 39 behavioral wire, map/migration and retrieval E2E tests passed on 1.0.30. The five retrieval scenarios passed on each release. They cover full read shapes, a default stdio MCP call, grouped structured evidence, current and limited budgets, explain and impact, save/resume and citation-only diffs, mismatched saved metadata, historical edits/deletion/renames/name reuse, missing source and removal on remap.
+
+CLI unit and integration finished with 5,317 passes, one expected failure, three skips, and the previously recorded caller-location snapshot failure. The agent-evaluation subprocess passed separately on Node 24. Core ingestion had 1,108 passes and one skip. The 16 projector tests, production builds, CLI and strict retrieval E2E type checks, parser smoke, the 5,000-file scale test, and all nine pinned request/response-byte checks passed. ESLint reported 40 warnings and zero errors. Knip continues to report the earlier core-ingestion `BehaviorWrite` export as unused. The no-evidence explain timing above is the open Step 4 release gate.
+
+## Step 7 — Boolean lifecycle pilot
+
+Starting with `tree-sitter/1.32`, `attrs.behavior_v1` can carry a literal boolean destination on a named instance field. The five eligible names are `dead`, `destroyed`, `queued`, `running` and `stopped`. A uniquely owned top-level class must declare the field with a literal boolean initializer. Another eligible method must directly test the field in a top-level early-return check followed by a call or construction. The return must be bare or directly call `Promise.resolve`; returning an alternative display value does not qualify a slot. Direct tests, negation, strict boolean equality and a conjunction of two simple field tests qualify the slot. A qualifying read adds no guard or prior value to a different method's write.
+
+The writer observes standalone literal assignments in ordinary method blocks and supported `if` arms. Declarations do not generate initial states. A boolean prior is a candidate only for the first executable statement of the innermost then-arm testing the same field with strict boolean equality. Truthiness, negation, else-arms and repeated assignments leave the prior unknown. String writes keep their existing typed identity tuple and get priority under shared analysis caps.
+
+The shared reader checks live and saved observations against producer provenance. A `1.31` envelope admits only the legacy string contract. A `1.32` boolean destination is JSON `true` or `false`; the strings `"true"` and `"false"` have different types and identities. Boolean projections carry their syntax scope. This scope, the producer's budget cut reason, and the retrieval counts of omitted members or writes answer three separate questions. Absence of a write cannot establish a terminal state. Existing workspace writer compatibility, replay verification, durable backfill and full-attribute replacement rules apply to this upgrade.
+
+For each evidence-enabled workspace, deploy readers that accept both producers before enabling the `1.32` writer. Coordinate all writers for that workspace. A `1.31` writer can replace an envelope with a string-only version or omit it entirely. The backend provides no writer-version lock. Historical reads use the producer recorded at the requested revision.
+
+On frozen commit `83cd3e684f2df7a82508958a5b936013fafdcc8c`, the independent labels predict five supported writes. Two assign `ParsePool.dead`, one assigns `ParsePool.destroyed`, and two assign scheduler flags. All five have unknown prior values. The two scheduler resets in a loop and a finally clause are outside this pilot. The `FreshPostings.ascii` encoding flag is a negative example.
+
+Ordinary maps of that commit with both producers yielded the same structural signature of 13,656 nodes and 26,400 edges excluding regions and their membership edges. The `1.32` graph contained exactly the five labeled writes. The default `ix_context` class responses showed all five with matching source spans, the syntax limitation and the scope of the returned class members. Both memory-layer releases, 1.0.30 and 1.0.35, passed all 41 behavioral E2E tests. Comparing the compiled parsers on 174 legacy cases preserved the complete IR and all 68 string-write identities. In nine read-only Codex sessions, source alone, source with structural Ix, and source with boolean Ix each scored 15/15. These data establish five-site extraction accuracy. Agent-efficiency improvement remains unestablished.
+
+The pilot parser and map comparisons use `IX_BOOLEAN_PILOT=1 node scripts/behavior-perf.mjs BASELINE --parser` or `--map` from `ix-cli`. Set `IX_PILOT_CONTROL=1` for identical producers. The retrieval comparison uses `IX_BOOLEAN_PILOT=1 node scripts/behavior-retrieval-perf.mjs BASELINE 20 2`; `IX_RETRIEVAL_CONTROL=1` selects identical readers and writers. Map and retrieval benchmarks reset disposable E2E databases. Retrieval requires a second independent matching backend supplied through `IX_PILOT_BASE_ENDPOINT` and `IX_PILOT_BASE_ARANGO_URL`. Both inputs use the same checkout and symbol identities. The pilot reports paired intervals; a range crossing the ceiling leaves the gate inconclusive. The separate production no-evidence explain gate remains +5% median.
+
+Seven of 19 pilot latency comparisons met their ceilings with the paired 95% interval. Twelve were inconclusive. On 24 paired parser batches, sparse production files took 76.91 → 79.34 ms (+3.2%, interval −4.4% to +8.5%). Wide incidental classes took 25.27 → 27.05 ms (+7.0%, −13.5% to +36.2%). Their identical-build median changes were +17.7% and +9.3%. Both dense parser workloads and the mixed-evidence map met their +10% ceilings. Zero-evidence mapping took 466.14 → 468.48 ms (+0.5%, −4.6% to +6.3%) and both builds made six steady-state requests. No-evidence `ix_explain` took 83.30 → 87.93 ms (+5.6%, −27.0% to +31.5%). Both builds made the same 13 requests. Production rollout remains blocked.

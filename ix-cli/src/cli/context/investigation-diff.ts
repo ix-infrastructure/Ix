@@ -291,6 +291,7 @@ export async function buildFreshBundle(
     kind: opts.kind,
     path: opts.path,
     pick: opts.pick,
+    ...(opts.asOfRev !== undefined && {historicalMissRev: opts.asOfRev, textAnswer:false}),
     strict: true,
   }, format);
   if (!resolved) return undefined;

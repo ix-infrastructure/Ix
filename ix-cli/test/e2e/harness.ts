@@ -61,23 +61,23 @@ function checkUrl(name: string, raw: string): URL {
 }
 
 /** Reads and checks the environment. Throws instead of touching a shared stack. */
-export function e2eEnv(): E2eEnv {
-  if (process.env.IX_E2E !== "1") {
+export function e2eEnv(settings: NodeJS.ProcessEnv = process.env): E2eEnv {
+  if (settings.IX_E2E !== "1") {
     throw new Error(
       "Set IX_E2E=1 to run the real-backend harness: every scenario resets the backend's database.",
     );
   }
-  const backendPort = process.env.IX_E2E_BACKEND_PORT ?? "8290";
-  const arangoPort = process.env.IX_E2E_ARANGO_PORT ?? "8729";
-  const endpoint = process.env.IX_E2E_ENDPOINT ?? `http://127.0.0.1:${backendPort}`;
-  const arangoUrl = process.env.IX_E2E_ARANGO_URL ?? `http://127.0.0.1:${arangoPort}`;
+  const backendPort = settings.IX_E2E_BACKEND_PORT ?? "8290";
+  const arangoPort = settings.IX_E2E_ARANGO_PORT ?? "8729";
+  const endpoint = settings.IX_E2E_ENDPOINT ?? `http://127.0.0.1:${backendPort}`;
+  const arangoUrl = settings.IX_E2E_ARANGO_URL ?? `http://127.0.0.1:${arangoPort}`;
   checkUrl("backend endpoint", endpoint);
   checkUrl("ArangoDB URL", arangoUrl);
   if (!existsSync(CLI)) throw new Error(`${CLI} not found: run npm run build first`);
   return {
     endpoint: endpoint.replace(/\/$/, ""),
     arangoUrl,
-    token: process.env.IX_TOKEN || undefined,
+    token: settings.IX_TOKEN || undefined,
   };
 }
 

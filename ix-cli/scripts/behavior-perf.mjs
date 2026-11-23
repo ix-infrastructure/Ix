@@ -2,6 +2,7 @@
 // Node 26. Run against built Step 2 and candidate checkouts on the same host.
 // --map requires IX_E2E=1 and resets the disposable E2E backend before each run.
 import assert from 'node:assert/strict';
+import { pairedGate } from './behavior-perf-interval.mjs';
 import { execFile } from 'node:child_process';
 import {
   cpSync,
@@ -24,7 +25,11 @@ const here = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const [baseline, mode] = process.argv.slice(2);
 if (!baseline || !['--parser', '--map'].includes(mode))
   throw Error('Usage: behavior-perf.mjs BASELINE_ROOT --parser|--map');
-const roots = [resolve(baseline), here];
+// Set IX_BOOLEAN_PILOT=1 to compare 1.31 with 1.32 on identical source.
+const flowPilot = process.env.IX_FLOW_PILOT === '1';
+const pilot = flowPilot || process.env.IX_BOOLEAN_PILOT === '1';
+const control = pilot && process.env.IX_PILOT_CONTROL === '1';
+const roots = [resolve(baseline), control ? resolve(baseline) : here];
 const results = [];
 const median = (a) => (a[(a.length - 1) >> 1] + a[a.length >> 1]) / 2;
 function report(name, samples, ceiling) {
@@ -34,6 +39,10 @@ function report(name, samples, ceiling) {
   });
   const delta = 100 * (series[1].median / series[0].median - 1);
   const result = { name, series, delta, ceiling, pass: delta <= ceiling };
+  if (pilot && ceiling > 0) {
+    result.gate = pairedGate(samples, 0.5, ceiling, mode === '--parser' ? 4 : 1);
+    result.pass &&= result.gate.decision === 'pass';
+  }
   console.log(JSON.stringify(result));
   results.push(result);
 }
@@ -51,30 +60,66 @@ async function parserBench() {
     const path = paths[Math.floor((i * paths.length) / 32)];
     return [path, readFileSync(join(here, 'ix-cli/src', path), 'utf8')];
   });
-  const cases = [sparse, Array.from({ length: 32 }, (_, i) => [`job${i}.ts`, dense])];
+  const copies = source => Array.from({ length: 32 }, (_, i) => [`job${i}.ts`, source]);
+  const cases = [sparse, copies(dense)];
+  if (pilot) {
+    let mixed = dense.replace('start(){', 'running=false; work(){if(this.running)return; tick();} start(){this.running=true;');
+    if (flowPilot) mixed = mixed.replace('start(){', 'start(){try{while(again)this.running=false;}finally{this.status="idle";}');
+    const incidental = 'class Flag { running=false; label(){if(this.running)return "on";return "off";}' +
+      Array.from({length:80}, (_, i) => `m${i}(){this.running=true;}`).join('') + '}';
+    cases.push(copies(mixed), copies(incidental));
+    if (flowPilot) {
+      const negative = 'class A{ go(){'+'try{for(let i=0;i<N;i++){other.status="x";}}catch(e){audit(e);}'.repeat(60)+'}}';
+      const deep = 'class A{ go(){'+'try{while(ready){'.repeat(18)+'this.status="deep";'+'}}finally{}'.repeat(18)+'}}';
+      cases.push(copies(negative), copies(deep));
+    }
+  }
   const samples = cases.map(() => [[], []]);
-  // Alternate fresh pools in ABBA order. Include transfer of complete parse results.
-  for (const build of [0, 1, 1, 0]) {
-    const pool = new ParsePool(join(roots[build], 'core-ingestion/dist/parse-worker.js'), 4);
-    try {
-      for (const [k, files] of cases.entries())
-        for (let round = 0; round < 15; round++) {
-          const start = performance.now();
-          const out = await Promise.all(files.map(([p, s]) => pool.parse(p, s)));
-          const ms = performance.now() - start;
-          assert(out.every(Boolean));
-          assert.equal(
-            out.reduce((n, r) => n + (r.behavior?.writes.length ?? 0), 0),
-            k ? 3200 : 0,
-          );
-          if (round >= 5) samples[k][build].push(ms);
+  async function timed(pool, build, k, record) {
+    const start = performance.now();
+    const out = await Promise.all(cases[k].map(([p, s]) => pool.parse(p, s)));
+    const ms = performance.now() - start;
+    assert(out.every(Boolean));
+    assert.equal(out.reduce((n, r) => n + (r.behavior?.writes.length ?? 0), 0),
+      [0, 3200, flowPilot ? (build && !control ? 3296 : 3232) : (build && !control ? 3232 : 3200), 0, 0, 0][k]);
+    if (flowPilot && k === 5 && build && !control)
+      assert(out.every(r => r.behavior?.coverage === 'partial' && r.behavior.cutReason === 'depth'));
+    if (record) samples[k][build].push(ms);
+  }
+  const newPool = build => new ParsePool(join(roots[build], 'core-ingestion/dist/parse-worker.js'), 4);
+  if (pilot) {
+    // Match each observation within a pair of hot pools. Only one pool is working.
+    for (let session = 0; session < 4; session++) {
+      const pools = [];
+      for (const build of session % 2 ? [1, 0] : [0, 1]) pools[build] = newPool(build);
+      try {
+        for (const k of cases.keys()) for (let round = 0; round < 11; round++) {
+          for (const build of (session + round) % 2 ? [1, 0] : [0, 1])
+            await timed(pools[build], build, k, round >= 5);
         }
-    } finally {
-      await pool.destroy();
+      } finally { await Promise.all(pools.map(pool => pool.destroy())); }
+    }
+  } else {
+    for (const build of [0, 1, 1, 0]) {
+      const pool = newPool(build);
+      try {
+        for (const k of cases.keys()) for (let round = 0; round < 15; round++)
+          await timed(pool, build, k, round >= 5);
+      } finally { await pool.destroy(); }
     }
   }
   report('32 production files / four-worker pool (ms)', samples[0], 5);
   report('3200 writes / four-worker pool (ms)', samples[1], 10);
+
+  if (pilot) {
+    report(flowPilot ? 'mixed dense writes plus two nested sites per file (ms)' : '3200 string and 32 candidate boolean writes (ms)', samples[2], 10);
+    report('32 classes with 80 incidental writes each (ms)', samples[3], 5);
+    if (flowPilot) {
+      report('32 wide negative files with loops and exception arms (ms)', samples[4], 5);
+      report('32 nested exception files at the depth cap (ms)', samples[5], 5);
+    }
+    return;
+  }
 
   // Time the optional pass independently, with identical instrumentation in both modules.
   let elapsed;
@@ -149,7 +194,11 @@ async function mapBench() {
     for (const evidence of [false, true]) {
       for (let i = 0; i < 24; i++) {
         const source =
-          `export class Job${i} {\n  start(){\n` +
+          `export class Job${i} {\n` +
+          (pilot && evidence ? '  running=false; work(){if(this.running)return; tick();}\n' : '') +
+          '  start(){\n' +
+          (pilot && evidence ? '    this.running=true;\n' : '') +
+          (flowPilot && evidence ? '    try{while(again)this.running=false;}finally{this.status="idle";}\n' : '') +
           (evidence
             ? '    if(this.status === "queued") this.status="running";\n'
             : '    return "running";\n') +
@@ -208,7 +257,8 @@ async function mapBench() {
           const writes = patches
             .flatMap((p) => p.ops)
             .reduce((count, op) => count + (op.attrs?.behavior_v1?.writes.length ?? 0), 0);
-          assert.equal(writes, b && evidence ? 24 : 0, 'uploaded verified sites');
+          const expected = flowPilot ? 48 + (b && !control ? 48 : 0) : pilot ? 24 + (b && !control ? 24 : 0) : b ? 24 : 0;
+          assert.equal(writes, evidence ? expected : 0, 'uploaded verified sites');
           const bytes = uploads.reduce((total, event) => total + Buffer.byteLength(event.body), 0);
           writeFileSync(file, '');
           await run(process.execPath, args, options);
@@ -225,7 +275,7 @@ async function mapBench() {
           rmSync(home, { recursive: true, force: true });
         }
       report(
-        `24-file fresh map, ${evidence ? '24 guarded writes' : 'zero writes'} (ms)`,
+        `24-file fresh map, ${evidence ? (pilot ? 'mixed evidence' : '24 guarded writes') : 'zero writes'} (ms)`,
         data,
         evidence ? 10 : 5,
       );

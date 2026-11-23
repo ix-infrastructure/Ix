@@ -178,3 +178,73 @@ describe("behavioral retrieval", () => {
     }
   });
 });
+
+it("keeps typed boolean evidence, its syntax limits and producer version across live and saved reads", () => {
+  const field = {
+    ...write,
+    slotName: "stopped",
+    observed: {
+      ...write.observed,
+      to: { kind: "boolean", value: true },
+      guards: [
+        {
+          ...guard,
+          expression: "this.stopped === false",
+          conditionKey: ["strictEqual", "this.stopped", ["boolean", false]],
+        },
+      ],
+    },
+    inferred: { ...write.inferred, from: { kind: "boolean", value: false } },
+  };
+  function decode(w: unknown, extractor = "tree-sitter/1.32") {
+    return projectBehavior(
+      node,
+      [
+        {
+          ...node,
+          provenance: { ...node.provenance, extractor },
+          attrs: { ...node.attrs, behavior_v1: { ...raw, writes: [w] } },
+        },
+      ],
+      [],
+    );
+  }
+  const view = decode(field)!;
+  expect(readSavedBehavior(view)).toEqual(view);
+  expect(behaviorDescription(view)).toContain("writes this.stopped = true");
+  expect(behaviorDescription(view)).toContain("candidate prior false");
+  expect(behaviorDescription(view)).toContain("loops and try/finally");
+  expect(decode(field, "tree-sitter/1.31")).toBeUndefined();
+  expect(decode({ ...field, slotKind: "local" })).toBeUndefined();
+  expect(
+    decode({ ...field, observed: { ...field.observed, to: { kind: "boolean", value: "false" } } }),
+  ).toBeUndefined();
+  expect(
+    decode({ ...field, inferred: { ...field.inferred, from: { kind: "boolean", value: true } } }),
+  ).toBeUndefined();
+  const badSaved = structuredClone(view);
+  badSaved.slots[0].sites[0].source.extractor = "tree-sitter/1.31";
+  expect(readSavedBehavior(badSaved)).toBeUndefined();
+  expect(decode(write)).toBeDefined();
+});
+
+it("requires the entire 1.33 path in live and saved views, and rejects a prior from outside a frame", () => {
+  const frame = {kind:"try", arm:"finally", form:"finally", guardDepth:1, span:[3,0,5,1], body:[3,2,4,2]};
+  function decode(flow: unknown, extractor = "tree-sitter/1.33", prior: unknown = {from:"unknown"}) {
+    const site = {...write, observed:{...write.observed, controlFlow:flow}, inferred:prior};
+    return projectBehavior(node,[{...node, provenance:{...node.provenance,extractor},
+      attrs:{...node.attrs,behavior_v1:{...raw,writes:[site]}}}],[]);
+  }
+  const view = decode([frame])!;
+  expect(readSavedBehavior(view)).toEqual(view);
+  expect(behaviorDescription(view)).toContain('guard true "this.state');
+  expect(behaviorDescription(view)).toContain(' > try/finally finally arm [3,2,4,2]: start writes');
+  expect(decode([], "tree-sitter/1.32")).toBeUndefined();
+  expect(decode(undefined)).toBeUndefined();
+  expect(decode([frame], undefined, write.inferred)).toBeUndefined();
+  for (const bad of [{...frame,kind:"switch"},{...frame,body:[4,0,4,3]},{...frame,form:"catch"},{...frame,guardDepth:0}])
+    expect(decode([bad])).toBeUndefined();
+  const stale = structuredClone(view);
+  delete stale.slots[0].sites[0].observed.controlFlow;
+  expect(readSavedBehavior(stale)).toBeUndefined();
+});

@@ -109,7 +109,10 @@ async function writeLegacy(co: Checkout) {
   const parsed = core[0].parseFile(rel, source())!;
   const { behavior: _omitted, ...structural } = parsed;
   const patch = core[1].buildPatchWithResolution(structural, sha(source()), ws, []);
-  const [current, legacy] = core[1].sourcePatchIdCandidates(rel, sha(source()), ws);
+  const [current, ...older] = core[1].sourcePatchIdCandidates(rel, sha(source()), ws);
+  const index = core[1].PREVIOUS_EXTRACTORS!.indexOf("tree-sitter/1.30");
+  expect(index).toBeGreaterThanOrEqual(0);
+  const legacy = older[index];
   patch.source.extractor = "tree-sitter/1.30";
   patch.patchId = legacy;
   patch.replaces = [current];
@@ -269,4 +272,86 @@ it("P7 recovers after process death between a durable checkpoint and the next up
   if (recovered !== rel) expect((await evidence(co, source()))?.writes[0].observed.to.value).toBe("running");
   expect(JSON.parse(readFileSync(path, "utf8")).extractor).toBe(core[1].extractorName());
   expect(readdirSync(co.ixHome)).not.toContain(name);
+});
+
+it.each(["tree-sitter/1.31", "tree-sitter/1.32"])("migrates an unchanged owner from %s, repairs replay, retires nested writes and preserves history", async version => {
+  const co = checkout(fixture);
+  const code =
+    'export class Job {\n start(){this.status="ok";this.stopped=true;while(open)this.stopped=false;}\n stopped=false;\n run(){if(this.stopped)return; tick();}\n}\n';
+  writeFileSync(join(co.dir, rel), code);
+  map(co);
+  const current = (await live(co)).attrs.behavior_v1 as { writes: { slotName: string }[] };
+  expect(current.writes.map((w) => w.slotName)).toEqual(["status", "stopped", "stopped"]);
+  const patch = core[1].buildPatchWithResolution(
+    core[0].parseFile(rel, code)!,
+    sha(code),
+    workspaceId(co),
+    [],
+  );
+  const [now, ...previousIds] = core[1].sourcePatchIdCandidates(rel, sha(code), workspaceId(co));
+  patch.patchId = previousIds[core[1].PREVIOUS_EXTRACTORS!.indexOf(version)];
+  patch.replaces = [now];
+  patch.source.extractor = version;
+  for (const op of patch.ops) {
+    if (op.type !== "UpsertNode") continue;
+    if (op.attrs.parser_version) op.attrs.parser_version = version;
+    const envelope = op.attrs.behavior_v1;
+    if (!envelope) continue;
+    envelope.writes = envelope.writes.filter((w: { observed: {controlFlow: unknown[]; to: {kind: string}} }) =>
+      !w.observed.controlFlow.length && (version === "tree-sitter/1.32" || w.observed.to.kind === "string"));
+    for (const w of envelope.writes) delete w.observed.controlFlow;
+
+  }
+  const legacy = await client.commitPatch(patch);
+  expect(legacy.status).toBe("Ok");
+  const historical = (revision: number) =>
+    JSON.parse(
+      ix(env, co, [
+        "context",
+        id(co),
+        "--as-of-rev",
+        String(revision),
+        "--max-chars",
+        "24000",
+        "--format",
+        "json",
+      ]).stdout,
+    ).evidence.find((e: { kind: string }) => e.kind === "behavior")?.behavior;
+  const oldView = historical(legacy.rev);
+  expect(oldView.slots.map((s: {slotName: string}) => s.slotName).sort()).toEqual(
+    version === "tree-sitter/1.32" ? ["status", "stopped"] : ["status"]);
+  for (const slot of oldView.slots) for (const site of slot.sites) {
+    expect(site.source.extractor).toBe(version);
+    expect(site.observed).not.toHaveProperty("controlFlow");
+  }
+  const marker = baseline(co);
+  writeFileSync(
+    marker,
+    JSON.stringify({ ...JSON.parse(readFileSync(marker, "utf8")), extractor: version }),
+  );
+  map(co);
+  expect((await live(co)).attrs.behavior_v1).toEqual(current);
+  expect(JSON.parse(readFileSync(marker, "utf8")).extractor).toBe("tree-sitter/1.33");
+  const rev = (await client.contextForNode(id(co), { depth: "full" })).metadata.asOfRev;
+  writeFileSync(join(co.dir, rel), code.replace("if(this.stopped)return; ", ""));
+  map(co);
+  expect(((await live(co)).attrs.behavior_v1 as typeof current).writes).toEqual([
+    current.writes[0],
+  ]);
+  const wire = (await client.historicalNodes([id(co)], rev!)).nodes.find((n) => n.id === id(co));
+  expect(wire?.attrs.behavior_v1).toEqual(current);
+  expect(wire?.provenance?.extractor).toBe("tree-sitter/1.33");
+  const previous = historical(rev!);
+  const nested = previous.slots.flatMap((s: {sites: unknown[]}) => s.sites)
+    .find((w: {observed: {controlFlow: unknown[]}}) => w.observed.controlFlow.length);
+  expect(nested.observed.controlFlow).toMatchObject([{kind:"while", test:{expression:"open"}}]);
+  expect(historical(legacy.rev)).toEqual(oldView);
+  expect(previous.slots.map((s: { slotName: string }) => s.slotName)).toContain("stopped");
+  expect(
+    previous.slots.find((s: { slotName: string }) => s.slotName === "stopped").sites[0],
+  ).toMatchObject({
+    observed: { to: { kind: "boolean", value: true } },
+    inferred: { from: "unknown" },
+    source: { extractor: "tree-sitter/1.33" },
+  });
 });

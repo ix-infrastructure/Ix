@@ -5,7 +5,7 @@ import * as crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 // @ts-ignore — tree-sitter has no bundled types
 import Parser from 'tree-sitter';
-import { behaviorLimits, extractBehavior, firstBehaviorCandidate } from './behavior.js';
+import { behaviorLimits, extractBehavior, firstBehaviorCandidate, firstBooleanCandidate } from './behavior.js';
 import type { BehaviorDefinition, BehavioralEvidence } from './behavior.js';
 export { bindBehaviorIds } from './behavior.js';
 export type { BehaviorWrite, BehavioralEvidence } from './behavior.js';
@@ -2989,8 +2989,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     // JS/TS named/default import bindings (local → public symbol) for cross-repo
     // alias resolution. Additive: never alters emitted relationships.
     const isJsTs = language === SupportedLanguages.JavaScript || language === SupportedLanguages.TypeScript;
-    const firstCandidate = isJsTs && !TS_DECLARATION_FILE.test(filePath) ? firstBehaviorCandidate(source) : -1;
-    const behaviorDefs: BehaviorDefinition[] | undefined = firstCandidate >= 0 && !tree.rootNode.hasError ? [] : undefined;
+    const behavioralFile = isJsTs && !TS_DECLARATION_FILE.test(filePath);
+    const firstBoolean = behavioralFile ? firstBooleanCandidate(source) : -1;
+    const firstCandidate = behavioralFile ? firstBehaviorCandidate(source) : -1;
+    const behaviorDefs: BehaviorDefinition[] | undefined = (firstCandidate >= 0 || firstBoolean >= 0) && !tree.rootNode.hasError ? [] : undefined;
     const importBindings: ImportBinding[] = [];
     const jsTsImportedLocalNames = new Set<string>();
     const jsTsImportUseHasUnshadowed = new Map<string, boolean>();
@@ -3956,7 +3958,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     const tsGlobalTypes = isTsSource ? tsGlobalTypeNames(tree.rootNode) : [];
     const tsModule = isTsSource && isTsModule(tree.rootNode);
     const fileRole = classifyFileRole(filePath, source);
-    const behavior = behaviorDefs && extractBehavior(entities, behaviorDefs, source, firstCandidate, deadline, qualifiedKey);
+    const behavior = behaviorDefs && extractBehavior(entities, behaviorDefs, source, firstCandidate, deadline, qualifiedKey, firstBoolean);
 
     return {
       filePath,

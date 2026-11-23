@@ -8,6 +8,10 @@ export const MAX_BEHAVIOR_MEMBERS = 20;
 const MAX_SITES = 4;
 const MAX_DECODE_WRITES = 256;
 const MAX_DESCRIPTION_CHARS = 1600;
+const booleanScope =
+  "Direct method and if-block writes only; loops and try/finally are outside extraction scope";
+const flowScope = "Lexical sites only; execution and frequency unknown";
+const stringSlots = new Set(["state", "phase", "status"]);
 const hash = /^[0-9a-f]{64}$/;
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const cleanName = (s: string) => !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(s);
@@ -26,7 +30,10 @@ function schemas(z: typeof Zod.z) {
   const span = z
     .tuple([pos, pos, pos, pos])
     .refine(([l, c, e, d]) => l >= 1 && (e > l || (e === l && d > c)));
-  const literal = z.object({ kind: z.literal("string"), value: z.string().max(128) });
+  const literal = z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("string"), value: z.string().max(128) }),
+    z.object({ kind: z.literal("boolean"), value: z.boolean() }),
+  ]);
   const guard = z.object({
     expression: z.string().min(1).max(1024),
     span,
@@ -36,7 +43,10 @@ function schemas(z: typeof Zod.z) {
       z.tuple([
         z.literal("strictEqual"),
         z.string().max(256),
-        z.tuple([z.literal("string"), z.string().max(128)]),
+        z.union([
+          z.tuple([z.literal("string"), z.string().max(128)]),
+          z.tuple([z.literal("boolean"), z.boolean()]),
+        ]),
       ]),
       z.tuple([z.literal("tokens"), ident]),
     ]),
@@ -57,7 +67,15 @@ function schemas(z: typeof Zod.z) {
       ]),
     }),
   ]);
-  const observed = z.object({ to: literal, assignment: span, guards: z.array(guard).max(48) });
+  const frameBase = { span, body: span, guardDepth: pos.max(48) };
+  const frame = z.discriminatedUnion("kind", [
+    z.object({ ...frameBase, kind: z.enum(["while", "for"]), header: span, headerKey: ident,
+      test: z.object({ expression: z.string().min(1).max(1024), span }).nullable() }).strict(),
+    z.object({ ...frameBase, kind: z.literal("try"), arm: z.enum(["body", "catch", "finally"]),
+      form: z.enum(["catch", "finally", "catchFinally"]) }).strict(),
+  ]);
+  const observed = z.object({ to: literal, assignment: span, guards: z.array(guard).max(48),
+    controlFlow: z.array(frame).max(48).optional() });
   const inferred = z.union([
     z.object({ from: z.literal("unknown") }),
     z.object({
@@ -69,14 +87,49 @@ function schemas(z: typeof Zod.z) {
   const slot = z.object({
     slotId: ident,
     slotKind: z.enum(["local", "instanceField"]),
-    slotName: z.enum(["state", "phase", "status"]),
+    slotName: z.enum([
+      "state",
+      "phase",
+      "status",
+      "stopped",
+      "dead",
+      "destroyed",
+      "queued",
+      "running",
+    ]),
   });
   const write = slot.extend({ id: ident, observed, inferred }).refine((w) => {
+    const { controlFlow, assignment, guards } = w.observed;
+    if (controlFlow?.length) {
+      const before = (a: number[], i: number, b: number[], j: number) =>
+        a[i] < b[j] || (a[i] === b[j] && a[i + 1] <= b[j + 1]);
+      const contains = (a: number[], b: number[]) => before(a, 0, b, 0) && before(b, 2, a, 2);
+      if (controlFlow.length + guards.length > 48) return false;
+      for (const [i, f] of controlFlow.entries()) {
+        const outer = controlFlow[i - 1];
+        if (!contains(f.span, f.body) || !contains(f.body, assignment) ||
+            f.guardDepth > guards.length || (outer && (!contains(outer.body, f.span) ||
+              f.guardDepth < outer.guardDepth || !before(outer.span, 0, f.span, 0) ||
+              (outer.span[0] === f.span[0] && outer.span[1] === f.span[1])))) return false;
+        if (guards.some((g, j) => j < f.guardDepth ? !before(g.span, 2, f.span, 0) :
+          !contains(f.body, g.span) || !before(g.span, 2, assignment, 0))) return false;
+        if (f.kind === "try") {
+          if (f.arm !== "body" && f.form !== "catchFinally" && f.arm !== f.form) return false;
+        } else if (!contains(f.span, f.header) || f.header[0] !== f.span[0] || f.header[1] !== f.span[1] ||
+                   !before(f.header, 2, f.body, 0) || (f.test ? !contains(f.header, f.test.span) : f.kind === "while")) return false;
+      }
+      if (w.inferred.from !== "unknown" && w.inferred.guardIndex < controlFlow.at(-1)!.guardDepth) return false;
+    }
+    const boolean = w.observed.to.kind === "boolean";
+    if (boolean === stringSlots.has(w.slotName) || (boolean && w.slotKind !== "instanceField"))
+      return false;
     const operand = (w.slotKind === "local" ? "" : "this.") + w.slotName;
     if (
       w.observed.guards.some(
         (g) =>
-          g.conditionKey[0] === "strictEqual" && g.sameSlot !== (g.conditionKey[1] === operand),
+          g.conditionKey[0] === "strictEqual" &&
+          (g.conditionKey[2][0] !== w.observed.to.kind ||
+            g.sameSlot !== (g.conditionKey[1] === operand)),
       )
     )
       return false;
@@ -88,6 +141,7 @@ function schemas(z: typeof Zod.z) {
       g.sameSlot === true &&
       g.conditionKey[0] === "strictEqual" &&
       g.conditionKey[1] === (w.slotKind === "local" ? w.slotName : "this." + w.slotName) &&
+      g.conditionKey[2][0] === w.inferred.from.kind &&
       g.conditionKey[2][1] === w.inferred.from.value
     );
   });
@@ -106,7 +160,7 @@ function schemas(z: typeof Zod.z) {
           !/^[\w+.-]+:/.test(s),
       ),
     hash: ident,
-    extractor: z.literal("tree-sitter/1.31"),
+    extractor: z.enum(["tree-sitter/1.31", "tree-sitter/1.32", "tree-sitter/1.33"]),
   });
   const site = z.object({
     id: ident,
@@ -114,6 +168,7 @@ function schemas(z: typeof Zod.z) {
     ownerName: z.string().min(1).max(512).refine(cleanName),
     source,
     extraction: coverage,
+    syntaxScope: z.enum([booleanScope, flowScope]).optional(),
     observed,
     inferred,
   });
@@ -134,7 +189,14 @@ function schemas(z: typeof Zod.z) {
         new Set(v.slots.map((s) => s.slotId)).size === v.slots.length &&
         new Set(v.slots.flatMap((s) => s.sites.map((w) => w.id))).size ===
           v.slots.reduce((n, s) => n + s.sites.length, 0) &&
-        v.slots.every((s) => s.sites.every((w) => write.safeParse({ ...s, ...w }).success)),
+        v.slots.every((s) =>
+          s.sites.every(
+            (w) =>
+              write.safeParse({ ...s, ...w }).success &&
+              producerMatches(w.source.extractor, w.observed) &&
+              w.syntaxScope === scopeFor(w.source.extractor, w.observed.to.kind),
+          ),
+        ),
     );
   return { write, coverage, source, view };
 }
@@ -148,6 +210,16 @@ export type BehaviorView = Zod.infer<ReturnType<typeof schemas>["view"]>;
 type Slot = BehaviorView["slots"][number];
 type Site = Slot["sites"][number];
 
+function producerMatches(producer: string, observed: {to: {kind: string}; controlFlow?: unknown}): boolean {
+  return (producer === "tree-sitter/1.33") === (observed.controlFlow !== undefined) &&
+    (producer !== "tree-sitter/1.31" || observed.to.kind === "string");
+}
+
+function scopeFor(producer: string, literal: string) {
+  if (producer === "tree-sitter/1.33") return flowScope;
+  return literal === "boolean" ? booleanScope : undefined;
+}
+
 function guardedArray(raw: unknown, max: number): raw is unknown[] {
   return Array.isArray(raw) && raw.length <= max;
 }
@@ -157,6 +229,10 @@ function boundedSite(w: unknown): boolean {
   return (
     record(w) &&
     record(w.observed) &&
+    (w.observed.controlFlow === undefined || (guardedArray(w.observed.controlFlow, 48) &&
+      w.observed.controlFlow.every(f => record(f) && guardedArray(f.span, 4) && guardedArray(f.body, 4) &&
+        (f.kind === "try" || (guardedArray(f.header, 4) &&
+          (f.test === null || (record(f.test) && guardedArray(f.test.span, 4)))))))) &&
     guardedArray(w.observed.assignment, 4) &&
     guardedArray(w.observed.guards, 48) &&
     w.observed.guards.every(
@@ -298,9 +374,10 @@ export function projectBehavior(
       writes.some(
         (w) =>
           !w ||
+          !producerMatches(source.extractor, w.observed) ||
           (typeof first === "number" &&
             typeof last === "number" &&
-            [w.observed.assignment, ...w.observed.guards.map((g) => g.span)].some(
+            [w.observed.assignment, ...w.observed.guards.map((g) => g.span), ...(w.observed.controlFlow ?? []).map(f => f.span)].some(
               (s) => s[0] < first || s[2] > last,
             )),
       )
@@ -339,6 +416,7 @@ export function projectBehavior(
         extraction,
         observed: w.observed,
         inferred: w.inferred,
+        ...(scopeFor(source.extractor, w.observed.to.kind) && { syntaxScope: scopeFor(source.extractor, w.observed.to.kind) }),
       };
       const single = { ...view, slots: [{ ...slot, sites: [site] }] };
       const size = behaviorDescription(single).length;
@@ -357,7 +435,7 @@ export function projectBehavior(
 }
 
 // Quote source as data on one physical line, including C1 and bidirectional controls.
-const quote = (s: string) =>
+const quote = (s: string | boolean) =>
   JSON.stringify(s).replace(
     /[\u007f-\u009f\u2028-\u202e\u2066-\u2069]/gu,
     (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"),
@@ -371,9 +449,21 @@ export function behaviorDescription(view: BehaviorView): string {
       const guards = w.observed.guards.map(
         (g) => `guard ${g.arm === "then" ? "true" : "false"} ${quote(g.expression)} [${g.span}]`,
       );
+      const path: string[] = [];
+      const frames = w.observed.controlFlow ?? [];
+      if (frames.length) for (let depth = 0; depth <= guards.length; depth++) {
+        for (const f of frames.filter(f => f.guardDepth === depth)) {
+          if (f.kind === "try") {
+            const construct = f.form === "catchFinally" ? "try/catch/finally" : "try/" + f.form;
+            path.push(`${construct} ${f.arm === "body" ? "body" : f.arm + " arm"} [${f.body}]`);
+          } else path.push(`${f.kind} body (test ${f.test ? quote(f.test.expression) : "omitted"}) [${f.header}]`);
+        }
+        if (depth < guards.length) path.push(guards[depth]);
+      }
       lines.push(
+        (path.length ? "Inside " + path.join(" > ") + ": " : "") +
         `${w.ownerName} writes ${name} = ${quote(w.observed.to.value)} in ${quote(w.source.uri)} [${w.observed.assignment}]` +
-          (guards.length ? ", " + guards.join(", ") : "") +
+          (!frames.length && guards.length ? ", " + guards.join(", ") : "") +
           `, candidate prior ${w.inferred.from === "unknown" ? "unknown" : quote(w.inferred.from.value)}` +
           (w.extraction.coverage === "partial"
             ? ` (partial extraction: ${w.extraction.cutReason})`
@@ -381,6 +471,8 @@ export function behaviorDescription(view: BehaviorView): string {
       );
     }
   }
+  for (const scope of [booleanScope, flowScope])
+    if (view.slots.some(slot => slot.sites.some(site => site.syntaxScope === scope))) lines.push(scope);
   if (view.scope === "returned-members") lines.push("class view covers returned members only");
   if (view.unavailableMembers) lines.push(`${view.unavailableMembers} owner(s) unavailable`);
   if (view.omittedMembers || view.omittedWrites)

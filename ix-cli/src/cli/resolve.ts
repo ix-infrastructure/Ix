@@ -12,7 +12,7 @@ import { requireReadWorkspaceId, resolveWorkspaceId } from "./bootstrap.js";
 import { readStitchScope, resolveWorkspaceRoot, stitchScopeCachePath, writeStitchScope } from "./config.js";
 import { ixHome } from "./ix-home.js";
 import { checkGraphHealth, isUnhealthy } from "./graph-health.js";
-import { reportAmbiguousTarget, reportResolutionFailure, reportResolutionNotices } from "./ui.js";
+import { reportAmbiguousTarget, reportFailure, reportResolutionFailure, reportResolutionNotices } from "./ui.js";
 import { relativePath } from "./format.js";
 import { isQuiet } from "./output-shape.js";
 import { disambiguationHint } from "./next-step.js";
@@ -200,6 +200,8 @@ export async function resolveReadSystemId(
 export interface ResolveOpts {
   /** Retain requested full nodes for this invocation before ranking discards their attributes. */
   onNodes?: (nodes: GraphNode[]) => void;
+  /** A historical miss cannot be answered with a match from the current working tree. */
+  historicalMissRev?: number;
   suggest?: boolean;
   /** Only these command boundaries run the bounded candidate probes. */
   suggestCommand?: string;
@@ -1187,6 +1189,11 @@ export async function resolveFileOrReport(
   if (result.resolved) {
     if (result.notices?.length) reportResolutionNotices(result.notices, format, opts);
     return result.entity;
+  }
+  if (opts.historicalMissRev !== undefined && !result.ambiguous) {
+    reportFailure("unresolved_target",
+      `Behavioral evidence unavailable at revision ${opts.historicalMissRev}: could not verify the identity of "${target}".`, format);
+    return null;
   }
   await reportUnresolved(client, target, result, opts, format);
   return null;

@@ -1,0 +1,19 @@
+comparison,stage,pair,score,incorrect_claims,critical_errors,source_reads,tools,context_est_tokens,input_tokens,cached_input_tokens,cold_input_tokens,output_tokens,elapsed_s
+live minus source,V0,1,0,0,0,0,1,522,26332,34688,-8356,23,4.577
+live minus source,V0,2,0,0,0,0,1,522,26302,19712,6590,154,8.043
+live minus source,V0,3,0,0,0,0,1,522,27076,23808,3268,80,2.275
+live minus source,B04,1,1,0,0,0,1,509,7348,12160,-4812,-17,0.395
+live minus source,B04,2,0,0,0,0,1,509,27666,27392,274,100,4.55
+live minus source,B04,3,0,0,0,0,1,509,11146,3712,7434,11,3.584
+live minus source,B06,1,0,0,0,0,1,358,29719,26368,3351,101,-4.619
+live minus source,B06,2,0,0,0,0,1,358,27924,24320,3604,179,9.055
+live minus source,B06,3,0,0,0,0,1,358,25065,9600,15465,126,4.971
+full minus ablated,V0,1,0,0,0,-1,-1,71,-30870,-18048,-12822,-63,-6.167
+full minus ablated,V0,2,0,0,0,-1,-1,71,-30852,-23552,-7300,-60,-3.611
+full minus ablated,V0,3,0,0,0,-1,-1,71,-41416,-35200,-6216,-124,-6.166
+full minus ablated,B04,1,0,0,0,-1,-1,59,-28054,-26880,-1174,-90,-11.907
+full minus ablated,B04,2,1,0,0,-1,-1,59,-30864,-30976,112,-120,-4.113
+full minus ablated,B04,3,1,0,0,-1,-1,59,-30860,-17792,-13068,-84,-7.932
+full minus ablated,B06,1,0,0,0,0,0,0,-6,-10368,10362,21,0.38
+full minus ablated,B06,2,0,0,0,0,0,0,-3496,2048,-5544,20,-3.698
+full minus ablated,B06,3,0,0,0,0,0,0,688,-18560,19248,44,3.909

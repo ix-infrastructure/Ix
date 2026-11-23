@@ -1,0 +1,37 @@
+blind_id,label,stage,pair,arm,score,owners,destinations,guards,priors,citations,limitations,exact_write_guard_spans,incorrect_claims,critical_errors,scoring_note,tools,source_reads,ix_calls,source_result_bytes,evidence_packet_bytes,context_est_tokens,elapsed_s,input_tokens,cached_input_tokens,cache_write_input_tokens,output_tokens,reasoning_output_tokens,cold_input_tokens
+R27,V0-1-ablated,V0,1,ablated,10,2,2,2,2,1,1,False,0,0,,1,1,0,198,767,451,16.841,44361,28416,0,263,0,15945
+R10,V0-1-full,V0,1,full,10,2,2,2,2,1,1,True,0,0,,0,0,0,0,1116,522,10.674,13491,10368,0,200,0,3123
+R36,V0-1-live,V0,1,live,10,2,2,2,2,1,1,False,0,0,,2,1,1,198,0,615,16.389,70033,62592,0,316,0,7441
+R09,V0-1-source,V0,1,source,10,2,2,2,2,1,1,False,0,0,Correctly labels the stop prior unconstrained. Illustrative running predecessor is explicitly conditional.,1,1,0,198,0,93,11.812,43701,27904,0,293,0,15797
+R24,V0-2-ablated,V0,2,ablated,10,2,2,2,2,1,1,False,0,0,Correctly labels the stop prior unconstrained. Illustrative running predecessor is explicitly conditional.,1,1,0,198,767,451,12.444,44343,33920,0,270,0,10423
+R29,V0-2-full,V0,2,full,10,2,2,2,2,1,1,True,0,0,,0,0,0,0,1116,522,8.833,13491,10368,0,210,0,3123
+R15,V0-2-live,V0,2,live,10,2,2,2,2,1,1,False,0,0,,2,1,1,198,0,615,19.756,70009,57984,0,441,13,12025
+R21,V0-2-source,V0,2,source,10,2,2,2,2,1,1,False,0,0,Correctly labels the stop prior unconstrained. Illustrative running predecessor is explicitly conditional.,1,1,0,198,0,93,11.713,43707,38272,0,287,0,5435
+R22,V0-3-ablated,V0,3,ablated,10,2,2,2,2,1,1,False,0,0,Correctly labels the stop prior unconstrained. Illustrative running predecessor is explicitly conditional.,1,1,0,198,767,451,13.883,54907,48128,0,326,0,6779
+R20,V0-3-full,V0,3,full,10,2,2,2,2,1,1,True,0,0,,0,0,0,0,1116,522,7.717,13491,12928,0,202,0,563
+R34,V0-3-live,V0,3,live,10,2,2,2,2,1,1,True,0,0,,2,1,1,198,0,615,15.594,70775,56704,0,363,0,14071
+R35,V0-3-source,V0,3,source,10,2,2,2,2,1,1,False,0,0,Correctly labels the stop prior unconstrained. Illustrative running predecessor is explicitly conditional.,1,1,0,198,0,93,13.319,43699,32896,0,283,0,10803
+R30,B04-1-ablated,B04,1,ablated,10,2,2,2,2,1,1,False,0,0,,1,1,0,196,767,450,19.839,41536,37248,0,293,0,4288
+R06,B04-1-full,B04,1,full,10,2,2,2,2,1,1,True,0,0,,0,0,0,0,1089,509,7.932,13482,10368,0,203,0,3114
+R19,B04-1-live,B04,1,live,10,2,2,2,2,1,1,False,0,0,,2,1,1,196,0,601,12.713,51042,48128,0,290,0,2914
+R11,B04-1-source,B04,1,source,9,2,2,2,1,1,1,False,0,0,Lists conditional examples for both candidate priors and recognizes no method checks the prior. Leaves the requested unknown-prior classification implicit; one of two prior points. No observed runtime sequence claimed.,1,1,0,196,0,92,12.318,43694,35968,0,307,0,7726
+R14,B04-2-ablated,B04,2,ablated,9,2,2,2,1,1,1,False,0,0,Lists conditional examples for both candidate priors and recognizes no method checks the prior. Leaves the requested unknown-prior classification implicit; one of two prior points. No observed runtime sequence claimed.,1,1,0,196,767,450,12.303,44346,41344,0,315,0,3002
+R01,B04-2-full,B04,2,full,10,2,2,2,2,1,1,True,0,0,,0,0,0,0,1089,509,8.19,13482,10368,0,195,0,3114
+R16,B04-2-live,B04,2,live,10,2,2,2,2,1,1,False,0,0,,2,1,1,196,0,601,16.601,68420,64384,0,409,0,4036
+R23,B04-2-source,B04,2,source,10,2,2,2,2,1,1,False,0,0,,1,1,0,196,0,92,12.051,40754,36992,0,309,0,3762
+R08,B04-3-ablated,B04,3,ablated,9,2,2,2,1,1,1,False,0,0,Lists conditional examples for both candidate priors and recognizes no method checks the prior. Leaves the requested unknown-prior classification implicit; one of two prior points. No observed runtime sequence claimed.,1,1,0,196,767,450,15.621,44342,28160,0,290,0,16182
+R03,B04-3-full,B04,3,full,10,2,2,2,2,1,1,True,0,0,,0,0,0,0,1089,509,7.689,13482,10368,0,206,0,3114
+R07,B04-3-live,B04,3,live,10,2,2,2,2,1,1,True,0,0,,2,1,1,196,0,601,15.523,54852,41984,0,322,0,12868
+R28,B04-3-source,B04,3,source,10,2,2,2,2,1,1,False,0,0,,1,1,0,196,0,92,11.939,43706,38272,0,311,0,5434
+R12,B06-1-ablated,B06,1,ablated,10,2,2,2,2,1,1,N/A,0,0,"Correct file-scoped absence, with a source citation and external behavior left unknown.",1,1,0,166,767,436,10.628,44344,38784,0,230,0,5560
+R04,B06-1-full,B06,1,full,10,2,2,2,2,1,1,N/A,0,0,"Correct file-scoped absence, with a source citation and external behavior left unknown.",1,1,0,166,767,436,11.008,44338,28416,0,251,0,15922
+R13,B06-1-live,B06,1,live,10,2,2,2,2,1,1,N/A,0,0,"Correct file-scoped absence, with a source citation and external behavior left unknown.",2,1,1,166,0,436,14.646,70465,65664,0,343,0,4801
+R18,B06-1-source,B06,1,source,10,2,2,2,2,1,1,N/A,0,0,"Correct file-scoped absence, with a source citation and external behavior left unknown.",1,1,0,166,0,78,19.265,40746,39296,0,242,0,1450
+R17,B06-2-ablated,B06,2,ablated,10,2,2,2,2,1,1,N/A,0,0,"Correct file-scoped absence, with a source citation and external behavior left unknown.",1,1,0,166,767,436,13.888,44332,28544,0,234,0,15788
+R05,B06-2-full,B06,2,full,10,2,2,2,2,1,1,N/A,0,0,"Correct file-scoped absence, with a source citation and external behavior left unknown.",1,1,0,166,767,436,10.19,40836,30592,0,254,0,10244
+R02,B06-2-live,B06,2,live,10,2,2,2,2,1,1,N/A,0,0,"Correct file-scoped absence, with a source citation and external behavior left unknown.",2,1,1,166,0,436,20.736,68668,61056,0,402,9,7612
+R26,B06-2-source,B06,2,source,10,2,2,2,2,1,1,N/A,0,0,"Correct file-scoped absence, with a source citation and external behavior left unknown.",1,1,0,166,0,78,11.681,40744,36736,0,223,0,4008
+R25,B06-3-ablated,B06,3,ablated,10,2,2,2,2,1,1,N/A,0,0,"Correct file-scoped absence, with a source citation and external behavior left unknown.",1,1,0,166,767,436,10.016,40844,39296,0,196,0,1548
+R33,B06-3-full,B06,3,full,10,2,2,2,2,1,1,N/A,0,0,"Correct file-scoped absence, with a source citation and external behavior left unknown.",1,1,0,166,767,436,13.925,41532,20736,0,240,0,20796
+R31,B06-3-live,B06,3,live,10,2,2,2,2,1,1,N/A,0,0,"Correct file-scoped absence, with a source citation and external behavior left unknown.",2,1,1,166,0,436,16.036,68661,47872,0,358,8,20789
+R32,B06-3-source,B06,3,source,10,2,2,2,2,1,1,N/A,0,0,"Correct file-scoped absence, with a source citation and external behavior left unknown.",1,1,0,166,0,78,11.065,43596,38272,0,232,0,5324

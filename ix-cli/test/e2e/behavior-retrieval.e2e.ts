@@ -3,6 +3,7 @@ import { mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { contextBundleSchema } from "../../src/cli/context-bundle-schema.js";
 import type { ContextBundle } from "../../src/cli/context/types.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -75,7 +76,20 @@ it("R1 verifies complete contained member attributes and a bounded, historical s
     ]).stdout,
   );
   expect(projection(past)?.slots[0]?.sites).toHaveLength(2);
-  const byName = JSON.parse(ix(env,co,["context","Job.start","--path","job.ts","--as-of-rev",String(rev),"--max-chars","24000","--format","json"]).stdout);
+  const byName = JSON.parse(
+    ix(env, co, [
+      "context",
+      "Job.start",
+      "--path",
+      "job.ts",
+      "--as-of-rev",
+      String(rev),
+      "--max-chars",
+      "24000",
+      "--format",
+      "json",
+    ]).stdout,
+  );
   expect(projection(byName)?.slots[0]?.sites[0]?.ownerId).toBe(owners[0]);
   for (const depth of ["compact", "standard", "full"]) {
     const ctx = await api.contextForNode(id("Job"), { depth, asOfRev: rev });
@@ -147,6 +161,15 @@ it("R2 maps an ordinary class and explains its cross-method state changes over r
     ])
       expect(text).toContain(phrase);
     expect(result.structuredContent).toBeUndefined();
+    const normalJson = await client.callTool({
+      name: "ix_context",
+      arguments: { target: "Job", structured: true },
+    });
+    const bounded = projection(normalJson.structuredContent as unknown as ContextBundle)!;
+    const count = bounded.slots.reduce((total, slot) => total + slot.sites.length, 0);
+    expect(count).toBeGreaterThan(0);
+    expect(count + bounded.omittedWrites).toBe(2);
+
     const structured = await client.callTool({
       name: "ix_context",
       arguments: { target: "Job", structured: true, max_chars: 24000 },
@@ -195,6 +218,20 @@ it("R3 preserves selected saved evidence and reports a change even when only cit
   const bundle = JSON.parse(ix(env, co, ["context", "Job", ...args]).stdout);
   const selected = projection(bundle)!;
   expect(selected.slots[0].sites).toHaveLength(2);
+  // The same schema guards both saving and loading. A tampered row must not
+  // survive when it purports to belong to a different snapshot or owner.
+  const wrongRevision = { ...bundle, metadata: { ...bundle.metadata, asOfRev: 99 } };
+  const wrongOwner = {
+    ...bundle,
+    target: { ...bundle.target, id: selected.slots[0].sites[0].ownerId },
+  };
+  for (const changed of [wrongRevision, wrongOwner]) {
+    const sanitized = contextBundleSchema.parse(changed);
+    expect(sanitized.evidence.some((row) => row.kind === "behavior")).toBe(false);
+    expect(sanitized.evidence.filter((row) => row.kind !== "behavior")).toEqual(
+      contextBundleSchema.parse(bundle).evidence.filter((row) => row.kind !== "behavior"),
+    );
+  }
   ix(env, co, ["context", "Job", "--save", "behavior", ...args]);
   writeFileSync(join(co.dir, "job.ts"), "\n" + original);
   ix(env, co, ["map", "."]);
@@ -227,6 +264,14 @@ it("R4 reads old identities and provenance after edits, deletion, rename and nam
   map();
   renameSync(join(co.dir, "job.ts"), join(co.dir, "archived.ts"));
   map();
+  const missing = ix(
+    env,
+    co,
+    ["context", "NoSuchHistoricalOwner", "--as-of-rev", String(rev), "--format", "json"],
+    true,
+  );
+  expect(missing.status).toBe(3);
+  expect(JSON.parse(missing.stdout).message).toContain(`unavailable at revision ${rev}`);
   const start = prior.slots[0].sites.find((s) => s.ownerName === "start")!;
   for (const target of [classId, "Job", "Job.start", start.ownerId, "start"]) {
     const old = JSON.parse(
@@ -309,4 +354,60 @@ it("R5 keeps mapped citations when the source disappears and retires them on the
   expect(after.entities.map((n: { name: string }) => n.name)).toEqual(
     expect.arrayContaining(["Job", "start", "stop"]),
   );
+});
+
+it("renders scoped boolean writes and an unknown prior through default MCP", async () => {
+  const co = checkout(fixture);
+  writeFileSync(
+    join(co.dir, "job.ts"),
+    [
+      "export class Job {",
+      "  stopped=false;",
+      "  work(){if(this.stopped)return; tick();}",
+      "  stop(){this.stopped=true;}",
+      "  resume(){if(this.stopped === true)this.stopped=false;}",
+      "  cleanup(){try {tick();} finally {this.stopped=false;}}",
+      "}",
+    ].join("\n"),
+  );
+  ix(env, co, ["map", "."]);
+  const mcp = new Client({ name: "boolean-pilot", version: "1" });
+  await mcp.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [entry, "mcp"],
+      cwd: co.dir,
+      env: {
+        ...(process.env as Record<string, string>),
+        IX_HOME: co.ixHome,
+        IX_ENDPOINT: env.endpoint,
+        IX_NO_UPDATE_CHECK: "1",
+      },
+    }),
+  );
+  try {
+    const result = await mcp.callTool({ name: "ix_context", arguments: { target: "Job" } });
+    const text = (result.content as { text: string }[]).map((c) => c.text).join("\n");
+    for (const fact of [
+      "stop writes this.stopped = true",
+      "candidate prior unknown",
+      "resume writes this.stopped = false",
+      "candidate prior true",
+      "finally arm",
+      "execution and frequency unknown",
+    ])
+      expect(text).toContain(fact);
+    expect(text).toContain("cleanup writes");
+    const bundle = JSON.parse(
+      ix(env, co, ["context", "Job", "--max-chars", "24000", "--format", "json"]).stdout,
+    );
+    expect(projection(bundle)?.slots).toHaveLength(1);
+    expect(
+      projection(bundle)
+        ?.slots[0].sites.map((w) => w.ownerName)
+        .sort(),
+    ).toEqual(["cleanup", "resume", "stop"]);
+  } finally {
+    await mcp.close();
+  }
 });

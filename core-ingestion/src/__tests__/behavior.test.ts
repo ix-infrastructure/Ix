@@ -227,3 +227,174 @@ describe('bounded optional analysis', () => {
     expect(extractBehavior([entity], [], '', -1, -Infinity, e => e.name)).toEqual({ coverage: 'partial', cutReason: 'deadline', writes: [] });
   });
 });
+
+describe('boolean lifecycle observations', () => {
+  const gate = 'work(){ if (!this.stopped) return; tick(); }';
+  const klass = (body: string) =>
+    'class W { stopped=false; ' + gate + ' set(){' + body + '} }';
+  it.each(['ts', 'tsx', 'js', 'jsx'])(
+    'keeps typed facts, exact guard spans and unknowns in %s',
+    (ext) => {
+      const source = klass(
+        [
+          '/*😀*/ if (this.stopped === false) this.stopped /*comment*/ = true;',
+          'if (true === this.stopped) this.stopped = false;',
+          'if (!this.stopped) this.stopped = true; else this.stopped = false;',
+          'if (this.stopped) { this.stopped=true; this.stopped=false; }',
+          'if (this.stopped === false) { tick(); this.stopped=true; }',
+          'if (this.stopped == false) this.stopped=true;',
+          'if (other.stopped === true) this.stopped=false;',
+          'if (this.stopped === "false") this.stopped=false;',
+          'if (other.ready) { if(this.stopped === true) this.stopped=false; }',
+        ].join('\r\n'),
+      );
+      const list = writes(source, 'src/job.' + ext);
+      expect(list.map((w) => w.inferred.from)).toEqual([
+        { kind: 'boolean', value: false },
+        { kind: 'boolean', value: true },
+        ...Array(8).fill('unknown'),
+        { kind: 'boolean', value: true },
+      ]);
+      expect(list.map((w) => w.observed.to.value)).toEqual([
+        true,
+        false,
+        true,
+        false,
+        true,
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+      ]);
+      expect(list.every((w) => w.observed.to.kind === 'boolean')).toBe(true);
+      expect(
+        list
+          .slice(2, 4)
+          .map((w) => [
+            w.observed.guards[0].sameSlot,
+            w.observed.guards[0].arm,
+          ]),
+      ).toEqual([
+        [true, 'then'],
+        [true, 'else'],
+      ]);
+      expect(list[8].observed.guards[0].sameSlot).toBe(false);
+      expect(list.at(-1)!.observed.guards.map((g) => g.expression)).toEqual([
+        'other.ready',
+        'this.stopped === true',
+      ]);
+      for (const w of list) {
+        expect(slice(source, w.observed.assignment)).toMatch(
+          /^this\.stopped.*(?:true|false)$/,
+        );
+        for (const g of w.observed.guards)
+          expect(slice(source, g.span)).toBe(g.expression);
+      }
+      expect(new Set(list.map((w) => ids(w).id)).size).toBe(list.length);
+      expect(
+        writes('\r\n' + source, 'src/job.' + ext).map((w) => ids(w)),
+      ).toEqual(list.map((w) => ids(w)));
+    },
+  );
+  it.each([
+    [
+      'metadata',
+      'class Badge {running=false; paint(){this.running=true} color(){return this.running?"amber":"green"}}',
+    ],
+    [
+      'presentation guard',
+      'class Glyph {stopped=false; refresh(){this.stopped=true} label(){if(this.stopped)return "square";return "triangle"}}',
+    ],
+    [
+      'same method',
+      'class A { stopped=false; go(){ if(this.stopped)return; tick(); this.stopped=true; } }',
+    ],
+    [
+      'wrong class',
+      'class A {stopped=false; set(){this.stopped=true}} class B {work(){if(this.stopped)return;tick()}}',
+    ],
+    ['no declaration', 'class A {' + gate + ' set(){this.stopped=true}}'],
+    [
+      'unsupported destinations and ownership',
+      klass(
+        'let stopped=false; stopped=true; other.stopped=true; this.stopped=!this.stopped; let x=()=>{this.stopped=true};',
+      ),
+    ],
+    [
+      'unsupported for-of inside cleanup',
+      klass(
+        'try {for(const v of xs)this.stopped=false;} finally{later(()=>{this.stopped=false});}',
+      ),
+    ],
+    [
+      'computed alias',
+      'class W { stopped=false; ["stopped"]=false; ' +
+        gate +
+        ' set(){this.stopped=true}}',
+    ],
+    [
+      'decorated declaration',
+      'class W { @log stopped=false; ' + gate + ' set(){this.stopped=true}}',
+    ],
+    [
+      'parameter property',
+      'class W { stopped=false; constructor(public stopped:boolean){} ' +
+        gate +
+        ' set(){this.stopped=true}}',
+    ],
+    ['incidental name', klass('this.ascii=false;')],
+  ])('rejects %s', (_, code) => expect(writes(code)).toEqual([]));
+  it('rejects a presentation selector even when its alternative calls a formatter', () => {
+    const source = 'class Preview {running=false; seed(){this.running=true;} caption(){if(this.running)return "active";return this.formatIdle();}}';
+    expect(writes(source)).toEqual([]);
+    expect(writes(source + '\nfunction keep(){let state;state="ready"}').map(w => w.ownerKey)).toEqual(['keep']);
+  });
+  it('accepts a braced resolved-promise exit and rejects a computed or optional call', () => {
+    const source = 'class Pool { dead=false; stop(){this.dead=true;} parse(){if(this.dead){note();return Promise.resolve(null);} return new Promise(work);} }';
+    expect(writes(source).map(w => w.slotName)).toEqual(['dead']);
+    for (const call of ['Promise["resolve"](null)', 'Promise.resolve?.(null)', 'formatDisabled()']) {
+      expect(writes(source.replace('Promise.resolve(null)', call))).toEqual([]);
+    }
+  });
+  it('permits grammar trivia and keeps a write after an earlier statement unknown', () => {
+    const code = klass(
+      'if (this.stopped === false) { touch(); this /*a*/ . /*b*/ stopped /*c*/ = /*d*/ true; }',
+    );
+    const [site] = writes(code);
+    expect(site.observed.to).toEqual({ kind: 'boolean', value: true });
+    expect(site.inferred.from).toBe('unknown');
+    expect(slice(code, site.observed.assignment)).toBe(
+      'this /*a*/ . /*b*/ stopped /*c*/ = /*d*/ true',
+    );
+  });
+  it('preserves the string prefix and structural symbols when boolean analysis reaches the write cap', () => {
+    const result = parsed(
+      klass('this.stopped=true;'.repeat(258) + 'this.status="legacy";'),
+    );
+    expect(result.entities.some((e) => e.name === 'set')).toBe(true);
+    expect(result.behavior).toMatchObject({
+      coverage: 'partial',
+      cutReason: 'writes',
+    });
+    expect(result.behavior?.writes).toHaveLength(256);
+    expect(result.behavior?.writes[0].observed.to).toEqual({
+      kind: 'string',
+      value: 'legacy',
+    });
+  });
+  it('keeps one slot across methods and preserves legacy string IDs and records', () => {
+    const setter = 'if (this.stopped === false) this.status="new";';
+    const plain = writes(klass(setter))[0];
+    const mixed = writes(
+      klass(setter + 'this.stopped=true;').replace(
+        /} }$/,
+        '} stop(){this.stopped=true;} }',
+      ),
+    );
+    expect(mixed[0]).toEqual(plain);
+    expect(ids(mixed[1]).slotId).toBe(ids(mixed[2]).slotId);
+    expect(ids(mixed[1]).id).not.toBe(ids(mixed[2]).id);
+  });
+});

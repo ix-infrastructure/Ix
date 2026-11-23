@@ -99,6 +99,11 @@ const fn = (body: string) => 'function run() { ' + body + ' }';
 
 // One separately labeled rejection case per row, including deliberate omissions
 // of real state changes that require a broader analysis.
+// These Step 7 exclusions become positive examples starting with producer 1.33.
+export const formerFlowExclusions = [
+  method('while (ready) this.status = "x"'), method('try { this.status = "x" } finally {}'),
+];
+
 export const negativeCases: [name: string, source: string, typescriptOnly?: boolean][] = [
   ['unrelated receiver', method('other.status = "x"')],
   ['alias of this', method('const self = this; self.state = "x"')],
@@ -108,9 +113,7 @@ export const negativeCases: [name: string, source: string, typescriptOnly?: bool
   ['dynamic value', method('this.phase = nextPhase()')],
   ['template value', method('this.status = `idle`')],
   ['compound assignment', method('this.state += "x"')],
-  ['inside a loop', method('while (ready) this.status = "x"')],
   ['inside switch', method('switch (v) { case 1: this.status = "x"; }')],
-  ['inside try', method('try { this.status = "x" } finally {}')],
   ['labeled block', method('retry: { this.state = "x"; }')],
   ['conditional expression', method('ok ? this.status = "x" : noop()')],
   ['short circuit', method('ok && (this.status = "x")')],
