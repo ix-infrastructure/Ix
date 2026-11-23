@@ -108,65 +108,94 @@ function fit(argument: string, parameter: string): Fit {
   return 'maybe';
 }
 
-interface Candidate {
+/** One way a call can apply to an overload. */
+interface Application {
+  /** The overload: an index into the signatures. */
   index: number;
-  varargs: boolean;
-  /** Per argument with a known type: its fit. */
+  /**
+   * The call spreads its trailing arguments over a varargs parameter. Passing
+   * the array itself is a fixed-arity application, like any other.
+   */
+  variable: boolean;
+  /** The fit of each argument with a known type, in argument order. */
   fits: Fit[];
+}
+
+/** Every way `shape` can apply to each signature by its argument count. */
+function applicationsByCount(signatures: readonly string[], shape: CallShape): Application[] {
+  const applications: Application[] = [];
+  const add = (index: number, variable: boolean, params: string[]): void => {
+    const fits: Fit[] = [];
+    params.forEach((param, i) => {
+      const arg = shape.argTypes?.[i];
+      if (arg != null) fits.push(fit(arg, param));
+    });
+    applications.push({ index, variable, fits });
+  };
+  signatures.forEach((signature, index) => {
+    const params = signature === '' ? [] : signature.split(',');
+    const last = params[params.length - 1];
+    if (!last?.endsWith('...')) {
+      if (shape.argc === params.length) add(index, false, params);
+      return;
+    }
+    const head = params.slice(0, -1);
+    const element = last.slice(0, -3);
+    // `f(T...)` called with one argument there: the array itself, or one element.
+    if (shape.argc === params.length) add(index, false, [...head, `${element}[]`]);
+    if (shape.argc >= head.length) {
+      add(index, true, [...head, ...new Array<string>(shape.argc - head.length).fill(element)]);
+    }
+  });
+  return applications;
+}
+
+/** The one overload all of `applications` belong to, else 0: cannot tell. */
+function onlyOverload(applications: Application[]): number {
+  return applications.length > 0 && applications.every(a => a.index === applications[0].index) ? applications[0].index : 0;
 }
 
 /**
  * The overload a call of this shape calls: an index into `signatures`, the
  * erased parameter lists of one `Container.name` in declaration order (see
  * `FileSummary.overloads`). 0, the first overload, also stands for "cannot
- * tell": no overload takes that many arguments, or more than one could be the
- * target. Two overloads that fit equally well are never guessed between.
+ * tell", and a wrong overload is worse than that, so in order:
+ *
+ * 1. No overload takes that many arguments, or none of those that do can take
+ *    an argument whose type is known (the target is elsewhere, inherited
+ *    perhaps): 0.
+ * 2. Some argument's type is unknown: the overload that alone takes that many
+ *    arguments, else 0. The unknown type could turn any other choice around.
+ * 3. Every type is known and one overload can take them: that one.
+ * 4. A fit depends on a hierarchy or a type parameter this cannot see: the
+ *    overload that takes every argument as exactly its own type, else 0.
+ * 5. Otherwise Java's phases: without boxing, then with it, then spreading
+ *    over varargs. The first phase with a fit decides, and within it the
+ *    overload more specific than every other; when there is none, 0.
  */
 export function selectJavaOverload(signatures: readonly string[], shape: CallShape): number {
-  const candidates: Candidate[] = [];
-  const known = (shape.argTypes ?? []).some(t => t != null);
-  for (let index = 0; index < signatures.length; index++) {
-    const params = signatures[index] === '' ? [] : signatures[index].split(',');
-    const varargs = params.length > 0 && params[params.length - 1].endsWith('...');
-    if (varargs ? shape.argc < params.length - 1 : shape.argc !== params.length) continue;
-    const fits: Fit[] = [];
-    for (let i = 0; known && i < shape.argc; i++) {
-      const arg = shape.argTypes?.[i];
-      if (arg == null) continue;
-      if (!varargs || i < params.length - 1) { fits.push(fit(arg, params[i])); continue; }
-      const element = params[params.length - 1].slice(0, -3);
-      const asElement = fit(arg, element);
-      // The one argument in the varargs position can also be the array itself.
-      const asArray = shape.argc === params.length ? fit(arg, `${element}[]`) : 'no';
-      fits.push(asElement === 'no' ? asArray : asElement === 'maybe' && typeof asArray === 'object' ? asArray : asElement);
-    }
-    candidates.push({ index, varargs, fits });
-  }
-  if (candidates.length === 0) return 0;
-  if (candidates.length === 1) return candidates[0].index;
-  if (!known) {
-    // By count alone, a fixed-arity overload is tried before a varargs one.
-    const fixed = candidates.filter(c => !c.varargs);
-    return fixed.length === 1 ? fixed[0].index : 0;
-  }
-  const viable = candidates.filter(c => !c.fits.includes('no'));
+  const byCount = applicationsByCount(signatures, shape);
+  const viable = byCount.filter(a => !a.fits.includes('no'));
   if (viable.length === 0) return 0;
-  if (viable.length === 1) return viable[0].index;
-  if (viable.some(c => c.fits.includes('maybe'))) {
-    // An overload that might fit through a hierarchy this cannot see can only
-    // lose to one that takes every known argument as exactly its own type.
-    const exact = viable.filter(c => !c.varargs && c.fits.every(f => typeof f === 'object' && f.rank === 4));
-    return exact.length === 1 ? exact[0].index : 0;
+
+  const allKnown = (shape.argTypes ?? []).filter(t => t != null).length === shape.argc;
+  if (!allKnown) return byCount.every(a => a.index === byCount[0].index) ? byCount[0].index : 0;
+  if (viable.every(a => a.index === viable[0].index)) return viable[0].index;
+
+  if (viable.some(a => a.fits.includes('maybe'))) {
+    // Nothing is more specific than an exact fit, whatever the others turn out to be.
+    return onlyOverload(viable.filter(a => !a.variable && a.fits.every(f => typeof f === 'object' && f.rank === 4)));
   }
-  // Java's phases: without boxing, then with it, then varargs. The first phase
-  // with a fit decides; within it the most specific overload wins.
-  const phase = (c: Candidate): number => c.varargs ? 3 : c.fits.some(f => (f as { boxed: boolean }).boxed) ? 2 : 1;
+
+  // Every fit is definite from here on.
+  const fitsOf = (a: Application) => a.fits as Array<{ rank: number; boxed: boolean }>;
+  const phase = (a: Application): number => a.variable ? 3 : fitsOf(a).some(f => f.boxed) ? 2 : 1;
   const first = Math.min(...viable.map(phase));
-  const inPhase = viable.filter(c => phase(c) === first);
-  const rank = (c: Candidate, i: number): number => (c.fits[i] as { rank: number }).rank;
-  const best = inPhase.filter(c => inPhase.every(other => other === c ||
-    (c.fits.every((_, i) => rank(c, i) >= rank(other, i)) && c.fits.some((_, i) => rank(c, i) > rank(other, i)))));
-  return best.length === 1 ? best[0].index : 0;
+  const inPhase = viable.filter(a => phase(a) === first);
+  // More specific: no argument fits worse, and one fits better.
+  const beats = (a: Application, b: Application): boolean =>
+    fitsOf(a).every((f, i) => f.rank >= fitsOf(b)[i].rank) && fitsOf(a).some((f, i) => f.rank > fitsOf(b)[i].rank);
+  return onlyOverload(inPhase.filter(a => inPhase.every(b => b.index === a.index || beats(a, b))));
 }
 
 /**

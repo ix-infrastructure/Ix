@@ -609,6 +609,14 @@ function javaFacts(root: any, facts: {
       }
       case 'object_creation_expression':
       case 'cast_expression': return node.childForFieldName('type')?.text;
+      case 'array_creation_expression': {
+        // `new int[]{1}`, `new String[2][]`: the element type and one `[]` per dimension.
+        const element = node.childForFieldName('type')?.text;
+        const dimensions = node.namedChildren
+          .filter((c: any) => c.type === 'dimensions_expr' || c.type === 'dimensions')
+          .reduce((n: number, c: any) => n + (c.type === 'dimensions_expr' ? 1 : (c.text.match(/\[/g) ?? []).length), 0);
+        return element && dimensions > 0 ? element + '[]'.repeat(dimensions) : undefined;
+      }
       case 'this': return enclosing(node)?.name;
       case 'identifier':
         return boundNames.has(node.text) ? variableType(lookupName(node.startIndex, node.text)) : undefined;

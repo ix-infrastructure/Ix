@@ -300,6 +300,138 @@ public class User {
     expect(callDsts(user, id('User', 'User.codes'))).toEqual([id('Log', 'Log.warn(int...)')]);
   });
 
+  it('stays on the first overload when an argument of unknown type could turn the choice around', () => {
+    const results = [
+      parse('Pk', `public class Pk {
+    public void pk(Object a, String b) {}
+    public void pk(String a, Integer b) {}
+    public void pk(String a) {}
+}
+`),
+      parse('User', `public class User {
+    void partial(Pk p) { p.pk("a", makeString()); }
+    void nothing(Pk p) { p.pk("a", null); }
+    void known(Pk p) { p.pk("a", 1); }
+    void single(Pk p) { p.pk(makeString()); }
+    String makeString() { return ""; }
+}
+`),
+    ];
+    const shapes = (src: string) => results[1].relationships.find(r => r.srcName === src && r.dstName === 'Pk.pk')?.callShapes;
+    // What a call returns is not evident, and `null` has no type to go by.
+    expect(shapes('User.partial')).toEqual([{ argc: 2, argTypes: ['String', null] }]);
+    expect(shapes('User.nothing')).toEqual([{ argc: 2, argTypes: ['String', null] }]);
+    const user = patchesOf(results).get('User')!;
+    const before = patchesOf(withoutShapes(results)).get('User')!;
+    for (const method of ['partial', 'nothing']) {
+      expect(callDsts(user, id('User', `User.${method}`)), method).toEqual([id('Pk', 'Pk.pk')]);
+      expect(calls(user, id('User', `User.${method}`)), method).toEqual(calls(before, id('User', `User.${method}`)));
+    }
+    // With every type known the same call is decided; so is the only overload of an arity.
+    expect(callDsts(user, id('User', 'User.known'))).toEqual([id('Pk', 'Pk.pk(String,Integer)')]);
+    expect(callDsts(user, id('User', 'User.single'))).toEqual([id('Pk', 'Pk.pk(String)')]);
+  });
+
+  it('makes the same choice for a call inside the declaring file', () => {
+    const results = [parse('Pk', `public class Pk {
+    public void pk(Object a, String b) {}
+    public void pk(String a, Integer b) {}
+    public void mix(String a) {}
+    public void mix(String a, String b) {}
+    void partial() { pk("a", makeString()); }
+    void known() { this.pk("a", 1); }
+    void elsewhere() { mix(1, 2); }
+    void pair() { mix("a", "b"); }
+    String makeString() { return ""; }
+}
+`)];
+    const pk = patchesOf(results).get('Pk')!;
+    const before = patchesOf(withoutShapes(results)).get('Pk')!;
+    expect(callDsts(pk, id('Pk', 'Pk.partial'), true).sort()).toEqual([id('Pk', 'Pk.pk'), id('Pk', 'Pk.makeString')].sort());
+    expect(calls(pk, id('Pk', 'Pk.partial'))).toEqual(calls(before, id('Pk', 'Pk.partial')));
+    expect(callDsts(pk, id('Pk', 'Pk.known'), true)).toEqual([id('Pk', 'Pk.pk(String,Integer)')]);
+    // No `mix` here takes two ints, though one takes two arguments.
+    expect(callDsts(pk, id('Pk', 'Pk.elsewhere'), true)).toEqual([id('Pk', 'Pk.mix')]);
+    expect(calls(pk, id('Pk', 'Pk.elsewhere'))).toEqual(calls(before, id('Pk', 'Pk.elsewhere')));
+    expect(callDsts(pk, id('Pk', 'Pk.pair'), true)).toEqual([id('Pk', 'Pk.mix(String,String)')]);
+  });
+
+  it('does not prefer a fixed-arity overload to a varargs one on unknown types, and reads a new array', () => {
+    const results = [
+      parse('Va', `public class Va {
+    public void va(int... codes) {}
+    public void va(int code) {}
+    public void rev(int code) {}
+    public void rev(int... codes) {}
+    public void vs(Object... parts) {}
+    public void vs(String text) {}
+}
+`),
+      parse('User', `public class User {
+    void array(Va v) { v.va(new int[]{1}); }
+    void sized(Va v) { v.rev(new int[2]); }
+    void unknownArray(Va v) { v.rev(codes()); }
+    void one(Va v) { v.rev(1); }
+    void unknown(Va v) { v.vs(thing()); }
+    void text(Va v) { v.vs("a"); }
+    void nested(Va v) { v.vs(new String[2][], new java.util.List<?>[0]); }
+    int[] codes() { return null; }
+    Object thing() { return null; }
+}
+`),
+    ];
+    const shapes = (src: string, dst: string) => results[1].relationships.find(r => r.srcName === src && r.dstName === dst)?.callShapes;
+    expect(shapes('User.array', 'Va.va')).toEqual([{ argc: 1, argTypes: ['int[]'] }]);
+    expect(shapes('User.sized', 'Va.rev')).toEqual([{ argc: 1, argTypes: ['int[]'] }]);
+    expect(shapes('User.nested', 'Va.vs')).toEqual([{ argc: 2, argTypes: ['String[][]', 'java.util.List[]'] }]);
+    const user = patchesOf(results).get('User')!;
+    const before = patchesOf(withoutShapes(results)).get('User')!;
+    // An int[] is the varargs array, never the int.
+    expect(callDsts(user, id('User', 'User.array'))).toEqual([id('Va', 'Va.va')]);
+    expect(callDsts(user, id('User', 'User.sized'))).toEqual([id('Va', 'Va.rev(int...)')]);
+    expect(callDsts(user, id('User', 'User.one'))).toEqual([id('Va', 'Va.rev')]);
+    // Unknown: it may be the array or the one value, a String or any Object.
+    for (const method of ['unknownArray', 'unknown']) {
+      expect(calls(user, id('User', `User.${method}`)), method).toEqual(calls(before, id('User', `User.${method}`)));
+    }
+    expect(callDsts(user, id('User', 'User.unknownArray'))).toEqual([id('Va', 'Va.rev')]);
+    expect(callDsts(user, id('User', 'User.unknown'))).toEqual([id('Va', 'Va.vs')]);
+    expect(callDsts(user, id('User', 'User.text'))).toEqual([id('Va', 'Va.vs(String)')]);
+  });
+
+  it('does not take the only overload of that arity when it cannot take the arguments', () => {
+    const results = [
+      parse('Base', `public class Base {
+    public void mix(int a, int b) {}
+}
+`),
+      parse('Sub', `public class Sub extends Base {
+    public void mix(String a) {}
+    public void mix(String a, String b) {}
+}
+`),
+      parse('User', `public class User {
+    void inherited(Sub s) { s.mix(1, 2); }
+    void half(Sub s) { s.mix(1, other()); }
+    void own(Sub s) { s.mix("a", "b"); }
+    void maybe(Sub s) { s.mix(other(), "b"); }
+    String other() { return ""; }
+}
+`),
+    ];
+    const edges = resolveEdges(results);
+    const user = patchesOf(results, edges).get('User')!;
+    const before = patchesOf(withoutShapes(results)).get('User')!;
+    // The target is Base.mix(int,int): no edge may claim Sub.mix(String,String).
+    for (const method of ['inherited', 'half']) {
+      expect(edges.filter(e => e.srcName === `User.${method}` && e.dstIdentityKey !== undefined), method).toEqual([]);
+      expect(calls(user, id('User', `User.${method}`)), method).toEqual(calls(before, id('User', `User.${method}`)));
+      expect(callDsts(user, id('User', `User.${method}`)), method).not.toContain(id('Sub', 'Sub.mix(String,String)'));
+    }
+    expect(callDsts(user, id('User', 'User.own'))).toEqual([id('Sub', 'Sub.mix(String,String)')]);
+    expect(callDsts(user, id('User', 'User.maybe'))).toEqual([id('Sub', 'Sub.mix(String,String)')]);
+  });
+
   it('leaves a new expression on the class node, whichever constructor it calls', () => {
     const results = [
       parse('Point', `public class Point {
