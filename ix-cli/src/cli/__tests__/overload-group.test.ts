@@ -3,7 +3,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import { registerCallersCommand } from "../commands/callers.js";
+import { registerContainsCommand } from "../commands/contains.js";
 import { registerDependsCommand } from "../commands/depends.js";
+import { registerExplainCommand } from "../commands/explain.js";
 import { registerImpactCommand } from "../commands/impact.js";
 import { registerLocateCommand } from "../commands/locate.js";
 import { registerTraceCommand } from "../commands/trace.js";
@@ -32,6 +34,7 @@ vi.mock("../../client/api.js", () => ({
     async expandByName() { return { nodes: [], edges: [] }; }
     async resolvePrefix(p: string) { return p; }
     async entity(id: string) { return entity(id); }
+    async provenance(id: string) { return { entityId: id, chain: [] }; }
   },
 }));
 
@@ -79,7 +82,9 @@ function expandOnce(id: string, opts?: { direction?: string; predicates?: string
 async function run(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const program = new Command().name("ix").exitOverride();
   registerCallersCommand(program);
+  registerContainsCommand(program);
   registerDependsCommand(program);
+  registerExplainCommand(program);
   registerImpactCommand(program);
   registerLocateCommand(program);
   registerTraceCommand(program);
@@ -391,6 +396,182 @@ describe("depends, impact and trace", () => {
     const body = JSON.parse((await run(["trace", "put", "--upstream", "--kind", "calls", "--format", "json"])).stdout);
     expect(JSON.stringify(body)).toContain('"beta"');
     expect(JSON.stringify(body)).toContain('"top"');
+  });
+});
+
+describe("one overload calling another", () => {
+  // `put()` delegates to `put(String,int)`, which calls `flush`.
+  beforeEach(() => { edges.push(edge(PUT_2, PUT_3)); });
+
+  /** Every node of a tree, depth-first. */
+  const flat = (tree: any[]): any[] => tree.flatMap((n) => [n, ...flat(n.children ?? [])]);
+
+  it("callers and callees: the call inside the group is neither", async () => {
+    const callers = JSON.parse((await run(["callers", "put", "--format", "json"])).stdout);
+    expect(names(callers.results)).toEqual(["alpha", "beta", "gamma", "shared"]);
+    expect(callers.summary).toMatchObject({ shown: 4, total: 4 });
+    const callees = JSON.parse((await run(["callees", "put", "--format", "json"])).stdout);
+    expect(names(callees.results)).toEqual(["flush", "log", "save"]);
+    expect(callees.summary).toMatchObject({ shown: 3, total: 3 });
+  });
+
+  it("trace --downstream: the callee is at the root once, not under a sibling overload", async () => {
+    const body = JSON.parse((await run(["trace", "put", "--downstream", "--kind", "calls", "--format", "json"])).stdout);
+    const all = flat(body.tree ?? body.downstream);
+    expect(names(body.tree ?? body.downstream)).toEqual(["flush", "log", "save"]);
+    expect(all.map((n) => n.name)).not.toContain("put");
+    expect(all.filter((n) => n.name === "flush")).toHaveLength(1);
+    expect(all.some((n) => n.cycle)).toBe(false);
+  });
+
+  it("trace --downstream: an overload reached again further down is the root again", async () => {
+    edges.push(edge(flush.id, PUT_1));
+    const body = JSON.parse((await run(["trace", "put", "--downstream", "--kind", "calls", "--format", "json"])).stdout);
+    const [again] = (body.tree ?? body.downstream).find((n: any) => n.name === "flush").children;
+    expect(again).toMatchObject({ name: "put", cycle: true });
+    expect(again.children ?? []).toEqual([]);
+  });
+
+  it("depends: the dependents are at the root, none of them a cycle", async () => {
+    const body = JSON.parse((await run(["depends", "put", "--format", "json"])).stdout);
+    expect(names(body.tree)).toEqual(["alpha", "beta", "gamma", "shared"]);
+    expect(flat(body.tree).map((n) => n.name)).not.toContain("put");
+    expect(flat(body.tree).some((n) => n.cycle)).toBe(false);
+  });
+
+  it("impact: the callers counted are the dependents", async () => {
+    const body = JSON.parse((await run(["impact", "put", "--format", "json"])).stdout);
+    expect(body.summary).toMatchObject({ callers: 4, callees: 3, dependents: 4 });
+  });
+
+  it("the merged expansion has no row and no edge for a member", async () => {
+    const client = { expand: vi.fn(async (id: string, opts?: any) => expandOnce(id, opts)) };
+    const graph = overloadGraph(client, [{ id: PUT_1, overloads: puts.map((p) => ({ id: p.id, signature: "" })) }]);
+    const out = await graph.expand(PUT_1, { direction: "out", predicates: ["CALLS"] });
+    expect(names(out.nodes)).toEqual(["flush", "log", "save"]);
+    expect(out.edges.every((e: Edge) => e.src === PUT_1 && e.dst !== PUT_1)).toBe(true);
+    const into = await graph.expand(PUT_1, { direction: "in", predicates: ["CALLS"] });
+    expect(names(into.nodes)).toEqual(["alpha", "beta", "gamma", "shared"]);
+    expect(into.edges.every((e: Edge) => e.dst === PUT_1 && e.src !== PUT_1)).toBe(true);
+  });
+});
+
+describe("explain on an overload group", () => {
+  it("the edges are the group's, the definition the first overload's", async () => {
+    const result = await run(["explain", "put", "--format", "json"]);
+    expect(result.exitCode).toBe(0);
+    const body = JSON.parse(result.stdout);
+    // The definition is the first overload's.
+    expect(body.facts).toMatchObject({ id: PUT_1, path: STORE, lineStart: 10, lineEnd: 13 });
+    // The edges are every overload's.
+    expect(body.facts).toMatchObject({ callerCount: 4, calleeCount: 3, dependentCount: 4 });
+    expect(names(body.facts.calleeRefs)).toEqual(["flush", "log", "save"]);
+    expect(body.rendered.context).toContain("Called by: 4 entities\nCalls: 3 entities");
+    expect(noticesOf(result.stdout)[0]).toMatchObject({ code: "overloaded_target", answered: 3 });
+    const alone = JSON.parse((await run(["explain", PUT_2, "--format", "json"])).stdout);
+    expect(alone.facts).toMatchObject({ id: PUT_2, lineStart: 20, callerCount: 1, calleeCount: 1 });
+    expect(noticesOf(JSON.stringify(alone))).toEqual([]);
+  });
+});
+
+describe("a class with several constructors", () => {
+  // The class node holds the first constructor; a later one is a node whose
+  // `overload_of` is the class. Its body's calls are on its own node, and
+  // nothing else is: it has no callers and no members of its own.
+  const CTOR_2 = "d".repeat(32);
+  const ctor2 = node(CTOR_2, "method", "Store", STORE, 5, { overload_of: storeClass.id, overload_signature: "int" });
+  const size = node("m-size", "method", "size", STORE, 40);
+
+  function storeWith(...extra: Row[]): void {
+    nodes = [storeClass, size, alpha, beta, save, flush, ...extra];
+    edges = [
+      edge(storeClass.id, size.id, "CONTAINS"),
+      edge(alpha.id, storeClass.id), edge(beta.id, storeClass.id, "REFERENCES"),
+      edge(storeClass.id, save.id),
+      ...(extra.length ? [edge(storeClass.id, CTOR_2, "CONTAINS"), edge(CTOR_2, flush.id), edge(CTOR_2, storeClass.id)] : []),
+    ];
+  }
+
+  /** The command's output and requests for the class alone, then with a second constructor. */
+  async function both(args: string[]) {
+    const once = async () => {
+      expand.mockClear();
+      const result = await run(args);
+      expect(result.exitCode).toBe(0);
+      return { body: JSON.parse(result.stdout), requests: expandCalls().sort() };
+    };
+    storeWith();
+    const plain = await once();
+    storeWith(ctor2);
+    return { plain, group: await once() };
+  }
+
+  it("contains: the requests and the rows of a plain class", async () => {
+    const { plain, group } = await both(["contains", "Store", "--format", "json"]);
+    expect(plain.requests).toEqual([`${storeClass.id} out CONTAINS`]);
+    expect(group.requests).toEqual(plain.requests);
+    expect(names(group.body.results)).toEqual(["Store", "size"]);
+    for (const row of group.body.results) expect(row).not.toHaveProperty("overload");
+    expect(group.body.resolutionNotices ?? []).toEqual([]);
+  });
+
+  it("callers: the requests and the answer of a plain class", async () => {
+    const { plain, group } = await both(["callers", "Store", "--format", "json"]);
+    expect(plain.requests).toContain(`${storeClass.id} in CALLS+REFERENCES`);
+    expect(group.requests).toEqual(plain.requests);
+    expect(group.body).toEqual(plain.body);
+  });
+
+  it("callees: one more request, for what the later constructor calls; no overload on a row", async () => {
+    const { plain, group } = await both(["callees", "Store", "--format", "json"]);
+    expect(plain.requests).toEqual([`${storeClass.id} out CALLS+REFERENCES`]);
+    expect(group.requests).toEqual([`${storeClass.id} out CALLS+REFERENCES`, `${CTOR_2} out CALLS+REFERENCES`].sort());
+    expect(names(plain.body.results)).toEqual(["save"]);
+    // `this(...)` from the later constructor is the class calling itself.
+    expect(names(group.body.results)).toEqual(["flush", "save"]);
+    for (const row of group.body.results) expect(row).not.toHaveProperty("overload");
+    expect(group.body.resolutionNotices ?? []).toEqual([]);
+  });
+
+  it("impact: nothing it asks is about what the class calls, so the requests of a plain class", async () => {
+    const { plain, group } = await both(["impact", "Store", "--format", "json"]);
+    expect(plain.requests.length).toBeGreaterThan(0);
+    // The later constructor is a member, asked for its callers like `size`.
+    expect(group.requests).toEqual([...plain.requests, `${CTOR_2} in CALLS+REFERENCES`].sort());
+  });
+
+  it("only the part of a question about outgoing calls and references reaches a later constructor", async () => {
+    storeWith(ctor2);
+    const client = { expand: vi.fn(async (id: string, opts?: any) => expandOnce(id, opts)) };
+    const graph = overloadGraph(client, [{ id: storeClass.id, overloads: [{ id: storeClass.id }, { id: CTOR_2, signature: "int" }] }]);
+    const sent = () => client.expand.mock.calls.map(([id, o]) => `${id} ${o?.direction} ${(o?.predicates ?? []).join("+")}`);
+    for (const opts of [
+      { direction: "in", predicates: ["CALLS", "REFERENCES"] },
+      { direction: "in" },
+      { direction: "out", predicates: ["CONTAINS"] },
+      { direction: "both", predicates: ["IMPORTS", "EXTENDS"] },
+    ]) {
+      client.expand.mockClear();
+      const result = await graph.expand(storeClass.id, opts);
+      expect(client.expand.mock.calls).toEqual([[storeClass.id, opts]]);
+      expect(overloadOfRow(result)).toBeUndefined();
+    }
+    // A mixed question: the class is asked all of it, the constructor its part.
+    client.expand.mockClear();
+    const mixed = await graph.expand(storeClass.id, { direction: "both", predicates: ["CALLS", "CONTAINS"], hops: 1 });
+    expect(client.expand.mock.calls).toEqual([
+      [storeClass.id, { direction: "both", predicates: ["CALLS", "CONTAINS"], hops: 1 }],
+      [CTOR_2, { direction: "out", predicates: ["CALLS"], hops: 1 }],
+    ]);
+    // The constructor is a row as what the class contains, not as its caller.
+    expect(names(mixed.nodes)).toEqual(["Store", "alpha", "flush", "save", "size"]);
+    expect(mixed.edges.map((e: Edge) => e.id)).not.toContain(`${CTOR_2}>CALLS>${storeClass.id}`);
+    expect(withOverloadOfRows(mixed, "Store")).toBe(mixed.nodes);
+    expect(overloadOfRow(mixed)!(flush)).toBe(CTOR_2);
+    // No filter at all asks for every edge, calls among them.
+    client.expand.mockClear();
+    await graph.expand(storeClass.id);
+    expect(sent()).toEqual([`${storeClass.id} undefined `, `${CTOR_2} out CALLS+REFERENCES`]);
   });
 });
 

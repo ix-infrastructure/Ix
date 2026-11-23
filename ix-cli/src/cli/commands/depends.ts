@@ -5,7 +5,7 @@ import chalk from "chalk";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
 import { resolveFileOrReport, printResolved, isRawId, shownTarget } from "../resolve.js";
-import { overloadGraph } from "../overload-group.js";
+import { answeredIds, overloadGraph } from "../overload-group.js";
 import { walkTree, type TreeWalkResult } from "../tree-walk.js";
 import { compactTreeNode, relativePath, printJson } from "../format.js";
 import { llmLine, llmShortId } from "../llm.js";
@@ -72,6 +72,7 @@ export async function buildDependencyTree(
   const activePredicates = (opts?.predicates ?? ALL_DEPENDENCY_PREDICATES).filter((p) => p in PREDICATE_META);
   return walkTree<DependencyNode>({
     rootId,
+    rootAliases: answeredIds(client, rootId),
     maxDepth: opts?.maxDepth ?? DEFAULT_MAX_DEPTH,
     maxNodes: opts?.maxNodes ?? MAX_NODES,
     predicates: activePredicates,
@@ -231,7 +232,8 @@ export function registerDependsCommand(program: Command): void {
       const maxNodes = opts.cap ? parseInt(opts.cap, 10) : MAX_NODES;
 
       // A name that is an overloaded method: the dependents of every overload
-      // at the root (#1139). Below it each node is walked as itself.
+      // at the root (#1139). Below it each node is walked as itself, and an
+      // overload of the root met again is the root again.
       const { tree, truncated, depthLimited, nodesVisited, maxDepthReached } = await buildDependencyTree(
         overloadGraph(client, [found]), target.id, { maxDepth, maxNodes },
       );

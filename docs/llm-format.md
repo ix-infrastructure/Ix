@@ -322,6 +322,9 @@ What the answer covers depends on the command, and `answered=<n>` says which:
   record ends `answered=true`, and a `ref` row of `callers`, `callees` and the
   other one-hop commands ends `overload=<name(signature)>`, the overload the
   row is an edge of (several joined by ` | `; json: `overload` on the row).
+  The overloads are one node in that answer: one overload calling another
+  is the method calling itself, so it is no caller, callee or dependent row
+  and no child in a `depends` or `trace` tree.
   Only the named target is a group: a traversal that reaches an overloaded
   method by an edge follows that one overload. At most 16 overloads are
   expanded; past that `answered` is 16, the message says "the first 16", and
@@ -333,6 +336,12 @@ What the answer covers depends on the command, and `answered=<n>` says which:
   `answered=1`, only the first `overload` record is marked (`chosen=true`),
   and the message reads `answering for the first, put(String) (<path>:<line>).
   Pass another overload's id as the target to answer for it.`
+
+A class with several constructors is not an overloaded name: it carries no
+notice and its rows no `overload`. The class node holds its first
+constructor and each later one is a node the class contains, so `ix callees`
+and a downstream `ix trace` of the class also list what the later
+constructors call; every other answer is the class node's own.
 
 One overload is addressed by its id, given in full on each `overload` record,
 as the target: an id names one node, the first overload's id included, so the

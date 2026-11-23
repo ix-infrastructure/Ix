@@ -121,7 +121,8 @@ from the first, the answer is for. Commands that answer from edges (`callers`,
 and the callers, callees and dependents of `explain`) answer for all of them
 together (at most 16): rows are merged, counts are of the merged list, and a
 one-hop row carries `overload` (`"put(String,int)"`, several joined by ` | `),
-the overload it is an edge of. Commands that show the definition or are
+the overload it is an edge of. One overload calling another is the method
+calling itself: no caller, callee or dependent row, no tree child. Commands that show the definition or are
 seeded by one node (`read`, `locate`, `overview`, `context`, `history`,
 `diff`, `overrides`) answer for the first alone: `answered: 1`. Pass one
 overload's `id` as the target to answer for it alone; an id is always one
@@ -129,7 +130,9 @@ node and carries no notice. In any `candidates` list, a row that stands for an
 overloaded method carries the same `overloads` array. llm prints `diagnostic
 code=overloaded_target ... overloads=<n> answered=<n>` and one `overload
 name=... line=... id=<full id>` record each, ending `answered=true` when the
-answer is for the group.
+answer is for the group. A class with several constructors is not an
+overloaded name: no notice, no `overload` on its rows; `callees` and a
+downstream `trace` of the class include what its later constructors call.
 
 Two records predate the envelope and keep their shape for now:
 

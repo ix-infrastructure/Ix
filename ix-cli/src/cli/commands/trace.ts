@@ -186,6 +186,7 @@ async function buildTraceTree(
   const { direction, predicates, maxDepth, maxNodes, limiter } = opts;
   return walkTree<TraceNode>({
     rootId,
+    rootAliases: answeredIds(client, rootId),
     maxDepth,
     maxNodes,
     // One call per node for all predicates, split by edge predicate (as in
@@ -702,7 +703,8 @@ export function registerTraceCommand(program: Command): void {
         const resolvedTarget = await resolveFileOrReport(client, symbol, { ...resolveOpts, overloads: "all" }, opts.format);
         if (!resolvedTarget) return;
         // An overloaded method is traced from all its overloads (#1139);
-        // below the root each node is walked as itself.
+        // below the root each node is walked as itself, and an overload of
+        // the root met again is the root again.
         const graph = overloadGraph(client, [resolvedTarget]);
         let target: ResolvedEntity = shownTarget(resolvedTarget);
 
