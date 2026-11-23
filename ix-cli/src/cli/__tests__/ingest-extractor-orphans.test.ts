@@ -647,7 +647,7 @@ describe.each(["head", "legacy"] as const)("an extractor change over the %s back
   }
 
   for (const mode of ["map", "full"] as const) {
-    it(`a ${mode} run deleting a file reads both stored-patch candidates of the window under both ids, ${mode === "map" ? "one after another" : "at once"}`, async () => {
+    it(`a ${mode} run deleting a file reads both stored-patch candidates of the window under both ids, at once`, async () => {
       const backend = newBackend();
       const home = join(root, `home-delete-${mode}-${semantics}`);
       restoreAll();
@@ -661,10 +661,9 @@ describe.each(["head", "legacy"] as const)("an extractor change over the %s back
         expect(backend.graphSignature().nodes.filter((line) => line.includes("math.ts"))).toEqual([]);
         // The current extractor's patch is stored under the built id; the
         // previous extractor's (merged where deletes go in bulk) under neither.
-        // Map mode reads the built id first and stops there for the current
-        // one: 1 + 2. A full run reads each candidate's two ids at once: 2 + 2,
-        // in the one round trip.
-        expect(backend.patchReads).toBe(mode === "map" ? 3 : 4);
+        // Deletions read each candidate's two ids at once in either mode:
+        // 2 + 2, so a map deletion also removes chunks from a full manifest.
+        expect(backend.patchReads).toBe(4);
       } finally {
         await backend.stop();
       }

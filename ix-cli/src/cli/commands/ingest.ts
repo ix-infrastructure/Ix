@@ -24,7 +24,7 @@ import {
 } from '../file-discovery.js';
 import {
   clearRebuildProgress, extractorChanged, isRev, loadIngestBaseline, loadRebuildProgress,
-  saveIngestBaseline, saveRebuildProgress, type BaselineFileNotes,
+  saveIngestBaseline, saveRebuildProgress, type BaselineFileNotes, type IngestMode,
   loadOrphanSweepPending, saveOrphanSweepPending, type OrphanSweepPending,
 } from '../ingest-baseline.js';
 import { resolveGitHubToken } from '../github/auth.js';
@@ -750,6 +750,12 @@ export interface OrphanSweepFile {
    * Each is read up to the first of its ids found (`builtFirstAlternatives`).
    */
   previousPatchIds: StoredPatchCandidate[];
+  /**
+   * This file goes as a map patch (it keeps its stored chunks). Defaults to
+   * the sweep's `mapMode`; a map run sets it per file, because a file a full
+   * run committed keeps its full payload there.
+   */
+  mapMode?: boolean;
 }
 
 /**
@@ -920,7 +926,7 @@ export async function sweepOrphanNodes(
             && !opts.batchUpserts?.has(id)
             && NODE_ID_SHAPE.test(id)
             && !stored.external.has(id)
-            && !(opts.mapMode && stored.kinds.get(id) === 'chunk')) ids.add(id);
+            && !((file.mapMode ?? opts.mapMode) && stored.kinds.get(id) === 'chunk')) ids.add(id);
         }
       }
       return [...ids];
@@ -980,7 +986,7 @@ export async function sweepOrphanNodes(
         const node = live.get(id);
         if (!node || (node.deletedRev !== undefined && node.deletedRev !== null)) return false;
         if (isExternalNode(node)) return false;
-        if (opts.mapMode && node.kind === 'chunk') return false;
+        if ((file.mapMode ?? opts.mapMode) && node.kind === 'chunk') return false;
         return nodeSourceUri(node) === file.patch.source.uri;
       });
       const probe = probes[i];
@@ -3113,6 +3119,17 @@ export async function ingestFiles(
       );
     };
     const previousMtimes = previousBaseline?.files ?? new Map<string, number>();
+    const fileModes = new Map(previousBaseline?.fileModes);
+    // Bulk commits replace all source edges. Once a full run has committed a
+    // file (so it has chunks), keep writing its full payload even during map
+    // so its chunk edges survive. A file with no recorded mode -- new, or from
+    // a baseline written before modes were recorded -- maps as before: map
+    // never turns a file it cannot prove holds chunks into a full ingest.
+    const modeForFile = (absolutePath: string): IngestMode => mapMode
+      ? fileModes.get(absolutePath) ?? 'map'
+      : 'full';
+    const mapsFile = (relativePath: string): boolean =>
+      modeForFile(nodePath.resolve(workspaceRoot, relativePath)) === 'map';
     const {
       previousDeletedFiles,
       nextDeletedFiles,
@@ -3127,6 +3144,24 @@ export async function ingestFiles(
       : new Map(resumedRebuild ?? previousMtimes);
     if (resumedRebuild) {
       for (const filePath of filePaths) if (!resumedRebuild.has(filePath)) forceReingestPaths.add(filePath);
+    }
+    // A full run re-sends every file not known to hold its full payload, so
+    // unchanged bytes a map wrote still get their chunks: it bypasses both
+    // mtime and source-hash skipping, even for a scoped or --lang run. That
+    // includes files with no recorded mode, once. A map run never upgrades a
+    // file, so it forces nothing here (and auto-map never re-sends the repo).
+    // Such a re-send of held bytes is not a change (`isForced`): it goes under
+    // `fullModePatchId`, and a backend that already holds that id holds the
+    // full payload, so `Idempotent` means done and the mode is recorded. One
+    // that keeps the built id (the hash lookup failed) still counts as a
+    // change: that id may be `ix map`'s patch, without chunks.
+    const modeUpgradePaths = new Set<string>();
+    if (!mapMode) {
+      for (const file of filePaths) {
+        if (fileModes.get(file) === 'full' || forceReingestPaths.has(file)) continue;
+        modeUpgradePaths.add(file);
+        forceReingestPaths.add(file);
+      }
     }
     let rebuildSavedAt = 0;
     // Committed patches carry the workspace-relative path; progress is keyed
@@ -3561,9 +3596,17 @@ export async function ingestFiles(
     ): PreparedPatch => ({ patch, fileNumber, filePath, changed });
 
     let forcedRelativePaths: Set<string> | undefined;
-    /** Whether a workspace-relative path was forced this run. Built on first use, once the set is final. */
+    /**
+     * Whether a workspace-relative path was forced this run for a change the
+     * graph needs (a restored file's dependents, a resumed rebuild), not only
+     * to upgrade its mode. Built on first use, once the set is final.
+     */
     const isForced = (relFilePath: string): boolean =>
-      (forcedRelativePaths ??= new Set([...forceReingestPaths].map(toWorkspaceRelative))).has(relFilePath);
+      (forcedRelativePaths ??= new Set([...forceReingestPaths].filter(abs => !modeUpgradePaths.has(abs)).map(toWorkspaceRelative))).has(relFilePath);
+    let modeUpgradeRelativePaths: Set<string> | undefined;
+    /** Whether a workspace-relative path was forced only to upgrade its mode. */
+    const isModeUpgrade = (relFilePath: string): boolean =>
+      (modeUpgradeRelativePaths ??= new Set([...modeUpgradePaths].map(toWorkspaceRelative))).has(relFilePath);
 
     /**
      * Record a patch the backend took, or one it only claims to hold.
@@ -4359,9 +4402,9 @@ export async function ingestFiles(
             patch = await reconcileRemovedEntities(
               client,
               patch,
-              modeAlternatives(sourcePatchIdCandidates(p.filePath, previousHash, fileWorkspace), mapMode),
+              modeAlternatives(sourcePatchIdCandidates(p.filePath, previousHash, fileWorkspace), mapsFile(p.filePath)),
               undefined,
-              mapMode,
+              mapsFile(p.filePath),
               reconcileLookups,
               { onWindowSkipped: reason => noteOrphanSkip(p.filePath, reason), window: reconcileOrphans && orphanSweepBlocker === null ? RECONCILE_MANIFEST_WINDOW : 1 },
             );
@@ -4408,7 +4451,9 @@ export async function ingestFiles(
         const unswept = new Set<number>();
         const writtenBefore = new Set<number>();
         try {
-          const sweepFiles = sweepable.map(b => ({ patch: b.patch, previousPatchIds: b.previousPatchIds }));
+          // Per file: a file a full run committed sends its chunks in a map
+          // run too, so its earlier extractor's chunks are swept like any node.
+          const sweepFiles: OrphanSweepFile[] = sweepable.map(b => ({ patch: b.patch, previousPatchIds: b.previousPatchIds, mapMode: mapsFile(b.p.filePath) }));
           const orphans = await sweepOrphanNodes(
             client,
             sweepFiles,
@@ -4477,11 +4522,17 @@ export async function ingestFiles(
         try {
           // Held content (a forced run of unchanged bytes) goes under the
           // full-mode id in a full run; every other patch keeps the built id.
-          const patch = patchForMode(b.patch, mapMode, { held: b.knownHash === b.hash, supersedes: b.previousHash !== undefined });
+          const patch = patchForMode(b.patch, mapsFile(b.p.filePath), { held: b.knownHash === b.hash, supersedes: b.previousHash !== undefined });
           noteResolution(b.p.filePath, patch);
           // source.uri (workspace-relative) and source.workspaceId are set
           // inside buildPatch; the backend stores both as opaque attributes.
-          return makePreparedPatch(patch, b.j + 1, b.p.filePath, b.previousHash !== undefined || isForced(b.p.filePath));
+          // A mode upgrade is a change unless it went under the full-mode id.
+          // Kept on the built id (the source-hash lookup failed or did not
+          // name this hash), an `Idempotent` answer may be `ix map`'s stripped
+          // patch: that is a replay, retried next run, not a recorded 'full'.
+          const changed = b.previousHash !== undefined || isForced(b.p.filePath)
+            || (isModeUpgrade(b.p.filePath) && patch.patchId === b.patch.patchId);
+          return makePreparedPatch(patch, b.j + 1, b.p.filePath, changed);
         } catch (err) {
           parseErrors++;
           process.stderr.write(`\n  [patch build error] ${b.p.filePath}: ${err}\n`);
@@ -4875,9 +4926,10 @@ export async function ingestFiles(
           patch = await reconcileRemovedEntities(
             client,
             patch,
-            modeAlternatives(sourcePatchIdCandidates(relFilePath, previousHash, fileWorkspace), mapMode),
+            modeAlternatives(sourcePatchIdCandidates(relFilePath, previousHash, fileWorkspace), false),
             dependentSourceUris,
-            mapMode,
+            // A deleted file owns no surviving entities in either mode.
+            false,
             reconcileLookups,
             {
               onWindowSkipped: reason => noteOrphanSkip(relFilePath, reason),
@@ -4887,7 +4939,7 @@ export async function ingestFiles(
               window: orphanSweepBlocker === null ? RECONCILE_MANIFEST_WINDOW : 1,
             },
           );
-          patch = patchForMode(patch, mapMode, { supersedes: true });
+          patch = patchForMode(patch, false, { supersedes: true });
           deletedPatches.push(makePreparedPatch(patch, i + 1, relFilePath, true));
           const dependents = [...dependentSourceUris].sort();
           nextDeletedFiles.set(absFilePath, dependents);
@@ -4928,6 +4980,7 @@ export async function ingestFiles(
               pendingFiles: previousBaseline.pendingFiles,
               parseTimeouts: previousBaseline.parseTimeouts,
               pythonPackageEntries: previousBaseline.pythonPackageEntries,
+              fileModes: previousBaseline.fileModes,
             },
           );
         }
@@ -5023,7 +5076,7 @@ export async function ingestFiles(
           const build = (salt?: string): GraphPatchPayload => {
             const patch = buildPatchFn!(p, hash, fileWorkspaceId(rel), edgesByFile.get(rel) ?? emptyEdges, undefined, fileMultiRepo(rel), salt);
             // Unchanged bytes the backend holds, re-sent for their edges.
-            return patchForMode(patch, mapMode, { held: true });
+            return patchForMode(patch, mapsFile(rel), { held: true });
           };
           const res = resolutionHash(build().ops);
           // Equal: re-resolving changes nothing this file says. A different
@@ -5129,6 +5182,12 @@ export async function ingestFiles(
     // A deletion whose patch did not land keeps its entry, so it is found
     // deleted again next run.
     const failedDeletions = deletedPaths.filter(abs => !committedRel.has(toWorkspaceRelative(abs)));
+    // Only committed files advance their mode. Failed and out-of-scope files
+    // retain theirs; saveIngestBaseline prunes entries removed from the mtimes.
+    for (const rel of committedRel) {
+      const abs = absoluteFor.get(rel);
+      if (abs !== undefined) fileModes.set(abs, modeForFile(abs));
+    }
     const baselinePersisted = (scopedRun && !previousBaseline) ? false : persistIngestBaseline(
       projectRoot,
       retryOnNextRun(
@@ -5144,7 +5203,7 @@ export async function ingestFiles(
       runClean ? baselineExtractor : (previousBaseline?.extractor ?? baselineExtractor),
       // A scoped run re-resolves only its own dependents, so it keeps the old
       // package list and the next full run still sees what changed outside.
-      { replayedFiles, pendingFiles, parseTimeouts, pythonPackageEntries: (scopedRun ? null : pythonPackageEntries) ?? previousBaseline?.pythonPackageEntries },
+      { fileModes, replayedFiles, pendingFiles, parseTimeouts, pythonPackageEntries: (scopedRun ? null : pythonPackageEntries) ?? previousBaseline?.pythonPackageEntries },
     );
     // The symbol table describes files, not the graph, so it is kept whether or
     // not every commit landed -- pruned to the files that still exist. A
