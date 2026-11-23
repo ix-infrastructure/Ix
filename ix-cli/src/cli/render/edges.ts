@@ -131,6 +131,8 @@ export interface ResolvedEdgeTarget {
   displayName?: string;
   resolutionMode?: string;
   path?: string;
+  /** A resolved entity's overload group (resolve/types.ts); never emitted here. */
+  overloads?: unknown;
 }
 
 /** callers, callees, contains, imports, imported-by, depends and the like. */
@@ -181,7 +183,8 @@ function edgeResultsJson({ slice, relation, resolvedTarget, source, diagnostics,
     resultSource: source ?? "graph",
   };
   if (resolvedTarget) {
-    const { displayName, ...shown } = resolvedTarget;
+    // `overloads` is the command's; it is printed once, in the `overloaded_target` notice.
+    const { displayName, overloads: _overloads, ...shown } = resolvedTarget;
     output.resolvedTarget = {
       ...shown,
       name: displayName ?? shown.name,

@@ -215,6 +215,12 @@ describe("overloads of one method are one target", () => {
 
   it("callers --strict answers for the first overload", async () => {
     graph(PUTS);
+    // A graph edge, so the answer never depends on what a text search of the
+    // checkout finds.
+    const caller = node("caller-1", "method", "save", OTHER, 5);
+    expand.mockImplementation(async (id: string) => (id === PUT_1
+      ? { nodes: [caller], edges: [{ id: "e-call", src: caller.id, dst: PUT_1, predicate: "CALLS", attrs: {} }] }
+      : { nodes: [], edges: [] }));
     const result = await run(["callers", "put", "--strict", "--format", "json"]);
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout).resolvedTarget.id).toBe(PUT_1);
@@ -273,7 +279,7 @@ describe("overloads of one method are one target", () => {
     expect(expandByName).not.toHaveBeenCalled();
   });
 
-  it("a later constructor folds into its class, which holds the first one", async () => {
+  it("a later constructor folds into its class, which holds the first one, without a notice", async () => {
     const point = cls("cls-point", "Point", STORE);
     graph([
       [point, null],
@@ -282,7 +288,8 @@ describe("overloads of one method are one target", () => {
     const result = await run(["locate", "Point", "--strict", "--format", "json"]);
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout).resolvedTarget.id).toBe("cls-point");
-    expect(noticesOf(result.stdout)[0].overloads).toEqual([{ id: "cls-point", line: 1 }, { id: "ctor-2", line: 9, signature: "int" }]);
+    // A class name is not an overloaded name: no notice, as before overloads were nodes.
+    expect(noticesOf(result.stdout)).toEqual([]);
   });
 });
 

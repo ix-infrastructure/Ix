@@ -37,8 +37,8 @@ export interface ResolvedEntity {
   /**
    * Set when the name is an overloaded method: every overload among the
    * candidates, this entity (the first) first, the rest in source order. The
-   * answer is for this entity alone; a command that wants every overload's
-   * edges reads the ids here.
+   * answer is for this entity alone; the ids are here for a command that
+   * wants every overload's edges.
    */
   overloads?: OverloadRef[];
 }
