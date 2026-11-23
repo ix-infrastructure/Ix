@@ -41,6 +41,10 @@ describe("stitchCallEntry", () => {
       "export function shadowed(validate: () => void) { validate(); }",
       "export function viaImport() { validate(); }",
       "export function viaNamespace() { lib.check(); }",
+      // A local function of the imported name: the call is that function, not
+      // the package's export (importBinding: false, no localCallee).
+      "export function localFn() { const validate = () => 1; validate(); }",
+      "export function nestedDecl() { function validate() {} validate(); }",
       "",
     ].join("\n");
     const parsed = ingestion.parseFile("src/use.ts", source);

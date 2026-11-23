@@ -2279,11 +2279,14 @@ const STITCH_COMMODITY = new Set(['map', 'forEach', 'reduce', 'reduceRight', 'fl
  * in this workspace, so it is never a cross-repo call candidate.
  *
  * The stitch ties a call to a provider's exported top-level symbol, so three
- * more calls never qualify, as resolveEdges drops them too (#1020): a call to a
- * parameter or local (`localCallee`), a call whose name a parameter or local
- * declaration shadows (`importBinding === false`), and a member call that
- * cannot be a module-level function (`memberCall`: `conn.validate()` on a
- * parameter, `self.close()`). A namespace call (`lib.validate()`) carries no
+ * more calls never qualify (#1020): a call to a parameter or local
+ * (`localCallee`), which resolveEdges drops; a call whose name a local
+ * declaration shadows at every use (`importBinding === false`: `function
+ * validate() {}` or `const validate = () => 1` inside the caller), which
+ * resolveEdges keeps off the import and the same-file entity takes; and a
+ * member call that cannot be a module-level function (`memberCall`:
+ * `conn.validate()` on a parameter, `self.close()`), which resolveEdges lands
+ * only on a member. A namespace call (`lib.validate()`) carries no
  * `memberCall` and is still offered.
  */
 export function stitchCallEntry(

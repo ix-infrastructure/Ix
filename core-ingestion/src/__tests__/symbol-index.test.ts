@@ -60,6 +60,8 @@ describe('summary signature and changed names (#961)', () => {
     if (rand() < 0.3) s.tsModule = true;
     const bare = some(() => pick(['A', 'B']), 2);
     if (bare.length) s.bareMembers = bare;
+    const props = some(() => pick(['A', 'B']), 2);
+    if (props.length) s.propertyReferences = props;
     return s;
   };
 
@@ -68,7 +70,7 @@ describe('summary signature and changed names (#961)', () => {
     const other = generate(rand) as Record<string, unknown>;
     const out = { ...s } as Record<string, unknown>;
     const fields = ['language', 'entityCount', 'qkeys', 'imports', 'refs', 'exportPublicNames', 'phpTypes', 'receiverFactories',
-      'receiverHeritage', 'receiverPackage', 'importAliases', 'tsGlobalTypes', 'tsModule', 'bareMembers'];
+      'receiverHeritage', 'receiverPackage', 'importAliases', 'tsGlobalTypes', 'tsModule', 'bareMembers', 'propertyReferences'];
     for (const field of fields) {
       if (rand() < 0.15) {
         if (other[field] === undefined) delete out[field];
@@ -121,6 +123,16 @@ describe('summary signature and changed names (#961)', () => {
     // A file with no bare members keeps the signature it had before the field existed.
     const old = summary('lib.rs', { qkeys: [['f', 'f']] });
     expect(summarySignature({ ...old, bareMembers: [] })).toBe(summarySignature(old));
+  });
+
+  it('names a property that came to hold a module function, or stopped (#1020)', () => {
+    // `this.validate = validate` in a base class makes a subclass's
+    // `this.validate()` in another file a call that may reach `validate`.
+    const before = signed(summary('base.js', { qkeys: [['Base', 'Base']] }));
+    const after = signed(summary('base.js', { qkeys: [['Base', 'Base']], propertyReferences: ['validate'] }));
+    expect(before.sig).not.toBe(after.sig);
+    expect(changedNames(before, after)).toEqual(new Set(['validate']));
+    expect(changedNames(after, before)).toEqual(new Set(['validate']));
   });
 
   it('names a renaming re-export whose source module moved', () => {

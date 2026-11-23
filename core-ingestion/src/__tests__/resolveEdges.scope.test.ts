@@ -616,6 +616,8 @@ describe('member calls and calls to locals across files (#1020)', () => {
     expect(callsFrom(resolveEdges([lib, direct]), 'src/c.js')).toEqual(['run -> src/a.js:validate']);
     const arrowCall = parse('src/d.js', "((lib) => { function run() { return lib.validate(1); } run(); }).call(this, require('./a'));\n");
     expect(callsFrom(resolveEdges([lib, arrowCall]), 'src/d.js')).toEqual(['run -> src/a.js:validate']);
+    const applied = parse('src/e.js', "(function (lib) { function run() { return lib.validate(1); } run(); }).apply(this, [require('./a')]);\n");
+    expect(callsFrom(resolveEdges([lib, applied]), 'src/e.js')).toEqual(['run -> src/a.js:validate']);
   });
 
   it('JavaScript: an IIFE parameter given a non-module value stays a non-module local', () => {
@@ -875,6 +877,63 @@ describe('member calls and calls to locals across files (#1020)', () => {
       '',
     ].join('\n'));
     expect(callsFrom(resolveEdges([lib, caller]), 'pkg/b.py')).toEqual(['C.run -> pkg/utils.py:validate']);
+  });
+
+  // A base class in another file may store a module function on the
+  // instance; the subclass's `this.validate()` / `self.validate()` reads it.
+  it('JavaScript/Python: a property a base class in another file sets to a module function still reaches it', () => {
+    const helpers = parse('src/helpers.js', 'function validate() {}\nmodule.exports = { validate };\n');
+    const base = parse('src/base.js', "const { validate } = require('./helpers');\nclass Base { constructor() { this.validate = validate; } }\nmodule.exports = { Base };\n");
+    const sub = parse('src/b.js', "const { Base } = require('./base');\nclass A extends Base { run() { this.validate(); } }\n");
+    expect(callsFrom(resolveEdges([helpers, base, sub]), 'src/b.js')).toEqual(['A.run -> src/helpers.js:validate']);
+    // Also when the base is known only through the index (a batch without it).
+    const index = buildGlobalResolutionIndex([helpers.filePath, base.filePath],
+      new Map([helpers, base].map(r => [r.filePath, summarizeParseResult(r)])));
+    expect(callsFrom(resolveEdges([sub], undefined, index), 'src/b.js')).toEqual(['A.run -> src/helpers.js:validate']);
+
+    const pyLib = parse('pkg/h.py', 'def validate():\n    pass\n');
+    const pyBase = parse('pkg/a.py', 'from pkg.h import validate\n\nclass Base:\n    def __init__(self):\n        self.validate = validate\n');
+    const pySub = parse('pkg/b.py', 'from pkg.a import Base\n\nclass A(Base):\n    def run(self):\n        self.validate()\n');
+    expect(callsFrom(resolveEdges([pyLib, pyBase, pySub]), 'pkg/b.py')).toEqual(['A.run -> pkg/h.py:validate']);
+  });
+
+  it('JavaScript/Python: a module a base class in another file stores on the instance still reaches the module function', () => {
+    const helpers = parse('src/helpers.js', 'function validate() {}\nmodule.exports = { validate };\n');
+    const base = parse('src/base.js', "const helpers = require('./helpers');\nclass Base { constructor() { this.helpers = helpers; } }\nmodule.exports = { Base };\n");
+    const sub = parse('src/b.js', "const { Base } = require('./base');\nclass A extends Base { run() { this.helpers.validate(); } }\n");
+    expect(callsFrom(resolveEdges([helpers, base, sub]), 'src/b.js')).toEqual(['A.run -> src/helpers.js:validate']);
+
+    const pyLib = parse('pkg/h.py', 'def validate():\n    pass\n');
+    const pyBase = parse('pkg/a.py', 'from pkg import h\n\nclass Base:\n    def __init__(self):\n        self.helpers = h\n');
+    const pySub = parse('pkg/b.py', 'from pkg.a import Base\n\nclass A(Base):\n    def run(self):\n        self.helpers.validate()\n');
+    expect(callsFrom(resolveEdges([pyLib, pyBase, pySub]), 'pkg/b.py')).toEqual(['A.run -> pkg/h.py:validate']);
+  });
+
+  it('JavaScript: functions mixed into a prototype still reach the module function', () => {
+    const helpers = parse('src/helpers.js', 'function validate() {}\nmodule.exports = { validate };\n');
+    // A mixin this file cannot list the names of.
+    const opaque = parse('src/b.js', "class A { run() { this.validate(); } }\nObject.assign(A.prototype, require('./helpers'));\n");
+    expect(callsFrom(resolveEdges([helpers, opaque]), 'src/b.js')).toEqual(['A.run -> src/helpers.js:validate']);
+    // An object literal mixed in from another file.
+    const target = parse('src/c.js', 'class C { run() { this.validate(); } }\nmodule.exports = { C };\n');
+    const mixin = parse('src/m.js', "const { validate } = require('./helpers');\nconst { C } = require('./c');\nObject.assign(C.prototype, { validate });\n");
+    expect(callsFrom(resolveEdges([helpers, target, mixin]), 'src/c.js')).toEqual(['C.run -> src/helpers.js:validate']);
+  });
+
+  it('JavaScript: an instance property set from a parameter, or a parameter mixed in, stays a non-module receiver', () => {
+    const helpers = parse('src/helpers.js', 'function validate() {}\nmodule.exports = { validate };\n');
+    const caller = parse('src/b.js', [
+      'class A {',
+      '  constructor(conn, options) { this.conn = conn; Object.assign(this, options); }',
+      '  run() { this.conn.validate(); this.validate(); }',
+      '}',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([helpers, caller]), 'src/b.js')).toEqual([]);
+    // An object literal that is not put on an instance or prototype (the
+    // module's exports) does not make other files' member calls plain calls.
+    const other = parse('src/c.js', 'class C { run() { this.validate(); } }\n');
+    expect(callsFrom(resolveEdges([helpers, other]), 'src/c.js')).toEqual([]);
   });
 
   it('Rust: a method call reaches a trait-impl method in another file', () => {

@@ -304,6 +304,8 @@ describe('Python call scope flags', () => {
       '    pass',
       '',
       'class C:',
+      '    def __init__(self):',
+      '        self.pool = []',
       '    def close(self):',
       '        pass',
       '    def run(self, conn):',

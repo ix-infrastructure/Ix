@@ -398,6 +398,17 @@ export interface FileParseResult {
    * file has none.
    */
   bareMembers?: string[];
+  /**
+   * JS/TS and Python: sorted names of properties the file sets on an
+   * instance, a prototype or a class to a function or module defined outside
+   * the function doing it (`this.validate = validate`, `self.validate =
+   * validate`, `A.prototype.validate = validate`, a class field or class-body
+   * binding, an object mixed into a prototype). A member call of that name in
+   * another file, a subclass's `this.validate()`, may reach a module-level
+   * function through it, so it is not resolved as a member-only call
+   * (ParsedRelationship.memberCall, #1020). Absent when the file has none.
+   */
+  propertyReferences?: string[];
   fileRole: RoleClassification;
 }
 
@@ -1191,6 +1202,25 @@ interface CallSiteScope {
   localCallee?: true;
 }
 
+/** What `collectCallSiteScopes` finds in a file. */
+interface CallSiteScopes {
+  /** Each call's scope facts, by call node id. */
+  sites: Map<number, CallSiteScope>;
+  /** FileParseResult.propertyReferences. */
+  propertyReferences: Set<string>;
+}
+
+/** Mixin helpers that copy properties onto their first argument (`Object.assign`, `_.extend`). */
+const MIXIN_FUNCTIONS = new Set(['assign', 'extend', 'merge', 'defaults', 'assignIn']);
+
+/** Python names for the instance or class a method runs on. */
+const PY_INSTANCE_NAMES = new Set(['self', 'cls']);
+
+/** `X.prototype` */
+function isPrototype(node: any): boolean {
+  return node?.type === 'member_expression' && node.childForFieldName?.('property')?.text === 'prototype';
+}
+
 /** One function, block or class around a call, with the names it binds. */
 interface CallScopeFrame {
   type: string;
@@ -1395,27 +1425,6 @@ function parameterRoots(param: any, python: boolean): string[] | undefined {
 const AMD_LOADERS = new Set(['define', 'require', 'requirejs']);
 
 /**
- * How many leading parameters of a JS function are AMD dependencies: in
- * `define(['./utils'], function (utils) { ... })` (or `require` / `requirejs`)
- * the loader binds each callback parameter, by position, to the module the
- * dependency array names there, as surely as `const utils = require('./utils')`
- * does. So `utils.validate()` is a call on a module, not on a non-module
- * receiver (#1020). Zero unless the function is a loader's argument and the
- * argument before it is an array of string literals.
- */
-function amdDependencyCount(fn: any): number {
-  const args = fn?.parent;
-  if (args?.type !== 'arguments') return 0;
-  const call = args.parent;
-  const callee = call?.type === 'call_expression' ? call.childForFieldName?.('function') : undefined;
-  if (callee?.type !== 'identifier' || !AMD_LOADERS.has(callee.text)) return 0;
-  const deps = fn.previousNamedSibling;
-  if (deps?.type !== 'array') return 0;
-  const elements = deps.namedChildren.filter((child: any) => child.type !== 'comment');
-  return elements.every((child: any) => child.type === 'string') ? elements.length : 0;
-}
-
-/**
  * Prefix of an alias root that is looked up from outside the frame that binds
  * the alias: an argument an IIFE passes in is evaluated where the call is, so
  * the function's own parameters do not shadow it.
@@ -1431,40 +1440,23 @@ function unwrapParens(node: any): any {
   return inner;
 }
 
-/** The arguments a call passes to `fn` when `fn` is its callee (`(function (a) {})(x)`, `.call(this, x)`). */
-function iifeArguments(fn: any): any[] | undefined {
-  let node = fn;
-  while (node.parent?.type === 'parenthesized_expression') node = node.parent;
-  let call = node.parent;
-  let skip = 0;
-  if (call?.type === 'member_expression' && call.childForFieldName?.('object')?.id === node.id
-    && call.childForFieldName?.('property')?.text === 'call') {
-    call = call.parent;
-    skip = 1;
-    if (call?.type !== 'call_expression' || call.childForFieldName?.('function')?.id !== node.parent.id) return undefined;
-  } else if (call?.type !== 'call_expression' || call.childForFieldName?.('function')?.id !== node.id) return undefined;
+/** A call's arguments, without comments. */
+function callArguments(call: any): any[] {
   const args = call.childForFieldName?.('arguments');
-  if (args?.type !== 'arguments') return undefined;
-  return args.namedChildren.filter((child: any) => child.type !== 'comment').slice(skip);
+  return args?.type === 'arguments' ? args.namedChildren.filter((child: any) => child.type !== 'comment') : [];
 }
 
 /**
  * How many leading parameters of a UMD factory hold modules: in
  * `(function (root, factory) { define(['./dep'], factory); ...
  * factory(require('./dep')) })(this, function (dep) { ... })` the wrapper
- * calls (or hands to an AMD loader) the parameter `fn` is passed as, and
- * whatever it passes there is a dependency. Every such position counts as a
- * module, whatever the wrapper passes (`factory(root.Dep)` is a global
- * library), which keeps the calls on them as they were before #1020.
+ * calls (or hands to an AMD loader) the parameter the factory is passed as
+ * (`position`), and whatever it passes there is a dependency. Every such
+ * position counts as a module, whatever the wrapper passes
+ * (`factory(root.Dep)` is a global library), which keeps the calls on them as
+ * they were before #1020.
  */
-function umdFactoryModuleCount(fn: any): number {
-  const args = fn.parent;
-  if (args?.type !== 'arguments') return 0;
-  const call = args.parent;
-  if (call?.type !== 'call_expression') return 0;
-  const wrapper = unwrapParens(call.childForFieldName?.('function'));
-  if (!JS_TS_INVOKABLE_LITERALS.has(wrapper?.type)) return 0;
-  const position = args.namedChildren.filter((child: any) => child.type !== 'comment').findIndex((child: any) => child.id === fn.id);
+function umdFactoryModuleCount(wrapper: any, position: number): number {
   const params = wrapper.childForFieldName?.('parameters') ?? wrapper.childForFieldName?.('parameter');
   const paramList = params?.type === 'formal_parameters' ? params.namedChildren.filter((child: any) => child.type !== 'comment') : [params];
   const param = paramList[position];
@@ -1476,7 +1468,7 @@ function umdFactoryModuleCount(fn: any): number {
   let count = 0;
   for (const inner of body.descendantsOfType('call_expression')) {
     const callee = inner.childForFieldName?.('function');
-    const innerArgs = (inner.childForFieldName?.('arguments')?.namedChildren ?? []).filter((child: any) => child.type !== 'comment');
+    const innerArgs = callArguments(inner);
     if (callee?.type === 'identifier' && callee.text === factory) {
       count = Math.max(count, innerArgs.length);
     } else if (callee?.type === 'identifier' && AMD_LOADERS.has(callee.text)) {
@@ -1489,22 +1481,11 @@ function umdFactoryModuleCount(fn: any): number {
 }
 
 /**
- * What each leading parameter of a JS function is bound to by the code that
- * invokes it where it is written (#1020), by position: an AMD dependency or a
- * UMD factory dependency holds a module (MODULE_ROOT); an IIFE parameter
- * aliases the roots of its argument (`(function (lib) {})(require('./a'))`,
- * `(function (lib) {})(a)`), looked up from outside the function (OUTER_ROOT),
- * or is a plain local (undefined) when the argument has no roots. Empty when
- * nothing invokes it there; parameters past the end keep their own default.
+ * What the parameters of an invoked function literal alias, by position: the
+ * roots of each argument, looked up from outside the function (OUTER_ROOT),
+ * or a plain local (undefined) when the argument has no roots.
  */
-function invocationParameterRoots(fn: any): Array<string[] | undefined> {
-  const amd = amdDependencyCount(fn);
-  if (amd > 0) return Array.from({ length: amd }, () => [MODULE_ROOT]);
-  const umd = umdFactoryModuleCount(fn);
-  if (umd > 0) return Array.from({ length: umd }, () => [MODULE_ROOT]);
-  if (!JS_TS_INVOKABLE_LITERALS.has(fn?.type)) return [];
-  const args = iifeArguments(fn);
-  if (!args) return [];
+function invokedArgumentRoots(args: any[]): Array<string[] | undefined> {
   const out: Array<string[] | undefined> = [];
   for (const arg of args) {
     // A spread hides which argument lands where.
@@ -1512,6 +1493,63 @@ function invocationParameterRoots(fn: any): Array<string[] | undefined> {
     out.push(valueRoots(arg, false)?.map(root => (root === MODULE_ROOT ? root : OUTER_ROOT + root)));
   }
   return out;
+}
+
+/**
+ * What each leading parameter of a JS function literal is bound to by the
+ * call that invokes it where it is written, or hands it to a loader (#1020),
+ * recorded by the function's node id: an AMD dependency
+ * (`define(['./utils'], function (utils) {})`, `require` / `requirejs`) or a
+ * UMD factory dependency holds a module (MODULE_ROOT), as surely as
+ * `const utils = require('./utils')` does; an IIFE parameter
+ * (`(function (lib) {})(require('./a'))`, `.call(this, a)`,
+ * `.apply(this, [a])`) aliases its argument (invokedArgumentRoots). A
+ * function with no entry keeps each parameter's own default.
+ *
+ * Read from the call, which the walk meets before the function inside it, so
+ * nothing climbs the tree: `.parent` costs the depth of the node, which made
+ * deeply nested callbacks quadratic.
+ */
+function recordInvocations(call: any, callee: any, out: Map<number, Array<string[] | undefined>>): void {
+  // The callee decides first: most calls invoke nothing written in place, and
+  // reading a call's arguments costs.
+  const calleeType = callee?.type;
+  if (calleeType === 'identifier') {
+    if (!AMD_LOADERS.has(callee.text)) return;
+    const args = callArguments(call);
+    for (let i = 1; i < args.length; i++) {
+      const deps = args[i - 1];
+      if (!JS_TS_INVOKABLE_LITERALS.has(args[i].type) || deps.type !== 'array') continue;
+      const elements = deps.namedChildren.filter((child: any) => child.type !== 'comment');
+      if (elements.length && elements.every((child: any) => child.type === 'string')) {
+        out.set(args[i].id, elements.map(() => [MODULE_ROOT]));
+      }
+    }
+    return;
+  }
+  if (calleeType === 'parenthesized_expression' || JS_TS_INVOKABLE_LITERALS.has(calleeType)) {
+    const invoked = unwrapParens(callee);
+    if (!JS_TS_INVOKABLE_LITERALS.has(invoked?.type)) return;
+    const args = callArguments(call);
+    out.set(invoked.id, invokedArgumentRoots(args));
+    // A UMD wrapper: a function it is passed may be the factory.
+    args.forEach((arg, position) => {
+      if (!JS_TS_INVOKABLE_LITERALS.has(arg.type)) return;
+      const count = umdFactoryModuleCount(invoked, position);
+      if (count > 0) out.set(arg.id, Array.from({ length: count }, () => [MODULE_ROOT]));
+    });
+    return;
+  }
+  if (calleeType !== 'member_expression') return;
+  const method = callee.childForFieldName?.('property')?.text;
+  if (method !== 'call' && method !== 'apply') return;
+  const fn = unwrapParens(callee.childForFieldName?.('object'));
+  if (!JS_TS_INVOKABLE_LITERALS.has(fn?.type)) return;
+  const args = callArguments(call);
+  if (method === 'call') out.set(fn.id, invokedArgumentRoots(args.slice(1)));
+  else if (method === 'apply' && args[1]?.type === 'array') {
+    out.set(fn.id, invokedArgumentRoots(args[1].namedChildren.filter((child: any) => child.type !== 'comment')));
+  }
 }
 
 /** Python calls that wrap a function and keep it callable as an attribute. */
@@ -1596,12 +1634,15 @@ function receiverProperties(node: any, python: boolean): string[] {
  * class declarations do not count as locals: the first name a module, the
  * others an entity the parser extracts.
  */
-function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => void): Map<number, CallSiteScope> {
+function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => void): CallSiteScopes {
   const frames: CallScopeFrame[] = [];
   // Each call with its innermost frame: the frames link outward, so a call
   // costs no copy of the stack.
   const pending: Array<{ id: number; start: number; frame?: CallScopeFrame; name: string; receiver: boolean }> = [];
   const result = new Map<number, CallSiteScope>();
+  // JS: what the call around a function literal binds its parameters to, by
+  // the function's node id (recordInvocations).
+  const invocations = new Map<number, Array<string[] | undefined>>();
   // The method name of each member call, and every property name the file
   // assigns a reference to (`this.validate = validate`, `{ validate }`): a call
   // of such a name may reach a module-level function through the property, so
@@ -1612,15 +1653,51 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
   // may hold a module, so the call is not member-only either.
   const receiverPropertyNames = new Map<number, string[]>();
   const assignedProperties = new Set<string>();
+  // The subset set on an instance, a prototype or a class (`this.validate =
+  // validate`, `self.validate = validate`, `A.prototype.validate = validate`,
+  // a class field, a prototype mixin): a subclass in another file inherits
+  // them, so they go out with the file (CallSiteScopes.propertyReferences).
+  const instanceProperties = new Set<string>();
   // Property assignments whose value is rooted at a name, decided after the
   // walk: a parameter or local (`this.loader = loader`) holds no module function.
-  const pendingProperties: Array<{ prop: string; start: number; frame?: CallScopeFrame; name: string }> = [];
-  const assignProperty = (prop: string | undefined, value: any, start: number): void => {
+  const pendingProperties: Array<{ prop: string; start: number; frame?: CallScopeFrame; name: string; instance: boolean }> = [];
+  const assignProperty = (prop: string | undefined, value: any, start: number, instance: boolean): void => {
     if (!prop) return;
     const root = referenceRoot(value, python);
-    if (typeof root === 'string') pendingProperties.push({ prop, start, frame: frames[frames.length - 1], name: root });
+    const frame = frames[frames.length - 1];
+    if (typeof root === 'string') pendingProperties.push({ prop, start, frame, name: root, instance });
     else if (root === undefined) {
-      for (const name of valueRoots(value, python) ?? []) pendingProperties.push({ prop, start, frame: frames[frames.length - 1], name });
+      for (const name of valueRoots(value, python) ?? []) pendingProperties.push({ prop, start, frame, name, instance });
+    }
+  };
+  // JS: object literals whose properties land on a prototype or instance
+  // (`A.prototype = { ... }`, `Object.assign(A.prototype, { ... })`), by node id.
+  const instanceObjects = new Set<number>();
+  // JS: a prototype or `this` mixin from a value whose properties this file
+  // cannot list (`Object.assign(A.prototype, require('./helpers'))`): any
+  // `this.m()` here may call a module function. Names are decided after the
+  // walk: mixing in a parameter or local (`Object.assign(this, options)`) is not.
+  let opaqueMixin = false;
+  const opaqueMixinSources: Array<{ start: number; frame?: CallScopeFrame; name: string }> = [];
+  // Member calls on `this` (JS) or `self` / `cls` (Python), by call node id.
+  const instanceCalls = new Set<number>();
+  // The properties this file sets on `this` / `self` or declares as class
+  // fields or attributes, whatever the value. `this.helpers.validate()` with
+  // `helpers` not among them reads a property a base class in another file
+  // sets, which may hold a module, so it is not a member-only call.
+  const ownProperties = new Set<string>();
+  // `Object.assign(A.prototype, ...)`, `_.extend(this, ...)` (MIXIN_FUNCTIONS).
+  const recordMixin = (call: any): void => {
+    const [target, ...sources] = callArguments(call).map(unwrapParens);
+    if (target?.type !== 'this' && !isPrototype(target)) return;
+    for (const source of sources) {
+      if (source.type === 'object') instanceObjects.add(source.id);
+      // Another prototype brings methods, which resolve as members.
+      else if (!isPrototype(source)) {
+        const roots = valueRoots(source, false);
+        if (roots === undefined || roots.includes(MODULE_ROOT)) opaqueMixin = true;
+        else for (const name of roots) opaqueMixinSources.push({ start: source.startIndex, frame: frames[frames.length - 1], name });
+      }
     }
   };
   const bindAlias = (frame: CallScopeFrame | undefined, names: Set<string>, roots: string[]): void => {
@@ -1646,7 +1723,7 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
   };
   // A function's parameters, each a local or an alias of what it defaults to.
   // The first `invoked.length` take what the code invoking the function passes
-  // there instead (invocationParameterRoots).
+  // there instead (recordInvocations).
   const bindParameters = (frame: CallScopeFrame, params: any, invoked: Array<string[] | undefined> = []): void => {
     const list = params?.type === (python ? 'parameters' : 'formal_parameters') || params?.type === 'lambda_parameters'
       ? params.namedChildren : [params];
@@ -1664,8 +1741,11 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
         paramRoots = rest.length ? rest : undefined;
       } else paramRoots = position < invoked.length ? invoked[position] : parameterRoots(param, python);
       bindValue(frame, names, paramRoots);
-      if (!python && paramRoots && param?.namedChildren?.some((c: any) => c.type === 'accessibility_modifier')) {
-        for (const name of names) for (const r of paramRoots) pendingProperties.push({ prop: name, start: param.startIndex, frame: frame.outer, name: r });
+      if (!python && param?.namedChildren?.some((c: any) => c.type === 'accessibility_modifier')) {
+        for (const name of names) {
+          ownProperties.add(name);
+          for (const r of paramRoots ?? []) pendingProperties.push({ prop: name, start: param.startIndex, frame: frame.outer, name: r, instance: true });
+        }
       }
     }
   };
@@ -1709,13 +1789,18 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
       } else if (type === 'assignment' || type === 'augmented_assignment' || type === 'for_statement') {
         const left = node.childForFieldName?.('left');
         const right = type === 'augmented_assignment' ? undefined : node.childForFieldName?.('right');
-        if (left?.type === 'attribute') assignProperty(left.childForFieldName?.('attribute')?.text, right, node.startIndex);
+        if (left?.type === 'attribute') {
+          const prop = left.childForFieldName?.('attribute')?.text;
+          assignProperty(prop, right, node.startIndex, true);
+          if (prop && PY_INSTANCE_NAMES.has(left.childForFieldName?.('object')?.text)) ownProperties.add(prop);
+        }
         pythonTargetNames(left, names);
         const frame = functionFrame();
         // A class-body binding is an attribute: `v = staticmethod(validate)`
         // makes `self.v()` a call of `validate`.
         if (type === 'assignment' && left?.type === 'identifier' && frame?.type === 'class_definition') {
-          assignProperty(left.text, right, node.startIndex);
+          assignProperty(left.text, right, node.startIndex, true);
+          ownProperties.add(left.text);
         }
         // `m = a`, `m = o.impl or a`; a loop variable takes what it iterates over.
         const roots = left?.type === 'identifier' || type === 'for_statement' ? valueRoots(right, true) : undefined;
@@ -1761,6 +1846,7 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
           const rootNode = receiverRoot(fn.childForFieldName?.('object'), true);
           if (rootNode?.type === 'identifier') {
             pending.push({ id: node.id, start: node.startIndex, frame: frames[frames.length - 1], name: rootNode.text, receiver: true });
+            if (PY_INSTANCE_NAMES.has(rootNode.text)) instanceCalls.add(node.id);
           } else if (rootNode?.type === 'call' && rootNode.childForFieldName?.('function')?.text === 'super') {
             result.set(node.id, { localReceiver: true });
           }
@@ -1776,7 +1862,7 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
         if (own) frame.names.add(own.text);
       }
       for (const name of frame.names) frame.calleeNames.add(name);
-      bindParameters(frame, node.childForFieldName?.('parameters') ?? node.childForFieldName?.('parameter'), invocationParameterRoots(node));
+      bindParameters(frame, node.childForFieldName?.('parameters') ?? node.childForFieldName?.('parameter'), invocations.get(node.id));
       frames.push(frame);
     } else if (JS_TS_SCOPE_BLOCKS.has(type)) {
       const frame = newFrame(node, type);
@@ -1824,7 +1910,13 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
     } else if (type === 'assignment_expression') {
       const left = node.childForFieldName?.('left');
       if (left?.type === 'member_expression') {
-        assignProperty(left.childForFieldName?.('property')?.text, node.childForFieldName?.('right'), node.startIndex);
+        const object = left.childForFieldName?.('object');
+        const right = node.childForFieldName?.('right');
+        const prop = left.childForFieldName?.('property')?.text;
+        assignProperty(prop, right, node.startIndex, object?.type === 'this' || isPrototype(object));
+        if (prop && object?.type === 'this') ownProperties.add(prop);
+        // `A.prototype = { validate }`
+        if (isPrototype(left) && unwrapParens(right)?.type === 'object') instanceObjects.add(unwrapParens(right).id);
       } else if (left?.type === 'identifier') {
         const roots = valueRoots(node.childForFieldName?.('right'), false);
         if (roots !== undefined) {
@@ -1843,27 +1935,43 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
     } else if (type === 'public_field_definition' || type === 'field_definition') {
       // A class field holding a reference: `validate = validate`.
       const key = node.childForFieldName?.(type === 'field_definition' ? 'property' : 'name');
-      if (key?.type === 'property_identifier') assignProperty(key.text, node.childForFieldName?.('value'), node.startIndex);
+      if (key?.type === 'property_identifier') {
+        assignProperty(key.text, node.childForFieldName?.('value'), node.startIndex, true);
+        ownProperties.add(key.text);
+      }
     } else if (type === 'object') {
+      const instance = instanceObjects.has(node.id);
       for (const child of node.namedChildren) {
-        if (child.type === 'shorthand_property_identifier') assignProperty(child.text, child, child.startIndex);
-        else if (child.type === 'pair') {
-          const key = child.childForFieldName?.('key');
-          if (key?.type === 'property_identifier') assignProperty(key.text, child.childForFieldName?.('value'), child.startIndex);
+        let key: string | undefined;
+        if (child.type === 'shorthand_property_identifier') {
+          key = child.text;
+          assignProperty(key, child, child.startIndex, instance);
+        } else if (child.type === 'pair') {
+          const keyNode = child.childForFieldName?.('key');
+          if (keyNode?.type === 'property_identifier') {
+            key = keyNode.text;
+            assignProperty(key, child.childForFieldName?.('value'), child.startIndex, instance);
+          }
         }
+        if (instance && key) ownProperties.add(key);
       }
     } else if (type === 'call_expression' || type === 'new_expression') {
       const fn = node.childForFieldName?.(type === 'call_expression' ? 'function' : 'constructor');
+      if (type === 'call_expression') recordInvocations(node, fn, invocations);
       if (fn?.type === 'identifier') {
         pending.push({ id: node.id, start: node.startIndex, frame: frames[frames.length - 1], name: fn.text, receiver: false });
       } else if (fn?.type === 'member_expression') {
         const member = fn.childForFieldName?.('property')?.text;
         if (member) memberNames.set(node.id, member);
+        if (type === 'call_expression' && member !== undefined && MIXIN_FUNCTIONS.has(member)) recordMixin(node);
         const receiverProps = receiverProperties(fn.childForFieldName?.('object'), false);
         if (receiverProps.length) receiverPropertyNames.set(node.id, receiverProps);
         const rootNode = receiverRoot(fn.childForFieldName?.('object'), false);
         if (rootNode?.type === 'this') {
-          if (thisIsClassBound()) result.set(node.id, { localReceiver: true });
+          if (thisIsClassBound()) {
+            result.set(node.id, { localReceiver: true });
+            instanceCalls.add(node.id);
+          }
         } else if (rootNode?.type === 'super') {
           result.set(node.id, { localReceiver: true });
         } else if (rootNode?.type === 'identifier') {
@@ -1913,15 +2021,21 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
     }
   }
   for (const assigned of pendingProperties) {
-    if (!isLocal(assigned.name, assigned.start, assigned.frame, true)) assignedProperties.add(assigned.prop);
+    if (isLocal(assigned.name, assigned.start, assigned.frame, true)) continue;
+    assignedProperties.add(assigned.prop);
+    if (assigned.instance) instanceProperties.add(assigned.prop);
   }
+  if (!opaqueMixin) opaqueMixin = opaqueMixinSources.some(source => !isLocal(source.name, source.start, source.frame, true));
   for (const [id, scope] of result) {
     if (!scope.localReceiver) continue;
     const member = memberNames.get(id);
-    if (member !== undefined && assignedProperties.has(member)) result.delete(id);
-    else if (receiverPropertyNames.get(id)?.some(prop => assignedProperties.has(prop))) result.delete(id);
+    const receiverProps = receiverPropertyNames.get(id);
+    if (opaqueMixin && instanceCalls.has(id)) result.delete(id);
+    else if (instanceCalls.has(id) && receiverProps && !ownProperties.has(receiverProps[0])) result.delete(id);
+    else if (member !== undefined && assignedProperties.has(member)) result.delete(id);
+    else if (receiverProps?.some(prop => assignedProperties.has(prop))) result.delete(id);
   }
-  return result;
+  return { sites: result, propertyReferences: instanceProperties };
 }
 
 /**
@@ -4173,8 +4287,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     const receiverFacts = [SupportedLanguages.Scala, SupportedLanguages.TypeScript, SupportedLanguages.Go, SupportedLanguages.Java].includes(language)
       ? collectReceiverFacts(tree.rootNode, language, checkBudget) : undefined;
     // Which calls a parameter, a local or `this` / `self` pins down (#1020).
-    const callSiteScopes = isJsTs || language === SupportedLanguages.Python
+    const callSiteFacts = isJsTs || language === SupportedLanguages.Python
       ? collectCallSiteScopes(tree.rootNode, language === SupportedLanguages.Python, checkBudget) : undefined;
+    const callSiteScopes = callSiteFacts?.sites;
 
     // --- Second pass: calls and imports ---
     for (const match of pass2Matches) {
@@ -4803,6 +4918,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       ...(tsGlobalTypes.length ? { tsGlobalTypes } : {}),
       ...(tsModule ? { tsModule: true as const } : {}),
       ...(bareMembers.size ? { bareMembers: [...bareMembers].sort() } : {}),
+      ...(callSiteFacts?.propertyReferences.size ? { propertyReferences: [...callSiteFacts.propertyReferences].sort() } : {}),
       fileRole: classifyFileRole(filePath, source),
     };
   } catch (e) {
@@ -4943,6 +5059,7 @@ export function summarizeParseResult(r: FileParseResult): FileSummary {
     // Always present, so a summary written before #1020 (no field) is told
     // apart from one with no bare members.
     bareMembers: r.bareMembers ?? [],
+    ...(r.propertyReferences ? { propertyReferences: r.propertyReferences } : {}),
     refs: [...refs].sort(),
   };
   return { ...summary, sig: summarySignature(summary) };
@@ -5327,6 +5444,21 @@ export function resolveEdges(
   const batchSummaries = results.map(summarizeParseResult);
   const summaries = new Map<string, FileSummary>(globalIndex?.summaries ?? []);
   for (const s of batchSummaries) summaries.set(s.filePath, s);
+  // #1020: properties any file sets on an instance, prototype or class to a
+  // function or module from outside (FileSummary.propertyReferences), by
+  // language family. A member call of such a name may reach a module-level
+  // function that way from another file (`this.validate()` in a subclass of a
+  // base that does `this.validate = validate`), so it resolves as a plain call.
+  const propertyReferenceKey = (language: string | undefined, name: string): string | undefined =>
+    language === SupportedLanguages.Python ? `py\0${name}`
+      : language === SupportedLanguages.JavaScript || language === SupportedLanguages.TypeScript ? `js\0${name}` : undefined;
+  const propertyReferences = new Set<string>();
+  for (const s of summaries.values()) {
+    for (const name of s.propertyReferences ?? []) {
+      const key = propertyReferenceKey(s.language, name);
+      if (key) propertyReferences.add(key);
+    }
+  }
   // The index's maps already hold every file it has a summary for (its symbol
   // maps from the summaries, its path maps from paths and summaries alike), so
   // only the batch's own summaries are laid over them below. Redoing the whole
@@ -6981,7 +7113,8 @@ export function resolveEdges(
       // A member call that cannot be a module-level function (`conn.validate()`
       // on a parameter) is not bound by an import of that name either: only a
       // plain identifier reads the lexical binding.
-      const memberCall = rel.predicate === 'CALLS' && rel.memberCall === true;
+      const memberCall = rel.predicate === 'CALLS' && rel.memberCall === true &&
+        !propertyReferences.has(propertyReferenceKey(srcLanguage, rel.dstName) ?? '');
       const origDstName = rel.dstName;
       // Z: resolve a renamed-import call by the provider's public symbol, but keep the
       // ORIGINAL local name on the emitted edge (buildPatchWithResolution maps the edge
