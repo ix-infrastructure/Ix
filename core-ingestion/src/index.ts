@@ -1415,6 +1415,105 @@ function amdDependencyCount(fn: any): number {
   return elements.every((child: any) => child.type === 'string') ? elements.length : 0;
 }
 
+/**
+ * Prefix of an alias root that is looked up from outside the frame that binds
+ * the alias: an argument an IIFE passes in is evaluated where the call is, so
+ * the function's own parameters do not shadow it.
+ */
+const OUTER_ROOT = '\0outer:';
+
+/** A JS function literal invoked where it is written, unwrapped through parentheses. */
+const JS_TS_INVOKABLE_LITERALS = new Set(['arrow_function', 'function_expression', 'function', 'generator_function']);
+
+function unwrapParens(node: any): any {
+  let inner = node;
+  while (inner?.type === 'parenthesized_expression') inner = inner.namedChild(0);
+  return inner;
+}
+
+/** The arguments a call passes to `fn` when `fn` is its callee (`(function (a) {})(x)`, `.call(this, x)`). */
+function iifeArguments(fn: any): any[] | undefined {
+  let node = fn;
+  while (node.parent?.type === 'parenthesized_expression') node = node.parent;
+  let call = node.parent;
+  let skip = 0;
+  if (call?.type === 'member_expression' && call.childForFieldName?.('object')?.id === node.id
+    && call.childForFieldName?.('property')?.text === 'call') {
+    call = call.parent;
+    skip = 1;
+    if (call?.type !== 'call_expression' || call.childForFieldName?.('function')?.id !== node.parent.id) return undefined;
+  } else if (call?.type !== 'call_expression' || call.childForFieldName?.('function')?.id !== node.id) return undefined;
+  const args = call.childForFieldName?.('arguments');
+  if (args?.type !== 'arguments') return undefined;
+  return args.namedChildren.filter((child: any) => child.type !== 'comment').slice(skip);
+}
+
+/**
+ * How many leading parameters of a UMD factory hold modules: in
+ * `(function (root, factory) { define(['./dep'], factory); ...
+ * factory(require('./dep')) })(this, function (dep) { ... })` the wrapper
+ * calls (or hands to an AMD loader) the parameter `fn` is passed as, and
+ * whatever it passes there is a dependency. Every such position counts as a
+ * module, whatever the wrapper passes (`factory(root.Dep)` is a global
+ * library), which keeps the calls on them as they were before #1020.
+ */
+function umdFactoryModuleCount(fn: any): number {
+  const args = fn.parent;
+  if (args?.type !== 'arguments') return 0;
+  const call = args.parent;
+  if (call?.type !== 'call_expression') return 0;
+  const wrapper = unwrapParens(call.childForFieldName?.('function'));
+  if (!JS_TS_INVOKABLE_LITERALS.has(wrapper?.type)) return 0;
+  const position = args.namedChildren.filter((child: any) => child.type !== 'comment').findIndex((child: any) => child.id === fn.id);
+  const params = wrapper.childForFieldName?.('parameters') ?? wrapper.childForFieldName?.('parameter');
+  const paramList = params?.type === 'formal_parameters' ? params.namedChildren.filter((child: any) => child.type !== 'comment') : [params];
+  const param = paramList[position];
+  const factory = param?.type === 'identifier' ? param.text
+    : param?.type === 'required_parameter' && param.childForFieldName?.('pattern')?.type === 'identifier' ? param.childForFieldName('pattern').text
+    : undefined;
+  const body = wrapper.childForFieldName?.('body');
+  if (!factory || !body) return 0;
+  let count = 0;
+  for (const inner of body.descendantsOfType('call_expression')) {
+    const callee = inner.childForFieldName?.('function');
+    const innerArgs = (inner.childForFieldName?.('arguments')?.namedChildren ?? []).filter((child: any) => child.type !== 'comment');
+    if (callee?.type === 'identifier' && callee.text === factory) {
+      count = Math.max(count, innerArgs.length);
+    } else if (callee?.type === 'identifier' && AMD_LOADERS.has(callee.text)) {
+      const at = innerArgs.findIndex((child: any) => child.type === 'identifier' && child.text === factory);
+      const deps = at > 0 ? innerArgs[at - 1] : undefined;
+      if (deps?.type === 'array') count = Math.max(count, deps.namedChildren.filter((child: any) => child.type !== 'comment').length);
+    }
+  }
+  return count;
+}
+
+/**
+ * What each leading parameter of a JS function is bound to by the code that
+ * invokes it where it is written (#1020), by position: an AMD dependency or a
+ * UMD factory dependency holds a module (MODULE_ROOT); an IIFE parameter
+ * aliases the roots of its argument (`(function (lib) {})(require('./a'))`,
+ * `(function (lib) {})(a)`), looked up from outside the function (OUTER_ROOT),
+ * or is a plain local (undefined) when the argument has no roots. Empty when
+ * nothing invokes it there; parameters past the end keep their own default.
+ */
+function invocationParameterRoots(fn: any): Array<string[] | undefined> {
+  const amd = amdDependencyCount(fn);
+  if (amd > 0) return Array.from({ length: amd }, () => [MODULE_ROOT]);
+  const umd = umdFactoryModuleCount(fn);
+  if (umd > 0) return Array.from({ length: umd }, () => [MODULE_ROOT]);
+  if (!JS_TS_INVOKABLE_LITERALS.has(fn?.type)) return [];
+  const args = iifeArguments(fn);
+  if (!args) return [];
+  const out: Array<string[] | undefined> = [];
+  for (const arg of args) {
+    // A spread hides which argument lands where.
+    if (arg.type === 'spread_element') break;
+    out.push(valueRoots(arg, false)?.map(root => (root === MODULE_ROOT ? root : OUTER_ROOT + root)));
+  }
+  return out;
+}
+
 /** Python calls that wrap a function and keep it callable as an attribute. */
 const PY_FUNCTION_WRAPPERS = new Set(['staticmethod', 'classmethod', 'partial', 'functools.partial']);
 
@@ -1546,8 +1645,9 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
     else bind(frame, names);
   };
   // A function's parameters, each a local or an alias of what it defaults to.
-  // The first `modules` hold modules (AMD dependencies).
-  const bindParameters = (frame: CallScopeFrame, params: any, modules = 0): void => {
+  // The first `invoked.length` take what the code invoking the function passes
+  // there instead (invocationParameterRoots).
+  const bindParameters = (frame: CallScopeFrame, params: any, invoked: Array<string[] | undefined> = []): void => {
     const list = params?.type === (python ? 'parameters' : 'formal_parameters') || params?.type === 'lambda_parameters'
       ? params.namedChildren : [params];
     let index = 0;
@@ -1556,7 +1656,13 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
       const names = new Set<string>();
       if (python) pythonTargetNames(param, names);
       else jsTsPatternNames(param, names);
-      const paramRoots = index++ < modules ? [MODULE_ROOT] : parameterRoots(param, python);
+      const position = index++;
+      let paramRoots: string[] | undefined;
+      if (!python && param?.type === 'rest_pattern' && position < invoked.length) {
+        // `...mods` collects every argument from here on.
+        const rest = invoked.slice(position).flatMap(roots => roots ?? []);
+        paramRoots = rest.length ? rest : undefined;
+      } else paramRoots = position < invoked.length ? invoked[position] : parameterRoots(param, python);
       bindValue(frame, names, paramRoots);
       if (!python && paramRoots && param?.namedChildren?.some((c: any) => c.type === 'accessibility_modifier')) {
         for (const name of names) for (const r of paramRoots) pendingProperties.push({ prop: name, start: param.startIndex, frame: frame.outer, name: r });
@@ -1670,7 +1776,7 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
         if (own) frame.names.add(own.text);
       }
       for (const name of frame.names) frame.calleeNames.add(name);
-      bindParameters(frame, node.childForFieldName?.('parameters') ?? node.childForFieldName?.('parameter'), amdDependencyCount(node));
+      bindParameters(frame, node.childForFieldName?.('parameters') ?? node.childForFieldName?.('parameter'), invocationParameterRoots(node));
       frames.push(frame);
     } else if (JS_TS_SCOPE_BLOCKS.has(type)) {
       const frame = newFrame(node, type);
@@ -1788,7 +1894,11 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
         const roots = frame.aliases?.get(name);
         // The roots are looked up from this frame outward.
         const from: CallScopeFrame = frame;
-        if (roots !== undefined) return roots.every(root => lookup(root, from, true, depth + 1));
+        if (roots !== undefined) {
+          return roots.every(root => (root.startsWith(OUTER_ROOT)
+            ? lookup(root.slice(OUTER_ROOT.length), from.outer, true, depth + 1)
+            : lookup(root, from, true, depth + 1)));
+        }
         if ((receiver || aliased ? frame.names : frame.calleeNames).has(name)) return true;
         if (!receiver && frame.names.has(name)) return false;
         frame = frame.outer;

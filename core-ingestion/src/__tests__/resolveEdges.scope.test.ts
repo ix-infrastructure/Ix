@@ -571,6 +571,68 @@ describe('member calls and calls to locals across files (#1020)', () => {
     expect(callsFrom(resolveEdges([lib, caller]), 'src/app.js')).toEqual([]);
   });
 
+  // A UMD wrapper calls its factory with the dependencies (or hands it to
+  // define()), so the factory's parameters hold modules.
+  it('JavaScript: a member call on a UMD factory dependency still reaches the module function', () => {
+    const lib = parse('src/dep.js', 'function validate(x) { return x; }\nmodule.exports = { validate };\n');
+    const caller = parse('src/b.js', [
+      '(function (root, factory) {',
+      "  if (typeof define === 'function' && define.amd) define(['./dep'], factory);",
+      "  else if (typeof module === 'object') module.exports = factory(require('./dep'));",
+      '  else root.B = factory(root.Dep);',
+      '})(this, function (dep) {',
+      '  function run() { return dep.validate(1); }',
+      '  return { run };',
+      '});',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.js')).toEqual(['run -> src/dep.js:validate']);
+    const tiers = resolveEdgesWithTier([lib, caller]).filter(e => e.predicate === 'CALLS' && e.srcFilePath === 'src/b.js').map(e => e.tier);
+    expect(tiers).toEqual(['import']);
+  });
+
+  it('JavaScript: a function passed to an IIFE that never calls it binds no modules', () => {
+    const lib = parse('src/dep.js', 'function validate(x) { return x; }\nmodule.exports = { validate };\n');
+    const caller = parse('src/b.js', [
+      '(function (root, cb) { root.cb = cb; })(this, function (conn) {',
+      '  function run() { return conn.validate(1); }',
+      '  return { run };',
+      '});',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.js')).toEqual([]);
+  });
+
+  // An IIFE parameter is what the call passes in, looked up where the call is.
+  it('JavaScript: a member call on an IIFE parameter holding a module still reaches the module function', () => {
+    const lib = parse('src/a.js', 'function validate(x) { return x; }\nmodule.exports = { validate };\n');
+    const viaLocal = parse('src/b.js', [
+      "const a = require('./a');",
+      '(function (lib) { function run() { return lib.validate(1); } run(); })(a);',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, viaLocal]), 'src/b.js')).toEqual(['run -> src/a.js:validate']);
+    const direct = parse('src/c.js', "(function (lib) { function run() { return lib.validate(1); } run(); })(require('./a'));\n");
+    expect(callsFrom(resolveEdges([lib, direct]), 'src/c.js')).toEqual(['run -> src/a.js:validate']);
+    const arrowCall = parse('src/d.js', "((lib) => { function run() { return lib.validate(1); } run(); }).call(this, require('./a'));\n");
+    expect(callsFrom(resolveEdges([lib, arrowCall]), 'src/d.js')).toEqual(['run -> src/a.js:validate']);
+  });
+
+  it('JavaScript: an IIFE parameter given a non-module value stays a non-module local', () => {
+    const lib = parse('src/a.js', 'function validate(x) { return x; }\nmodule.exports = { validate };\n');
+    // `{}` has no roots; `a` is the IIFE's own parameter name, but the
+    // argument is the enclosing function's local `conn`, not the module.
+    const caller = parse('src/b.js', [
+      "const a = require('./a');",
+      '(function (lib) { function run() { return lib.validate(1); } run(); })({});',
+      'function outer(conn) {',
+      '  (function (a) { function go() { return a.validate(1); } go(); })(conn);',
+      '}',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.js')).toEqual([]);
+  });
+
   // #1020 accepted trade-off: an untyped parameter with no default is a
   // receiver known not to be a module, whatever it is named, so even
   // `module.validate()` gets no edge to a module-level `validate`. Only a
