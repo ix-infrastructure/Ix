@@ -192,6 +192,12 @@ export function withOverloadNotice(result: ResolveResult, target: string): Resol
   // The entity's own overload first, whatever order the group came in.
   const first = found.find((o) => o.id === entity.id) ?? found[0];
   const overloads = [first, ...found.filter((o) => o !== first)];
+  // A class holds its first constructor, so later constructors fold into it,
+  // but a class name is not an overloaded name: only a method that says its
+  // own signature is one. Nearly every Java class would carry the notice.
+  if (first.signature === undefined) {
+    return others.length === (result.notices ?? []).length ? result : { ...result, notices: others };
+  }
   const notice: ResolutionNotice = {
     code: "overloaded_target",
     target,
