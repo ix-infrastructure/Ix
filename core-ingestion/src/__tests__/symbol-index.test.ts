@@ -133,6 +133,11 @@ describe('summary signature and changed names (#961)', () => {
     expect(before.sig).not.toBe(after.sig);
     expect(changedNames(before, after)).toEqual(new Set(['validate']));
     expect(changedNames(after, before)).toEqual(new Set(['validate']));
+    // The files the property reaches follow the file's imports (a mixin into
+    // an imported class), so a changed import names it too.
+    const moved = signed(summary('base.js', { qkeys: [['Base', 'Base']], propertyReferences: ['validate'],
+      imports: [{ dstName: './c' }] }));
+    expect(changedNames(after, moved)).toEqual(new Set(['validate']));
   });
 
   it('names a renaming re-export whose source module moved', () => {

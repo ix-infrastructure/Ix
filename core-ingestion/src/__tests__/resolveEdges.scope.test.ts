@@ -965,6 +965,46 @@ describe('member calls and calls to locals across files (#1020)', () => {
     expect(callsFrom(resolveEdges([helpers, other]), 'src/c.js')).toEqual([]);
   });
 
+  // An unrelated file's property must not turn every member call of the name
+  // in the language back into a plain call.
+  it('JavaScript/TypeScript/Python: a property an unrelated file sets keeps the member rule elsewhere', () => {
+    const lib = parse('src/a.ts', 'export function validate() {}\n');
+    const caller = parse('src/b.ts', 'export function use(conn: Conn) { conn.validate(); }\n');
+    const other = parse('src/c.ts', "import { validate } from './x';\nexport class Z { constructor() { this.validate = validate; } }\n");
+    expect(other.propertyReferences).toEqual(['validate']);
+    expect(callsFrom(resolveEdges([lib, caller, other]), 'src/b.ts')).toEqual([]);
+    // Also when the unrelated file is known only through the index.
+    const index = buildGlobalResolutionIndex([lib.filePath, other.filePath],
+      new Map([lib, other].map(r => [r.filePath, summarizeParseResult(r)])));
+    expect(callsFrom(resolveEdges([caller], undefined, index), 'src/b.ts')).toEqual([]);
+
+    const pyLib = parse('pkg/h.py', 'def validate():\n    pass\n');
+    const pyCaller = parse('pkg/b.py', 'def use(conn):\n    conn.validate()\n');
+    const pyOther = parse('pkg/c.py', 'from pkg.x import validate\n\nclass Z:\n    def __init__(self):\n        self.validate = validate\n');
+    expect(pyOther.propertyReferences).toEqual(['validate']);
+    expect(callsFrom(resolveEdges([pyLib, pyCaller, pyOther]), 'pkg/b.py')).toEqual([]);
+  });
+
+  // The function the property holds may be in the caller's own file; the
+  // patch builder still sees a member call there, so resolveEdges ties it.
+  it('JavaScript/TypeScript: a property a related file sets reaches a module function in the caller\'s own file', () => {
+    const a = parse('src/a.ts', "export function validate() {}\nexport class C { run() { this.validate(); } }\n");
+    const b = parse('src/b.ts', "import { validate } from './a';\nexport class D { constructor() { this.validate = validate; } }\n");
+    const resolved = resolveEdgesWithTier([a, b]);
+    expect(callsFrom(resolved, 'src/a.ts')).toEqual(['C.run -> src/a.ts:validate']);
+    const calls = buildPatchWithResolution(a, 'h', 'ws', resolved.filter(e => e.srcFilePath === a.filePath)).ops
+      .filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+    const nodes = buildPatchWithResolution(a, 'h', 'ws', []).ops.filter(op => op.type === 'UpsertNode');
+    const validateNode = nodes.find(op => op.type === 'UpsertNode' && op.name === 'validate');
+    expect(validateNode).toBeDefined();
+    expect(calls.map(op => op.type === 'UpsertEdge' ? op.dst : '')).toEqual([validateNode!.type === 'UpsertNode' ? validateNode!.id : '']);
+    // Without the related file the member rule holds: no member, no edge.
+    expect(callsFrom(resolveEdges([a]), 'src/a.ts')).toEqual([]);
+    const alone = buildPatchWithResolution(a, 'h', 'ws', resolveEdgesWithTier([a])).ops
+      .filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS');
+    expect(alone).toEqual([]);
+  });
+
   it('Rust: a method call reaches a trait-impl method in another file', () => {
     const lib = parse('src/shape.rs', 'pub trait Shape {\n    fn area(&self) -> f64;\n}\npub struct Sq;\nimpl Shape for Sq {\n    fn area(&self) -> f64 { 1.0 }\n}\n');
     const caller = parse('src/main.rs', 'fn make(s: &dyn Shape) {\n    s.area();\n}\n');

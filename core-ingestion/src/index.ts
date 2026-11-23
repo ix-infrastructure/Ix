@@ -5454,21 +5454,58 @@ export function resolveEdges(
   const batchSummaries = results.map(summarizeParseResult);
   const summaries = new Map<string, FileSummary>(globalIndex?.summaries ?? []);
   for (const s of batchSummaries) summaries.set(s.filePath, s);
-  // #1020: properties any file sets on an instance, prototype or class to a
-  // function or module from outside (FileSummary.propertyReferences), by
-  // language family. A member call of such a name may reach a module-level
-  // function that way from another file (`this.validate()` in a subclass of a
-  // base that does `this.validate = validate`), so it resolves as a plain call.
+  // #1020: the files that set a property on an instance, prototype or class
+  // to a function or module from outside (FileSummary.propertyReferences), by
+  // language family and name. A member call of such a name may reach a
+  // module-level function that way from another file (`this.validate()` in a
+  // subclass of a base that does `this.validate = validate`), so it resolves
+  // as a plain call -- but only in a file related to the one that sets it
+  // (propertyReferenceReaches): an unrelated file's property must not undo the
+  // member rule for every call of that name in the language.
   const propertyReferenceKey = (language: string | undefined, name: string): string | undefined =>
     language === SupportedLanguages.Python ? `py\0${name}`
       : language === SupportedLanguages.JavaScript || language === SupportedLanguages.TypeScript ? `js\0${name}` : undefined;
-  const propertyReferences = new Set<string>();
+  const propertyReferenceFiles = new Map<string, string[]>();
   for (const s of summaries.values()) {
     for (const name of s.propertyReferences ?? []) {
       const key = propertyReferenceKey(s.language, name);
-      if (key) propertyReferences.add(key);
+      if (!key) continue;
+      const files = propertyReferenceFiles.get(key);
+      if (files) files.push(s.filePath); else propertyReferenceFiles.set(key, [s.filePath]);
     }
   }
+  // The files a property-setting file imports directly, computed on demand:
+  // a file it imports may hold the class it mixes the property into.
+  const propertyFileImports = new Map<string, Set<string>>();
+  const importsOfPropertyFile = (fp: string): Set<string> => {
+    let out = propertyFileImports.get(fp);
+    if (out) return out;
+    out = new Set();
+    const summary = summaries.get(fp);
+    for (const rel of summary?.imports ?? []) {
+      if (rel.importVia === 'helper') continue;
+      for (const target of resolveImportTargets(fp, summary!.language, rel.dstName, rel.importRaw, 'runtime', rel.importAliased === true)) {
+        out.add(target);
+      }
+    }
+    propertyFileImports.set(fp, out);
+    return out;
+  };
+  /**
+   * Whether a property-setting file is related to `srcFilePath` closely enough
+   * for a member call there to read the property: it is the file itself, a
+   * file it imports or one re-export hop beyond (a base class it extends), or
+   * a file that imports it directly (a mixin into its class). Deeper chains
+   * keep the member rule.
+   */
+  const propertyReferenceReaches = (
+    srcFilePath: string, language: string | undefined, name: string,
+    imported: ReadonlySet<string>, transitive: ReadonlySet<string>,
+  ): boolean => {
+    const files = propertyReferenceFiles.get(propertyReferenceKey(language, name) ?? '');
+    return files !== undefined && files.some(fp =>
+      fp === srcFilePath || imported.has(fp) || transitive.has(fp) || importsOfPropertyFile(fp).has(srcFilePath));
+  };
   // The index's maps already hold every file it has a summary for (its symbol
   // maps from the summaries, its path maps from paths and summaries alike), so
   // only the batch's own summaries are laid over them below. Redoing the whole
@@ -7123,8 +7160,11 @@ export function resolveEdges(
       // A member call that cannot be a module-level function (`conn.validate()`
       // on a parameter) is not bound by an import of that name either: only a
       // plain identifier reads the lexical binding.
-      const memberCall = rel.predicate === 'CALLS' && rel.memberCall === true &&
-        !propertyReferences.has(propertyReferenceKey(srcLanguage, rel.dstName) ?? '');
+      // A property a related file sets to a module function of that name
+      // (propertyReferenceReaches) makes it a plain call again.
+      const propertyOptOut = rel.predicate === 'CALLS' && rel.memberCall === true &&
+        propertyReferenceReaches(srcFilePath, srcLanguage, rel.dstName, importedFilePaths, transitiveFilePaths);
+      const memberCall = rel.predicate === 'CALLS' && rel.memberCall === true && !propertyOptOut;
       const origDstName = rel.dstName;
       // Z: resolve a renamed-import call by the provider's public symbol, but keep the
       // ORIGINAL local name on the emitted edge (buildPatchWithResolution maps the edge
@@ -7170,7 +7210,20 @@ export function resolveEdges(
       if (
         hasSameFileDefinition &&
         (!binding || (rel.importBinding !== true && sameScopeDefines(result, srcName, origDstName)))
-      ) continue;
+      ) {
+        // The same-file edge buildPatchWithResolution writes for a plain call.
+        // It still reads the call's memberCall flag, so it keys this one on a
+        // member of the name and finds none when the file has only the
+        // module-level function the property holds: tie the call to that
+        // function here instead (confidence 0.8, as it is reached through a
+        // property another file sets).
+        if (propertyOptOut && !definesMember(srcFilePath, origDstName) &&
+            (fileQKeys.get(srcFilePath)?.get(origDstName) ?? []).includes(origDstName)) {
+          resolved.push({ srcFilePath, srcName, dstFilePath: srcFilePath, dstName: origDstName,
+            dstQualifiedKey: origDstName, predicate: 'CALLS', confidence: 0.8 });
+        }
+        continue;
+      }
       if (rel.importBinding === false) continue;
 
       // Lexical scope (JS/TS) — see JS_AMBIENT_CALLEES. An unbound bare call to
@@ -7549,8 +7602,12 @@ export function resolveEdges(
 
       if (resolvedMatches.length === 1) {
         const fp = resolvedMatches[0];
-        if (bareCall && !definesAtModuleScope(fp)) continue; // only a member of that name
-        if (memberCall && !definesMember(fp, dstName)) continue; // only a module-level function of it
+        // A bare call never lands on a member: skip a file whose only
+        // definition of the name is one.
+        if (bareCall && !definesAtModuleScope(fp)) continue;
+        // A member call lands only on a member: skip a file that has no member
+        // of the name (only a module-level function of it).
+        if (memberCall && !definesMember(fp, dstName)) continue;
         const dstQualifiedKey = targetQKey(fp);
         if (dstQualifiedKey === null) continue; // ambiguous — do not emit bad nodeId
         resolved.push({ srcFilePath, srcName, dstFilePath: fp, dstName: origDstName, dstQualifiedKey, predicate: rel.predicate, confidence: 0.5, tier: 'global', ...callKind });

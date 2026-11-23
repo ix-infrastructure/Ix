@@ -51,7 +51,8 @@ export interface FileSummary {
   /**
    * Properties set on an instance, prototype or class to a function or module
    * from outside (FileParseResult.propertyReferences): a member call of such a
-   * name in any file of the language may reach a module-level function.
+   * name in a file related to this one by import may reach a module-level
+   * function (resolveEdges' propertyReferenceReaches).
    */
   propertyReferences?: string[];
   /** Sorted unique names this file calls, references or extends (for IN-11). */
@@ -118,8 +119,12 @@ export function summaryBindings(s: Partial<BindingFields> | undefined): Map<stri
   // Whether a member call (`x.m()`) may land on a bare-keyed `m` here.
   for (const name of s.bareMembers ?? []) out.set(`b\0${pkg}\0${name}`, [name]);
   // Whether a member call (`this.m()`) in another file may reach a module
-  // function through a property `m` set here.
-  for (const name of s.propertyReferences ?? []) out.set(`r\0${name}`, [name]);
+  // function through a property `m` set here. Which files that is depends on
+  // what this file imports (the class it mixes `m` into), so they are in the key.
+  if (s.propertyReferences?.length) {
+    const imports = heritageImportsKey(s.imports);
+    for (const name of s.propertyReferences) out.set(`r\0${name}\0${imports}`, [name]);
+  }
   return out;
 }
 
