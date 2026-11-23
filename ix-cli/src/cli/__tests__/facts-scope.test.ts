@@ -298,6 +298,33 @@ describe("class targets: what the members call", () => {
     calls.filter((c) => c.method === "expand" && c.id !== CLASS && c.predicates?.includes("CALLS")
                         && !c.predicates.includes("REFERENCES"));
 
+  it("includes Java static receiver classes and preserves REFERENCES in a class bundle (#1137)", async () => {
+    const base = classClient([]);
+    const gate = ext("c-gate", "Gate", "src/Gate.java", 3, "class");
+    const client = {
+      ...base,
+      async entity(id: string) {
+        const result = await base.entity(id);
+        return { ...result, node: { ...result.node, provenance: { sourceUri: "src/Evaluator.java" } } };
+      },
+      async expand(id: string, opts?: { direction?: string; predicates?: string[]; limit?: number }) {
+        const result = await base.expand(id, opts);
+        if (id === "m-run" && opts?.direction === "out" && opts.predicates?.includes("REFERENCES")) {
+          return { ...result, nodes: [...result.nodes, gate], edges: [...(result.edges ?? []), { src: id, dst: gate.id, predicate: "REFERENCES" }] };
+        }
+        return result;
+      },
+    } as unknown as IxClient;
+    const facts = await collectFacts(client, CLASS, "Evaluator", "class", "context");
+    expect(facts.memberCalleeRefs).toContainEqual(expect.objectContaining({ id: gate.id, name: "Gate" }));
+    expect(facts.memberCalls).toContainEqual({ src: "m-run", dst: gate.id, predicate: "REFERENCES" });
+    const bundle = bundleFor(facts);
+    expect(bundle.entities).toContainEqual(expect.objectContaining({ id: gate.id, name: "Gate" }));
+    expect(bundle.relationships).toContainEqual({ src: "m-run", dst: gate.id, predicate: "REFERENCES" });
+    expect(bundle.relationships).not.toContainEqual({ src: "m-run", dst: gate.id, predicate: "CALLS" });
+    expect(bundle.evidence.find(e => e.refs.includes(gate.id) && e.source === "facts.callees")?.reason).toContain("uses");
+  });
+
   it("lists the outside entities a class's methods call, most-called first", async () => {
     const calls: Call[] = [];
     const facts = await collectFacts(classClient(calls), CLASS, "Engine", "class", "context");

@@ -272,7 +272,8 @@ export interface ParsedRelationship {
   importVia?: 'helper';
   /**
    * Lexically inferred receiver. An exact member resolves at tier `type`;
-   * otherwise the relationship resolves by its name, as without inference.
+   * Java REFERENCES names the receiver class itself. Otherwise a call resolves
+   * by its name, as without inference.
    */
   receiverType?: string;
   receiverFactory?: string;
@@ -283,7 +284,7 @@ export interface ParsedRelationship {
   receiverChain?: string[];
   /**
    * Set on a typed relationship that only exists for its receiver (the call
-   * also has its own, unchanged relationship). Without an exact member it
+   * also has its own, unchanged relationship). Without an exact member/type it
    * resolves to nothing: no edge, no claim, no unresolved-call entry.
    */
   receiverOnly?: true;
@@ -3821,6 +3822,19 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           if (!superCall) delete callRelationships.get(bareKey)?.superCall;
         }
         if (typedReceiver) {
+          // Java Type.m() names the class as well as the method. Instance,
+          // implicit-this and shadowed receivers do not name a class here.
+          if (typedReceiver.typeReference && typedReceiver.type) {
+            if (!seenRefs.has(caller)) seenRefs.set(caller, new Set());
+            const refs = seenRefs.get(caller)!;
+            if (refs.has(typedReceiver.type)) {
+              const ref = relationships.find(r => r.srcName === caller && r.dstName === typedReceiver.type && r.predicate === 'REFERENCES');
+              if (ref) ref.receiverType = typedReceiver.type;
+            } else {
+              refs.add(typedReceiver.type);
+              relationships.push({ srcName: caller, dstName: typedReceiver.type, predicate: 'REFERENCES', receiverType: typedReceiver.type, receiverOnly: true });
+            }
+          }
           // `Type.member`, `receiver.member` for a factory-typed receiver, or
           // Java `Type.getB().member` for a chain.
           const chain = typedReceiver.chain?.length ? `${typedReceiver.chain.map(m => `${m}()`).join('.')}.` : '';
@@ -6108,6 +6122,19 @@ export function resolveEdges(
           }
         } else if (phpType.entries.length > 1) {
           stats.skippedAmbiguous++;
+        }
+        continue;
+      }
+
+      // A Java static receiver names a type in package/import scope, never an
+      // unrelated class that happens to have the same simple name.
+      if (srcLanguage === SupportedLanguages.Java && rel.predicate === 'REFERENCES' && rel.receiverType) {
+        const providers = receiverProviders(srcFilePath, rel.receiverType);
+        if (providers.length === 1) {
+          const target = providers[0];
+          resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: target.fp, dstName: rel.dstName,
+            dstQualifiedKey: target.type, predicate: 'REFERENCES', confidence: 0.95, tier: 'type' });
+          stats.resolvedType = (stats.resolvedType ?? 0) + 1;
         }
         continue;
       }

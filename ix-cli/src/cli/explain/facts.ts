@@ -118,8 +118,8 @@ export interface EntityFacts {
    * file targets.
    */
   memberCalleeRefs?: EntityLocation[];
-  /** The member -> callee CALLS edges behind `memberCalleeRefs`, for the bundle's relationships. */
-  memberCalls?: Array<{ src: string; dst: string; predicate: "CALLS" }>;
+  /** Member calls and Java receiver-class references behind `memberCalleeRefs`. */
+  memberCalls?: Array<{ src: string; dst: string; predicate: "CALLS" | "REFERENCES" }>;
 
   /**
    * What the neighbouring files define. Members are otherwise collected for the
@@ -467,7 +467,9 @@ async function collectMemberCallees(
   client: IxClient,
   target: { id: string; path?: string; lineStart?: number; lineEnd?: number },
   members: EntityLocation[],
-): Promise<{ refs: EntityLocation[]; edges: Array<{ src: string; dst: string; predicate: "CALLS" }> }> {
+): Promise<{ refs: EntityLocation[]; edges: Array<{ src: string; dst: string; predicate: "CALLS" | "REFERENCES" }> }> {
+  // Java static calls name their receiver class through REFERENCES (#1137).
+  const java = target.path?.endsWith(".java") === true;
   const memberIds = new Set(members.map((m) => m.id));
   const pool = structuralMemberOrder(members.filter((m) => CALL_SOURCE_KINDS.has(m.kind))).slice(0, MEMBER_CALLEE_POOL);
   const inside = (n: any): boolean => {
@@ -478,16 +480,22 @@ async function collectMemberCallees(
       line >= target.lineStart && line <= target.lineEnd;
   };
   const found: any[][] = new Array(pool.length);
+  const foundEdges: Array<Array<{ src: string; dst: string; predicate: "CALLS" | "REFERENCES" }>> = new Array(pool.length);
   let next = 0;
   const worker = async () => {
     while (next < pool.length) {
       const index = next++;
       try {
         const result = await client.expand(pool[index].id, {
-          direction: "out", predicates: ["CALLS"], limit: MEMBER_CALLEE_CAP,
+          direction: "out", predicates: java ? ["CALLS", "REFERENCES"] : ["CALLS"], limit: MEMBER_CALLEE_CAP,
         });
+        foundEdges[index] = java
+          ? (result.edges ?? []).filter((e): e is typeof e & { predicate: "CALLS" | "REFERENCES" } =>
+              e.src === pool[index].id && (e.predicate === "CALLS" || e.predicate === "REFERENCES"))
+          : result.nodes.map((n) => ({ src: pool[index].id, dst: n.id, predicate: "CALLS" as const }));
+        const destinations = new Set(foundEdges[index].map((e) => e.dst));
         found[index] = uniqueById(result.nodes).filter((n: any) =>
-          n.id !== target.id && !memberIds.has(n.id) && !inside(n));
+          destinations.has(n.id) && n.id !== target.id && !memberIds.has(n.id) && !inside(n));
       } catch {
         found[index] = [];  // one unreadable member must not lose the others
       }
@@ -495,12 +503,13 @@ async function collectMemberCallees(
   };
   await Promise.all(Array.from({ length: Math.min(MEMBER_USE_CONCURRENCY, pool.length) }, worker));
 
-  const edges: Array<{ src: string; dst: string; predicate: "CALLS" }> = [];
+  const edges: Array<{ src: string; dst: string; predicate: "CALLS" | "REFERENCES" }> = [];
   const callees = new Map<string, any>();
   pool.forEach((member, index) => {
     for (const n of found[index] ?? []) {
       if (!callees.has(n.id)) callees.set(n.id, n);
-      edges.push({ src: member.id, dst: n.id, predicate: "CALLS" });
+      edges.push(...(foundEdges[index] ?? []).filter((e) => e.dst === n.id)
+        .map((e) => ({ src: member.id, dst: n.id, predicate: e.predicate })));
     }
   });
   const refs: EntityLocation[] = [];
