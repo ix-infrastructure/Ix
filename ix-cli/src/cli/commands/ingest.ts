@@ -7,6 +7,7 @@ import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import type { Command } from 'commander';
 import { formatOption } from '../options.js';
+import { parseLimit } from '../paging.js';
 import { ParsePool } from './parse-pool.js';
 // import { ResolveWorker } from './resolve-pool.js';
 import chalk from 'chalk';
@@ -5768,7 +5769,7 @@ async function ingestGitHub(opts: {
   const repo = parseGitHubRepo(opts.github!);
   const token = await resolveGitHubToken(opts.token);
   const client = createClient();
-  const limit = parseInt(opts.limit, 10);
+  const limit = parseLimit(opts.limit);
   const start = performance.now();
 
   const since = opts.since ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);

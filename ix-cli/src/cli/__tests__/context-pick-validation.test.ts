@@ -12,6 +12,7 @@ vi.mock("../resolve.js", async (importOriginal) => ({
 
 import { registerContextCommand } from "../commands/context.js";
 import { parseContextDepthOption } from "../context/options.js";
+import { applyOssSetup } from "../register/oss-setup.js";
 
 async function runContext(args: string[]): Promise<{ error?: CommanderError; stderr: string }> {
   const stderr: string[] = [];
@@ -205,6 +206,27 @@ describe("ix context --depth validation", () => {
       const result = await runContext(["--depth", depth]);
 
       expect(result.error).toBeUndefined();
+      expect(resolveFileOrReport).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps the fallback parser when the full OSS setup runs", async () => {
+    const stderr: string[] = [];
+    const program = new Command()
+      .name("ix")
+      .exitOverride()
+      .configureOutput({ writeErr: (chunk) => stderr.push(chunk) });
+    registerContextCommand(program);
+    applyOssSetup(program);
+    const warn = vi.spyOn(console, "error").mockImplementation((...parts) => {
+      stderr.push(parts.join(" "));
+    });
+    try {
+      await program.parseAsync(["context", "Widget", "--depth", "2"], { from: "user" });
+
+      expect(stderr.join("")).toContain("using standard");
       expect(resolveFileOrReport).toHaveBeenCalledOnce();
     } finally {
       warn.mockRestore();
