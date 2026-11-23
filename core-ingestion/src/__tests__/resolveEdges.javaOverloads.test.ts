@@ -429,7 +429,9 @@ public class User {
       expect(callDsts(user, id('User', `User.${method}`)), method).not.toContain(id('Sub', 'Sub.mix(String,String)'));
     }
     expect(callDsts(user, id('User', 'User.own'))).toEqual([id('Sub', 'Sub.mix(String,String)')]);
-    expect(callDsts(user, id('User', 'User.maybe'))).toEqual([id('Sub', 'Sub.mix(String,String)')]);
+    // `other()` may be anything and `Base` declares `mix`: an inherited
+    // `mix(Object,String)` would fit, so this cannot be told and stays first.
+    expect(callDsts(user, id('User', 'User.maybe'))).toEqual([id('Sub', 'Sub.mix')]);
   });
 
   it('does not read the type of a cast to a type parameter', () => {
@@ -531,6 +533,52 @@ public class User {
       expect(own([parse('Sub', `public class Sub {\n${OWN}${inside}}\n`)], 'widened')).toEqual([id('Sub', 'Sub.own(long)')]);
     });
 
+    it('does not pick by argument count when a seen supertype declares the name', () => {
+      const pair = '    public void own(String s) {}\n    public void own(String s, int n) {}\n';
+      const caller = parse('User', `public class User {
+    Object foo() { return null; }
+    void two(Sub s) { s.own(foo(), foo()); }
+}
+`);
+      // `foo()` may be anything, so `Base.own(Object,Object)` may be the target.
+      const declared = [
+        parse('Base', 'public class Base {\n    public void own(Object a, Object b) {}\n}\n'),
+        parse('Sub', `public class Sub extends Base {\n${pair}}\n`), caller,
+      ];
+      expect(dsts(declared, 'two')).toEqual([id('Sub', 'Sub.own')]);
+      // A parent that cannot be seen is not known to declare it: the count decides.
+      const unseen = [parse('Sub', `public class Sub extends java.util.ArrayList<String> {\n${pair}}\n`), caller];
+      expect(dsts(unseen, 'two')).toEqual([id('Sub', 'Sub.own(String,int)')]);
+    });
+
+    it('counts a nested supertype as unseen, by a dotted name or a simple one', () => {
+      const outer = parse('Outer', `public class Outer {
+    public static class Base {
+        public void own(int n) {}
+    }
+}
+`);
+      for (const [imports, parent] of [['', 'Outer.Base'], ['import demo.Outer.Base;\n\n', 'Base']]) {
+        const results = [outer, parse('Sub', `${imports}public class Sub extends ${parent} {\n${OWN}}\n`), user('Sub')];
+        expect(dsts(results, 'widened'), parent).toEqual([id('Sub', 'Sub.own')]);
+        expect(dsts(results, 'exact'), parent).toEqual([id('Sub', 'Sub.own(long)')]);
+      }
+      // Inside one file too, where only the file's own keys are known.
+      for (const parent of ['Holder.Base', 'Base']) {
+        const inFile = parse('Holder', `public class Holder {
+    static class Base {
+        public void own(int n) {}
+    }
+    static class Sub extends ${parent} {
+${OWN}        void widened() { own(1); }
+    }
+}
+`);
+        expect(callDsts(patchesOf([inFile]).get('Holder')!, id('Holder', 'Sub.widened'), true), parent)
+          .toEqual([id('Holder', 'Sub.own')]);
+      }
+    });
+
     it('keeps the issue\'s boxed call on handle(Integer): Over has no supertype', () => {
       const results = [parse('Over', OVER), parse('User', USER)];
       expect(results[0].receiverHeritage).toBeUndefined();
@@ -557,6 +605,23 @@ public class User {
     expect(results[0].entities.filter(e => e.name === 'Point').map(e => e.identityKey)).toEqual([undefined, undefined, 'Point(int)']);
     expect(results[1].relationships.find(r => r.dstName === 'Point')?.callShapes).toBeUndefined();
     expect(callDsts(patchesOf(results).get('User')!, id('User', 'User.make'))).toEqual([id('Point', 'Point')]);
+  });
+
+  it('gives a later constructor no edge for `this(...)`, and an edge to the class for `new`', () => {
+    const point = parse('Point', `public class Point {
+    public Point() { this(0); }
+    public Point(int x) { Point copy = new Point(); }
+    public Point(int x, int y) { this(x + y); }
+}
+`);
+    const ops = patchesOf([point]).get('Point')!;
+    const out = (src: string, predicate: string) =>
+      ops.filter(op => op.type === 'UpsertEdge' && op.predicate === predicate && op.src === src).map(op => op.dst);
+    expect(out(id('Point', 'Point(int,int)'), 'CALLS')).toEqual([]);
+    expect(out(id('Point', 'Point'), 'CALLS')).toEqual([]);
+    // What the CLI folds away for a class: its later constructor naming the class.
+    expect(out(id('Point', 'Point(int)'), 'CALLS')).toEqual([id('Point', 'Point')]);
+    expect(out(id('Point', 'Point(int)'), 'REFERENCES')).toEqual([id('Point', 'Point')]);
   });
 
   it('resolves against a summary from before overloads were recorded as it always did', () => {
@@ -651,7 +716,7 @@ describe('selectJavaOverload', () => {
 
   it('takes only an exact overload when the class may inherit one it does not list', () => {
     const inherited = (signatures: string[], argTypes: Array<string | null>): string =>
-      signatures[selectJavaOverload(signatures, { argc: argTypes.length, ...(argTypes.some(t => t !== null) ? { argTypes } : {}) }, true)];
+      signatures[selectJavaOverload(signatures, { argc: argTypes.length, ...(argTypes.some(t => t !== null) ? { argTypes } : {}) }, 'unseen')];
     // Widening, boxing, Object, a supertype and varargs spreading: an inherited overload could be closer.
     expect(inherited(['String', 'long'], ['int'])).toBe('String');
     expect(inherited(['String', 'Integer'], ['int'])).toBe('String');
@@ -667,6 +732,15 @@ describe('selectJavaOverload', () => {
     expect(inherited(['int', 'String[]'], ['String[]'])).toBe('String[]');
     // Types that are not known are decided by argument count, as without it.
     expect(inherited(['String', 'int,int'], [null, null])).toBe('int,int');
+  });
+
+  it('gives an argument count no say when an inherited method of the name is known to exist', () => {
+    const shape = { argc: 2 };
+    expect(selectJavaOverload(['String', 'String,int'], shape, 'declared')).toBe(0);
+    expect(selectJavaOverload(['String', 'String,int'], shape, 'unseen')).toBe(1);
+    expect(selectJavaOverload(['String', 'String,int'], shape, false)).toBe(1);
+    // Known types still decide: an exact fit has nothing closer.
+    expect(selectJavaOverload(['String', 'String,int'], { argc: 2, argTypes: ['String', 'int'] }, 'declared')).toBe(1);
   });
 
   it('matches arrays and the varargs position', () => {

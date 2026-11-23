@@ -178,7 +178,7 @@ import { classifyFileRole } from './role-classifier.js';
 import type { RoleClassification } from './role-classifier.js';
 import { callReceiver, collectReceiverFacts } from './receiver-types.js';
 import { summarySignature, type FileSummary } from './symbol-index.js';
-import { javaMayInherit, selectJavaOverloads, type CallShape } from './java-overloads.js';
+import { javaMayInherit, selectJavaOverloads, type CallShape, type JavaInherit } from './java-overloads.js';
 export type { CallShape } from './java-overloads.js';
 export type { FileSummary } from './symbol-index.js';
 
@@ -5781,9 +5781,11 @@ export function resolveEdges(
 
   // Java: whether the class of the method `key` in `fp` may inherit a method
   // of that name its own overload table does not list (`javaMayInherit`). A
-  // supertype is seen when its name resolves to one Java type of the repo.
-  const javaInheritCache = new Map<string, boolean>();
-  function javaMayInheritMember(fp: string, key: string): boolean {
+  // supertype is seen when its name resolves to one top-level Java type of the
+  // repo. A nested one is not: heritage and members are looked up by a key its
+  // simple name does not match, so it would read as declaring nothing.
+  const javaInheritCache = new Map<string, JavaInherit>();
+  function javaMayInheritMember(fp: string, key: string): JavaInherit {
     const cacheKey = `${fp}\0${key}`;
     let known = javaInheritCache.get(cacheKey);
     if (known === undefined) {
@@ -5797,9 +5799,11 @@ export function resolveEdges(
         child => (summaries.get(child.fp)?.receiverHeritage ?? [])
           .filter(([name]) => name === simple(child.type))
           .map(([, parent]) => {
+            if (parent.includes('.')) return undefined;
             const providers = receiverProviders(child.fp, parent);
-            return providers.length === 1 && summaries.get(providers[0].fp)?.language === SupportedLanguages.Java
-              ? providers[0] : undefined;
+            if (providers.length !== 1 || summaries.get(providers[0].fp)?.language !== SupportedLanguages.Java) return undefined;
+            const qualified = fileQKeys.get(providers[0].fp)?.get(providers[0].type) ?? [];
+            return qualified.length > 0 && qualified.every(q => q === providers[0].type) ? providers[0] : undefined;
           }),
         (type, member) => (fileQKeys.get(type.fp)?.get(member) ?? []).includes(`${type.type}.${member}`),
         type => `${type.fp}\0${type.type}`,

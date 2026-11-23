@@ -14,7 +14,7 @@ import type {
   UpsertEdgeOp,
 } from './schema.js';
 import { resolveEdges } from './index.js';
-import { javaMayInherit, selectJavaOverloads } from './java-overloads.js';
+import { javaMayInherit, selectJavaOverloads, type JavaInherit } from './java-overloads.js';
 import type { FileParseResult, ParsedEntity, ParsedRelationship, ResolutionTier, ResolvedEdge } from './index.js';
 
 // ---------------------------------------------------------------------------
@@ -631,22 +631,28 @@ export function buildPatchWithResolution(
   /**
    * Whether the class of the Java method `key` may inherit a method of that
    * name which this file's overload table does not list (`javaMayInherit`).
-   * Only this file is known here, so a supertype is seen when it is declared
-   * in it; one declared anywhere else may hold such a method.
+   * Only this file is known here, so a supertype is seen when it is a
+   * top-level type declared in it; a nested one, or one declared anywhere
+   * else, may hold such a method.
    */
-  const mayInheritHere = (key: string): boolean => {
+  const inheritHere = new Map<string, JavaInherit>();
+  const mayInheritHere = (key: string): JavaInherit => {
+    const known = inheritHere.get(key);
+    if (known !== undefined) return known;
     const dot = key.lastIndexOf('.');
     // Heritage is recorded by a class's simple name.
     const simple = (type: string): string => type.slice(type.lastIndexOf('.') + 1);
-    return javaMayInherit<string>(
+    const inherit = javaMayInherit<string>(
       key.slice(0, Math.max(dot, 0)),
       key.slice(dot + 1),
       child => (result.receiverHeritage ?? [])
         .filter(([name]) => name === simple(child))
-        .map(([, parent]) => (allQKeys.has(parent) ? parent : undefined)),
+        .map(([, parent]) => (!parent.includes('.') && allQKeys.has(parent) ? parent : undefined)),
       (type, member) => allQKeys.has(`${type}.${member}`),
       type => type,
     );
+    inheritHere.set(key, inherit);
+    return inherit;
   };
 
   /**

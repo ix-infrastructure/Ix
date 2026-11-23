@@ -79,10 +79,10 @@ function constructorQuestion(opts: ExpandOpts): ExpandOpts | undefined {
   return predicates.length > 0 ? { ...opts, direction: "out", predicates } : undefined;
 }
 
-/** The question is about calls and references and nothing else. */
-function callsOnly(opts: ExpandOpts): boolean {
+/** The question takes in calls or references, alone or among other edges. */
+function asksCalls(opts: ExpandOpts): boolean {
   const predicates = opts?.predicates ?? [];
-  return predicates.length > 0 && predicates.every((p) => CONSTRUCTOR_EDGES.includes(p));
+  return predicates.length === 0 || predicates.some((p) => CONSTRUCTOR_EDGES.includes(p));
 }
 
 /**
@@ -117,7 +117,7 @@ export function overloadGraph<C extends Pick<IxClient, "expand">>(
     const forLater = group.classHead ? constructorQuestion(opts) : opts;
     if (group.classHead && !forLater) {
       const result = await client.expand(id, opts);
-      return callsOnly(opts) ? withoutOwnConstructors(group, result) : result;
+      return asksCalls(opts) ? withoutOwnConstructors(id, group, result) : result;
     }
     const results = await mapLimit(group.members, ALL_CONCURRENCY, (member, i) => client.expand(member.id, i === 0 ? opts : forLater));
     return mergeExpansions(id, group, results, opts?.hops ?? 1);
@@ -142,8 +142,10 @@ export function overloadGraph<C extends Pick<IxClient, "expand">>(
  * between two of them (`put()` calling `put(String,int)`) is the node's edge
  * to itself and is dropped, and so is the overload's row. A class does hold
  * its later constructors, so for a class only a call or a reference between
- * members is dropped (`this(...)`); the `CONTAINS` edge and the constructor's
- * row stay as they came. `truncated` when any expansion was, or when
+ * members is dropped (`new Store()` in a constructor); the `CONTAINS` edge and
+ * the constructor's row stay as they came, and so does the class's own edge to
+ * itself, which a plain class would show too. `truncated` when any expansion
+ * was, or when
  * overloads past the cap were not expanded: the list is then not known to be
  * whole.
  */
@@ -162,7 +164,9 @@ function mergeExpansions(rootId: string, group: Group, results: ExpandResponse[]
     for (const edge of result.edges ?? []) {
       const inside = memberIds.has(edge.src) && memberIds.has(edge.dst);
       if (inside) {
-        if (!group.classHead || CONSTRUCTOR_EDGES.includes(edge.predicate)) continue;
+        const classSelfEdge = group.classHead && edge.src === rootId && edge.dst === rootId;
+        if (!group.classHead || (CONSTRUCTOR_EDGES.includes(edge.predicate) && !classSelfEdge)) continue;
+        if (classSelfEdge) keptMembers.add(rootId);
         if (edge.src !== rootId) keptMembers.add(edge.src);
         if (edge.dst !== rootId) keptMembers.add(edge.dst);
       }
@@ -197,20 +201,25 @@ function mergeExpansions(rootId: string, group: Group, results: ExpandResponse[]
 }
 
 /**
- * A class's own answer to who calls or references it, without its later
- * constructors: one that starts `this(...)` calls the class node, which holds
- * the first constructor, and that is the class calling itself. The answer as
- * it came when none is in it, which is nearly always.
+ * A class's own answer to a question that takes in calls or references,
+ * without its later constructors' part: one whose body says `new Store()` or
+ * names the type has an edge to the class node, which holds the first
+ * constructor, and that is the class using itself (`this(...)` emits no edge).
+ * Only calls and references between members go, and then the row of a
+ * later constructor no remaining edge joins; its `CONTAINS` edge and row stay
+ * in a question that also asks for those, and so does a class's edge to
+ * itself. The answer as it came when none is in it, which is nearly always.
  */
-function withoutOwnConstructors(group: Group, result: ExpandResponse): ExpandResponse {
+function withoutOwnConstructors(rootId: string, group: Group, result: ExpandResponse): ExpandResponse {
   const own = new Set(group.members.map((m) => m.id));
-  if (!(result.nodes ?? []).some((n) => n?.id && own.has(n.id))) return result;
+  const allEdges = result.edges ?? [];
+  const edges = allEdges.filter((e) =>
+    !(own.has(e.src) && own.has(e.dst) && CONSTRUCTOR_EDGES.includes(e.predicate) && !(e.src === rootId && e.dst === rootId)));
+  const joined = new Set(edges.flatMap((e) => [e.src, e.dst]));
+  const isLoose = (id: string | undefined): boolean => !!id && id !== rootId && own.has(id) && !joined.has(id);
+  if (edges.length === allEdges.length && !(result.nodes ?? []).some((n) => isLoose(n?.id))) return result;
   // Only the rows and edges change; whatever else the answer says stays.
-  return {
-    ...result,
-    nodes: result.nodes.filter((n) => !(n?.id && own.has(n.id))),
-    edges: (result.edges ?? []).filter((e) => !(own.has(e.src) && own.has(e.dst))),
-  };
+  return { ...result, nodes: (result.nodes ?? []).filter((n) => !isLoose(n?.id)), edges };
 }
 
 /**

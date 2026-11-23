@@ -527,7 +527,7 @@ describe("a class with several constructors", () => {
     expect(plain.requests).toEqual([`${storeClass.id} out CALLS+REFERENCES`]);
     expect(group.requests).toEqual([`${storeClass.id} out CALLS+REFERENCES`, `${CTOR_2} out CALLS+REFERENCES`].sort());
     expect(names(plain.body.results)).toEqual(["save"]);
-    // `this(...)` from the later constructor is the class calling itself.
+    // `new Store()` in the later constructor is the class calling itself.
     expect(names(group.body.results)).toEqual(["flush", "save"]);
     for (const row of group.body.results) expect(row).not.toHaveProperty("overload");
     expect(group.body.resolutionNotices ?? []).toEqual([]);
@@ -572,6 +572,58 @@ describe("a class with several constructors", () => {
     client.expand.mockClear();
     await graph.expand(storeClass.id);
     expect(sent()).toEqual([`${storeClass.id} undefined `, `${CTOR_2} out CALLS+REFERENCES`]);
+  });
+
+  const classGraph = (client: { expand: (id: string, opts?: any) => Promise<any> }) =>
+    overloadGraph(client, [{ id: storeClass.id, overloads: [{ id: storeClass.id }, { id: CTOR_2, signature: "int" }] }]);
+
+  it("a mixed question into the class: no constructor row from `new Store()`, every other edge stays", async () => {
+    storeWith(ctor2);
+    edges.push(edge(gamma.id, storeClass.id, "IMPORTS"));
+    nodes.push(gamma);
+    const graph = classGraph({ expand: async (id, opts) => expandOnce(id, opts) });
+    for (const opts of [{ direction: "in", predicates: ["CALLS", "IMPORTS", "REFERENCES"] }, { direction: "in" }]) {
+      const result = await graph.expand(storeClass.id, opts as any);
+      expect(names(result.nodes)).toEqual(["alpha", "beta", "gamma"]);
+      expect(result.edges.map((e: any) => e.id)).not.toContain(`${CTOR_2}>CALLS>${storeClass.id}`);
+      expect(result.edges.map((e: any) => e.predicate)).toContain("IMPORTS");
+    }
+  });
+
+  it("a question without calls or references is the class's answer untouched", async () => {
+    storeWith(ctor2);
+    const answer = expandOnce(storeClass.id, { direction: "in", predicates: ["IMPORTS"] });
+    const graph = classGraph({ expand: async () => answer });
+    expect(await graph.expand(storeClass.id, { direction: "in", predicates: ["IMPORTS"] })).toBe(answer);
+  });
+
+  it("the class's own edge to itself is kept, on both paths", async () => {
+    storeWith(ctor2);
+    edges.push(edge(storeClass.id, storeClass.id));
+    const graph = classGraph({ expand: async (id, opts) => expandOnce(id, opts) });
+    const into = await graph.expand(storeClass.id, { direction: "in", predicates: ["CALLS"] });
+    expect(into.edges.map((e: any) => e.id)).toContain(`${storeClass.id}>CALLS>${storeClass.id}`);
+    expect(names(into.nodes)).toContain("Store");
+    expect(into.nodes.map((n: any) => n.id)).not.toContain(CTOR_2);
+    const out = await graph.expand(storeClass.id, { direction: "out", predicates: ["CALLS"] });
+    expect(out.edges.filter((e: any) => e.src === storeClass.id && e.dst === storeClass.id)).toHaveLength(1);
+    expect(out.nodes.map((n: any) => n.id)).toContain(storeClass.id);
+    expect(out.nodes.map((n: any) => n.id)).not.toContain(CTOR_2);
+  });
+
+  it("depends, trace and explain: a later constructor's `new Store()` is no dependent or caller", async () => {
+    storeWith(ctor2);
+    const depends = JSON.parse((await run(["depends", "Store", "--format", "json"])).stdout);
+    expect(JSON.stringify(depends)).not.toContain(CTOR_2);
+    expect(JSON.stringify(depends)).toContain("alpha");
+    const trace = await run(["trace", "Store", "--upstream", "--format", "json"]);
+    expect(trace.exitCode).toBe(0);
+    expect(trace.stdout).not.toContain(CTOR_2);
+    expect(trace.stdout).toContain("alpha");
+    const explain = JSON.parse((await run(["explain", "Store", "--format", "json"])).stdout);
+    expect(explain.facts.callerCount).toBe(1);
+    expect(explain.facts.dependentCount).toBe(2);
+    expect(JSON.stringify(explain.facts.callerRefs ?? [])).not.toContain(CTOR_2);
   });
 });
 

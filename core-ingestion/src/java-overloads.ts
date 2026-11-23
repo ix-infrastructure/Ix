@@ -160,12 +160,22 @@ function onlyOverload(applications: Application[]): number {
 const OBJECT_METHODS = new Set(['equals', 'hashCode', 'toString', 'getClass', 'notify', 'notifyAll', 'wait', 'clone', 'finalize']);
 
 /**
- * Whether `type` may inherit a method named `member` that its own overload
- * table does not list: the name is one of `Object`'s, or some supertype
- * declares it, or some supertype cannot be seen (it is outside the repo, or
- * its name does not say which type it is). `supertypes` gives a type's
- * declared supertypes, `undefined` for one that cannot be seen; `declares`
- * says whether a type that can be seen declares the method itself.
+ * Why a class may inherit a method its own overload table does not list.
+ * `'declared'`: the name is one of `Object`'s, or a supertype that can be seen
+ * declares it, so an inherited overload of that name exists. `'unseen'`: no
+ * such declaration is known, but some supertype cannot be seen. `false`: every
+ * supertype was seen and none declares it.
+ */
+export type JavaInherit = false | 'unseen' | 'declared';
+
+/**
+ * Whether, and why, `type` may inherit a method named `member` that its own
+ * overload table does not list (`JavaInherit`). A supertype cannot be seen
+ * when it is outside the repo, or its name does not say which type it is.
+ * `supertypes` gives a type's declared supertypes, `undefined` for one that
+ * cannot be seen; `declares` says whether a type that can be seen declares the
+ * method itself. An unseen supertype does not end the walk: a seen one further
+ * on may still declare the name.
  */
 export function javaMayInherit<T>(
   type: T,
@@ -173,19 +183,24 @@ export function javaMayInherit<T>(
   supertypes: (type: T) => Array<T | undefined>,
   declares: (type: T, member: string) => boolean,
   keyOf: (type: T) => string,
-): boolean {
-  if (OBJECT_METHODS.has(member)) return true;
+): JavaInherit {
+  if (OBJECT_METHODS.has(member)) return 'declared';
+  let inherit: JavaInherit = false;
   const seen = new Set<string>([keyOf(type)]);
   const pending = [type];
   for (let i = 0; i < pending.length; i++) {
     for (const parent of supertypes(pending[i])) {
-      if (parent === undefined || declares(parent, member)) return true;
+      if (parent === undefined) {
+        inherit = 'unseen';
+        continue;
+      }
+      if (declares(parent, member)) return 'declared';
       if (seen.has(keyOf(parent))) continue;
       seen.add(keyOf(parent));
       pending.push(parent);
     }
   }
-  return false;
+  return inherit;
 }
 
 /** The application takes every argument as exactly its own type. */
@@ -209,21 +224,26 @@ const exact = (a: Application): boolean => !a.variable && a.fits.every(f => type
  *    over varargs. The first phase with a fit decides, and within it the
  *    overload more specific than every other; when there is none, 0.
  *
- * `mayInherit`: the class may inherit a method of this name that `signatures`
+ * `inherit`: the class may inherit a method of this name that `signatures`
  * does not list (`javaMayInherit`). An inherited `own(int)` is what
  * `s.own(1)` calls, though the class's own table has only `own(String)` and
  * `own(long)` and one of them can take the argument. So an overload chosen by
  * 3 or 5 then stands only when it takes every argument as exactly its own
  * type, which nothing inherited can be closer than; one that needs widening,
- * boxing, a supertype or varargs spreading is 0.
+ * boxing, a supertype or varargs spreading is 0. Rule 2 knows no type to
+ * compare, so it gives way only to an inherited method known to exist
+ * (`'declared'`): `Base.own(Object,Object)` is what `s.own(foo(), foo())` may
+ * call, though `Sub` alone has a two-argument `own`. A supertype merely unseen
+ * does not stop it, or nearly every class with a library parent would lose it.
  */
-export function selectJavaOverload(signatures: readonly string[], shape: CallShape, mayInherit = false): number {
+export function selectJavaOverload(signatures: readonly string[], shape: CallShape, inherit: JavaInherit = false): number {
   const byCount = applicationsByCount(signatures, shape);
   const viable = byCount.filter(a => !a.fits.includes('no'));
   if (viable.length === 0) return 0;
 
+  const mayInherit = inherit !== false;
   const allKnown = (shape.argTypes ?? []).filter(t => t != null).length === shape.argc;
-  if (!allKnown) return byCount.every(a => a.index === byCount[0].index) ? byCount[0].index : 0;
+  if (!allKnown) return inherit !== 'declared' && byCount.every(a => a.index === byCount[0].index) ? byCount[0].index : 0;
   if (viable.every(a => a.index === viable[0].index)) return !mayInherit || viable.some(exact) ? viable[0].index : 0;
 
   if (viable.some(a => a.fits.includes('maybe'))) {
@@ -247,6 +267,6 @@ export function selectJavaOverload(signatures: readonly string[], shape: CallSha
  * The overloads the call sites of one relationship call: the distinct indices
  * `selectJavaOverload` gives its shapes, ascending.
  */
-export function selectJavaOverloads(signatures: readonly string[], shapes: readonly CallShape[], mayInherit = false): number[] {
-  return [...new Set(shapes.map(shape => selectJavaOverload(signatures, shape, mayInherit)))].sort((a, b) => a - b);
+export function selectJavaOverloads(signatures: readonly string[], shapes: readonly CallShape[], inherit: JavaInherit = false): number[] {
+  return [...new Set(shapes.map(shape => selectJavaOverload(signatures, shape, inherit)))].sort((a, b) => a - b);
 }
