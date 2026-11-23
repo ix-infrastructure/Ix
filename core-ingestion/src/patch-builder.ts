@@ -15,6 +15,7 @@ import type {
 } from './schema.js';
 import { resolveEdges } from './index.js';
 import type { FileParseResult, ParsedEntity, ResolutionTier, ResolvedEdge } from './index.js';
+import { qualifiedKey } from './symbol-key.js';
 
 // ---------------------------------------------------------------------------
 // Deterministic UUID from a string (matches existing CLI convention)
@@ -152,7 +153,8 @@ function deduplicateUpsertEdges(ops: PatchOp[]): PatchOp[] {
  * cross-file edges carry `confidence` and `tier`. 1.29: cross-file resolution
  * no longer depends on how files are split into batches, TypeScript gaps
  * (overload signatures, generic type references) are extracted, and files
- * carry `parse_errors` and their role.
+ * carry `parse_errors` and their role. 1.32: Java overloads have separate
+ * parameter-based identities and calls resolve to individual overloads.
  *
  * `ix map` skips files whose mtime or source hash is unchanged, which would
  * keep the old extractor's edges on them, so the ingest baseline records this
@@ -176,11 +178,11 @@ export function patchActor(): string {
 }
 
 export function extractorName(): string {
-  return `tree-sitter/1.31`;
+  return `tree-sitter/1.32`;
 }
 
 /** Previous extractor versions — their patches are superseded when re-ingesting. */
-export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.30', 'tree-sitter/1.29', 'tree-sitter/1.28', 'tree-sitter/1.27', 'tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
+export const PREVIOUS_EXTRACTORS = ['tree-sitter/1.31', 'tree-sitter/1.30', 'tree-sitter/1.29', 'tree-sitter/1.28', 'tree-sitter/1.27', 'tree-sitter/1.26', 'tree-sitter/1.25', 'tree-sitter/1.24', 'tree-sitter/1.23', 'tree-sitter/1.22', 'tree-sitter/1.21', 'tree-sitter/1.20', 'tree-sitter/1.19', 'tree-sitter/1.18', 'tree-sitter/1.17', 'tree-sitter/1.16', 'tree-sitter/1.15', 'tree-sitter/1.14', 'tree-sitter/1.13', 'tree-sitter/1.12', 'tree-sitter/1.11', 'tree-sitter/1.10', 'tree-sitter/1.9', 'tree-sitter/1.8', 'tree-sitter/1.7', 'tree-sitter/1.6', 'tree-sitter/1.5', 'tree-sitter/1.4', 'tree-sitter/1.3', 'tree-sitter/1.2', 'tree-sitter/1.1'];
 
 /** Patch ids that may own the active graph entities for a stored source hash. */
 export function sourcePatchIdCandidates(
@@ -358,21 +360,28 @@ export function buildPatchWithResolution(
   // Build lookup: `${srcName}:${predicate}:${dstName}` → { dstFilePath, dstQualifiedKey }
   // Callers should pass only edges for this file (pre-grouped) for best performance,
   // but we still tolerate the full array for backward compatibility.
-  const edgeResolution = new Map<string, {
+  type EdgeResolution = {
     dstFilePath: string;
     dstQualifiedKey: string;
     confidence: number;
     tier: ResolutionTier | undefined;
-  }>();
+  };
+  const edgeResolution = new Map<string, EdgeResolution[]>();
   for (const edge of resolvedEdges) {
     if (edge.srcFilePath !== result.filePath) continue;
     const callKind = edge.phpCallKind ? `:${edge.phpCallKind}` : '';
-    edgeResolution.set(`${edge.srcName}:${edge.predicate}:${edge.dstName}${callKind}`, {
+    const key = `${edge.srcName}:${edge.predicate}:${edge.dstName}${callKind}`;
+    // Several invocations in one Java caller can resolve to different overloads.
+    // Other languages retain their existing single-destination behavior.
+    const targets = result.language === 'java' ? edgeResolution.get(key) ?? [] : [];
+    if (targets.some(t => t.dstFilePath === edge.dstFilePath && t.dstQualifiedKey === edge.dstQualifiedKey)) continue;
+    targets.push({
       dstFilePath: edge.dstFilePath,
       dstQualifiedKey: edge.dstQualifiedKey,
       confidence: edge.confidence,
       tier: edge.tier,
     });
+    edgeResolution.set(key, targets);
   }
 
   const { entities, chunks } = result;
@@ -380,13 +389,19 @@ export function buildPatchWithResolution(
   // string, so it is emitted only when resolveEdges tied it to exactly one file.
   const resolvedHere = (r: (typeof result.relationships)[number]): boolean =>
     edgeResolution.has(`${r.srcName}:${r.predicate}:${r.dstName}`);
+  type PatchRelationship = (typeof result.relationships)[number] & { resolvedTarget?: EdgeResolution };
   const relationships = [
     ...result.relationships.filter(r => !r.receiverOnly && (r.importVia !== 'helper' || resolvedHere(r))),
     // A receiver-only typed call (see ParsedRelationship.receiverOnly) exists only
     // once resolved. Last, so an edge the call's own relationship already wrote
     // keeps its id and only takes the type tier.
     ...result.relationships.filter(r => r.receiverOnly && resolvedHere(r)),
-  ];
+  ].flatMap<PatchRelationship>(r => {
+    const baseKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
+    const targets = edgeResolution.get(r.phpCallKind ? `${baseKey}:${r.phpCallKind}` : baseKey) ?? edgeResolution.get(baseKey);
+    return targets ? targets.map(resolvedTarget => ({ ...r, resolvedTarget })) : [r];
+  });
+  const typedCalls = new Set(result.receiverTypedCalls ?? []);
   // filePath = workspace-relative PROVENANCE (source_uri / file_uri / patch id);
   // idPath = member-relative IDENTITY (node / edge / chunk ids) so a member's ids are
   // byte-identical solo vs. co-ingested. Edge matching still keys on the full
@@ -415,7 +430,7 @@ export function buildPatchWithResolution(
   // e.g.  ClassA.update  vs  ClassB.update  instead of both being "update".
   const entityQKey = new Map<ParsedEntity, string>();
   for (const e of entities) {
-    entityQKey.set(e, e.container ? `${e.container}.${e.name}` : e.name);
+    entityQKey.set(e, qualifiedKey(e));
   }
 
   // Reverse lookup: plain name → list of qualified keys (for edge resolution).
@@ -503,7 +518,7 @@ export function buildPatchWithResolution(
     // Chunk -[DEFINES]-> Symbol (only for named chunks whose symbol this patch
     // writes; any other would point at a node that does not exist)
     if (chunk.name !== null) {
-      const symbolKey = chunk.container ? `${chunk.container}.${chunk.name}` : chunk.name;
+      const symbolKey = qualifiedKey({ ...chunk, name: chunk.name });
       const symbolNid = nodeId(idPath, symbolKey);
       if (seenNodeIds.has(symbolNid)) ops.push({
         type: 'UpsertEdge',
@@ -559,19 +574,20 @@ export function buildPatchWithResolution(
     /** Set when resolveEdges tied the edge to another file. */
     resolution: { confidence: number; tier: ResolutionTier | undefined } | null;
   } => {
-    const baseKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
-    const salted = r.phpCallKind ? `${baseKey}:${r.phpCallKind}` : baseKey;
-    const matched = edgeResolution.has(salted) ? salted : baseKey;
-
-    if (edgeResolution.has(matched)) {
+    if (r.resolvedTarget) {
       // Cross-file resolved — use the defining file's nodeId, in the dst repo's
       // workspace namespace (matters only for cross-repo edges in a co-ingest).
-      const { dstFilePath, dstQualifiedKey, confidence, tier } = edgeResolution.get(matched)!;
+      const { dstFilePath, dstQualifiedKey, confidence, tier } = r.resolvedTarget;
       return {
         dstNodeId: dstNodeIdInRepo(dstFilePath, dstQualifiedKey),
         externalPkg: null,
         resolution: { confidence, tier },
       };
+    }
+    // A typed Java receiver that could not resolve must not become an unrelated
+    // same-file method just because its name matches (including overloads).
+    if (r.predicate === 'CALLS' && typedCalls.has(`${r.srcName}\0${r.dstName}`)) {
+      return { dstNodeId: '', externalPkg: null, resolution: null };
     }
     if (r.predicate === 'CALLS' && dstKey.includes('::') && !allQKeys.has(dstKey)) {
       const sep = dstKey.indexOf('::');

@@ -2512,11 +2512,11 @@ export async function ingestFiles(
     if (spec.startsWith('@')) { const parts = spec.split('/'); return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null; }
     return spec.split('/')[0] || null;
   };
-  const collectStitch = (parsedFiles: Array<{ filePath: string; entities?: Array<{ name: string; kind: string; container?: string }>; relationships?: Array<{ predicate: string; srcName?: string; dstName?: string; importRaw?: string }>; importBindings?: Array<{ pkg: string; local: string; imported: string }>; exportPublicNames?: Array<{ local: string; public: string; source?: string }> }>): void => {
+  const collectStitch = (parsedFiles: Array<{ filePath: string; entities?: Array<{ name: string; kind: string; container?: string; signature?: string }>; relationships?: Array<{ predicate: string; srcName?: string; dstName?: string; importRaw?: string }>; importBindings?: Array<{ pkg: string; local: string; imported: string }>; exportPublicNames?: Array<{ local: string; public: string; source?: string }> }>): void => {
     for (const p of parsedFiles) {
       stitchFiles.push(p.filePath);
       for (const e of (p.entities ?? [])) {
-        const qk = e.container ? `${e.container}.${e.name}` : e.name;
+        const qk = `${e.container ? `${e.container}.` : ''}${e.name}${e.signature ?? ''}`;
         stitchDefs.set(e.name, { qk, filePath: p.filePath });
         // A call FROM inside a class/namespace method has a QUALIFIED srcName
         // (e.g. "Ora.constructor"); also key the def by its qualified key so the
