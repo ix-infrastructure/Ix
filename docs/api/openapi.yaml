@@ -1570,7 +1570,11 @@ components:
         Create or replace a node. `attrs` is an open map. Symbol and file nodes
         carry `line_start` / `line_end` / `language` / `role`; chunk nodes carry
         `file_uri`, `chunk_kind`, `start_line` / `end_line`, `start_byte` /
-        `end_byte`, `content_hash` and `parser_version`.
+        `end_byte`, `content_hash` and `parser_version`. A Java overload after
+        the first of its name carries `overload_of` (the id of the node the
+        first declaration is written to) and `overload_signature` (its erased
+        parameter list, `String,int`); the first overload's method node carries
+        `overload_signature` too.
       required: [type, id, kind, name, attrs]
       properties:
         type: { type: string, enum: [UpsertNode] }

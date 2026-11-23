@@ -468,7 +468,13 @@ export function buildPatchWithResolution(
       const lines = { line_start: e.lineStart, line_end: e.lineEnd, language: e.language };
       const attrs: FileNodeAttrs | SymbolNodeAttrs = e.kind === 'file'
         ? { ...lines, role: result.fileRole.role, role_confidence: result.fileRole.role_confidence, role_signals: result.fileRole.role_signals, ...(result.hasParseErrors ? { parse_errors: true } : {}) }
-        : { ...lines, role: result.fileRole.role, role_source: 'inherited_from_file' };
+        : {
+            ...lines, role: result.fileRole.role, role_source: 'inherited_from_file',
+            // A later overload names the node of the first declaration of its
+            // key, which is the id its own bare key folds to.
+            ...(e.identityKey && e.overloadSignature !== undefined ? { overload_of: nodeId(idPath, entityQKey.get(e)!) } : {}),
+            ...(e.overloadSignature !== undefined ? { overload_signature: e.overloadSignature } : {}),
+          };
       ops.push({
         type: 'UpsertNode',
         id,

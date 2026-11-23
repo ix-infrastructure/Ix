@@ -207,6 +207,13 @@ export interface ParsedEntity {
    * reads it: every overload keeps the one qualified key `Container.name`.
    */
   identityKey?: string;
+  /**
+   * The erased parameter list of a Java overload (`String,int`, `` for none),
+   * written to its node as `overload_signature`. Set on every overload after
+   * the first, and on the first method once the file has a later one; a method
+   * that is not overloaded has none.
+   */
+  overloadSignature?: string;
 }
 
 /** A semantic code span extracted from the AST. The primary LLM retrieval unit. */
@@ -3093,6 +3100,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     // Java: `Container.name` → the erased parameter signature of its first
     // declaration in this file, which is the one that keeps the bare key.
     const javaFirstSignature = new Map<string, string>();
+    // The entity of that first declaration, when it is a method. A first
+    // constructor is merged into its class node and is not recorded.
+    const javaFirstMethod = new Map<string, ParsedEntity>();
 
     // --- First pass: collect definitions ---
     for (const match of pass1Matches) {
@@ -3186,6 +3196,8 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         // `run()`, a duplicate from a parse error) stays merged with the
         // declaration of that signature.
         let identityKey: string | undefined;
+        let overloadSignature: string | undefined;
+        let firstOfKey: string | undefined;
         if (
           language === SupportedLanguages.Java &&
           (defNode.type === 'method_declaration' || defNode.type === 'constructor_declaration')
@@ -3194,12 +3206,20 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           if (signature !== null) {
             const key = effectiveContainer ? `${effectiveContainer}.${name}` : name;
             const first = javaFirstSignature.get(key);
-            if (first === undefined) javaFirstSignature.set(key, signature);
-            else if (first !== signature) identityKey = `${key}(${signature})`;
+            if (first === undefined) {
+              javaFirstSignature.set(key, signature);
+              if (defNode.type === 'method_declaration') firstOfKey = key;
+            } else if (first !== signature) {
+              identityKey = `${key}(${signature})`;
+              overloadSignature = signature;
+              // The first overload says its signature too, now that it is one.
+              const firstMethod = javaFirstMethod.get(key);
+              if (firstMethod) firstMethod.overloadSignature = first;
+            }
           }
         }
 
-        entities.push({
+        const entity: ParsedEntity = {
           name,
           kind,
           lineStart,
@@ -3212,7 +3232,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
               : undefined
           ),
           ...(identityKey ? { identityKey } : {}),
-        });
+          ...(overloadSignature !== undefined ? { overloadSignature } : {}),
+        };
+        entities.push(entity);
+        if (firstOfKey !== undefined) javaFirstMethod.set(firstOfKey, entity);
 
         pendingChunks.push({
           name,
