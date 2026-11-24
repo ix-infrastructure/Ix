@@ -53,7 +53,7 @@
     "@emnapi/core": "1.11.3",
     "@emnapi/runtime": "1.11.3",
     "@types/node": "^26.6.6",
-    "fast-check": "^4.10.2",
+    "fast-check": "^4.10.3",
     "typescript": "^7.0.2",
     "vitest": "^4.1.12"
   },
