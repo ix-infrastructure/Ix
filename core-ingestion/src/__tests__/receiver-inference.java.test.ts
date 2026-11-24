@@ -23,16 +23,18 @@ function fixture(): FileParseResult[] {
     .map(f => parse(`/repo/${path.relative(FIXTURE, f).split(path.sep).join('/')}`, fs.readFileSync(f, 'utf8')));
 }
 
-/** Every CALLS edge the patches write, as `file::name` of both ends. */
-function callEdges(results: FileParseResult[], edges = resolveEdges(results)): Array<{ src: string; dst: string; tier?: string }> {
+/** Every CALLS (or `predicate`) edge the patches write, as `file::name` of both ends. */
+function callEdges(results: FileParseResult[], edges = resolveEdges(results), predicate = 'CALLS'): Array<{ src: string; dst: string; tier?: string }> {
   const patches = results.map(r => buildPatchWithResolution(r, 'hash', 'workspace', edges));
   const names = new Map<string, string>();
   results.forEach((r, i) => {
     for (const op of patches[i].ops as any[]) if (op.type === 'UpsertNode') names.set(op.id, `${r.filePath.replace('/repo/', '')}::${op.name}`);
   });
-  return patches.flatMap(p => (p.ops as any[]).filter(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS')
+  return patches.flatMap(p => (p.ops as any[]).filter(op => op.type === 'UpsertEdge' && op.predicate === predicate)
     .map(op => ({ src: names.get(op.src) ?? op.src, dst: names.get(op.dst) ?? op.dst, tier: op.attrs?.tier })));
 }
+
+const refEdges = (results: FileParseResult[]) => callEdges(results, resolveEdges(results), 'REFERENCES');
 
 const typedEdges = (edges: ReturnType<typeof resolveEdges>, srcName?: string) =>
   edges.filter(e => e.tier === 'type' && (srcName === undefined || e.srcName === srcName));
@@ -92,6 +94,17 @@ describe('Java typed receivers (fixture)', () => {
       srcName: 'TimeoutFilter.invoke', dstName: 'RpcUtils.methodName',
       dstFilePath: '/repo/com/acme/rpc/RpcUtils.java', dstQualifiedKey: 'RpcUtils.methodName', tier: 'type',
     }));
+  });
+
+  it('links a static call to the class it names (#1137)', () => {
+    expect(edges).toContainEqual({
+      srcFilePath: '/repo/com/acme/rpc/TimeoutFilter.java', srcName: 'TimeoutFilter.invoke', dstName: 'RpcUtils',
+      dstFilePath: '/repo/com/acme/rpc/RpcUtils.java', dstQualifiedKey: 'RpcUtils', predicate: 'REFERENCES', confidence: 0.95, tier: 'type',
+    });
+    expect(refEdges(results)).toContainEqual({ src: 'com/acme/rpc/TimeoutFilter.java::invoke', dst: 'com/acme/rpc/RpcUtils.java::RpcUtils', tier: 'type' });
+    // `URL param` already references URL: `URL.valueOf()` adds no second edge to it.
+    expect(refEdges(results).filter(e => e.src === 'com/acme/rpc/TimeoutFilter.java::invoke' && e.dst === 'com/acme/common/URL.java::URL'))
+      .toEqual([{ src: 'com/acme/rpc/TimeoutFilter.java::invoke', dst: 'com/acme/common/URL.java::URL', tier: 'import' }]);
   });
 
   it('resolves a chained call through the declared return type of the first call', () => {
@@ -244,6 +257,82 @@ describe('Java typed receivers', () => {
     const use = parse('/repo/q/Use.java',
       'package q;\npublic class Use {\n  void run() {}\n  void use(Missing m) {\n    m.run();\n  }\n}\n');
     expect(callEdges([use])).toContainEqual(expect.objectContaining({ src: 'q/Use.java::use', dst: 'q/Use.java::run' }));
+  });
+
+  describe('static calls reference their class (#1137)', () => {
+    const gate = () => parse('/repo/p/Gate.java',
+      'package p;\npublic class Gate {\n  public static boolean matches(String s) { return Gate.helper(s); }\n  static boolean helper(String s) { return true; }\n' +
+      '  static class Inner {\n    static void run() { Gate.helper(null); }\n  }\n}\n');
+    const evaluator = (body: string, params = 'String s') => parse('/repo/q/Evaluator.java',
+      `package q;\nimport p.Gate;\npublic class Evaluator {\n  boolean evaluate(${params}) {\n    ${body}\n  }\n}\n`);
+    const fromEvaluator = (files: FileParseResult[]) => refEdges(files).filter(e => e.src.startsWith('q/Evaluator.java::'));
+
+    it('gives a class used only through static calls a REFERENCES edge from each caller', () => {
+      const files = [gate(), evaluator('return Gate.matches(s) && Gate.matches(s);')];
+      expect(fromEvaluator(files)).toEqual([{ src: 'q/Evaluator.java::evaluate', dst: 'p/Gate.java::Gate', tier: 'type' }]);
+      // The method edge is unchanged.
+      expect(callEdges(files)).toContainEqual({ src: 'q/Evaluator.java::evaluate', dst: 'p/Gate.java::matches', tier: 'type' });
+    });
+
+    it('does not make a class reference itself through its own static calls', () => {
+      expect(refEdges([gate()])).toEqual([]);
+    });
+
+    it('references a nested class through its own static call', () => {
+      const files = [gate(), parse('/repo/q/Evaluator.java',
+        'package q;\nimport p.Gate.Inner;\npublic class Evaluator {\n  void evaluate() {\n    Inner.run();\n  }\n}\n')];
+      expect(fromEvaluator(files)).toEqual([{ src: 'q/Evaluator.java::evaluate', dst: 'p/Gate.java::Inner', tier: 'type' }]);
+    });
+
+    it.each([
+      ['a typed variable', 'Gate g = null; return g.matches(s);'],
+      ['a bound name that shadows the type', 'Object Gate = null; return Gate.matches(s);'],
+      ['a qualified type', 'return p.Gate.matches(s);'],
+      ['a lowercase name', 'return gate.matches(s);'],
+    ])('adds no class edge for a call on %s', (_label, body) => {
+      const refs = fromEvaluator([gate(), evaluator(body)]).filter(e => e.src === 'q/Evaluator.java::evaluate' && e.dst === 'p/Gate.java::Gate');
+      // `Gate g` is itself a type reference; nothing else may add one.
+      expect(refs).toEqual(body.startsWith('Gate g') ? [expect.objectContaining({ tier: 'import' })] : []);
+    });
+
+    it('marks only a bare type name as a static receiver', () => {
+      const rels = evaluator('Gate g = null; g.matches(s); Gate.matches(s); this.evaluate(s); p.Gate.matches(s); Gate.helper(s).toString();')
+        .relationships.filter(r => r.predicate === 'REFERENCES');
+      // `Gate g` gives the plain reference, which the static calls leave as it was.
+      expect(rels).toEqual([{ srcName: 'Evaluator.evaluate', dstName: 'Gate', predicate: 'REFERENCES' }]);
+      const staticOnly = evaluator('Gate.helper(s).toString();').relationships.filter(r => r.predicate === 'REFERENCES');
+      expect(staticOnly).toEqual([{ srcName: 'Evaluator.evaluate', dstName: 'Gate', predicate: 'REFERENCES', receiverType: 'Gate', receiverOnly: true }]);
+    });
+
+    it('keeps the plain type reference when it follows a static call', () => {
+      const result = evaluator('return Gate.matches(s);', 'String s, Gate later');
+      expect(result.relationships.filter(r => r.predicate === 'REFERENCES'))
+        .toEqual([{ srcName: 'Evaluator.evaluate', dstName: 'Gate', predicate: 'REFERENCES' }]);
+    });
+
+    it('writes no edge, claim or unresolved entry for a type outside the repository', () => {
+      const files = [gate(), evaluator('return Math.max(1, 2) > 0 && Collections.emptyList().isEmpty();')];
+      expect(fromEvaluator(files)).toEqual([]);
+      const patch = buildPatchWithResolution(files[1], 'hash', 'workspace', resolveEdges(files));
+      expect((patch.ops as any[]).filter(op => op.type === 'AssertClaim' && /^references:/.test(op.field))).toEqual([]);
+    });
+
+    it('writes no edge when two classes in scope share the name', () => {
+      const files = [
+        parse('/repo/a/Dup.java', 'package a;\npublic class Dup {\n  public static void run() {}\n}\n'),
+        parse('/repo/b/Dup.java', 'package b;\npublic class Dup {\n  public static void run() {}\n}\n'),
+        parse('/repo/q/Use.java', 'package q;\nimport a.*;\nimport b.*;\npublic class Use {\n  void use() {\n    Dup.run();\n  }\n}\n'),
+      ];
+      expect(refEdges(files)).toEqual([]);
+    });
+
+    it('resolves a batch against summaries as the full run does', () => {
+      const files = [gate(), evaluator('return Gate.matches(s);')];
+      const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
+      const index = buildGlobalResolutionIndex([...summaries.keys()], summaries);
+      expect(resolveEdges([files[1]], undefined, index)).toEqual(resolveEdges(files).filter(e => e.srcFilePath === files[1].filePath));
+      expect(resolveEdges([files[1]], undefined, index)).toContainEqual(expect.objectContaining({ predicate: 'REFERENCES', dstQualifiedKey: 'Gate', tier: 'type' }));
+    });
   });
 
   it('records heritage, package and class-returning method results as summary facts', () => {

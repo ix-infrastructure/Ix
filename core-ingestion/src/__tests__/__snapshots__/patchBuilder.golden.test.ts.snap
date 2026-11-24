@@ -634,6 +634,7 @@ exports[`buildPatchWithResolution golden output (the CLI path) > is unchanged fo
       "{"type":"UpsertEdge","id":"73238776-61b2-2d48-ddac-fecf848c2604","src":"4d206b76-45ae-7771-627b-3c49ac6a923c","dst":"65368523-a686-eda1-561c-760d6a1e2a0a","predicate":"CALLS","attrs":{"confidence":0.95,"tier":"type"}}",
       "{"type":"UpsertEdge","id":"23db1fe3-9c97-2889-0f75-d3fa54ef656c","src":"4d206b76-45ae-7771-627b-3c49ac6a923c","dst":"bc6008b7-eca8-f02c-74fb-3046c49cc5dc","predicate":"CALLS","attrs":{"confidence":0.5,"tier":"global"}}",
       "{"type":"UpsertEdge","id":"85383b4e-2fd2-5d79-15ec-2c6bb5e2403e","src":"4d206b76-45ae-7771-627b-3c49ac6a923c","dst":"989a2307-f610-dd3f-99d5-06f341f5efe6","predicate":"CALLS","attrs":{"confidence":0.95,"tier":"type"}}",
+      "{"type":"UpsertEdge","id":"6344f21a-cdc6-0a0d-32fc-32f797440d1e","src":"4d206b76-45ae-7771-627b-3c49ac6a923c","dst":"e1e48278-2a9d-0ca3-15df-86f78b6f877f","predicate":"REFERENCES","attrs":{"confidence":0.95,"tier":"type"}}",
       "{"type":"UpsertEdge","id":"f848f3bf-247b-ac1f-fc7a-7ea5ef0ae92a","src":"4d206b76-45ae-7771-627b-3c49ac6a923c","dst":"ceb72e8f-d2a2-ed94-5f74-fb993f285370","predicate":"CALLS","attrs":{"confidence":0.95,"tier":"type"}}",
       "{"type":"AssertClaim","entityId":"9d02b238-bb8e-70dc-2e82-a9faadbe58c1","field":"contains:TimeoutFilter","value":"TimeoutFilter","confidence":null}",
       "{"type":"AssertClaim","entityId":"35abc1b1-e8bb-6cf8-5ff9-b72e2d02b8d9","field":"contains:getMethodParameter","value":"getMethodParameter","confidence":null}",

@@ -309,6 +309,8 @@ export interface ParsedRelationship {
   /**
    * Lexically inferred receiver. An exact member resolves at tier `type`;
    * otherwise the relationship resolves by its name, as without inference.
+   * On a receiver-only Java REFERENCES (a static call's class, #1137) it is
+   * the class itself, resolved only when exactly one class in scope has it.
    */
   receiverType?: string;
   receiverFactory?: string;
@@ -321,6 +323,7 @@ export interface ParsedRelationship {
    * Set on a typed relationship that only exists for its receiver (the call
    * also has its own, unchanged relationship). Without an exact member it
    * resolves to nothing: no edge, no claim, no unresolved-call entry.
+   * Also set on the REFERENCES a Java static call adds to its class.
    */
   receiverOnly?: true;
 }
@@ -3959,6 +3962,9 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     const seenCalls = new Map<string, Set<string>>();
     // Track seen type references per enclosing class/file to avoid duplicate REFERENCES edges
     const seenRefs = new Map<string, Set<string>>();
+    // Java: the REFERENCES a static call (`Gate.matches()`) adds to its class,
+    // by `src\0type`, until a written type reference makes it a plain one (#1137).
+    const staticTypeRefs = new Map<string, ParsedRelationship>();
     // Map function name → (param name → declared type) for typed-parameter qualifier substitution
     const paramTypeMap = new Map<string, Map<string, string>>();
     // Python: map function name → (variable name → assigned type) for untyped-param qualifier substitution
@@ -4877,6 +4883,22 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
             relationships.push(rel);
             callRelationships.set(typedKey, rel);
           }
+          // #1137: `Gate.matches()` also uses the class `Gate`, which otherwise
+          // gets no edge when it is only ever called statically. Like the typed
+          // call, it resolves only to the one class in scope with that name.
+          // A class's calls to its own (or an enclosing class's) members are skipped.
+          const type = typedReceiver.staticType ? typedReceiver.type : undefined;
+          if (type && !classRanges.some(r => r.name === type && callLine >= r.start && callLine <= r.end)) {
+            if (!seenRefs.has(caller)) seenRefs.set(caller, new Set());
+            const refs = seenRefs.get(caller)!;
+            // A type reference already written in the caller links the class.
+            if (!refs.has(type)) {
+              refs.add(type);
+              const rel: ParsedRelationship = { srcName: caller, dstName: type, predicate: 'REFERENCES', receiverType: type, receiverOnly: true };
+              relationships.push(rel);
+              staticTypeRefs.set(`${caller}\x00${type}`, rel);
+            }
+          }
         }
         continue;
       }
@@ -4898,7 +4920,14 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
 
         if (!seenRefs.has(src)) seenRefs.set(src, new Set());
         const seen = seenRefs.get(src)!;
-        if (!seen.has(typeName)) {
+        const staticRef = staticTypeRefs.get(`${src}\x00${typeName}`);
+        if (staticRef) {
+          // The type is also written here: the static call's reference becomes
+          // the plain one this reference gives without it.
+          delete staticRef.receiverType;
+          delete staticRef.receiverOnly;
+          staticTypeRefs.delete(`${src}\x00${typeName}`);
+        } else if (!seen.has(typeName)) {
           seen.add(typeName);
           relationships.push({ srcName: src, dstName: typeName, predicate: 'REFERENCES' });
         }
@@ -7265,6 +7294,18 @@ export function resolveEdges(
         continue;
       }
 
+      // Java #1137: the class a static call names, when exactly one class in
+      // scope has that name. Otherwise the reference names nothing.
+      if (rel.predicate === 'REFERENCES' && rel.receiverType && rel.receiverOnly) {
+        const providers = receiverProviders(srcFilePath, rel.receiverType);
+        const key = providers.length === 1 ? bestQKey(fileQKeys, providers[0].fp, providers[0].type) : null;
+        if (key) {
+          resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: providers[0].fp, dstName: rel.dstName,
+            dstQualifiedKey: key, predicate: 'REFERENCES', confidence: 0.95, tier: 'type' });
+          stats.resolvedType = (stats.resolvedType ?? 0) + 1;
+        }
+        continue;
+      }
       // A typed receiver resolves to its exact member. Otherwise a receiver-only
       // relationship stops here, and any other resolves by its own name below.
       if (rel.predicate === 'CALLS' && (rel.receiverType || rel.receiverFactory)) {

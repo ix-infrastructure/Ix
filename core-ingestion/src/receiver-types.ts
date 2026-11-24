@@ -9,6 +9,12 @@ export interface ReceiverType {
    * `getB`). Each step's declared return type is the next receiver.
    */
   chain?: string[];
+  /**
+   * Java: the receiver is the type itself (`Gate.matches()`), a bare name no
+   * declaration in the file binds, with no call chain. The call then uses the
+   * class as well as the method (#1137).
+   */
+  staticType?: true;
 }
 
 export interface ReceiverFacts {
@@ -578,7 +584,12 @@ function javaFacts(root: any, facts: {
       if (calls.has(call.id)) return calls.get(call.id);
       const object = call.childForFieldName('object');
       const info = qualifiedSuper(call, object) ? {} : object ? lookup(object) : { type: enclosing(call)?.name };
-      const receiver = info.type ? { type: info.type, ...(info.chain ? { chain: info.chain } : {}), receiver: object?.text ?? 'this' } : undefined;
+      // Only a name lookup reads as a type when no declaration binds it; a
+      // variable, `this`, `super`, a chain or `p.Gate` is not marked.
+      const staticType = object?.type === 'identifier' && !boundNames.has(object.text) && !info.chain && info.type === object.text;
+      const receiver = info.type
+        ? { type: info.type, ...(info.chain ? { chain: info.chain } : {}), ...(staticType ? { staticType: true as const } : {}), receiver: object?.text ?? 'this' }
+        : undefined;
       calls.set(call.id, receiver);
       return receiver;
     },
