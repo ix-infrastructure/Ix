@@ -532,6 +532,23 @@ describe('member calls and calls to locals across files (#1020)', () => {
     expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts')).toEqual(['Holder.run -> src/a.ts:validate']);
   });
 
+  // A destructured name with a default holds the default when the property
+  // is missing, like a plain `validate = v` parameter.
+  it('TypeScript: a destructured name defaulting to an import still reaches the imported function', () => {
+    const lib = parse('src/a.ts', 'export function validate(x: number) { return x; }\n');
+    const caller = parse('src/c.ts', [
+      "import { validate as v } from './a';",
+      'export function plain(validate = v) { validate(1); }',
+      'export function param({ validate = v } = {}) { validate(1); }',
+      'export function declared(o: Opts) { const { validate = v } = o; validate(1); }',
+      'export function noDefault({ validate }: Opts) { validate(1); }',
+      '',
+    ].join('\n'));
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/c.ts').sort()).toEqual([
+      'declared -> src/a.ts:validate', 'param -> src/a.ts:validate', 'plain -> src/a.ts:validate',
+    ]);
+  });
+
   it('Python: a module stored on self, or imported inside a function with a fallback, still reaches the module function', () => {
     const lib = parse('pkg/api.py', 'def validate(x):\n    return x\n');
     const caller = parse('pkg/b.py', [

@@ -269,6 +269,29 @@ describe('TypeScript call scope flags', () => {
     expect(flags['blockOnly -> validate']).toEqual({});
   });
 
+  it('leaves a destructured name that defaults to a module-scope name unmarked', () => {
+    const flags = calls([
+      "import { v, w } from './a';",
+      'export function plainDefault(validate = v) { validate(); }',
+      'export function objectDefault({ validate = v } = {}) { validate(); }',
+      'export function renamedDefault({ k: validate = v }: Opts) { validate(); }',
+      'export function arrayDefault([validate = v]: Fn[]) { validate(); }',
+      'export function nestedDefault({ a: { validate = v } }: Opts) { validate(); }',
+      'export function declared(opts: Opts) { const { validate = w } = opts; validate(); }',
+      'export function noDefault({ validate }: Opts) { validate(); }',
+      'export function localDefault(fallback: Fn, { validate = fallback }: Opts) { validate(); }',
+      'export function otherDefault({ check = v, validate }: Opts) { validate(); }',
+    ].join('\n'));
+    for (const caller of ['plainDefault', 'objectDefault', 'renamedDefault', 'arrayDefault', 'nestedDefault', 'declared']) {
+      expect(flags[`${caller} -> validate`], caller).toEqual({});
+    }
+    expect(flags).toMatchObject({
+      'noDefault -> validate': { localCallee: true },
+      'localDefault -> validate': { localCallee: true },
+      'otherDefault -> validate': { localCallee: true },
+    });
+  });
+
   it('does not mark a call to a local function the parser extracts as an entity', () => {
     const result = parseFile('/repo/scope.ts', 'export function outer() {\n  const helper = () => 1;\n  return helper();\n}\n');
     expect(result!.entities.map(e => e.name)).toContain('helper');

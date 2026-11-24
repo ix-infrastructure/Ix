@@ -1208,20 +1208,11 @@ interface CallSiteScopes {
   sites: Map<number, CallSiteScope>;
   /** FileParseResult.propertyReferences. */
   propertyReferences: Set<string>;
-}
-
-/**
- * Whether a call's name node is the member of `super.m()` (JS/TS) or
- * `super().m()` / `super(Cls, self).m()` (Python).
- */
-function isSuperReceiverCall(nameNode: any, python: boolean): boolean {
-  const parent = nameNode?.parent;
-  if (python) {
-    if (parent?.type !== 'attribute') return false;
-    const object = parent.childForFieldName?.('object');
-    return object?.type === 'call' && object.childForFieldName?.('function')?.text === 'super';
-  }
-  return parent?.type === 'member_expression' && parent.childForFieldName?.('object')?.type === 'super';
+  /**
+   * Call node ids of `super.m()` (JS/TS) and `super().m()` /
+   * `super(Cls, self).m()` (Python): the receiver is `super` itself.
+   */
+  superCalls: Set<number>;
 }
 
 /** Mixin helpers that copy properties onto their first argument (`Object.assign`, `_.extend`). */
@@ -1306,6 +1297,40 @@ function jsTsPatternNames(node: any, out: Set<string>): void {
     case 'object_pattern':
     case 'array_pattern':
       for (const child of node.namedChildren) jsTsPatternNames(child, out);
+      return;
+    default:
+      return;
+  }
+}
+
+/**
+ * The names a JS/TS binding pattern gives a default (`{ validate = v }`,
+ * `[a = v]`, `{ k: a = v }`, a parameter `a = v`), each with the roots of
+ * that default (valueRoots). A name with no default, or whose default has no
+ * roots, is left out.
+ */
+function jsTsPatternDefaults(node: any, out: Map<string, string[]>): void {
+  if (!node) return;
+  switch (node.type) {
+    case 'required_parameter':
+    case 'optional_parameter':
+      jsTsPatternDefaults(node.childForFieldName?.('pattern'), out);
+      return;
+    case 'assignment_pattern':
+    case 'object_assignment_pattern': {
+      const left = node.childForFieldName?.('left');
+      if (left?.type === 'identifier' || left?.type === 'shorthand_property_identifier_pattern') {
+        const roots = valueRoots(node.childForFieldName?.('right'), false);
+        if (roots !== undefined) out.set(left.text, roots);
+      } else jsTsPatternDefaults(left, out);
+      return;
+    }
+    case 'pair_pattern':
+      jsTsPatternDefaults(node.childForFieldName?.('value'), out);
+      return;
+    case 'object_pattern':
+    case 'array_pattern':
+      for (const child of node.namedChildren) jsTsPatternDefaults(child, out);
       return;
     default:
       return;
@@ -1663,6 +1688,7 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
   // costs no copy of the stack.
   const pending: Array<{ id: number; start: number; frame?: CallScopeFrame; name: string; receiver: boolean }> = [];
   const result = new Map<number, CallSiteScope>();
+  const superCalls = new Set<number>();
   // JS: what the call around a function literal binds its parameters to, by
   // the function's node id (recordInvocations).
   const invocations = new Map<number, Array<string[] | undefined>>();
@@ -1744,6 +1770,21 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
     if (roots !== undefined) bindAlias(frame, names, roots);
     else bind(frame, names);
   };
+  // JS/TS: a destructured name with a default (`{ validate = v }`) holds the
+  // value or the default, so it aliases the default's roots too, like a plain
+  // `validate = v` parameter. Returns the names left for bindValue.
+  const bindPatternDefaults = (frame: CallScopeFrame | undefined, pattern: any, names: Set<string>,
+    roots: string[] | undefined): Set<string> => {
+    const defaults = new Map<string, string[]>();
+    jsTsPatternDefaults(pattern, defaults);
+    if (!defaults.size) return names;
+    const rest = new Set(names);
+    for (const [name, defaultRoots] of defaults) {
+      if (!rest.delete(name)) continue;
+      bindAlias(frame, new Set([name]), [...new Set([...(roots ?? []), ...defaultRoots])]);
+    }
+    return rest;
+  };
   // A function's parameters, each a local or an alias of what it defaults to.
   // The first `invoked.length` take what the code invoking the function passes
   // there instead (recordInvocations).
@@ -1763,7 +1804,7 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
         const rest = invoked.slice(position).flatMap(roots => roots ?? []);
         paramRoots = rest.length ? rest : undefined;
       } else paramRoots = position < invoked.length ? invoked[position] : parameterRoots(param, python);
-      bindValue(frame, names, paramRoots);
+      bindValue(frame, python ? names : bindPatternDefaults(frame, param, names, paramRoots), paramRoots);
       if (!python && param?.namedChildren?.some((c: any) => c.type === 'accessibility_modifier')) {
         for (const name of names) {
           ownProperties.add(name);
@@ -1864,9 +1905,11 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
         } else if (fn?.type === 'attribute') {
           const member = fn.childForFieldName?.('attribute')?.text;
           if (member) memberNames.set(node.id, member);
-          const receiverProps = receiverProperties(fn.childForFieldName?.('object'), true);
+          const object = fn.childForFieldName?.('object');
+          if (object?.type === 'call' && object.childForFieldName?.('function')?.text === 'super') superCalls.add(node.id);
+          const receiverProps = receiverProperties(object, true);
           if (receiverProps.length) receiverPropertyNames.set(node.id, receiverProps);
-          const rootNode = receiverRoot(fn.childForFieldName?.('object'), true);
+          const rootNode = receiverRoot(object, true);
           if (rootNode?.type === 'identifier') {
             pending.push({ id: node.id, start: node.startIndex, frame: frames[frames.length - 1], name: rootNode.text, receiver: true });
             if (PY_INSTANCE_NAMES.has(rootNode.text)) instanceCalls.add(node.id);
@@ -1925,11 +1968,11 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
         if (jsTsLoadsModule(value)) continue;
         const roots = valueRoots(value, false);
         if (roots !== undefined) {
-          bindAlias(frame, declared, roots);
+          bindAlias(frame, bindPatternDefaults(frame, pattern, declared, roots), roots);
           continue;
         }
         const functionValued = pattern?.type === 'identifier' && JS_TS_FUNCTION_VALUES.has(value?.type);
-        bind(frame, declared, !functionValued);
+        bind(frame, bindPatternDefaults(frame, pattern, declared, undefined), !functionValued);
       }
     } else if (type === 'assignment_expression') {
       const left = node.childForFieldName?.('left');
@@ -1988,9 +2031,11 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
         const member = fn.childForFieldName?.('property')?.text;
         if (member) memberNames.set(node.id, member);
         if (type === 'call_expression' && member !== undefined && MIXIN_FUNCTIONS.has(member)) recordMixin(node);
-        const receiverProps = receiverProperties(fn.childForFieldName?.('object'), false);
+        const object = fn.childForFieldName?.('object');
+        if (object?.type === 'super') superCalls.add(node.id);
+        const receiverProps = receiverProperties(object, false);
         if (receiverProps.length) receiverPropertyNames.set(node.id, receiverProps);
-        const rootNode = receiverRoot(fn.childForFieldName?.('object'), false);
+        const rootNode = receiverRoot(object, false);
         if (rootNode?.type === 'this') {
           if (thisIsClassBound()) {
             result.set(node.id, { localReceiver: true });
@@ -2059,7 +2104,7 @@ function collectCallSiteScopes(root: any, python: boolean, checkBudget: () => vo
     else if (member !== undefined && assignedProperties.has(member)) result.delete(id);
     else if (receiverProps?.some(prop => assignedProperties.has(prop))) result.delete(id);
   }
-  return { sites: result, propertyReferences: instanceProperties };
+  return { sites: result, propertyReferences: instanceProperties, superCalls };
 }
 
 /**
@@ -4314,6 +4359,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     const callSiteFacts = isJsTs || language === SupportedLanguages.Python
       ? collectCallSiteScopes(tree.rootNode, language === SupportedLanguages.Python, checkBudget) : undefined;
     const callSiteScopes = callSiteFacts?.sites;
+    const superCallSites = callSiteFacts?.superCalls;
 
     // --- Second pass: calls and imports ---
     for (const match of pass2Matches) {
@@ -4710,8 +4756,11 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         // `m` for the same call can only land on a same-named member of this
         // class (the override itself) or a module function, never on the base,
         // so it is not emitted.
-        if (!qualifierCapture && (isJsTs || language === SupportedLanguages.Python) &&
-          isSuperReceiverCall(callName.node, language === SupportedLanguages.Python) && soleBaseAt(callLine)) continue;
+        // (From collectCallSiteScopes, by call node id: reading `.parent` here
+        // walks down from the root, quadratic in a long JS/TS call chain.)
+        const callNodeId = match.captures.find((c: any) => c.name === 'call')?.node?.id;
+        if (!qualifierCapture && callNodeId !== undefined && superCallSites?.has(callNodeId) &&
+          soleBaseAt(callLine)) continue;
 
         if (!builtinCall && !qualifierCapture && !namespaceCapture && effectiveCallee === callee) {
           recordJsTsImportUse('CALLS', caller, effectiveCallee, callName.node, callee);
@@ -4749,7 +4798,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           // #1020: a member call that cannot be a module-level function, and a
           // plain call to a parameter or local. Only for the call's own name:
           // a receiver-typed or rewritten callee already names its target.
-          const siteScope = callSiteScopes?.get(match.captures.find((c: any) => c.name === 'call')?.node?.id);
+          const siteScope = callNodeId === undefined ? undefined : callSiteScopes?.get(callNodeId);
           const isMember = effectiveCallee === callee && (
             language === SupportedLanguages.Rust
               // `x.m()` is always a method: a free function needs `m(x)` or `path::m()`.
