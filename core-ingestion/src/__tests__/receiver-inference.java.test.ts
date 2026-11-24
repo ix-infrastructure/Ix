@@ -326,6 +326,18 @@ describe('Java typed receivers', () => {
       expect(refEdges(files)).toEqual([]);
     });
 
+    it('adds no class edge when the same-named class is nested in another class of the file', () => {
+      // In B, `Gate` is p.Gate, not A.Gate: A.Gate is not in B's scope.
+      const files = [
+        parse('/repo/p/Gate.java', 'package p;\npublic class Gate {\n  public static void run() {}\n}\n'),
+        parse('/repo/p/A.java', 'package p;\nclass A {\n  static class Gate {\n    static void run() {}\n  }\n  void f() {\n    Gate.run();\n  }\n}\n' +
+          'class B {\n  void g() {\n    Gate.run();\n  }\n}\n'),
+      ];
+      const refs = refEdges(files).filter(e => e.src.startsWith('p/A.java::'));
+      // Inside A, the nested Gate is the one in scope.
+      expect(refs).toEqual([{ src: 'p/A.java::f', dst: 'p/A.java::Gate', tier: 'type' }]);
+    });
+
     it('resolves a batch against summaries as the full run does', () => {
       const files = [gate(), evaluator('return Gate.matches(s);')];
       const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));

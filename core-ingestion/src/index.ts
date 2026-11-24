@@ -4888,7 +4888,15 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           // call, it resolves only to the one class in scope with that name.
           // A class's calls to its own (or an enclosing class's) members are skipped.
           const type = typedReceiver.staticType ? typedReceiver.type : undefined;
-          if (type && !classRanges.some(r => r.name === type && callLine >= r.start && callLine <= r.end)) {
+          const encloses = (r: { start: number; end: number }) => callLine >= r.start && callLine <= r.end;
+          // A same-named class this file nests in another class that does not
+          // enclose the call is not what the bare name means here (it may be
+          // a package type, or an inherited member): resolution would still
+          // pick it, so add no class edge rather than a wrong one.
+          const decls = type ? classRanges.filter(r => r.name === type) : [];
+          const nestedElsewhere = decls.length > 0 && decls.every(d =>
+            classRanges.some(o => o !== d && o.start <= d.start && o.end >= d.end && !encloses(o)));
+          if (type && !nestedElsewhere && !classRanges.some(r => r.name === type && encloses(r))) {
             if (!seenRefs.has(caller)) seenRefs.set(caller, new Set());
             const refs = seenRefs.get(caller)!;
             // A type reference already written in the caller links the class.
