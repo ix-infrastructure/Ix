@@ -982,24 +982,42 @@ describe('member calls and calls to locals across files (#1020)', () => {
     expect(callsFrom(resolveEdges([helpers, other]), 'src/c.js')).toEqual([]);
   });
 
-  // An unrelated file's property must not turn every member call of the name
-  // in the language back into a plain call.
-  it('JavaScript/TypeScript/Python: a property an unrelated file sets keeps the member rule elsewhere', () => {
+  // The class that gets a property can be far from the file that sets it, so
+  // any file of the language that sets one counts. The price: an unrelated
+  // file's property keeps the name-based edge for that name, as before #1020.
+  it('JavaScript: a property set three extends hops up, by a sibling mixin, or through a re-export still reaches the module function', () => {
+    const api = parse('src/api.js', 'function validate(x) { return x; }\nmodule.exports = { validate };\n');
+    const base = parse('src/base.js', "const { validate } = require('./api');\nclass Base { constructor() { this.validate = validate; } }\nmodule.exports = { Base };\n");
+    const mid = parse('src/mid.js', "const { Base } = require('./base');\nclass Mid extends Base {}\nmodule.exports = { Mid };\n");
+    const mid2 = parse('src/mid2.js', "const { Mid } = require('./mid');\nclass Mid2 extends Mid {}\nmodule.exports = { Mid2 };\n");
+    const sub = parse('src/sub.js', "const { Mid2 } = require('./mid2');\nclass S extends Mid2 { run() { this.validate(1); } }\n");
+    expect(callsFrom(resolveEdges([api, base, mid, mid2, sub]), 'src/sub.js')).toEqual(['S.run -> src/api.js:validate']);
+
+    const foo = parse('src/foo.js', 'class Foo {}\nmodule.exports = { Foo };\n');
+    const mix = parse('src/mix.js', "const { Foo } = require('./foo');\nconst { validate } = require('./api');\nFoo.prototype.validate = validate;\n");
+    const bar = parse('src/bar.js', "const { Foo } = require('./foo');\nclass Bar extends Foo { run() { this.validate(1); } }\n");
+    expect(callsFrom(resolveEdges([api, foo, mix, bar]), 'src/bar.js')).toEqual(['Bar.run -> src/api.js:validate']);
+
+    const own = parse('src/foo.js', 'class Foo { run() { this.validate(1); } }\nmodule.exports = { Foo };\n');
+    const reexp = parse('src/reexp.js', "module.exports = require('./foo');\n");
+    const mixVia = parse('src/mix.js', "const { Foo } = require('./reexp');\nconst { validate } = require('./api');\nFoo.prototype.validate = validate;\n");
+    expect(callsFrom(resolveEdges([api, own, reexp, mixVia]), 'src/foo.js')).toEqual(['Foo.run -> src/api.js:validate']);
+  });
+
+  it('JavaScript/TypeScript/Python: with no file setting the property, a member call on a parameter keeps the member rule', () => {
     const lib = parse('src/a.ts', 'export function validate() {}\n');
     const caller = parse('src/b.ts', 'export function use(conn: Conn) { conn.validate(); }\n');
+    expect(callsFrom(resolveEdges([lib, caller]), 'src/b.ts')).toEqual([]);
     const other = parse('src/c.ts', "import { validate } from './x';\nexport class Z { constructor() { this.validate = validate; } }\n");
     expect(other.propertyReferences).toEqual(['validate']);
-    expect(callsFrom(resolveEdges([lib, caller, other]), 'src/b.ts')).toEqual([]);
-    // Also when the unrelated file is known only through the index.
-    const index = buildGlobalResolutionIndex([lib.filePath, other.filePath],
-      new Map([lib, other].map(r => [r.filePath, summarizeParseResult(r)])));
-    expect(callsFrom(resolveEdges([caller], undefined, index), 'src/b.ts')).toEqual([]);
+    // A property set anywhere in the language makes the name a plain call again.
+    expect(callsFrom(resolveEdges([lib, caller, other]), 'src/b.ts')).toEqual(['use -> src/a.ts:validate']);
 
     const pyLib = parse('pkg/h.py', 'def validate():\n    pass\n');
     const pyCaller = parse('pkg/b.py', 'def use(conn):\n    conn.validate()\n');
-    const pyOther = parse('pkg/c.py', 'from pkg.x import validate\n\nclass Z:\n    def __init__(self):\n        self.validate = validate\n');
-    expect(pyOther.propertyReferences).toEqual(['validate']);
-    expect(callsFrom(resolveEdges([pyLib, pyCaller, pyOther]), 'pkg/b.py')).toEqual([]);
+    expect(callsFrom(resolveEdges([pyLib, pyCaller]), 'pkg/b.py')).toEqual([]);
+    // JavaScript's properties do not reach Python.
+    expect(callsFrom(resolveEdges([pyLib, pyCaller, other]), 'pkg/b.py')).toEqual([]);
   });
 
   // The function the property holds may be in the caller's own file; the

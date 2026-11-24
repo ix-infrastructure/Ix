@@ -5560,58 +5560,28 @@ export function resolveEdges(
   const batchSummaries = results.map(summarizeParseResult);
   const summaries = new Map<string, FileSummary>(globalIndex?.summaries ?? []);
   for (const s of batchSummaries) summaries.set(s.filePath, s);
-  // #1020: the files that set a property on an instance, prototype or class
-  // to a function or module from outside (FileSummary.propertyReferences), by
-  // language family and name. A member call of such a name may reach a
-  // module-level function that way from another file (`this.validate()` in a
-  // subclass of a base that does `this.validate = validate`), so it resolves
-  // as a plain call -- but only in a file related to the one that sets it
-  // (propertyReferenceReaches): an unrelated file's property must not undo the
-  // member rule for every call of that name in the language.
+  // #1020: the names some file sets as a property on an instance, prototype or
+  // class to a function or module from outside (FileSummary.propertyReferences),
+  // by language family. A member call of such a name may reach a module-level
+  // function that way from another file (`this.validate()` in a subclass of a
+  // base that does `this.validate = validate`), so it resolves as a plain call,
+  // as it did before #1020. Any file of the language counts: the class that
+  // gets the property can be several `extends` hops away, or mixed in by a
+  // sibling or through a re-export, and a narrower test lost those edges. The
+  // cost is that one unrelated file with such a property keeps the name-based
+  // edge for that name, which is what every member call got before.
   const propertyReferenceKey = (language: string | undefined, name: string): string | undefined =>
     language === SupportedLanguages.Python ? `py\0${name}`
       : language === SupportedLanguages.JavaScript || language === SupportedLanguages.TypeScript ? `js\0${name}` : undefined;
-  const propertyReferenceFiles = new Map<string, string[]>();
+  const propertyReferenceNames = new Set<string>();
   for (const s of summaries.values()) {
     for (const name of s.propertyReferences ?? []) {
       const key = propertyReferenceKey(s.language, name);
-      if (!key) continue;
-      const files = propertyReferenceFiles.get(key);
-      if (files) files.push(s.filePath); else propertyReferenceFiles.set(key, [s.filePath]);
+      if (key) propertyReferenceNames.add(key);
     }
   }
-  // The files a property-setting file imports directly, computed on demand:
-  // a file it imports may hold the class it mixes the property into.
-  const propertyFileImports = new Map<string, Set<string>>();
-  const importsOfPropertyFile = (fp: string): Set<string> => {
-    let out = propertyFileImports.get(fp);
-    if (out) return out;
-    out = new Set();
-    const summary = summaries.get(fp);
-    for (const rel of summary?.imports ?? []) {
-      if (rel.importVia === 'helper') continue;
-      for (const target of resolveImportTargets(fp, summary!.language, rel.dstName, rel.importRaw, 'runtime', rel.importAliased === true)) {
-        out.add(target);
-      }
-    }
-    propertyFileImports.set(fp, out);
-    return out;
-  };
-  /**
-   * Whether a property-setting file is related to `srcFilePath` closely enough
-   * for a member call there to read the property: it is the file itself, a
-   * file it imports or one re-export hop beyond (a base class it extends), or
-   * a file that imports it directly (a mixin into its class). Deeper chains
-   * keep the member rule.
-   */
-  const propertyReferenceReaches = (
-    srcFilePath: string, language: string | undefined, name: string,
-    imported: ReadonlySet<string>, transitive: ReadonlySet<string>,
-  ): boolean => {
-    const files = propertyReferenceFiles.get(propertyReferenceKey(language, name) ?? '');
-    return files !== undefined && files.some(fp =>
-      fp === srcFilePath || imported.has(fp) || transitive.has(fp) || importsOfPropertyFile(fp).has(srcFilePath));
-  };
+  const propertyReferenceReaches = (language: string | undefined, name: string): boolean =>
+    propertyReferenceNames.has(propertyReferenceKey(language, name) ?? '');
   // The index's maps already hold every file it has a summary for (its symbol
   // maps from the summaries, its path maps from paths and summaries alike), so
   // only the batch's own summaries are laid over them below. Redoing the whole
@@ -7282,10 +7252,10 @@ export function resolveEdges(
       // A member call that cannot be a module-level function (`conn.validate()`
       // on a parameter) is not bound by an import of that name either: only a
       // plain identifier reads the lexical binding.
-      // A property a related file sets to a module function of that name
+      // A property some file sets to a module function of that name
       // (propertyReferenceReaches) makes it a plain call again.
       const propertyOptOut = rel.predicate === 'CALLS' && rel.memberCall === true &&
-        propertyReferenceReaches(srcFilePath, srcLanguage, rel.dstName, importedFilePaths, transitiveFilePaths);
+        propertyReferenceReaches(srcLanguage, rel.dstName);
       const memberCall = rel.predicate === 'CALLS' && rel.memberCall === true && !propertyOptOut;
       const origDstName = rel.dstName;
       // Z: resolve a renamed-import call by the provider's public symbol, but keep the
