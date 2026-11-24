@@ -4889,13 +4889,26 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           // A class's calls to its own (or an enclosing class's) members are skipped.
           const type = typedReceiver.staticType ? typedReceiver.type : undefined;
           const encloses = (r: { start: number; end: number }) => callLine >= r.start && callLine <= r.end;
-          // A same-named class this file nests in another class that does not
-          // enclose the call is not what the bare name means here (it may be
-          // a package type, or an inherited member): resolution would still
-          // pick it, so add no class edge rather than a wrong one.
+          // Classes whose nested types the bare name can mean here: those that
+          // enclose the call and, through `extends`, their bases in this file.
+          const inScope = new Set<string>();
+          const pending = type ? classRanges.filter(encloses).map(r => r.name) : [];
+          while (pending.length > 0) {
+            const name = pending.pop()!;
+            if (inScope.has(name)) continue;
+            inScope.add(name);
+            for (const base of classBases.get(name) ?? []) {
+              const plain = /^([\w$]+)\s*(?:<[^]*>)?$/.exec(base);
+              if (plain) pending.push(plain[1]);
+            }
+          }
+          // A same-named class this file nests in another class that is not in
+          // scope is not what the bare name means here (it may be a package
+          // type, or an inherited member): resolution would still pick it, so
+          // add no class edge rather than a wrong one.
           const decls = type ? classRanges.filter(r => r.name === type) : [];
           const nestedElsewhere = decls.length > 0 && decls.every(d =>
-            classRanges.some(o => o !== d && o.start <= d.start && o.end >= d.end && !encloses(o)));
+            classRanges.some(o => o !== d && o.start <= d.start && o.end >= d.end && !inScope.has(o.name)));
           if (type && !nestedElsewhere && !classRanges.some(r => r.name === type && encloses(r))) {
             if (!seenRefs.has(caller)) seenRefs.set(caller, new Set());
             const refs = seenRefs.get(caller)!;

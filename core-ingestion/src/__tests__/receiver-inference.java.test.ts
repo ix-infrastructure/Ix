@@ -338,6 +338,23 @@ describe('Java typed receivers', () => {
       expect(refs).toEqual([{ src: 'p/A.java::f', dst: 'p/A.java::Gate', tier: 'type' }]);
     });
 
+    it.each([
+      ['extends the nesting class', 'class B extends A'],
+      ['extends it with type arguments', 'class B extends A<String>'],
+      ['extends it through another class of the file', 'class M extends A {}\nclass B extends M'],
+    ])('references a nested class a same-file subclass inherits when it %s', (_label, header) => {
+      const files = [parse('/repo/p/A.java', 'package p;\nclass A<T> {\n  static class Gate {\n    static void run() {}\n  }\n}\n' +
+        `${header} {\n  void g() {\n    Gate.run();\n  }\n}\n`)];
+      expect(refEdges(files)).toEqual([{ src: 'p/A.java::g', dst: 'p/A.java::Gate', tier: 'type' }]);
+    });
+
+    it('adds no class edge for a type nested two levels down in the base', () => {
+      // B inherits A.M, not A.M.Gate: the bare name `Gate` does not reach it.
+      const files = [parse('/repo/p/A.java', 'package p;\nclass A {\n  static class M {\n    static class Gate {\n      static void run() {}\n    }\n  }\n}\n' +
+        'class B extends A {\n  void g() {\n    Gate.run();\n  }\n}\n')];
+      expect(refEdges(files)).toEqual([]);
+    });
+
     it('resolves a batch against summaries as the full run does', () => {
       const files = [gate(), evaluator('return Gate.matches(s);')];
       const summaries = new Map(files.map(r => [r.filePath, summarizeParseResult(r)]));
