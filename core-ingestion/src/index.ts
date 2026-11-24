@@ -237,6 +237,13 @@ export interface ParsedRelationship {
    * the stem fallback (`import torch.nn as nn` must not bind a local nn.py).
    */
   importAliased?: boolean;
+  /**
+   * PHP aliased `use` clauses only (`use A\\B as C;`, `use A\\{B as C};`): the
+   * name the clause binds in the file (`C`). Short names resolve through it,
+   * not through the last segment of the FQCN, which the clause does not bind.
+   * Absent on un-aliased clauses (they bind that last segment).
+   */
+  importLocal?: string;
   /** PHP call shape used to distinguish constructors from same-named functions. */
   phpCallKind?: 'constructor' | 'function' | 'member' | 'static';
   /**
@@ -750,6 +757,12 @@ function normalizeCapturedImport(rawValue: string, language: SupportedLanguages)
 
   const rawMod = unwrapped.split('/').filter((s: string) => s !== '*').pop() ?? unwrapped;
   return rawMod.replace(/^\.+/, '');
+}
+
+/** The `as` name of a PHP `namespace_use_clause` (`C` in `A\B as C`), if any. */
+function phpUseClauseAlias(clause: any): string | undefined {
+  const alias = clause?.childForFieldName?.('alias');
+  return alias?.type === 'name' && alias.text ? alias.text : undefined;
 }
 
 /** Unwrap an import specifier's surrounding quotes/brackets WITHOUT reducing it to
@@ -4409,8 +4422,15 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           const fqcn = phpGroupPrefix ? `${phpGroupPrefix}\\${firstName.text}` : firstName.text;
           const modName = normalizeCapturedImport(fqcn, language);
           const importRaw = unwrapImportSpecifier(fqcn);
+          const importLocal = phpUseClauseAlias(clause.node);
           entities.push({ name: modName, kind: 'module', lineStart: firstName.startPosition.row + 1, lineEnd: firstName.startPosition.row + 1, language });
-          relationships.push({ srcName: fileName, dstName: modName, predicate: 'IMPORTS', importRaw });
+          relationships.push({
+            srcName: fileName,
+            dstName: modName,
+            predicate: 'IMPORTS',
+            importRaw,
+            ...(importLocal ? { importAliased: true, importLocal } : {}),
+          });
         }
         continue;
       }
@@ -4472,6 +4492,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           const phpImportAliased = language === SupportedLanguages.PHP
             && phpUseClause?.type === 'namespace_use_clause'
             && phpUseClause.namedChildCount > 1;
+          const phpImportLocal = phpImportAliased ? phpUseClauseAlias(phpUseClause) : undefined;
           entities.push({ name: modName, kind: 'module', lineStart: importSource.node.startPosition.row + 1, lineEnd: importSource.node.startPosition.row + 1, language });
           relationships.push({
             srcName: fileName,
@@ -4480,6 +4501,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
             importRaw,
             ...(importKind ? { importKind } : {}),
             ...(phpImportAliased || (language === SupportedLanguages.Python && importAlias) ? { importAliased: true } : {}),
+            ...(phpImportLocal ? { importLocal: phpImportLocal } : {}),
           });
         }
         continue;
@@ -5054,6 +5076,19 @@ function trimPhpNamespace(namespace: string | undefined): string {
   while (start < end && namespace.charCodeAt(start) === 92) start++;
   while (end > start && namespace.charCodeAt(end - 1) === 92) end--;
   return namespace.slice(start, end);
+}
+
+/**
+ * The lower-cased short name a PHP class `use` binds: its alias, else the last
+ * segment of the FQCN. Undefined for function/const imports, for non-imports,
+ * and for an aliased import that does not carry the alias it binds (hand-built
+ * or older parse results), which stays unresolved rather than mis-bound.
+ */
+function phpImportedLocal(rel: ParsedRelationship): string | undefined {
+  if (rel.predicate !== 'IMPORTS' || rel.importKind === 'function' || rel.importKind === 'const') return undefined;
+  if (typeof rel.importRaw !== 'string') return undefined;
+  if (rel.importAliased) return rel.importLocal ? rel.importLocal.toLowerCase() : undefined;
+  return rel.importRaw.replace(/^\\+/, '').toLowerCase().split('\\').pop() || undefined;
 }
 
 function phpTypeFqcn(entity: ParsedEntity): string | undefined {
@@ -5637,16 +5672,11 @@ export function resolveEdges(
     // to it). Both were mis-classified as single-namespace files.
     if ((result.phpNamespaceBlocks ?? 0) > 1) continue;
     for (const rel of result.relationships) {
-      if (
-        rel.predicate !== 'IMPORTS' ||
-        rel.importKind === 'function' ||
-        rel.importKind === 'const' ||
-        rel.importAliased ||
-        typeof rel.importRaw !== 'string'
-      ) continue;
+      // Keyed by the name the clause binds: its alias (`use A\B as C` binds C,
+      // not B), else the FQCN's last segment.
+      const local = phpImportedLocal(rel);
+      if (!local || typeof rel.importRaw !== 'string') continue;
       const fqcn = rel.importRaw.replace(/^\\+/, '').toLowerCase();
-      const local = fqcn.split('\\').pop();
-      if (!local) continue;
       const imports = phpFqcnImportsByLocal.get(result.filePath) ?? new Map<string, string | null>();
       if (!imports.has(local)) imports.set(local, fqcn);
       else if (imports.get(local) !== fqcn) imports.set(local, null);
@@ -6989,14 +7019,20 @@ export function resolveEdges(
     entries: Array<{ filePath: string; typeName: string }>;
     memberName?: string;
   } | undefined {
-    if (rel.predicate === 'IMPORTS' && (rel.importKind === 'function' || rel.importKind === 'const')) {
-      return undefined;
+    const imports = phpFqcnImportsByLocal.get(srcFilePath);
+    if (rel.predicate === 'IMPORTS') {
+      // An import is looked up by the name it binds, never by its dstName (the
+      // FQCN tail): `use A\Account as Acct; use B\Account;` must send each
+      // IMPORTS edge to its own class, not both to the one binding `Account`.
+      const local = phpImportedLocal(rel);
+      if (!local || !imports?.has(local)) return undefined;
+      const fqcn = imports.get(local);
+      return { entries: fqcn ? phpFqcnToTypes.get(fqcn) ?? [] : [] };
     }
     const parts = rel.dstName.split('.');
     if (rel.predicate === 'CALLS' && parts.length === 1 && rel.phpCallKind !== 'constructor') {
       return undefined;
     }
-    const imports = phpFqcnImportsByLocal.get(srcFilePath);
     const local = parts[0].toLowerCase();
     if (!imports?.has(local)) return undefined;
     const fqcn = imports.get(local);
@@ -7024,7 +7060,10 @@ export function resolveEdges(
         ? importedPhpType(srcFilePath, rel)
         : undefined;
       if (phpType) {
-        for (const entry of phpType.entries) importedFilePaths.add(entry.filePath);
+        // An aliased class is reachable only through its alias, which the
+        // FQCN map resolves exactly. Its file must not widen the name scope:
+        // with `use App\Models\Account as Acct;` a bare `Account` is not it.
+        if (!rel.importAliased) for (const entry of phpType.entries) importedFilePaths.add(entry.filePath);
         continue;
       }
       // A helper-literal import is inferred and binds no names: it becomes an

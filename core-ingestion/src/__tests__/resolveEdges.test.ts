@@ -371,6 +371,103 @@ function run(Alpha $a): void { new Alpha(); }
     expect(edges.filter((edge) => edge.dstFilePath === '/repo/Other/Alpha.php')).toEqual([]);
   });
 
+  describe('PHP aliased imports (#1021)', () => {
+    const account = () => parseFile(
+      '/repo/app/Models/Account.php',
+      `<?php
+namespace App\\Models;
+class Account {
+    public static function find(int $id): self { return new self(); }
+    public function label(): string { return ''; }
+}
+`,
+    )!;
+    const legacy = () => parseFile(
+      '/repo/app/Legacy/Account.php',
+      `<?php
+namespace App\\Legacy;
+class Account {
+    public static function find(int $id): self { return new self(); }
+    public function label(): string { return ''; }
+}
+`,
+    )!;
+    const body = (alias: string) => `
+function run(${alias} $a): void {
+    ${alias}::find(1);
+    new ${alias}();
+    $a->label();
+}
+`;
+    const to = (edges: ReturnType<typeof resolveEdges>, fp: string) =>
+      edges.filter(edge => edge.dstFilePath === fp).map(edge => `${edge.predicate} ${edge.dstQualifiedKey} ${edge.confidence}`).sort();
+
+    it('resolves references made through `use X as Y` like a plain use', () => {
+      const plain = parseFile('/repo/app/Plain.php', `<?php\nnamespace App;\nuse App\\Models\\Account;\n${body('Account')}`)!;
+      const aliased = parseFile('/repo/app/Aliased.php', `<?php\nnamespace App;\nuse App\\Models\\Account as Acct;\n${body('Acct')}`)!;
+      const models = '/repo/app/Models/Account.php';
+
+      const plainEdges = to(resolveEdges([plain, account(), legacy()]), models);
+      const aliasedEdges = to(resolveEdges([aliased, account(), legacy()]), models);
+
+      expect(plainEdges.length).toBeGreaterThan(1);
+      expect(plainEdges.some(edge => edge.startsWith('IMPORTS '))).toBe(true);
+      expect(aliasedEdges).toEqual(plainEdges);
+    });
+
+    it('resolves a grouped `use A\\{X as Y}` alias by the name it binds', () => {
+      const plain = parseFile('/repo/app/Plain.php', `<?php\nnamespace App;\nuse App\\Models\\Account;\n${body('Account')}`)!;
+      const grouped = parseFile('/repo/app/Grouped.php', `<?php\nnamespace App;\nuse App\\Models\\{Account as Acct};\n${body('Acct')}`)!;
+      const models = '/repo/app/Models/Account.php';
+
+      expect(to(resolveEdges([grouped, account(), legacy()]), models))
+        .toEqual(to(resolveEdges([plain, account(), legacy()]), models));
+    });
+
+    it.each([
+      ['use App\\Models\\Account as Acct;'],
+      ['use App\\Models\\{Account as Acct};'],
+    ])('does not bind the FQCN tail of an alias (%s)', (use) => {
+      // The clause binds Acct only, so a bare `Account` names App\Account,
+      // not the Models class.
+      const consumer = parseFile('/repo/app/Consumer.php', `<?php\nnamespace App;\n${use}\nfunction run(): void { new Account(); Account::find(1); }\n`)!;
+
+      expect(to(resolveEdges([consumer, account(), legacy()]), '/repo/app/Models/Account.php')
+        .filter(edge => !edge.startsWith('IMPORTS '))).toEqual([]);
+    });
+
+    it('leaves an aliased import that lacks its bound name unresolved', () => {
+      // Hand-built or older parse results flag the alias but do not carry it;
+      // the alias must not fall back to the FQCN tail (here: Legacy's binding).
+      const consumer = parseFile('/repo/app/Old.php', `<?php\nnamespace App;\nuse App\\Models\\Account as Acct;\nuse App\\Legacy\\Account;\n${body('Acct')}`)!;
+      for (const rel of consumer.relationships) delete rel.importLocal;
+
+      expect(to(resolveEdges([consumer, account(), legacy()]), '/repo/app/Models/Account.php')).toEqual([]);
+    });
+
+    it('sends each import to its own class when an alias and a plain use share a short name', () => {
+      const consumer = parseFile(
+        '/repo/app/Both.php',
+        `<?php
+namespace App;
+use App\\Models\\Account as Acct;
+use App\\Legacy\\Account;
+function run(): void { Acct::find(1); Account::find(2); }
+`,
+      )!;
+      const edges = resolveEdges([consumer, account(), legacy()]);
+
+      expect(to(edges, '/repo/app/Models/Account.php')).toEqual([
+        'CALLS Account.find 0.9',
+        'IMPORTS Account.php 0.9',
+      ]);
+      expect(to(edges, '/repo/app/Legacy/Account.php')).toEqual([
+        'CALLS Account.find 0.9',
+        'IMPORTS Account.php 0.9',
+      ]);
+    });
+  });
+
   it('does not leak a PHP use across braced namespace blocks', () => {
     // `use` is scoped to its namespace block. `go` lives in namespace B, which
     // declares its own Thing, so it must not resolve to the Thing imported by
