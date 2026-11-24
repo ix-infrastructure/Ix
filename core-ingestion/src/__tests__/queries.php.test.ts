@@ -82,6 +82,27 @@ use const Vendor\\Package\\FLAG;
     ]);
   });
 
+  it('records the name an aliased use clause binds', () => {
+    const result = parseFile(
+      '/repo/Aliases.php',
+      `<?php
+use App\\Models\\Account as Acct;
+use Vendor\\One\\Alpha, Vendor\\Two\\Beta as Bee;
+use App\\Legacy\\{Account as OldAccount, Ledger};
+      `,
+    );
+
+    const imports = result?.relationships.filter(rel => rel.predicate === 'IMPORTS')
+      .map(({ dstName, importRaw, importAliased, importLocal }) => ({ dstName, importRaw, importAliased, importLocal }));
+    expect(imports).toEqual([
+      { dstName: 'Account', importRaw: 'App\\Models\\Account', importAliased: true, importLocal: 'Acct' },
+      { dstName: 'Alpha', importRaw: 'Vendor\\One\\Alpha', importAliased: undefined, importLocal: undefined },
+      { dstName: 'Beta', importRaw: 'Vendor\\Two\\Beta', importAliased: true, importLocal: 'Bee' },
+      { dstName: 'Account', importRaw: 'App\\Legacy\\Account', importAliased: true, importLocal: 'OldAccount' },
+      { dstName: 'Ledger', importRaw: 'App\\Legacy\\Ledger', importAliased: undefined, importLocal: undefined },
+    ]);
+  });
+
   it('distinguishes PHP constructors from function and member calls', () => {
     const result = parseFile(
       '/repo/Calls.php',
@@ -142,6 +163,9 @@ use Vendor\\Contracts\\{DomainService as DS, Repo};
       dstName: 'DomainService',
       predicate: 'IMPORTS',
       importRaw: 'Vendor\\Contracts\\DomainService',
+      // #1021: the clause binds DS, so it is flagged like `use X as Y`.
+      importAliased: true,
+      importLocal: 'DS',
     });
     expect(result!.relationships).toContainEqual({
       srcName: 'UseCase.php',
