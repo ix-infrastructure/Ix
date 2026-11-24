@@ -436,6 +436,43 @@ function run(${alias} $a): void {
         .filter(edge => !edge.startsWith('IMPORTS '))).toEqual([]);
     });
 
+    it.each([
+      ['use App\\Models\\Account as Acct;'],
+      ['use App\\Models\\{Account as Acct};'],
+    ])('keeps an aliased class in scope for untyped member calls (%s)', (use) => {
+      // The receiver is untyped, so `label` resolves by name through the
+      // import scope. The aliased class's file must stay in that scope, as it
+      // is for a plain use; an unrelated `label` elsewhere must not win.
+      const thing = parseFile(
+        '/repo/other/Thing.php',
+        '<?php\nnamespace Other;\nclass Thing { public function label(): string { return \'\'; } }\n',
+      )!;
+      const src = (u: string, name: string) => `<?php\nnamespace App;\n${u}\nfunction run(): void {\n    $a = new ${name}();\n    $a->label();\n}\n`;
+      const plain = parseFile('/repo/app/Plain.php', src('use App\\Models\\Account;', 'Account'))!;
+      const aliased = parseFile('/repo/app/Aliased.php', src(use, 'Acct'))!;
+      const models = '/repo/app/Models/Account.php';
+
+      const plainEdges = to(resolveEdges([plain, account(), thing]), models);
+      expect(plainEdges).toContain('CALLS Account.label 0.9');
+      expect(to(resolveEdges([aliased, account(), thing]), models)).toEqual(plainEdges);
+      expect(to(resolveEdges([aliased, account(), thing]), '/repo/other/Thing.php')).toEqual([]);
+    });
+
+    it.each([
+      ['use App\\Models\\Account as Acct;'],
+      ['use App\\Models\\{Account as Acct};'],
+    ])('resolves the FQCN tail of an alias only through the global tier when it is unique (%s)', (use) => {
+      // With no second Account, a bare `Account` (App\Account, not indexed)
+      // may still reach the Models class by name alone, but only at the
+      // global tiers' confidence, never as if the alias had bound it.
+      const consumer = parseFile('/repo/app/Consumer.php', `<?php\nnamespace App;\n${use}\nfunction run(): void { new Account(); Account::find(1); }\n`)!;
+
+      const edges = to(resolveEdges([consumer, account()]), '/repo/app/Models/Account.php')
+        .filter(edge => !edge.startsWith('IMPORTS '));
+      expect(edges.length).toBeGreaterThan(0);
+      expect(edges.filter(edge => edge.endsWith(' 0.9'))).toEqual([]);
+    });
+
     it('leaves an aliased import that lacks its bound name unresolved', () => {
       // Hand-built or older parse results flag the alias but do not carry it;
       // the alias must not fall back to the FQCN tail (here: Legacy's binding).

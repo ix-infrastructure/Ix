@@ -7053,6 +7053,12 @@ export function resolveEdges(
 
     // Build the set of file paths this file explicitly imports.
     const importedFilePaths = new Set<string>();
+    // PHP: per imported file, the lower-cased class names this file reaches
+    // only through an alias (`use App\Models\Account as Acct;` hides
+    // `account`). The file stays in scope for its members (`$a->label()` on an
+    // untyped `$a = new Acct()`), but a bare `Account` is App\Account, so the
+    // name-based tiers must not match that class by its own name.
+    const phpAliasHidden = new Map<string, Set<string>>();
     for (const rel of result.relationships) {
       if (rel.predicate !== 'IMPORTS') continue;
       if (pythonHasRelativeModuleImport && rel.importRaw === undefined) continue;
@@ -7060,10 +7066,13 @@ export function resolveEdges(
         ? importedPhpType(srcFilePath, rel)
         : undefined;
       if (phpType) {
-        // An aliased class is reachable only through its alias, which the
-        // FQCN map resolves exactly. Its file must not widen the name scope:
-        // with `use App\Models\Account as Acct;` a bare `Account` is not it.
-        if (!rel.importAliased) for (const entry of phpType.entries) importedFilePaths.add(entry.filePath);
+        for (const entry of phpType.entries) {
+          importedFilePaths.add(entry.filePath);
+          if (!rel.importAliased) continue;
+          const hidden = phpAliasHidden.get(entry.filePath) ?? new Set<string>();
+          hidden.add(entry.typeName.toLowerCase());
+          phpAliasHidden.set(entry.filePath, hidden);
+        }
         continue;
       }
       // A helper-literal import is inferred and binds no names: it becomes an
@@ -7073,6 +7082,9 @@ export function resolveEdges(
         importedFilePaths.add(fp);
       }
     }
+
+    const phpHidesName = (fp: string, name: string): boolean =>
+      phpAliasHidden.get(fp)?.has(name.toLowerCase()) === true;
 
     // Build one-hop transitive import set.
     // Handles re-exports: baz.ts → index.ts (re-exports from bar.ts) → bar.ts
@@ -7538,6 +7550,7 @@ export function resolveEdges(
             : [...importedFilePaths];
           const qualImportMatches: string[] = [];
           for (const fp of qualifierSearchPool) {
+            if (phpHidesName(fp, qualifierPart)) continue;
             if (fileDefinesQualifiedMember(fp, qualifierPart, memberPart) || fileHasSymbol.get(fp)?.has(qualifierPart)) {
               qualImportMatches.push(fp);
             }
@@ -7621,7 +7634,8 @@ export function resolveEdges(
       }
 
       // Tier 2: import-scoped (confidence 0.9)
-      const importMatches = definersIn(importedFilePaths, importedOrder, dstName).filter(reachable);
+      const importMatches = definersIn(importedFilePaths, importedOrder, dstName)
+        .filter(fp => reachable(fp) && !phpHidesName(fp, dstName));
       const narrowedImportMatches = narrowByRepoDeps(narrowCCandidates(importMatches, srcFilePath, srcLanguage, srcName, dstName), srcFilePath);
 
       if (narrowedImportMatches.length === 1) {
