@@ -17,6 +17,21 @@ vi.mock("../resolve.js", async (importOriginal) => ({
   resetReadScope,
 }));
 
+/** A promise with its resolver exposed, for ordering steps without real clocks. */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+/**
+ * Drives `map --latch`: `taken` resolves once that map holds its lock, and the
+ * map keeps working until the test resolves `release`. A timed `--hold` races
+ * the test's own sleeps, and on a stalled runner the map finished first and the
+ * assertion saw the next state (#1165). A latch only moves when the test says.
+ */
+let mapLatch = { taken: deferred(), release: deferred() };
+
 /**
  * A stand-in command tree. The capture machinery is what is under test here,
  * not the Ix commands, and a real one would need a backend.
@@ -81,7 +96,8 @@ function createTestProgram(): Command {
     .command("map")
     .option("--hold <ms>", "keep working after taking the lock", "0")
     .option("--hang", "take the lock and never finish")
-    .action(async (opts: { hold: string; hang?: boolean }) => {
+    .option("--latch", "take the lock, then work until mapLatch.release resolves")
+    .action(async (opts: { hold: string; hang?: boolean; latch?: boolean }) => {
       const workspace = process.env.IX_TEST_WORKSPACE ?? "workspace";
       const lock = acquireMapLock(workspace, "ix map test");
       if (!lock) {
@@ -89,7 +105,12 @@ function createTestProgram(): Command {
         return;
       }
       if (opts.hang) await new Promise(() => {});
-      await new Promise((resolve) => setTimeout(resolve, Number(opts.hold)));
+      if (opts.latch) {
+        mapLatch.taken.resolve();
+        await mapLatch.release.promise;
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, Number(opts.hold)));
+      }
       // Whether the lock this command took is still its own by the time it
       // finishes — anything releasing it mid-run reopens the window.
       console.log(existsSync(lockPathForTest(workspace)) ? "mapped" : "lock-taken-mid-run");
@@ -339,17 +360,27 @@ describe("in-process ix runner", () => {
         abortSettleMs: 0,
       });
 
-      // Abandoned at 40ms, grace fires at ~100ms, still working until ~400ms.
-      // The grace drops the exit-code distrust; the lock is a separate lifetime
-      // and stays with the command that is still using it.
-      expect((await run(["map", "--hold", "400"], 40)).ok).toBe(false);
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      mapLatch = { taken: deferred(), release: deferred() };
+      resetReadScope.mockClear();
+      try {
+        // Abandoned at 40ms, grace fires at ~100ms, and still working until the
+        // latch is released — however slow the runner, it cannot finish early.
+        // The grace drops the exit-code distrust; the lock is a separate
+        // lifetime and stays with the command that is still using it.
+        expect((await run(["map", "--latch"], 40)).ok).toBe(false);
+        await mapLatch.taken.promise;
+        // Only the grace invalidates an unsettled map, so this is the grace
+        // having fired, not a guess at how long it takes.
+        await vi.waitFor(() => expect(resetReadScope).toHaveBeenCalled(), { timeout: 5_000 });
 
-      // An unrelated command completing must not take the running map's lock
-      // with it — releasing everything held is what did, one call later than
-      // the grace itself.
-      expect((await run(["say", "unrelated"], 5_000)).stdout).toBe("out:unrelated\n");
-      expect((await run(["map"], 5_000)).stdout).toBe("coalesced\n");
+        // An unrelated command completing must not take the running map's lock
+        // with it — releasing everything held is what did, one call later than
+        // the grace itself.
+        expect((await run(["say", "unrelated"], 5_000)).stdout).toBe("out:unrelated\n");
+        expect((await run(["map"], 5_000)).stdout).toBe("coalesced\n");
+      } finally {
+        mapLatch.release.resolve();
+      }
     });
   });
 
@@ -359,13 +390,26 @@ describe("in-process ix runner", () => {
         version: "test-version",
         createProgram: createTestProgram,
         orphanGraceMs: 40,
+        abortSettleMs: 0,
       });
+      mapLatch = { taken: deferred(), release: deferred() };
+      resetReadScope.mockClear();
+      const workspace = process.env.IX_TEST_WORKSPACE ?? "workspace";
 
       // The other direction: holding every lock back to protect a running
       // command stranded the ones whose command had genuinely finished, and the
       // next ix_map coalesced forever. Ownership is what lets both hold.
-      await run(["map", "--hold", "250"], 30);
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      try {
+        await run(["map", "--latch"], 30);
+        await mapLatch.taken.promise;
+        // Overran its grace: the grace has fired while the map still runs.
+        await vi.waitFor(() => expect(resetReadScope).toHaveBeenCalled(), { timeout: 5_000 });
+        expect(existsSync(lockPathForTest(workspace))).toBe(true);
+      } finally {
+        mapLatch.release.resolve();
+      }
+      // Now it finishes; its settle releases its own lock.
+      await vi.waitFor(() => expect(existsSync(lockPathForTest(workspace))).toBe(false), { timeout: 5_000 });
 
       expect((await run(["map"], 5_000)).stdout).toBe("mapped\n");
     });

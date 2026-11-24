@@ -8,11 +8,13 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Command } from "commander";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { PassThrough } from "node:stream";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildHelpText } from "../help-text.js";
 import { OSS_FALLBACK_TABLE, registerOssFallbacks } from "../register/oss-fallbacks.js";
 import { planStartup } from "../register/oss-table.js";
 import { registerOssCommands } from "../register/oss.js";
+import { readStdin } from "../memory-render.js";
 
 /**
  * `ix note` and `ix session` with Ix Pro absent: OSS answers them against the
@@ -159,8 +161,11 @@ describe("ix note against the local backend (Pro absent)", () => {
     const off = await ix(["note", "--json"], "later text", home, { env: { IX_STDIN_IDLE_MS: "0" }, delayMs: 800 });
     expect(off.status).toBe(0);
     seen = [];
-    // A short override fires before the text comes, and nothing is written.
-    const idle = await ix(["note", "--json"], "too late", home, { env: { IX_STDIN_IDLE_MS: "200" }, delayMs: 1500 });
+    // A short override fires on a pipe that stays open and silent, and nothing is written.
+    // The text never comes while the child lives (the delayed write is dropped once it closes):
+    // a delay counted from spawn could otherwise land before a slow-starting CLI even reads
+    // stdin, and the note would be written (#1165). The timing itself is pinned in-process below.
+    const idle = await ix(["note", "--json"], "too late", home, { env: { IX_STDIN_IDLE_MS: "200" }, delayMs: 600_000 });
     expect(idle.status).toBe(1);
     expect(idle.stderr).toContain("No input on stdin");
     expect(seen).toEqual([]);
@@ -332,5 +337,59 @@ describe("displayEndpoint", () => {
     expect(displayEndpoint("https://user:s3cret@tunnel.example/org/acme/?token=abc#x")).toBe("https://tunnel.example/org/acme");
     expect(displayEndpoint("http://localhost:8090")).toBe("http://localhost:8090");
     expect(displayEndpoint("not a url")).toBe("(unparseable endpoint)");
+  });
+});
+
+/**
+ * The IX_STDIN_IDLE_MS bound, measured from when readStdin starts waiting. The
+ * end-to-end case above can only count from spawn, so it cannot say anything
+ * about timing on a slow runner; this drives readStdin in-process on a fake
+ * stdin and fake timers, so every step happens exactly when the test says.
+ */
+describe("readStdin idle bound (in-process)", () => {
+  let stdin: PassThrough;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    stdin = new PassThrough();
+    vi.spyOn(process, "stdin", "get").mockReturnValue(stdin as unknown as typeof process.stdin);
+    vi.stubEnv("IX_STDIN_IDLE_MS", "200");
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it("gives up after IX_STDIN_IDLE_MS of silence, and only then", async () => {
+    const outcome = vi.fn();
+    const read = readStdin().then((v) => outcome("ok", v), (e: Error) => outcome("err", e.message));
+    await vi.advanceTimersByTimeAsync(199);
+    expect(outcome).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await read;
+    expect(outcome).toHaveBeenCalledWith("err", expect.stringContaining("No input on stdin"));
+    // Text arriving after it gave up is not read.
+    expect(stdin.listenerCount("data")).toBe(0);
+  });
+
+  it("takes text that arrives inside the bound, and every chunk restarts it", async () => {
+    const read = readStdin();
+    await vi.advanceTimersByTimeAsync(150);
+    stdin.write("late ");
+    await vi.advanceTimersByTimeAsync(150);
+    stdin.write("text");
+    await vi.advanceTimersByTimeAsync(150);
+    stdin.end();
+    await expect(read).resolves.toBe("late text");
+  });
+
+  it("waits indefinitely when IX_STDIN_IDLE_MS is 0", async () => {
+    vi.stubEnv("IX_STDIN_IDLE_MS", "0");
+    const read = readStdin();
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    stdin.end("much later");
+    await expect(read).resolves.toBe("much later");
   });
 });
