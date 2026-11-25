@@ -213,7 +213,7 @@ export function describeEmptyCompletedMap(
   // much was ingested (Ix#1167). Name the scope that was sent: it is the one
   // fact the user cannot see, and the language guess below is wrong for it.
   if (scope.systemId) {
-    return `Backend reported ${result.outcome}, but mapped 0 files after local ingest found ${files} (${patches} ${patchWord} committed). The map was scoped to system ${scope.systemId}, the system the backend has this workspace in, and none of the workspace's files carry that system. Run 'ix ingest <root> --force' to register the workspace with the stitcher again. ${tail}`;
+    return `Backend reported ${result.outcome}, but mapped 0 files after local ingest found ${files} (${patches} ${patchWord} committed). The map was scoped to system ${scope.systemId}, and the workspace's files may not carry that system. If the workspace was joined to it by the stitcher, run 'ix ingest <root> --force' to register it again. ${tail}`;
   }
 
   return `Backend reported ${result.outcome}, but mapped 0 files after local ingest found ${files} (${patches} ${patchWord} committed). The source graph was ingested, but no architecture hierarchy was created. The active backend may not map this source language yet. ${tail}`;
