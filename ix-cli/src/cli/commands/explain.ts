@@ -1,5 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
+import { overloadGraph } from "../overload-group.js";
 import type { Command } from "commander";
 import { IxClient } from "../../client/api.js";
 import { createClient } from "../../client/factory.js";
@@ -35,7 +36,7 @@ export function registerExplainCommand(program: Command): void {
     .addHelpText("after", "\nExamples:\n  ix explain IngestionService\n  ix explain expand --path memory-layer\n  ix explain verify_token --kind function --format json\n  ix explain IxClient --raw\n" + EXIT_CODES_HELP)
     .action(async (symbol: string, opts: { kind?: string; path?: string; pick?: number; strict?: boolean; suggest?: boolean; format: string; raw?: boolean }) => {
       const client = createClient({ query: true });
-      const resolveOpts = { suggest: opts.suggest, suggestCommand: "explain", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict };
+      const resolveOpts = { suggest: opts.suggest, suggestCommand: "explain", missStarted: performance.now(), kind: opts.kind, path: opts.path, pick: opts.pick, strict: opts.strict, ...(opts.raw ? {} : { overloads: "all" as const }) };
       const found = await resolveFileOrReport(client, symbol, resolveOpts, opts.format);
       if (!found) return;
       const target = shownTarget(found);
@@ -56,7 +57,9 @@ export function registerExplainCommand(program: Command): void {
       // The workspace health check runs alongside: cached per backend
       // revision, so on a warm cache it is one ~10 ms request in parallel.
       const healthCheck = checkGraphHealth(client, activeReadScope());
-      const facts = await collectFacts(client, target.id, target.name, target.kind);
+      // The definition is the first overload's; who calls the method and what
+      // it calls are every overload's (#1139).
+      const facts = await collectFacts(overloadGraph(client, [found]), target.id, target.name, target.kind);
       const health = worseHealth(await healthCheck, assessTargetStructure(facts));
       const degraded = isUnhealthy(health);
       let role = inferRole(facts);

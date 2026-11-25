@@ -14,7 +14,8 @@ import type {
   UpsertEdgeOp,
 } from './schema.js';
 import { resolveEdges } from './index.js';
-import type { FileParseResult, ParsedEntity, ResolutionTier, ResolvedEdge } from './index.js';
+import { javaMayInherit, selectJavaOverloads, type JavaInherit } from './java-overloads.js';
+import type { FileParseResult, ParsedEntity, ParsedRelationship, ResolutionTier, ResolvedEdge } from './index.js';
 
 // ---------------------------------------------------------------------------
 // Deterministic UUID from a string (matches existing CLI convention)
@@ -364,16 +365,31 @@ export function buildPatchWithResolution(
     confidence: number;
     tier: ResolutionTier | undefined;
   }>();
+  // Java (#1139): the overloads resolveEdges chose for a relationship, by
+  // `${srcIdentityKey ?? ''}\0${lookup key}`: the identity key of each, or
+  // undefined for the first overload. Kept only where some edge names a later
+  // overload; every other relationship resolves through `edgeResolution` alone.
+  const overloadTargets = new Map<string, Array<string | undefined>>();
   for (const edge of resolvedEdges) {
     if (edge.srcFilePath !== result.filePath) continue;
     const callKind = edge.phpCallKind ? `:${edge.phpCallKind}` : '';
-    edgeResolution.set(`${edge.srcName}:${edge.predicate}:${edge.dstName}${callKind}`, {
+    const key = `${edge.srcName}:${edge.predicate}:${edge.dstName}${callKind}`;
+    edgeResolution.set(key, {
       dstFilePath: edge.dstFilePath,
       dstQualifiedKey: edge.dstQualifiedKey,
       confidence: edge.confidence,
       tier: edge.tier,
     });
+    const targetsKey = `${edge.srcIdentityKey ?? ''}\0${key}`;
+    const targets = overloadTargets.get(targetsKey);
+    if (!targets) overloadTargets.set(targetsKey, [edge.dstIdentityKey]);
+    else if (!targets.includes(edge.dstIdentityKey)) targets.push(edge.dstIdentityKey);
   }
+  for (const [key, targets] of overloadTargets) {
+    if (targets.every(target => target === undefined)) overloadTargets.delete(key);
+  }
+  // This file's own overloads, for the calls that stay inside it.
+  const localOverloads = new Map<string, string[]>(result.overloads ?? []);
 
   const { entities, chunks } = result;
   // A helper-literal import (see ParsedRelationship.importVia) is inferred from a
@@ -452,17 +468,29 @@ export function buildPatchWithResolution(
     return name;
   }
 
+  // The key a relationship's source node id is folded from. `srcIdentityKey`
+  // is set where the source is an entity with its own identity (a Java
+  // overload after the first); the name alone would land on the first overload.
+  const relationshipSrcKey = (r: ParsedRelationship): string =>
+    r.srcIdentityKey ?? resolveKey(r.srcName);
+
   // UpsertNode for each entity (deduplicated by id — first occurrence wins)
   const seenNodeIds = new Set<string>();
   for (const e of entities) {
-    const qk = entityQKey.get(e)!;
+    const qk = e.identityKey ?? entityQKey.get(e)!;
     const id = nodeId(idPath, qk);
     if (!seenNodeIds.has(id)) {
       seenNodeIds.add(id);
       const lines = { line_start: e.lineStart, line_end: e.lineEnd, language: e.language };
       const attrs: FileNodeAttrs | SymbolNodeAttrs = e.kind === 'file'
         ? { ...lines, role: result.fileRole.role, role_confidence: result.fileRole.role_confidence, role_signals: result.fileRole.role_signals, ...(result.hasParseErrors ? { parse_errors: true } : {}) }
-        : { ...lines, role: result.fileRole.role, role_source: 'inherited_from_file' };
+        : {
+            ...lines, role: result.fileRole.role, role_source: 'inherited_from_file',
+            // A later overload names the node of the first declaration of its
+            // key, which is the id its own bare key folds to.
+            ...(e.identityKey && e.overloadSignature !== undefined ? { overload_of: nodeId(idPath, entityQKey.get(e)!) } : {}),
+            ...(e.overloadSignature !== undefined ? { overload_signature: e.overloadSignature } : {}),
+          };
       ops.push({
         type: 'UpsertNode',
         id,
@@ -503,7 +531,7 @@ export function buildPatchWithResolution(
     // Chunk -[DEFINES]-> Symbol (only for named chunks whose symbol this patch
     // writes; any other would point at a node that does not exist)
     if (chunk.name !== null) {
-      const symbolKey = chunk.container ? `${chunk.container}.${chunk.name}` : chunk.name;
+      const symbolKey = chunk.identityKey ?? (chunk.container ? `${chunk.container}.${chunk.name}` : chunk.name);
       const symbolNid = nodeId(idPath, symbolKey);
       if (seenNodeIds.has(symbolNid)) ops.push({
         type: 'UpsertEdge',
@@ -558,6 +586,8 @@ export function buildPatchWithResolution(
     externalPkg: { pkgName: string; funcName: string } | null;
     /** Set when resolveEdges tied the edge to another file. */
     resolution: { confidence: number; tier: ResolutionTier | undefined } | null;
+    /** Set when the destination is a Java overload after the first. */
+    overload?: true;
   } => {
     const baseKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
     const salted = r.phpCallKind ? `${baseKey}:${r.phpCallKind}` : baseKey;
@@ -598,6 +628,63 @@ export function buildPatchWithResolution(
     seenNodeIds.has(srcNodeId) &&
     (dst.resolution !== null || dst.externalPkg !== null || seenNodeIds.has(dst.dstNodeId));
 
+  /**
+   * Whether the class of the Java method `key` may inherit a method of that
+   * name which this file's overload table does not list (`javaMayInherit`).
+   * Only this file is known here, so a supertype is seen when it is a
+   * top-level type declared in it; a nested one, or one declared anywhere
+   * else, may hold such a method.
+   */
+  const inheritHere = new Map<string, JavaInherit>();
+  const mayInheritHere = (key: string): JavaInherit => {
+    const known = inheritHere.get(key);
+    if (known !== undefined) return known;
+    const dot = key.lastIndexOf('.');
+    // Heritage is recorded by a class's simple name.
+    const simple = (type: string): string => type.slice(type.lastIndexOf('.') + 1);
+    const inherit = javaMayInherit<string>(
+      key.slice(0, Math.max(dot, 0)),
+      key.slice(dot + 1),
+      child => (result.receiverHeritage ?? [])
+        .filter(([name]) => name === simple(child))
+        .map(([, parent]) => (!parent.includes('.') && allQKeys.has(parent) ? parent : undefined)),
+      (type, member) => allQKeys.has(`${type}.${member}`),
+      type => type,
+    );
+    inheritHere.set(key, inherit);
+    return inherit;
+  };
+
+  /**
+   * Every destination of a relationship: `resolveDst`'s, unless it is a Java
+   * call whose sites select overloads other than the first (#1139). Then there
+   * is one destination per overload selected. The first overload's is
+   * `resolveDst`'s own, so its edge keeps the id it always had; a later
+   * overload's is that overload's node, in the same file.
+   */
+  const resolveDsts = (r: (typeof relationships)[number], dstKey: string): Array<ReturnType<typeof resolveDst>> => {
+    const first = resolveDst(r, dstKey);
+    if (r.predicate !== 'CALLS' || first.externalPkg) return [first];
+    if (first.resolution) {
+      const baseKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
+      const salted = r.phpCallKind ? `${baseKey}:${r.phpCallKind}` : baseKey;
+      const matched = edgeResolution.has(salted) ? salted : baseKey;
+      const targets = overloadTargets.get(`${r.srcIdentityKey ?? ''}\0${matched}`);
+      if (!targets) return [first];
+      const { dstFilePath } = edgeResolution.get(matched)!;
+      return targets.map(target => target === undefined
+        ? first
+        : { ...first, dstNodeId: dstNodeIdInRepo(dstFilePath, target), overload: true as const });
+    }
+    // Same file: resolveEdges leaves the call to this function, so the choice
+    // is made here, from the same table by the same rule.
+    const signatures = r.callShapes?.length ? localOverloads.get(dstKey) : undefined;
+    if (!signatures) return [first];
+    return selectJavaOverloads(signatures, r.callShapes!, mayInheritHere(dstKey)).map(index => index === 0
+      ? first
+      : { ...first, dstNodeId: nodeId(idPath, `${dstKey}(${signatures[index]})`), overload: true as const });
+  };
+
   // #1020: the key of a call that has no target in this file. It names no
   // entity, so the edge is dropped and the call recorded as unresolved.
   const noTargetKey = (name: string): string => `\0no-target\0${name}`;
@@ -613,9 +700,10 @@ export function buildPatchWithResolution(
     return keys.length === 1 ? keys[0] : noTargetKey(name);
   }
 
-  // The destination key every edge id folded before #1020.
+  // The destination key every edge id folded before #1020. A CONTAINS edge to
+  // a Java overload names that overload's own node by its identity key (#1139).
   const legacyDstKey = (r: (typeof relationships)[number]): string =>
-    r.predicate === 'CONTAINS' ? resolveKey(r.dstName, r.srcName) : resolveKey(r.dstName);
+    r.predicate === 'CONTAINS' ? r.dstIdentityKey ?? resolveKey(r.dstName, r.srcName) : resolveKey(r.dstName);
 
   const relationshipDstKey = (r: (typeof relationships)[number]): string => {
     // A call to a parameter or local names nothing this file declares.
@@ -662,16 +750,18 @@ export function buildPatchWithResolution(
   {
     const dstsByTuple = new Map<string, Set<string>>();
     for (const r of relationships) {
-      const srcKey = resolveKey(r.srcName);
+      const srcKey = relationshipSrcKey(r);
       const dstKey = relationshipDstKey(r);
-      const dst = resolveDst(r, dstKey);
-      const edgeDstKey = edgeIdDstKey(r, dstKey, dst);
-      // Only edges that are written can collide.
-      if (!keepEdge(nodeId(idPath, srcKey), dst)) continue;
-      const tuple = edgeIdTuple(srcKey, edgeDstKey, r.predicate);
-      let seen = dstsByTuple.get(tuple);
-      if (!seen) { seen = new Set<string>(); dstsByTuple.set(tuple, seen); }
-      seen.add(dst.dstNodeId);
+      // A later overload's edge always folds its destination into its id
+      // (below), so it cannot collide and must not salt the first overload's.
+      for (const dst of resolveDsts(r, dstKey)) {
+        // Only edges that are written can collide.
+        if (dst.overload || !keepEdge(nodeId(idPath, srcKey), dst)) continue;
+        const tuple = edgeIdTuple(srcKey, edgeIdDstKey(r, dstKey, dst), r.predicate);
+        let seen = dstsByTuple.get(tuple);
+        if (!seen) { seen = new Set<string>(); dstsByTuple.set(tuple, seen); }
+        seen.add(dst.dstNodeId);
+      }
     }
     for (const [tuple, dsts] of dstsByTuple) {
       if (dsts.size > 1) collidingIdTuples.add(tuple);
@@ -679,60 +769,63 @@ export function buildPatchWithResolution(
   }
 
   for (const r of relationships) {
-    const srcKey = resolveKey(r.srcName);
+    const srcKey = relationshipSrcKey(r);
     const dstKey = relationshipDstKey(r);
 
-    const dst = resolveDst(r, dstKey);
-    const { dstNodeId, externalPkg, resolution } = dst;
-    if (!keepEdge(nodeId(idPath, srcKey), dst)) {
+    const dsts = resolveDsts(r, dstKey).filter(dst => keepEdge(nodeId(idPath, srcKey), dst));
+    if (dsts.length === 0) {
       if (r.predicate === 'CALLS') unresolvedCalls.add(nodeId(idPath, srcKey), r.dstName);
       continue;
     }
-    if (externalPkg && !seenExternalNodes.has(dstNodeId)) {
-      seenExternalNodes.add(dstNodeId);
-      const externalAttrs: ExternalNodeAttrs = { package: externalPkg.pkgName, external: true, language: result.language };
-      ops.push({
-        type: 'UpsertNode',
-        id: dstNodeId,
-        kind: 'function',
-        name: externalPkg.funcName,
-        attrs: externalAttrs,
-      });
-    }
-
-    const edgeDstKey = edgeIdDstKey(r, dstKey, dst);
-    // The phpCallKind salt above exists so `foo()` and `Bar::foo()` keep distinct
-    // ids when they resolve to *different* targets. When they resolve to the same
-    // node it instead mints two ids for one edge, and since the dedup downstream
-    // keys on id, both commit. An edge is identified by (src, dst, predicate) —
-    // two of those with empty attrs are indistinguishable in the graph.
-    const edgeIdentity = `${nodeId(idPath, srcKey)}\x00${dstNodeId}\x00${r.predicate}`;
-    const emitted = emittedEdgeIdentities.get(edgeIdentity);
-    if (emitted) {
-      // A typed relationship confirming an edge the call already wrote.
-      if (r.receiverOnly && resolution) {
-        emitted.attrs = { confidence: resolution.confidence, ...(resolution.tier ? { tier: resolution.tier } : {}) };
+    for (const dst of dsts) {
+      const { dstNodeId, externalPkg, resolution } = dst;
+      if (externalPkg && !seenExternalNodes.has(dstNodeId)) {
+        seenExternalNodes.add(dstNodeId);
+        const externalAttrs: ExternalNodeAttrs = { package: externalPkg.pkgName, external: true, language: result.language };
+        ops.push({
+          type: 'UpsertNode',
+          id: dstNodeId,
+          kind: 'function',
+          name: externalPkg.funcName,
+          attrs: externalAttrs,
+        });
       }
-      continue;
+
+      const edgeDstKey = edgeIdDstKey(r, dstKey, dst);
+      // The phpCallKind salt above exists so `foo()` and `Bar::foo()` keep distinct
+      // ids when they resolve to *different* targets. When they resolve to the same
+      // node it instead mints two ids for one edge, and since the dedup downstream
+      // keys on id, both commit. An edge is identified by (src, dst, predicate) —
+      // two of those with empty attrs are indistinguishable in the graph.
+      const edgeIdentity = `${nodeId(idPath, srcKey)}\x00${dstNodeId}\x00${r.predicate}`;
+      const emitted = emittedEdgeIdentities.get(edgeIdentity);
+      if (emitted) {
+        // A typed relationship confirming an edge the call already wrote.
+        if (r.receiverOnly && resolution) {
+          emitted.attrs = { confidence: resolution.confidence, ...(resolution.tier ? { tier: resolution.tier } : {}) };
+        }
+        continue;
+      }
+      // Only a colliding tuple is salted, so every other edge keeps the id it
+      // had before this change. So is the edge to a Java overload after the
+      // first: the relationship's unsalted id belongs to the first overload.
+      const idDstKey = dst.overload || collidingIdTuples.has(edgeIdTuple(srcKey, edgeDstKey, r.predicate))
+        ? `${edgeDstKey}\x00${dstNodeId}`
+        : edgeDstKey;
+      const edgeAttrs: ResolvedEdgeAttrs = resolution
+        ? { confidence: resolution.confidence, ...(resolution.tier ? { tier: resolution.tier } : {}) }
+        : {};
+      const edgeOp: UpsertEdgeOp = {
+        type: 'UpsertEdge',
+        id: edgeId(idPath, srcKey, idDstKey, r.predicate),
+        src: nodeId(idPath, srcKey),
+        dst: dstNodeId,
+        predicate: r.predicate,
+        attrs: edgeAttrs,
+      };
+      emittedEdgeIdentities.set(edgeIdentity, edgeOp);
+      ops.push(edgeOp);
     }
-    // Only a colliding tuple is salted, so every other edge keeps the id it
-    // had before this change.
-    const idDstKey = collidingIdTuples.has(edgeIdTuple(srcKey, edgeDstKey, r.predicate))
-      ? `${edgeDstKey}\x00${dstNodeId}`
-      : edgeDstKey;
-    const edgeAttrs: ResolvedEdgeAttrs = resolution
-      ? { confidence: resolution.confidence, ...(resolution.tier ? { tier: resolution.tier } : {}) }
-      : {};
-    const edgeOp: UpsertEdgeOp = {
-      type: 'UpsertEdge',
-      id: edgeId(idPath, srcKey, idDstKey, r.predicate),
-      src: nodeId(idPath, srcKey),
-      dst: dstNodeId,
-      predicate: r.predicate,
-      attrs: edgeAttrs,
-    };
-    emittedEdgeIdentities.set(edgeIdentity, edgeOp);
-    ops.push(edgeOp);
   }
   unresolvedCalls.applyTo(ops);
 
@@ -744,7 +837,7 @@ export function buildPatchWithResolution(
   for (const r of relationships) {
     // A receiver-only typed call claims nothing the call's own relationship does not.
     if (r.receiverOnly) continue;
-    const srcKey = resolveKey(r.srcName);
+    const srcKey = relationshipSrcKey(r);
     const entityId = nodeId(idPath, srcKey);
     const field = `${r.predicate.toLowerCase()}:${r.dstName}`;
     const claimIdentity = `${entityId}\x00${field}`;

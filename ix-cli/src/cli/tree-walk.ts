@@ -72,6 +72,11 @@ export function createLimiter(max: number): Limiter {
 
 export interface TreeWalkOptions<T extends { children: T[] }> {
   rootId: string;
+  /**
+   * Other ids the root stands for (the overloads of a root that is an
+   * overloaded method): reaching one of them is reaching the root again.
+   */
+  rootAliases?: readonly string[];
   maxDepth: number;
   maxNodes: number;
   /** A node's children are merged in this order. */
@@ -213,8 +218,8 @@ export function splitByPredicate(
   return predicates.map((_, i) => ids.filter((id) => listed[i].has(id)).map((id) => byId.get(id)));
 }
 
-function newState(rootId: string): WalkState {
-  return { visited: new Set([rootId]), nodesVisited: 0, truncated: false, depthLimited: false, maxDepthReached: 0 };
+function newState(opts: { rootId: string; rootAliases?: readonly string[] }): WalkState {
+  return { visited: new Set([opts.rootId, ...(opts.rootAliases ?? [])]), nodesVisited: 0, truncated: false, depthLimited: false, maxDepthReached: 0 };
 }
 
 /** Count and mark one neighbour, the way both walk orders do. */
@@ -237,7 +242,7 @@ function admit<T extends { children: T[] }>(
 async function depthFirst<T extends { children: T[] }>(
   opts: TreeWalkOptions<T>, neighbours: Neighbours,
 ): Promise<TreeWalkResult<T>> {
-  const state = newState(opts.rootId);
+  const state = newState(opts);
 
   async function expand(nodeId: string, depth: number): Promise<T[]> {
     // Stopping at the depth bound is not the same as cutting something off:
@@ -284,7 +289,7 @@ async function depthFirst<T extends { children: T[] }>(
 async function breadthFirst<T extends { children: T[] }>(
   opts: TreeWalkOptions<T>, neighbours: Neighbours,
 ): Promise<TreeWalkResult<T>> {
-  const state = newState(opts.rootId);
+  const state = newState(opts);
   const tree: T[] = [];
   const queue: Array<{ id: string; depth: number; into: T[] }> = [];
   const enqueue = (id: string, depth: number, into: T[]): void => {

@@ -178,6 +178,8 @@ import { classifyFileRole } from './role-classifier.js';
 import type { RoleClassification } from './role-classifier.js';
 import { callReceiver, collectReceiverFacts } from './receiver-types.js';
 import { summarySignature, type FileSummary } from './symbol-index.js';
+import { javaMayInherit, selectJavaOverloads, type CallShape, type JavaInherit } from './java-overloads.js';
+export type { CallShape } from './java-overloads.js';
 export type { FileSummary } from './symbol-index.js';
 
 // ---------------------------------------------------------------------------
@@ -199,6 +201,21 @@ export interface ParsedEntity {
    * index entities under their fully-qualified path.
    */
   packageScope?: string;
+  /**
+   * Node identity only, read by the patch builder alone: the key this entity's
+   * node id is folded from when it is not `Container.name`. Set on a Java
+   * overload after the first (`Container.name(T1,T2)`, see
+   * `javaErasedSignature`), so each overload is its own node. Resolution never
+   * reads it: every overload keeps the one qualified key `Container.name`.
+   */
+  identityKey?: string;
+  /**
+   * The erased parameter list of a Java overload (`String,int`, `` for none),
+   * written to its node as `overload_signature`. Set on every overload after
+   * the first, and on the first method once the file has a later one; a method
+   * that is not overloaded has none.
+   */
+  overloadSignature?: string;
 }
 
 /** A semantic code span extracted from the AST. The primary LLM retrieval unit. */
@@ -216,12 +233,31 @@ export interface ParsedChunk {
   language: string;
   /** Name of the directly enclosing class/trait/interface, if any. */
   container?: string;
+  /** The `identityKey` of the entity this chunk defines, when it has one. */
+  identityKey?: string;
 }
 
 export interface ParsedRelationship {
   srcName: string;
   dstName: string;
   predicate: EdgePredicate;  // "CONTAINS" | "CALLS" | "IMPORTS" | "EXTENDS" | "REFERENCES"
+  /**
+   * Node identity only, read by the patch builder alone: the `identityKey` of
+   * the entity at that end, when it has one (see ParsedEntity.identityKey).
+   * `srcIdentityKey` is on what a Java overload after the first calls or
+   * references; `dstIdentityKey` on the CONTAINS relationship to it. Resolution
+   * reads `srcName` / `dstName` and never these.
+   */
+  srcIdentityKey?: string;
+  dstIdentityKey?: string;
+  /**
+   * Java CALLS only: each distinct way the call sites folded into this
+   * relationship pass arguments. Once the name has resolved to a method with
+   * overloads, these pick which of them the edge goes to (#1139). Absent in a
+   * parse result from before it existed, and then the first overload is the
+   * target, as it was.
+   */
+  callShapes?: CallShape[];
   // For path-based IMPORTS only: the unwrapped raw import specifier exactly as
   // written (e.g. "./core", "../util/x", "@nestjs/core", "alpha"), BEFORE it is
   // flattened to a bare stem. The multi-repo dependency gate needs this to tell a
@@ -391,6 +427,15 @@ export interface FileParseResult {
    * another file, a same-named method in this file is not the target.
    */
   receiverTypedCalls?: string[];
+  /**
+   * Java: `[Container.name, signatures]` for each method declared more than
+   * once with different parameters: the erased parameter list of each
+   * overload (`String,int`, `Map,T...`), in declaration order. The first is
+   * the node of the bare key; each later one is the node whose identity key is
+   * `Container.name(signature)`. Constructors are left out: a `new T()` stays
+   * on the class node.
+   */
+  overloads?: Array<[string, string[]]>;
   /**
    * TypeScript, not a declaration file: the type names this file puts in the
    * global scope (a script's top-level types, a module's `declare global {}`).
@@ -3995,6 +4040,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       endByte: number;
       language: SupportedLanguages;
       container?: string;
+      identityKey?: string;
     }> = [];
 
     // Track class ranges for containment: [name, startLine, endLine]
@@ -4063,6 +4109,37 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     const callRelationships = new Map<string, ParsedRelationship>();
     // Java: per `${scope}\0${callKey}`, whether every call site has a typed receiver.
     const javaTypedSites = new Map<string, boolean>();
+    // Java: the argument shape of each call node (a call matches two patterns),
+    // and the shapes already on each relationship.
+    const javaCallShapes = new Map<number, { key: string; shape: CallShape } | null>();
+    const javaShapesSeen = new Map<ParsedRelationship, Set<string>>();
+    const javaCallShape = (call: any): { key: string; shape: CallShape } | null => {
+      if (call?.type !== 'method_invocation') return null;
+      let known = javaCallShapes.get(call.id);
+      if (known === undefined) {
+        const args = (call.childForFieldName('arguments')?.namedChildren ?? [])
+          .filter((arg: any) => arg.type !== 'line_comment' && arg.type !== 'block_comment');
+        const argTypes: Array<string | null> = args.map((arg: any) => {
+          const type = receiverFacts?.argumentType?.(arg);
+          return type ? eraseJavaType(type) || null : null;
+        });
+        const typed = argTypes.some(type => type !== null);
+        known = {
+          key: typed ? `${args.length}:${argTypes.map(type => type ?? '').join(',')}` : `${args.length}`,
+          shape: { argc: args.length, ...(typed ? { argTypes } : {}) },
+        };
+        javaCallShapes.set(call.id, known);
+      }
+      return known;
+    };
+    const addJavaCallShape = (rel: ParsedRelationship | undefined, call: { key: string; shape: CallShape } | null): void => {
+      if (!rel || !call) return;
+      let seen = javaShapesSeen.get(rel);
+      if (!seen) { seen = new Set(); javaShapesSeen.set(rel, seen); }
+      if (seen.has(call.key)) return;
+      seen.add(call.key);
+      (rel.callShapes ??= []).push(call.shape);
+    };
     // JS/TS: helper-literal module paths already emitted (see importVia).
     const jsTsHelperImports = new Set<string>();
     if (isJsTs) {
@@ -4133,6 +4210,15 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       }
     }
     const seenSignatures = new Set<string>();
+    // Java: `Container.name` → the erased parameter signature of its first
+    // declaration in this file, which is the one that keeps the bare key.
+    const javaFirstSignature = new Map<string, string>();
+    // Java: `Container.name` → the distinct signatures of its method
+    // declarations, in order (FileParseResult.overloads).
+    const javaSignatures = new Map<string, string[]>();
+    // The entity of that first declaration, when it is a method. A first
+    // constructor is merged into its class node and is not recorded.
+    const javaFirstMethod = new Map<string, ParsedEntity>();
 
     // --- First pass: collect definitions ---
     for (const match of pass1Matches) {
@@ -4218,7 +4304,43 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           ? heritageClassCapture.node.text
           : (enclosing ?? undefined);
 
-        entities.push({
+        // Java overloads share `Container.name`, so they shared one node: the
+        // first one's lines, holding every overload's calls (#1139). The first
+        // declaration keeps that key, and with it its node id and every
+        // cross-file edge to it. A later one with a different signature gets its
+        // own identity; one with the same signature (two anonymous classes'
+        // `run()`, a duplicate from a parse error) stays merged with the
+        // declaration of that signature.
+        let identityKey: string | undefined;
+        let overloadSignature: string | undefined;
+        let firstOfKey: string | undefined;
+        if (
+          language === SupportedLanguages.Java &&
+          (defNode.type === 'method_declaration' || defNode.type === 'constructor_declaration')
+        ) {
+          const signature = javaErasedSignature(defNode);
+          if (signature !== null) {
+            const key = effectiveContainer ? `${effectiveContainer}.${name}` : name;
+            const first = javaFirstSignature.get(key);
+            if (first === undefined) {
+              javaFirstSignature.set(key, signature);
+              if (defNode.type === 'method_declaration') firstOfKey = key;
+            } else if (first !== signature) {
+              identityKey = `${key}(${signature})`;
+              overloadSignature = signature;
+              // The first overload says its signature too, now that it is one.
+              const firstMethod = javaFirstMethod.get(key);
+              if (firstMethod) firstMethod.overloadSignature = first;
+            }
+            if (defNode.type === 'method_declaration') {
+              const signatures = javaSignatures.get(key);
+              if (!signatures) javaSignatures.set(key, [signature]);
+              else if (!signatures.includes(signature)) signatures.push(signature);
+            }
+          }
+        }
+
+        const entity: ParsedEntity = {
           name,
           kind,
           lineStart,
@@ -4230,7 +4352,11 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
               ? phpNamespaceForNode(defNode, phpNamespaces.spans)
               : undefined
           ),
-        });
+          ...(identityKey ? { identityKey } : {}),
+          ...(overloadSignature !== undefined ? { overloadSignature } : {}),
+        };
+        entities.push(entity);
+        if (firstOfKey !== undefined) javaFirstMethod.set(firstOfKey, entity);
 
         pendingChunks.push({
           name,
@@ -4241,6 +4367,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           endByte,
           language,
           container: enclosing ?? undefined,
+          ...(identityKey ? { identityKey } : {}),
         });
 
         if (kind === 'class' || kind === 'interface' || kind === 'trait') {
@@ -4248,11 +4375,19 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         }
         if (!effectiveContainer && isBareMemberDefinition(defNode, kind)) bareMembers.add(name);
 
-        if (effectiveContainer) {
-          relationships.push({ srcName: effectiveContainer, dstName: name, predicate: 'CONTAINS' });
-        } else {
-          relationships.push({ srcName: fileName, dstName: name, predicate: 'CONTAINS' });
-        }
+        // A Java constructor is named after its class, which `findEnclosing`
+        // leaves out, so it has no container: the first one shares the class's
+        // key and node. A later overload is a node of its own, and it belongs
+        // to the class rather than to whatever encloses the class.
+        const containsSrc = identityKey && defNode.type === 'constructor_declaration'
+          ? findEnclosing(classRanges, lineStart, '') ?? effectiveContainer
+          : effectiveContainer;
+        relationships.push({
+          srcName: containsSrc ?? fileName,
+          dstName: name,
+          predicate: 'CONTAINS',
+          ...(identityKey ? { dstIdentityKey: identityKey } : {}),
+        });
         continue;
       }
 
@@ -4689,11 +4824,17 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         // Find enclosing function/method for the call; fall back to enclosing class
         // (e.g. calls in val/lazy val body at class level) before falling back to file.
         const callLine = callName.node.startPosition.row + 1;
-        const caller = findEnclosingDefinition(entities, callLine)
+        const callerEntity = enclosingDefinitionEntity(entities, callLine);
+        const caller = (callerEntity ? qualifiedKey(callerEntity) : null)
           ?? findEnclosing(classRanges, callLine, '')
           ?? fileName;
+        // What the call is attributed to in the graph. `caller` stays the
+        // resolution key every overload shares; a later Java overload is its
+        // own node, so its calls are de-duplicated and emitted under its own
+        // identity rather than folded into the first overload's.
+        const srcIdentity = callerEntity?.identityKey ? { srcIdentityKey: callerEntity.identityKey } : {};
 
-        const scope = caller;
+        const scope = callerEntity?.identityKey ?? caller;
         if (!seenCalls.has(scope)) seenCalls.set(scope, new Set());
         const seen = seenCalls.get(scope)!;
 
@@ -4911,6 +5052,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           seen.add(callKey);
           const rel: ParsedRelationship = {
             srcName: caller,
+            ...srcIdentity,
             dstName: effectiveCallee,
             predicate: 'CALLS',
             ...(phpCallKind ? { phpCallKind } : {}),
@@ -4925,6 +5067,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           delete callRelationships.get(bareKey)?.receiverOnly;
           if (!superCall) delete callRelationships.get(bareKey)?.superCall;
         }
+        // Java: how this site passes its arguments, on the call's relationship
+        // and on its typed one, so each can pick the overload it resolves to.
+        const javaShape = language === SupportedLanguages.Java ? javaCallShape(callCapture?.node) : null;
+        if (!builtinCall) addJavaCallShape(callRelationships.get(bareKey), javaShape);
         if (typedReceiver) {
           // `Type.member`, `receiver.member` for a factory-typed receiver, or
           // Java `Type.getB().member` for a chain.
@@ -4941,10 +5087,11 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
             if (!named.receiverType && !named.receiverFactory) Object.assign(named, receiver);
           } else if (!seen.has(typedName)) {
             seen.add(typedName);
-            const rel: ParsedRelationship = { srcName: caller, dstName: typedName, predicate: 'CALLS', ...receiver, receiverOnly: true };
+            const rel: ParsedRelationship = { srcName: caller, ...srcIdentity, dstName: typedName, predicate: 'CALLS', ...receiver, receiverOnly: true };
             relationships.push(rel);
             callRelationships.set(typedKey, rel);
           }
+          addJavaCallShape(callRelationships.get(typedKey), javaShape);
         }
         continue;
       }
@@ -4958,17 +5105,25 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         // Prefer the enclosing function/method so parameter and return-type references
         // point back to the actual caller. Fall back to class, then file.
         const refLine = refType.node.startPosition.row + 1;
-        const src = findEnclosingDefinition(entities, refLine)
+        const srcEntity = enclosingDefinitionEntity(entities, refLine);
+        const src = (srcEntity ? qualifiedKey(srcEntity) : null)
           ?? findEnclosing(classRanges, refLine, typeName)
           ?? fileName;
 
         recordJsTsImportUse('REFERENCES', src, typeName, refType.node, typeName, 'type');
 
-        if (!seenRefs.has(src)) seenRefs.set(src, new Set());
-        const seen = seenRefs.get(src)!;
+        // Per node, like calls: a later Java overload holds its own references.
+        const refScope = srcEntity?.identityKey ?? src;
+        if (!seenRefs.has(refScope)) seenRefs.set(refScope, new Set());
+        const seen = seenRefs.get(refScope)!;
         if (!seen.has(typeName)) {
           seen.add(typeName);
-          relationships.push({ srcName: src, dstName: typeName, predicate: 'REFERENCES' });
+          relationships.push({
+            srcName: src,
+            ...(srcEntity?.identityKey ? { srcIdentityKey: srcEntity.identityKey } : {}),
+            dstName: typeName,
+            predicate: 'REFERENCES',
+          });
         }
         continue;
       }
@@ -4983,8 +5138,16 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       // the relationship resolves as a member call.
       else if (callMemberOrLocal.get(bareKey) === true) rel.memberCall = true;
     }
-    const receiverTypedCalls = [...javaTypedSites].filter(([key, all]) => all && callRelationships.has(key))
-      .map(([key]) => `${callRelationships.get(key)!.srcName}\0${callRelationships.get(key)!.dstName}`);
+    // Keyed by `srcName`, which Java overloads share, while the sites above are
+    // tracked per overload: a call counts only when it is typed in every
+    // overload that makes it, as it did when the overloads were one scope.
+    const typedByCallName = new Map<string, boolean>();
+    for (const [key, all] of javaTypedSites) {
+      const rel = callRelationships.get(key);
+      const name = rel ? `${rel.srcName}\0${rel.dstName}` : `\0${key}`;
+      typedByCallName.set(name, (typedByCallName.get(name) ?? true) && all && rel !== undefined);
+    }
+    const receiverTypedCalls = [...typedByCallName].filter(([, all]) => all).map(([name]) => name);
 
     // A single relationship can represent multiple same-name uses in one scope.
     // Mark it local-only only when every captured use is shadowed; if any use still
@@ -5062,6 +5225,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       for (const [name, modulePath] of rustModuleAliases(tree.rootNode)) importAliases[name] ??= modulePath;
     }
     const tsGlobalTypes = isTsSource ? tsGlobalTypeNames(tree.rootNode) : [];
+    const javaOverloads = [...javaSignatures].filter(([, signatures]) => signatures.length > 1);
     const tsModule = isTsSource && isTsModule(tree.rootNode);
 
     return {
@@ -5086,6 +5250,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         : {}),
       ...(receiverFacts?.package ? { receiverPackage: receiverFacts.package } : {}),
       ...(receiverTypedCalls.length ? { receiverTypedCalls } : {}),
+      ...(javaOverloads.length ? { overloads: javaOverloads } : {}),
       ...(tsGlobalTypes.length ? { tsGlobalTypes } : {}),
       ...(tsModule ? { tsModule: true as const } : {}),
       ...(bareMembers.size ? { bareMembers: [...bareMembers].sort() } : {}),
@@ -5115,6 +5280,20 @@ export interface ResolvedEdge {
   /** Which resolution tier produced the edge; written on the edge with `confidence`. */
   tier?: ResolutionTier;
   phpCallKind?: ParsedRelationship['phpCallKind'];
+  /**
+   * Java CALLS to a method with overloads: the relationship's
+   * `srcIdentityKey`, when it has one. Callers that are overloads of each
+   * other share `srcName`, so this is what tells apart which of them calls
+   * which overload.
+   */
+  srcIdentityKey?: string;
+  /**
+   * Java CALLS: the identity key of the overload the call sites select, when
+   * it is not the first (`FileParseResult.overloads`). Absent: the node of
+   * `dstQualifiedKey`, as before. A relationship whose sites call several
+   * overloads resolves to one edge per overload.
+   */
+  dstIdentityKey?: string;
 }
 
 /**
@@ -5240,6 +5419,7 @@ export function summarizeParseResult(r: FileParseResult): FileSummary {
     ...(r.importAliases ? { importAliases: r.importAliases } : {}),
     ...(r.tsGlobalTypes ? { tsGlobalTypes: r.tsGlobalTypes } : {}),
     ...(r.tsModule ? { tsModule: true as const } : {}),
+    ...(r.overloads?.length ? { overloads: r.overloads } : {}),
     // Always present, so a summary written before #1020 (no field) is told
     // apart from one with no bare members.
     bareMembers: r.bareMembers ?? [],
@@ -6718,11 +6898,66 @@ export function resolveEdges(
     return as(imports.flatMap(pkg => inPackage(pkg, type)));
   }
 
+  // Java: a file's overload table by qualified key. A summary read back from
+  // disk may predate the table (or hold anything): then there is none, and
+  // every call goes to the first overload as before.
+  const javaOverloadTables = new Map<string, Map<string, string[]> | null>();
+  function javaOverloadsOf(fp: string, key: string): string[] | undefined {
+    let table = javaOverloadTables.get(fp);
+    if (table === undefined) {
+      const stored: unknown = summaries.get(fp)?.overloads;
+      table = null;
+      if (Array.isArray(stored)) {
+        table = new Map();
+        for (const entry of stored) {
+          if (Array.isArray(entry) && typeof entry[0] === 'string' && Array.isArray(entry[1]) &&
+              entry[1].length > 1 && entry[1].every((s: unknown) => typeof s === 'string')) table.set(entry[0], entry[1]);
+        }
+      }
+      javaOverloadTables.set(fp, table);
+    }
+    return table?.get(key);
+  }
+
   const receiverProviderCache = new Map<string, Array<{ fp: string; type: string }>>();
   function receiverProviders(context: string, type: string): Array<{ fp: string; type: string }> {
     const key = `${context}\0${type}`;
     if (!receiverProviderCache.has(key)) receiverProviderCache.set(key, findReceiverProviders(context, type));
     return receiverProviderCache.get(key)!;
+  }
+
+  // Java: whether the class of the method `key` in `fp` may inherit a method
+  // of that name its own overload table does not list (`javaMayInherit`). A
+  // supertype is seen when its name resolves to one top-level Java type of the
+  // repo. A nested one is not: heritage and members are looked up by a key its
+  // simple name does not match, so it would read as declaring nothing.
+  const javaInheritCache = new Map<string, JavaInherit>();
+  function javaMayInheritMember(fp: string, key: string): JavaInherit {
+    const cacheKey = `${fp}\0${key}`;
+    let known = javaInheritCache.get(cacheKey);
+    if (known === undefined) {
+      const dot = key.lastIndexOf('.');
+      type JavaType = { fp: string; type: string };
+      // Heritage is recorded by a class's simple name.
+      const simple = (type: string): string => type.slice(type.lastIndexOf('.') + 1);
+      known = javaMayInherit<JavaType>(
+        { fp, type: key.slice(0, Math.max(dot, 0)) },
+        key.slice(dot + 1),
+        child => (summaries.get(child.fp)?.receiverHeritage ?? [])
+          .filter(([name]) => name === simple(child.type))
+          .map(([, parent]) => {
+            if (parent.includes('.')) return undefined;
+            const providers = receiverProviders(child.fp, parent);
+            if (providers.length !== 1 || summaries.get(providers[0].fp)?.language !== SupportedLanguages.Java) return undefined;
+            const qualified = fileQKeys.get(providers[0].fp)?.get(providers[0].type) ?? [];
+            return qualified.length > 0 && qualified.every(q => q === providers[0].type) ? providers[0] : undefined;
+          }),
+        (type, member) => (fileQKeys.get(type.fp)?.get(member) ?? []).includes(`${type.type}.${member}`),
+        type => `${type.fp}\0${type.type}`,
+      );
+      javaInheritCache.set(cacheKey, known);
+    }
+    return known;
   }
   const goReceiverFiles = new Map<string, string[]>();
   const goPackageKey = (fp: string): string => `${nodePath.dirname(fp)}\0${summaries.get(fp)?.receiverPackage ?? ''}`;
@@ -7158,8 +7393,36 @@ export function resolveEdges(
       return typedByCall.get(`${srcName}\0${member}`) ?? [];
     };
 
+    // Java: once a call's name has resolved, by whichever tier, its call
+    // shapes pick the overload (#1139). Applied to the edges of one
+    // relationship when the loop moves on to the next, so every tier below is
+    // covered without each one knowing about overloads.
+    let overloadsOf: ParsedRelationship | undefined;
+    let overloadsFrom = resolved.length;
+    const pickOverloads = (): void => {
+      const rel = overloadsOf;
+      overloadsOf = undefined;
+      if (!rel || overloadsFrom === resolved.length) return;
+      for (const edge of resolved.splice(overloadsFrom)) {
+        const signatures = edge.predicate === 'CALLS' && rel.callShapes?.length
+          ? javaOverloadsOf(edge.dstFilePath, edge.dstQualifiedKey) : undefined;
+        if (!signatures) { resolved.push(edge); continue; }
+        // The caller's own overloads share `srcName`: say which one this is.
+        if (rel.srcIdentityKey) edge.srcIdentityKey = rel.srcIdentityKey;
+        const mayInherit = javaMayInheritMember(edge.dstFilePath, edge.dstQualifiedKey);
+        for (const index of selectJavaOverloads(signatures, rel.callShapes!, mayInherit)) {
+          resolved.push(index === 0 ? edge : { ...edge, dstIdentityKey: `${edge.dstQualifiedKey}(${signatures[index]})` });
+        }
+      }
+    };
+
     for (const rel of result.relationships) {
+      pickOverloads();
       if (rel.predicate !== 'CALLS' && rel.predicate !== 'EXTENDS' && rel.predicate !== 'REFERENCES' && rel.predicate !== 'IMPORTS') continue;
+      if (srcLanguage === SupportedLanguages.Java && rel.predicate === 'CALLS') {
+        overloadsOf = rel;
+        overloadsFrom = resolved.length;
+      }
 
       // Resolve Scala/Java dotted class imports (e.g. "ix.memory.model.ClaimId")
       // to the actual indexed entity node in the defining file.
@@ -7781,6 +8044,7 @@ export function resolveEdges(
       }
       // 0 or >1 matches after all tiers — leave as dangling edge, do not emit
     }
+    pickOverloads();
   }
 
   // Cross-repo dependency gate (co-ingest): keep a cross-repo edge only when the
@@ -7860,6 +8124,15 @@ function findEnclosingDefinition(
   entities: ParsedEntity[],
   line: number
 ): string | null {
+  const best = enclosingDefinitionEntity(entities, line);
+  return best ? qualifiedKey(best) : null;
+}
+
+/** `findEnclosingDefinition`, returning the entity itself. */
+function enclosingDefinitionEntity(
+  entities: ParsedEntity[],
+  line: number
+): ParsedEntity | null {
   let best: ParsedEntity | null = null;
   for (const e of entities) {
     if (e.kind !== 'function' && e.kind !== 'method' && e.kind !== 'constant') continue;
@@ -7869,5 +8142,50 @@ function findEnclosingDefinition(
       }
     }
   }
-  return best ? (best.container ? `${best.container}.${best.name}` : best.name) : null;
+  return best;
+}
+
+/**
+ * The erased parameter-type signature of a Java method or constructor
+ * declaration, as it appears in an overload's identity key: `String,int`,
+ * `Map,T...`, `` for no parameters. Each type is written as in the source with
+ * generics, annotations and whitespace removed; an array keeps its `[]`
+ * wherever it was written (`int c[]` is `int[]`), varargs are `T...`, and an
+ * explicit receiver (`A this`) is not a parameter. Null when the declaration
+ * has no parameter list to read.
+ */
+function javaErasedSignature(defNode: any): string | null {
+  const parameters = defNode.childForFieldName?.('parameters');
+  if (!parameters) return null;
+  const types: string[] = [];
+  for (const parameter of parameters.namedChildren as any[]) {
+    if (parameter.type === 'formal_parameter') {
+      const type = parameter.childForFieldName('type');
+      if (!type) return null;
+      types.push(eraseJavaType(type.text + (parameter.childForFieldName('dimensions')?.text ?? '')));
+    } else if (parameter.type === 'spread_parameter') {
+      // No field names here: [modifiers] type `...` variable_declarator.
+      const type = (parameter.namedChildren as any[])
+        .find(child => child.type !== 'modifiers' && child.type !== 'variable_declarator');
+      if (!type) return null;
+      types.push(`${eraseJavaType(type.text)}...`);
+    }
+    // receiver_parameter, comments: not part of the signature.
+  }
+  return types.join(',');
+}
+
+/** A Java type as written, without type arguments, annotations, comments or whitespace. */
+function eraseJavaType(text: string): string {
+  const bare = text
+    .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '')
+    .replace(/@[\w$.]+(\s*\((?:[^()]|\([^()]*\))*\))?/g, '');
+  let erased = '';
+  let depth = 0;
+  for (const ch of bare) {
+    if (ch === '<') depth++;
+    else if (ch === '>') depth = Math.max(0, depth - 1);
+    else if (depth === 0 && !/\s/.test(ch)) erased += ch;
+  }
+  return erased;
 }

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { absoluteFromSourceUri, isReadablePath } from "./config.js";
 import { canonicalizeDiscoveredFilePath, discoverSourceFiles } from "./file-discovery.js";
 import { rowLocation } from "./format.js";
+import { ALL_CONCURRENCY, mapLimit } from "../client/request-memo.js";
 
 /**
  * Where an edge happens: the call, or the import, rather than the entity at
@@ -410,6 +411,27 @@ export async function edgeTargetFor(
   } catch {
     return base;
   }
+}
+
+/**
+ * `edgeTargetFor` per row. One target for every row, except the callees of an
+ * overloaded method answered for all its overloads: a call is then looked for
+ * inside the overload that makes it (`overloadOf(row)`, its node id), which
+ * costs one more `/v1/entity` read per overload with a row in `rows`.
+ */
+export async function edgeTargetsFor(
+  client: { entity(id: string): Promise<{ node: any }> },
+  target: { id: string; name: string; kind: string; path?: string },
+  relation: string,
+  rows: ReadonlyArray<{ id?: string }>,
+  overloadOf?: (row: { id?: string }) => string | undefined,
+): Promise<(row: { id?: string }) => EdgeTarget> {
+  const own = await edgeTargetFor(client, target, relation);
+  if (!overloadOf || relation !== "callees") return () => own;
+  const others = [...new Set(rows.map(overloadOf))].filter((id): id is string => !!id && id !== target.id);
+  const found = await mapLimit(others, ALL_CONCURRENCY, (id) => edgeTargetFor(client, { ...target, id }, relation));
+  const byOverload = new Map(others.map((id, i) => [id, found[i]] as const));
+  return (row) => byOverload.get(overloadOf(row) ?? "") ?? own;
 }
 
 /**

@@ -12,7 +12,7 @@ import { candidateOrigin } from "../candidate-origin.js";
 import { CONTAINER_KINDS } from "../graph-model.js";
 import { normalizeForPathMatch } from "../path-match.js";
 import { scoreCandidate } from "./score.js";
-import type { AmbiguousResult, ResolutionMode, ResolutionNotice, ResolvedEntity, ResolveResult } from "./types.js";
+import type { AmbiguousResult, OverloadRef, ResolutionMode, ResolutionNotice, ResolvedEntity, ResolveResult } from "./types.js";
 
 /** The ambiguous record's hint as a person at a shell reads it. */
 export const AMBIGUOUS_HINT = "Use --pick <n> or --path to disambiguate.";
@@ -34,6 +34,197 @@ export function cmpStr(a: string, b: string): number {
 /** Tiebreak for equal candidates: (path, line, id), independent of backend order. */
 function displayOrder(a: any, b: any): number {
   return cmpStr(nodePath(a), nodePath(b)) || lineOf(a) - lineOf(b) || cmpStr(String(a.id), String(b.id));
+}
+
+// ── Overloads ─────────────────────────────────────────────────────────────
+
+/**
+ * `nodes` with the overloads of one method folded into its first overload.
+ *
+ * Ingest writes each overload after the first as its own node whose
+ * `overload_of` attribute is the id of the first one's node (#1139). A row
+ * whose `overload_of` is the id of another row in the same set is a later
+ * overload of that row: it is left out, and `groups` maps the first row's id
+ * to every overload of the group, the first one first and the rest in source
+ * order (line, then id). The overloads of one method are then one candidate
+ * when a pick is made, as they were while they were one node.
+ *
+ * The attribute is all this reads: no request, no language or kind test. Rows
+ * without it (a graph mapped before the attribute, any other language) are
+ * returned as they came, and so is a later overload whose first one is not
+ * among the rows.
+ */
+export function foldOverloads<T extends { id: unknown }>(
+  nodes: readonly T[],
+): { nodes: T[]; groups: Map<string, OverloadRef[]> } {
+  const groups = new Map<string, OverloadRef[]>();
+  const byId = new Map<string, T>();
+  for (const node of nodes) if (!byId.has(String(node.id))) byId.set(String(node.id), node);
+  const firstOf = (node: T): string | undefined => {
+    const first = (node as { attrs?: { overload_of?: unknown } }).attrs?.overload_of;
+    return typeof first === "string" && first !== String(node.id) && byId.has(first) ? first : undefined;
+  };
+  const later = new Map<string, T[]>();
+  const folded = new Set<string>();
+  for (const [id, node] of byId) {
+    const first = firstOf(node);
+    // A first overload is never itself a later one; a chain folds nothing.
+    if (first === undefined || firstOf(byId.get(first)!) !== undefined) continue;
+    later.set(first, [...(later.get(first) ?? []), node]);
+    folded.add(id);
+  }
+  if (folded.size === 0) return { nodes: nodes as T[], groups };
+  for (const [first, rest] of later) {
+    rest.sort((a, b) => lineOf(a) - lineOf(b) || cmpStr(String(a.id), String(b.id)));
+    groups.set(first, [byId.get(first)!, ...rest].map(overloadRefOf));
+  }
+  return { nodes: nodes.filter((node) => !folded.has(String(node.id))), groups };
+}
+
+function overloadRefOf(node: any): OverloadRef {
+  const line = lineOf(node);
+  const signature = node?.attrs?.overload_signature;
+  return {
+    id: String(node.id),
+    ...(line !== Number.MAX_SAFE_INTEGER ? { line } : {}),
+    ...(typeof signature === "string" ? { signature } : {}),
+  };
+}
+
+/** `foldOverloads` for rows that become candidates directly: one per method, with its `overloads`. */
+export function foldedCandidates(nodes: readonly any[]): Candidate[] {
+  const { nodes: kept, groups } = foldOverloads(nodes);
+  return kept.map((node) => {
+    const candidate = candidateOf(node);
+    const overloads = groups.get(candidate.id);
+    return overloads ? { ...candidate, overloads } : candidate;
+  });
+}
+
+/**
+ * Put each folded group (`foldOverloads`) on what stands for it in `result`:
+ * the resolved entity, and the row of every candidate list (a notice's or an
+ * ambiguous record's, shown or not). The rows are marked in place: the shown
+ * page and the full list share them.
+ */
+export function attachOverloads(result: ResolveResult | null, groups: ReadonlyMap<string, OverloadRef[]>): ResolveResult | null {
+  if (!result || groups.size === 0) return result;
+  const mark = (candidate: Candidate) => {
+    const overloads = groups.get(candidate.id);
+    if (overloads) candidate.overloads = overloads;
+  };
+  if (result.resolved) {
+    for (const notice of result.notices ?? []) {
+      notice.candidates.forEach(mark);
+      allCandidatesOf(notice).forEach(mark);
+    }
+    const overloads = groups.get(result.entity.id);
+    return overloads ? { ...result, entity: { ...result.entity, overloads } } : result;
+  }
+  if (result.ambiguous) {
+    result.result.candidates.forEach(mark);
+    allCandidatesOf(result.result).forEach(mark);
+  }
+  return result;
+}
+
+/** A candidate's overload group, as the field of the entity it becomes. */
+export function overloadsField(candidate: { overloads?: OverloadRef[] }): { overloads?: OverloadRef[] } {
+  return candidate.overloads ? { overloads: candidate.overloads } : {};
+}
+
+/** An overload as it is shown: `put(String,int)`, or the bare name when its node has no signature. */
+export function overloadLabel(name: string, overload: OverloadRef): string {
+  return overload.signature === undefined ? name : `${name}(${overload.signature})`;
+}
+
+/**
+ * The most overloads of one method a command expands when it answers for the
+ * whole group. Each is at least one backend query per edge question the
+ * command asks, so a method with dozens of overloads must not turn one call
+ * into hundreds of round trips; the rest are reached by their ids.
+ */
+export const OVERLOAD_EXPAND_CAP = 16;
+
+/**
+ * The overloads a command that answers for the whole group expands: every one
+ * of the entity's group up to `OVERLOAD_EXPAND_CAP`, the entity's own first.
+ * Empty for an entity that stands for no group (a method with one signature,
+ * anything addressed by its id).
+ */
+export function expandedOverloads(entity: { overloads?: OverloadRef[] }): OverloadRef[] {
+  const overloads = entity.overloads ?? [];
+  return overloads.length > 1 ? overloads.slice(0, OVERLOAD_EXPAND_CAP) : [];
+}
+
+function overloadMessage(target: string, name: string, path: string | undefined, overloads: readonly OverloadRef[], answered: number): string {
+  const head = `"${target}" has ${overloads.length} overloads; `;
+  if (answered > 1) {
+    const which = answered === overloads.length
+      ? `all ${answered} together`
+      : `the first ${answered} together (at most ${OVERLOAD_EXPAND_CAP} are expanded)`;
+    return `${head}answering for ${which}. Pass one overload's id as the target to answer for it alone.`;
+  }
+  const first = overloads[0];
+  const where = path ? ` (${path}${first.line != null ? `:${first.line}` : ""})` : "";
+  return `${head}answering for the first, ${overloadLabel(name, first)}${where}. Pass another overload's id as the target to answer for it.`;
+}
+
+/**
+ * A resolved result with the `overloaded_target` notice its entity calls for:
+ * one when the entity stands for several overloads, none otherwise. Applied
+ * last, after any `--pick`, so the notice is always about the entity returned.
+ * It is no guess and never changes the exit code; it says that there are
+ * several, how many of them the answer is for (`answered`), and gives their
+ * ids, which is how one is addressed. As written here the answer is for the
+ * first overload alone, which is what a command that shows the definition
+ * gives; a command that answers from every overload's edges says so with
+ * `answeringForOverloadGroup`.
+ */
+export function withOverloadNotice(result: ResolveResult, target: string): ResolveResult {
+  if (!result.resolved) return result;
+  const entity = result.entity;
+  const others = (result.notices ?? []).filter((n) => n.code !== "overloaded_target");
+  const found = entity.overloads;
+  if (!found || found.length < 2) {
+    return others.length === (result.notices ?? []).length ? result : { ...result, notices: others };
+  }
+  // The entity's own overload first, whatever order the group came in.
+  const first = found.find((o) => o.id === entity.id) ?? found[0];
+  const overloads = [first, ...found.filter((o) => o !== first)];
+  // A class holds its first constructor, so later constructors fold into it,
+  // but a class name is not an overloaded name: only a method that says its
+  // own signature is one. Nearly every Java class would carry the notice.
+  if (first.signature === undefined) {
+    return others.length === (result.notices ?? []).length ? result : { ...result, notices: others };
+  }
+  const notice: ResolutionNotice = {
+    code: "overloaded_target",
+    target,
+    message: overloadMessage(target, entity.name, entity.path, overloads, 1),
+    chosen: { id: entity.id, name: entity.name, kind: entity.kind, path: entity.path },
+    candidates: [{ id: entity.id, name: entity.name, kind: entity.kind, path: entity.path, rank: 1 }],
+    total: 1,
+    overloads,
+    answered: 1,
+  };
+  return { ...result, notices: [...others, notice] };
+}
+
+/**
+ * `notices` as a command that answers for the whole overload group reports
+ * them: each `overloaded_target` notice says the answer is for every overload
+ * (`answered` of them, `expandedOverloads`), not the first. The same array
+ * when there is no such notice.
+ */
+export function answeringForOverloadGroup(notices: readonly ResolutionNotice[]): readonly ResolutionNotice[] {
+  if (!notices.some((n) => n.code === "overloaded_target")) return notices;
+  return notices.map((n) => {
+    if (n.code !== "overloaded_target" || !n.overloads) return n;
+    const answered = expandedOverloads(n).length;
+    if (answered < 2) return n;
+    return { ...n, answered, message: overloadMessage(n.target, n.chosen.name, n.chosen.path, n.overloads, answered) };
+  });
 }
 
 /**
@@ -269,6 +460,7 @@ export function applyPick(
       name: picked.name,
       path: picked.path,
       resolutionMode: "scored",
+      ...overloadsField(picked),
     },
   };
 }
@@ -308,6 +500,7 @@ export function pickFromNotice(
       name: picked.name,
       path: picked.path,
       resolutionMode: keepFuzzy ? "fuzzy" : "scored",
+      ...overloadsField(picked),
     },
     notices: result.notices
       .filter((_, i) => i !== at)

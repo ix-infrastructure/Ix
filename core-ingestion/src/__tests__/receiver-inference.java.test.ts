@@ -102,9 +102,13 @@ describe('Java typed receivers (fixture)', () => {
     }));
   });
 
-  it('writes one edge per caller to a method with several overloads', () => {
+  it('writes one edge per overload a caller calls, however many sites call it', () => {
+    // Five sites: three pass (String, String), one a String default, one an int default (#1139).
     const toUrl = callEdges(results, edges).filter(e => e.src === 'com/acme/rpc/TimeoutFilter.java::invoke' && e.dst === 'com/acme/common/URL.java::getMethodParameter');
-    expect(toUrl).toEqual([{ src: 'com/acme/rpc/TimeoutFilter.java::invoke', dst: 'com/acme/common/URL.java::getMethodParameter', tier: 'type' }]);
+    expect(toUrl).toEqual(Array(3).fill({ src: 'com/acme/rpc/TimeoutFilter.java::invoke', dst: 'com/acme/common/URL.java::getMethodParameter', tier: 'type' }));
+    expect(edges.filter(e => e.srcName === 'TimeoutFilter.invoke' && e.dstName === 'URL.getMethodParameter').map(e => e.dstIdentityKey)).toEqual([
+      undefined, 'URL.getMethodParameter(String,String,String)', 'URL.getMethodParameter(String,String,int)',
+    ]);
   });
 
   it('no longer lets the same-file method claim calls typed as another class', () => {

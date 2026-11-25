@@ -125,6 +125,19 @@ export type SymbolNodeAttrs = UnresolvedCallAttrs & {
   /** The file's role (production, test, fixture, ...). */
   role: string;
   role_source: 'inherited_from_file';
+  /**
+   * On every overload of a name after the first in its type (Java): the id of
+   * the node the first declaration is written to. That is the first overload's
+   * method node or, for a constructor, the class node. Overloads of one name
+   * are told from same-named methods of other types by this alone.
+   */
+  overload_of?: string;
+  /**
+   * The erased parameter list of an overload: `String,int`, `` for none. On
+   * every node with `overload_of`, and on the first overload's method node
+   * when the file declares a later one.
+   */
+  overload_signature?: string;
 };
 
 /** A `file` node. */

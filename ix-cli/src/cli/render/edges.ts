@@ -9,6 +9,11 @@ import { attrLabel, disambiguatingIds, lineSpan, locationLabel, relativePath, ro
 import { dispatchVia, isPastEnd, isRawIdName, pastEndMessage, truncationHint, type Slice } from "../output/slice.js";
 import type { Diagnostic, EdgeRow, ResultSource } from "../output/types.js";
 
+/** The overload of the target a row is an edge of, absent unless the target was answered for all its overloads. */
+function overloadOf(node: EdgeRow): string | undefined {
+  return typeof node.overload === "string" ? node.overload : undefined;
+}
+
 /**
  * The candidates an `--all` edge query ran over. Rows carry `candidate: <n>`,
  * numbering into this list.
@@ -40,6 +45,7 @@ export function renderEdgeResultsLlm(
       site: n.site,
       candidate: typeof n.candidate === "number" ? n.candidate : undefined,
       via: dispatchVia(n),
+      overload: overloadOf(n),
       ...rowLocation(n),
     };
   });
@@ -86,6 +92,8 @@ export function renderEdgeResultsLlm(
     const tag: Array<[string, LlmValue]> = ref.candidate !== undefined ? [["candidate", ref.candidate]] : [];
     // A dispatch row: the call targets this supertype member.
     if (ref.via !== undefined) tag.push(["via", ref.via]);
+    // The target is an overloaded method: the overload this row is an edge of.
+    if (ref.overload !== undefined) tag.push(["overload", ref.overload]);
     // An unresolved row has no name to go by, so its id is all there is.
     lines.push(ref.resolved
       ? llmLine("ref", [...projectRow([
@@ -131,6 +139,8 @@ export interface ResolvedEdgeTarget {
   displayName?: string;
   resolutionMode?: string;
   path?: string;
+  /** The resolver's overload group; printed once, in the `overloaded_target` notice, never here. */
+  overloads?: unknown;
 }
 
 /** callers, callees, contains, imports, imported-by, depends and the like. */
@@ -165,6 +175,7 @@ function edgeResultsJson({ slice, relation, resolvedTarget, source, diagnostics,
       ...(n.site ? { site: n.site } : {}),
       ...(typeof n.candidate === "number" ? { candidate: n.candidate } : {}),
       ...(dispatchVia(n) ? { via: dispatchVia(n) } : {}),
+      ...(overloadOf(n) ? { overload: overloadOf(n) } : {}),
     };
     if (!resolved) {
       ref.resolved = false;
@@ -181,7 +192,7 @@ function edgeResultsJson({ slice, relation, resolvedTarget, source, diagnostics,
     resultSource: source ?? "graph",
   };
   if (resolvedTarget) {
-    const { displayName, ...shown } = resolvedTarget;
+    const { displayName, overloads: _overloads, ...shown } = resolvedTarget;
     output.resolvedTarget = {
       ...shown,
       name: displayName ?? shown.name,
@@ -259,7 +270,8 @@ function printEdgeResultsText({ slice, relation, symbol, source, diagnostics, ca
         `  ${chalk.cyan((n.kind ?? "").padEnd(10))}  ${chalk.dim(shortId)}  ${chalk.bold(name)}`
         + (where ? `  ${chalk.dim(where)}` : "")
         + (typeof n.candidate === "number" ? `  ${chalk.dim(`[${n.candidate}]`)}` : "")
-        + (dispatchVia(n) ? `  ${chalk.dim(`(via ${dispatchVia(n)})`)}` : ""),
+        + (dispatchVia(n) ? `  ${chalk.dim(`(via ${dispatchVia(n)})`)}` : "")
+        + (overloadOf(n) ? `  ${chalk.dim(`(${overloadOf(n)})`)}` : ""),
       );
       const site = n.site;
       if (site) console.log(`      ${chalk.dim(`at ${siteLabel(site)}`)}  ${site.snippet}`);

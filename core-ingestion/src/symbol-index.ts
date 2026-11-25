@@ -42,6 +42,12 @@ export interface FileSummary {
   /** TypeScript: the file is a module, so only its tsGlobalTypes are globals. Absent in older summaries. */
   tsModule?: true;
   /**
+   * Java: `[Container.name, signatures]` per method with overloads, as
+   * `FileParseResult.overloads`. Absent in a summary written before it
+   * existed; a call to such a file resolves to the first overload.
+   */
+  overloads?: Array<[string, string[]]>;
+  /**
    * Members extracted with no container, keyed by their bare name
    * (FileParseResult.bareMembers): what a member call may land on besides the
    * `Class.name` keys. Absent in a summary written before #1020; resolution
@@ -64,7 +70,8 @@ export interface FileSummary {
 /** The fields of a summary other files bind to: what `summaryBindings` reads. */
 type BindingFields = Pick<FileSummary,
   'language' | 'qkeys' | 'exportPublicNames' | 'imports' | 'phpTypes' | 'receiverFactories' |
-  'receiverHeritage' | 'receiverPackage' | 'importAliases' | 'tsGlobalTypes' | 'bareMembers' | 'propertyReferences'>;
+  'receiverHeritage' | 'receiverPackage' | 'importAliases' | 'tsGlobalTypes' | 'overloads' |
+  'bareMembers' | 'propertyReferences'>;
 
 /**
  * A summary as the dependents functions read it. One read back from the CLI's
@@ -116,6 +123,14 @@ export function summaryBindings(s: Partial<BindingFields> | undefined): Map<stri
   }
   // TypeScript globals an unimported heritage base may name.
   for (const name of s.tsGlobalTypes ?? []) out.set(`g\0${name}`, [name]);
+  // Java overloads: which one a call lands on depends on the whole list and
+  // its order, so a caller is re-resolved when an overload comes, goes or
+  // moves. A method without overloads adds no key.
+  for (const entry of Array.isArray(s.overloads) ? s.overloads : []) {
+    if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !Array.isArray(entry[1])) continue;
+    const [qkey, signatures] = entry;
+    out.set(`o\0${pkg}\0${qkey}\0${signatures.join('\x01')}`, [qkey, qkey.slice(qkey.lastIndexOf('.') + 1)]);
+  }
   // Whether a member call (`x.m()`) may land on a bare-keyed `m` here.
   for (const name of s.bareMembers ?? []) out.set(`b\0${pkg}\0${name}`, [name]);
   // Whether a member call (`this.m()`) in another file may reach a module

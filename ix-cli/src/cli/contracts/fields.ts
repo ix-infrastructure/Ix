@@ -36,7 +36,7 @@ import type { ReadAmbiguityJson, ReadFailureJson, ReadJson } from "./read.js";
 import type { StatusJson } from "./status.js";
 
 /** Recursion budget for {@link FieldPath}: deeper than any json contract nests. */
-type Depth = [never, 0, 1, 2, 3, 4, 5, 6];
+type Depth = [never, 0, 1, 2, 3, 4, 5, 6, 7];
 
 /** The paths below a value of type T, each with its leading `.` (or `[]`). */
 type Below<T, D extends number> = [D] extends [never]
@@ -50,7 +50,7 @@ type Below<T, D extends number> = [D] extends [never]
       : never;
 
 /** Every field path a value of type T can carry, in the syntax above. */
-export type FieldPath<T> = Below<T, 7> extends infer P extends string ? (P extends `.${infer Rest}` ? Rest : P) : never;
+export type FieldPath<T> = Below<T, 8> extends infer P extends string ? (P extends `.${infer Rest}` ? Rest : P) : never;
 
 /**
  * A field list for type T that names every path of T and nothing else.
@@ -83,7 +83,8 @@ type TextOutput = TextResult[] | ErrorRecordJson;
 /** Every shape `ix status --format json` prints (contracts/status.ts). */
 type StatusOutput = StatusJson | ErrorRecordJson;
 
-const CANDIDATE = ["id", "name", "kind", "path", "line", "score", "rank", "container"] as const;
+const CANDIDATE_KEYS = ["id", "name", "kind", "path", "line", "score", "rank", "container", "overloads"] as const;
+const OVERLOAD = ["id", "line", "signature"] as const;
 const NAMED = ["id", "name", "kind", "path"] as const;
 const DIAGNOSTIC = ["code", "message"] as const;
 const DID_YOU_MEAN = ["name", "kind", "path", "line"] as const;
@@ -91,6 +92,11 @@ const DID_YOU_MEAN = ["name", "kind", "path", "line"] as const;
 /** `prefix` plus `prefix.<key>` for each key. */
 function under<P extends string, K extends string>(prefix: P, keys: readonly K[]): Array<P | `${P}.${K}`> {
   return [prefix, ...keys.map((k) => `${prefix}.${k}` as const)];
+}
+
+/** A candidate row at `prefix`, with the overloads an overloaded method's row lists. */
+function candidate<P extends string>(prefix: P) {
+  return [...under(prefix, CANDIDATE_KEYS), ...under(`${prefix}.overloads[]`, OVERLOAD)] as const;
 }
 
 /** `prefix.<path>` for each path. */
@@ -110,9 +116,10 @@ function multiTarget<K extends string>(answer: readonly K[]) {
 }
 
 const NOTICE = [
-  ...under("resolutionNotices[]", ["code", "target", "message", "chosen", "candidates", "total", "truncated", "diagnostics"]),
+  ...under("resolutionNotices[]", ["code", "target", "message", "chosen", "candidates", "total", "truncated", "overloads", "answered", "diagnostics"]),
   ...under("resolutionNotices[].chosen", NAMED),
-  ...under("resolutionNotices[].candidates[]", CANDIDATE),
+  ...candidate("resolutionNotices[].candidates[]"),
+  ...under("resolutionNotices[].overloads[]", OVERLOAD),
   ...under("resolutionNotices[].diagnostics[]", DIAGNOSTIC),
 ] as const;
 
@@ -136,7 +143,7 @@ const LOCATE_ONE = [
   "diagnostics", ...under("diagnostics[]", DIAGNOSTIC),
   "resolutionNotices", ...NOTICE,
   "code",
-  "candidates", ...under("candidates[]", CANDIDATE),
+  "candidates", ...candidate("candidates[]"),
   "total", "truncated",
   "note", "target", "detail", "shown",
   "textMatches", ...under("textMatches[]", ["path", "line", "snippet"]),

@@ -14,6 +14,7 @@ import { noteResolutionNotices, printJson, relativePath } from "./format.js";
 import { isQuiet } from "./output-shape.js";
 import type { AmbiguousResult, ResolutionNotice, ResolveResult, Suggestion } from "./resolve.js";
 import { leverSentence, type Lever } from "./next-step.js";
+import { overloadLabel } from "./resolve/pick.js";
 import { graphHealthJson, graphHealthLlmFields, graphHealthProse, type GraphHealth } from "./graph-health.js";
 import { EXIT_ERROR, outcomeForCode, setOutcome } from "./outcome.js";
 import { didYouMeanRows, type TargetCandidate } from "./target-suggestions.js";
@@ -337,6 +338,31 @@ export function reportResolutionNotices(
         ]));
         continue;
       }
+      if (notice.code === "overloaded_target") {
+        const overloads = notice.overloads ?? [];
+        const answered = notice.answered ?? 1;
+        lines.push(llmLine("diagnostic", [
+          ["code", "overloaded_target"],
+          ["target", notice.target],
+          ["chosen", notice.chosen.name],
+          ["overloads", String(overloads.length)],
+          ["answered", String(answered)],
+          ["message", notice.message],
+        ]));
+        // Full ids: an id is how another overload is addressed, and `--pick`
+        // does not count these rows.
+        overloads.forEach((overload, i) => {
+          lines.push(llmLine("overload", [
+            ["name", overloadLabel(notice.chosen.name, overload)],
+            ["line", overload.line != null ? String(overload.line) : undefined],
+            ["id", overload.id],
+            ["chosen", overload.id === notice.chosen.id ? "true" : undefined],
+            // Only a group answer marks its rows: the first-only one is `chosen`.
+            ["answered", answered > 1 && i < answered ? "true" : undefined],
+          ]));
+        });
+        continue;
+      }
       lines.push(llmLine("diagnostic", [
         ["code", "ambiguous_target"],
         ["target", notice.target],
@@ -368,6 +394,14 @@ export function reportResolutionNotices(
   }
   for (const notice of notices) {
     console.error(chalk.dim(notice.message));
+    if (notice.code === "overloaded_target") {
+      (notice.overloads ?? []).forEach((overload, i) => {
+        const line = overload.line != null ? `line ${overload.line}` : "";
+        const mark = i < (notice.answered ?? 1) ? "  (answered)" : "";
+        console.error(chalk.dim(`  ${overload.id}  ${line.padEnd(10)} ${overloadLabel(notice.chosen.name, overload)}${mark}`));
+      });
+      continue;
+    }
     if (notice.code !== "ambiguous_target") continue;
     for (let index = 0; index < notice.candidates.length; index += 1) {
       const candidate = notice.candidates[index];
