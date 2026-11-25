@@ -165,6 +165,14 @@ export class FakeBackend {
   readonly lastOps = new Map<string, Array<Record<string, unknown>>>();
   /** The `patchId` of the last patch sent for each `source.uri`. */
   readonly lastPatchIds = new Map<string, string>();
+  /** Every commit request (bulk or single) as it arrived, body and all, in order. */
+  readonly commitBodies: Array<{ path: string; body: string }> = [];
+  /**
+   * Called as commit request `n` (1-based, counted in `commitBodies`) arrives.
+   * A promise holds the request open until it settles; the request is then
+   * answered as usual.
+   */
+  commitGate: ((n: number) => Promise<void> | undefined) | undefined;
   /** Paths this fake does not implement. Asserted empty after every test. */
   readonly unknownPaths: string[] = [];
   /**
@@ -543,7 +551,16 @@ export class FakeBackend {
       // throw and silently route the request down a different branch.
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
-      req.on("end", () => this.route(req.url ?? "/", Buffer.concat(chunks).toString("utf8"), res));
+      req.on("end", () => {
+        const url = req.url ?? "/";
+        const body = Buffer.concat(chunks).toString("utf8");
+        const path = new URL(url, "http://x").pathname;
+        if (path !== "/v1/patches/bulk" && path !== "/v1/patch") return this.route(url, body, res);
+        this.commitBodies.push({ path, body });
+        const gate = this.commitGate?.(this.commitBodies.length);
+        if (gate === undefined) return this.route(url, body, res);
+        void gate.then(() => this.route(url, body, res));
+      });
     });
     await new Promise<void>((resolve, reject) => {
       // Without the `error` listener a failed bind -- EACCES under a

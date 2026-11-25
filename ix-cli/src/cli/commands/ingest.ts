@@ -3413,12 +3413,18 @@ export async function ingestFiles(
      * summarized first (for a first map, that is one extra parse of the repo).
      *
      * `trustMtime` is false on Path B, where there is no baseline to trust.
+     *
+     * `inPathOrder` hands the summaries over in `resolutionPaths` order. The
+     * index keeps per-name lists in the order it meets the files, so a run
+     * that parsed most files before this call (Path B's parse-once) must
+     * present them in the order a run that summarized them all here would.
      */
     const buildResolutionIndex = async (
       ingestion: Pick<IngestionModule, 'summarizeParseResult' | 'buildGlobalResolutionIndex'>,
       parsedInStream: Set<string>,
       singleChunk: boolean,
       trustMtime: boolean,
+      inPathOrder = false,
     ): Promise<GlobalResolutionIndex> => {
       summarize = ingestion.summarizeParseResult;
       const summaries = new Map<string, StoredSummary>();
@@ -3459,11 +3465,17 @@ export async function ingestFiles(
           if (entry && entry.hash === hash) summaries.set(rel, entry.summary);
         }
       }
+      const ordered = inPathOrder
+        ? new Map(resolutionPaths.map(toWorkspaceRelative).flatMap(rel => {
+          const summary = summaries.get(rel);
+          return summary === undefined ? [] : [[rel, summary] as const];
+        }))
+        : summaries;
       // Every entry here came from `summarizeParseResult` under this extractor:
       // `loadIngestSymbols` drops a table written by any other, and this run's
       // entries are `noteSummary`'s. The table only types them loosely.
       return ingestion.buildGlobalResolutionIndex(
-        resolutionPaths.map(toWorkspaceRelative), summaries as Map<string, FileSummary>);
+        resolutionPaths.map(toWorkspaceRelative), ordered as Map<string, FileSummary>);
     };
     let globalIndex: GlobalResolutionIndex | undefined = undefined;
 
@@ -4511,24 +4523,56 @@ export async function ingestFiles(
       }).filter((pp): pp is PreparedPatch => pp !== null);
     };
 
-    /** Resolve edges within a batch, build patches, and commit in sub-chunks. */
-    const flushBatch = async (batch: ParsedFile[]): Promise<void> => {
-      if (batch.length === 0) return;
+    /** A batch whose edges are resolved and patches built: what `commitBatch` sends. */
+    type PreparedBatch = {
+      files: number;
+      patches: PreparedPatch[];
+      lastFile: string;
+      resolveEdgesMs: number;
+      buildPatchMs: number;
+      prepareMs: number;
+      nodes: number;
+      edges: number;
+      claims: number;
+    };
+
+    /**
+     * The per-batch totals and the debug line, once a batch is done with:
+     * committed, or failed in either half.
+     */
+    const settleBatch = (pb: PreparedBatch, commitMs: number, commitWallMs: number): void => {
+      timings.resolveMs += pb.resolveEdgesMs;
+      timings.buildPatchMs += pb.buildPatchMs;
+      timings.commitMs += commitMs;
+      totalNodesEmitted += pb.nodes;
+      totalEdgesEmitted += pb.edges;
+      totalClaimsEmitted += pb.claims;
+      logSaveTiming(pb.files, pb.resolveEdgesMs, pb.buildPatchMs, commitMs, pb.prepareMs + commitWallMs, pb.nodes, pb.edges, pb.claims);
+      progressPhase = 'Parsing';
+      progressStart = performance.now();
+    };
+
+    /**
+     * Resolve edges within a batch and build its patches; nothing is committed.
+     * It sends a request only for a file the backend already holds (the
+     * reconcile and orphan reads in `buildFilePatches`).
+     */
+    const prepareBatch = async (batch: ParsedFile[]): Promise<PreparedBatch | null> => {
+      if (batch.length === 0) return null;
       filesChanged += batch.length;
-      const saveStart = performance.now();
-      let resolveEdgesMs = 0;
-      let buildPatchMs = 0;
-      let commitMs = 0;
-      let batchNodes = 0;
-      let batchEdges = 0;
-      let batchClaims = 0;
+      const start = performance.now();
+      const lastFile = nodePath.basename(batch[batch.length - 1].filePath);
+      const pb: PreparedBatch = {
+        files: batch.length, patches: [], lastFile,
+        resolveEdgesMs: 0, buildPatchMs: 0, prepareMs: 0, nodes: 0, edges: 0, claims: 0,
+      };
       progressPhase = 'Saving';
       try {
-        setCurrentWork(`resolve+commit batch ending ${nodePath.basename(batch[batch.length - 1].filePath)}`);
+        setCurrentWork(`resolve+commit batch ending ${lastFile}`);
 
         const resolveStart = performance.now();
         const resolvedEdges = resolveEdgesFn!(batch.map(f => f.parsed), resolveStats, globalIndex, resolveOpts);
-        resolveEdgesMs = Math.round(performance.now() - resolveStart);
+        pb.resolveEdgesMs = Math.round(performance.now() - resolveStart);
         if (stitchEnabled) collectStitch(batch.map(f => f.parsed));
         const batchEdgesByFile = new Map<string, ResolvedEdge[]>();
         for (const edge of resolvedEdges) {
@@ -4537,31 +4581,42 @@ export async function ingestFiles(
           arr.push(edge);
         }
 
-        setCurrentWork(`build commit payloads ending ${nodePath.basename(batch[batch.length - 1].filePath)}`);
+        setCurrentWork(`build commit payloads ending ${lastFile}`);
         const buildStart = performance.now();
-        const preparedPatches = await buildFilePatches(batch, batchEdgesByFile);
-        buildPatchMs += Math.round(performance.now() - buildStart);
-        for (const pp of preparedPatches) {
+        pb.patches = await buildFilePatches(batch, batchEdgesByFile);
+        pb.buildPatchMs = Math.round(performance.now() - buildStart);
+        for (const pp of pb.patches) {
           for (const op of pp.patch.ops) {
-            if (op.type === 'UpsertNode') batchNodes++;
-            else if (op.type === 'UpsertEdge') batchEdges++;
-            else if (op.type === 'AssertClaim') batchClaims++;
+            if (op.type === 'UpsertNode') pb.nodes++;
+            else if (op.type === 'UpsertEdge') pb.edges++;
+            else if (op.type === 'AssertClaim') pb.claims++;
           }
         }
-        if (preparedPatches.length === 0) return;
-        commitMs += await commitPreparedPatches(preparedPatches, batch.length, { onCommitted: noteRebuilt });
-      } finally {
-        const totalSaveMs = Math.round(performance.now() - saveStart);
-        timings.resolveMs += resolveEdgesMs;
-        timings.buildPatchMs += buildPatchMs;
-        timings.commitMs += commitMs;
-        totalNodesEmitted += batchNodes;
-        totalEdgesEmitted += batchEdges;
-        totalClaimsEmitted += batchClaims;
-        logSaveTiming(batch.length, resolveEdgesMs, buildPatchMs, commitMs, totalSaveMs, batchNodes, batchEdges, batchClaims);
-        progressPhase = 'Parsing';
-        progressStart = performance.now();
+        pb.prepareMs = Math.round(performance.now() - start);
+        return pb;
+      } catch (err) {
+        pb.prepareMs = Math.round(performance.now() - start);
+        settleBatch(pb, 0, 0);
+        throw err;
       }
+    };
+
+    /** Commit a prepared batch in sub-chunks. */
+    const commitBatch = async (pb: PreparedBatch): Promise<void> => {
+      const start = performance.now();
+      let commitMs = 0;
+      try {
+        if (pb.patches.length === 0) return;
+        commitMs += await commitPreparedPatches(pb.patches, pb.files, { onCommitted: noteRebuilt });
+      } finally {
+        settleBatch(pb, commitMs, Math.round(performance.now() - start));
+      }
+    };
+
+    /** Resolve edges within a batch, build patches, and commit in sub-chunks. */
+    const flushBatch = async (batch: ParsedFile[]): Promise<void> => {
+      const pb = await prepareBatch(batch);
+      if (pb !== null) await commitBatch(pb);
     };
 
     // A local baseline with mtimes is enough to take the incremental path, even
@@ -4695,12 +4750,34 @@ export async function ingestFiles(
       resolveEdgesFn = ingestion.resolveEdges;
       buildPatchFn = patchBuilder.buildPatchWithResolution;
 
-      // Build global resolution index from all repo file paths before the parse loop
-      // so cross-batch imports resolve correctly even in streaming per-chunk mode.
-      // Read pre-scan files (Go, R, SAS) in parallel to maximize I/O throughput.
-      // Index keys are workspace-relative to match the relative paths we pass
-      // into parseFile below.
-      {
+      // Part of a first map's speed is not parsing twice, and part is not
+      // leaving the backend idle between commits.
+      //
+      // Parse once: across several chunks the resolution index needs every
+      // file's summary before the first batch resolves, and building it used
+      // to parse the whole repository a first time just for those. Up to
+      // PARSE_ONCE_MAX_FILES files, the chunks are parsed first and kept, and
+      // the index is built from what they parsed: one read and one parse per
+      // file. Above it, the summaries come from a pre-pass as before, so
+      // memory stays at a chunk's worth of parse results.
+      // IX_PARSE_ONCE_MAX_FILES=0 turns it off. Either way the batches, and so
+      // the patches and the order they are sent in, are the same.
+      const PARSE_ONCE_MAX_FILES = parseNonNegativeIntEnv('IX_PARSE_ONCE_MAX_FILES', 5000);
+      const parseOnce = filePaths.length > PARSE_STREAM_CHUNK && filePaths.length <= PARSE_ONCE_MAX_FILES;
+      // Overlap: batch N+1's edges are resolved and its patches built while
+      // batch N's commit is in flight, and its commit is chained behind N's.
+      // Commits stay one at a time and in batch order. Only when preparing a
+      // batch sends nothing: a file the backend holds a hash for is
+      // reconciled and swept against it during the build, and those reads
+      // must see the commits before them land first.
+      const overlapPrepare = knownHashes.size === 0;
+
+      if (!parseOnce) {
+        // Build global resolution index from all repo file paths before the parse loop
+        // so cross-batch imports resolve correctly even in streaming per-chunk mode.
+        // Read pre-scan files (Go, R, SAS) in parallel to maximize I/O throughput.
+        // Index keys are workspace-relative to match the relative paths we pass
+        // into parseFile below.
         const indexStart = performance.now();
         globalIndex = await buildResolutionIndex(
           ingestion,
@@ -4709,18 +4786,21 @@ export async function ingestFiles(
           false,
         );
         timings.goIndexMs = Math.round(performance.now() - indexStart);
+      } else {
+        // `noteSummary` records nothing until this is set, and the parse below
+        // runs before the index is built.
+        summarize = ingestion.summarizeParseResult;
       }
 
       progressPhase   = 'Parsing';
       progressTotal   = filePaths.length;
       progressCurrent = 0;
 
+      /** Files `parseChunk` handed to the parser, by absolute path, whatever it answered. */
+      const parseAttempted = new Set<string>();
       // Pipeline overlap: read files asynchronously and dispatch to parse pool
       // immediately so workers start processing while more files are still being read.
-      // Commit previous chunk's results while parsing the next chunk.
-      let pendingFlushB: Promise<void> = Promise.resolve();
-      for (let i = 0; i < filePaths.length; i += PARSE_STREAM_CHUNK) {
-        const chunk = filePaths.slice(i, i + PARSE_STREAM_CHUNK);
+      const parseChunk = async (chunk: string[]): Promise<ParsedFile[]> => {
         type FileData = { filePath: string; source: string; hash: string; previousHash: string | undefined; knownHash: string | undefined } | null;
         const fileData: FileData[] = new Array(chunk.length).fill(null);
         const parsePromises: Promise<FileParseResult | null>[] = new Array(chunk.length).fill(Promise.resolve(null));
@@ -4826,6 +4906,7 @@ export async function ingestFiles(
         for (let j = 0; j < fileData.length; j++) {
           const f = fileData[j];
           if (!f) continue;
+          parseAttempted.add(chunk[j]);
           const parsed = parseResults[j];
           if (!parsed) { filesSkipped++; filesSkippedUnparsed++; unparsedRel.add(f.filePath); continue; }
           entitiesParsed += parsed.entities.length;
@@ -4834,10 +4915,68 @@ export async function ingestFiles(
           if (parsed.hasParseErrors) filesWithParseErrors++;
           if (parsed.configEntriesCapped) filesWithCappedConfig++;
         }
-        await pendingFlushB;
-        pendingFlushB = flushBatch(batch);
+        return batch;
+      };
+
+      // The commit chain. `commitLast` is the newest batch's commit and
+      // `commitBefore` the one queued ahead of it. Each is caught at once, so
+      // a failure is not an unhandled rejection while the loop is busy
+      // parsing; it is rethrown where the loop next waits on the chain.
+      let commitLast: Promise<void> = Promise.resolve();
+      let commitBefore: Promise<void> = Promise.resolve();
+      let commitFailed = false;
+      /** Set when the loop below throws: a chained commit not yet sent is dropped. */
+      let abandoned = false;
+      const flushInOrder = async (batch: ParsedFile[]): Promise<void> => {
+        if (!overlapPrepare) {
+          await commitLast;
+          commitLast = flushBatch(batch);
+          commitLast.catch(() => { commitFailed = true; });
+          return;
+        }
+        if (commitFailed) await commitLast;
+        // At most one prepared batch waits behind the commit in flight.
+        await commitBefore;
+        const prepared = await prepareBatch(batch);
+        if (prepared === null) return;
+        commitBefore = commitLast;
+        commitLast = commitLast.then(() => (abandoned ? undefined : commitBatch(prepared)));
+        commitLast.catch(() => { commitFailed = true; });
+      };
+
+      try {
+        if (parseOnce) {
+          const batches: Array<ParsedFile[] | undefined> = [];
+          for (let i = 0; i < filePaths.length; i += PARSE_STREAM_CHUNK) {
+            batches.push(await parseChunk(filePaths.slice(i, i + PARSE_STREAM_CHUNK)));
+          }
+          // Every file parsed above has its summary in the table now. Only the
+          // files the parse did not take (minified, empty, too large,
+          // unreadable) are read for the index here, as the pre-pass read them.
+          const indexStart = performance.now();
+          globalIndex = await buildResolutionIndex(ingestion, parseAttempted, true, false, true);
+          timings.goIndexMs = Math.round(performance.now() - indexStart);
+          for (let i = 0; i < batches.length; i++) {
+            const batch = batches[i]!;
+            // Released batch by batch, so memory falls as the run proceeds.
+            batches[i] = undefined;
+            await flushInOrder(batch);
+          }
+        } else {
+          // Commit previous chunk's results while parsing the next chunk.
+          for (let i = 0; i < filePaths.length; i += PARSE_STREAM_CHUNK) {
+            await flushInOrder(await parseChunk(filePaths.slice(i, i + PARSE_STREAM_CHUNK)));
+          }
+        }
+      } catch (err) {
+        // A parse or a prepare threw. Nothing queued behind the commit in
+        // flight is sent; that commit finishes first, and if it failed, its
+        // error is the one reported, as when the batches ran one by one.
+        abandoned = true;
+        const commitError = await commitLast.then(() => undefined, (e: unknown) => ({ e }));
+        throw commitError !== undefined ? commitError.e : err;
       }
-      await pendingFlushB;
+      await commitLast;
     }
 
     const parsed = performance.now();
