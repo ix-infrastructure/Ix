@@ -1,6 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
-import { describe, expect, it } from 'vitest';
+import Parser from 'tree-sitter';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { parseFile } from '../index.js';
 
@@ -115,6 +116,51 @@ describe('parseFile scales linearly with uses of an imported name', () => {
     });
     expect(exponent, `times ${ms.map((t) => t.toFixed(1)).join('/')} ms`).toBeLessThan(MAX_EXPONENT);
   }, TEST_TIMEOUT_MS);
+});
+
+/**
+ * `x.m0().m1()...m{n-1}()`, in a method of a class with one base (which
+ * also calls `super`) or in a plain function.
+ */
+function memberChain(n: number, inClass: boolean): string {
+  const links = Array.from({ length: n }, (_, i) => `.m${i}()`).join('');
+  return inClass
+    ? `class B { m0() {} }\nexport class C extends B {\n  run() { super.m0(); return x${links}; }\n}\n`
+    : `export function f() { return x${links}; }\n`;
+}
+
+// In these bindings a node's `.parent` walks down from the root, so reading
+// it once per call is quadratic in a long call chain (#1020 review). The
+// super-call check reads the call-site facts instead: the number of `.parent`
+// reads does not grow with the chain. Counted, not timed, so it cannot flake.
+describe('parseFile does not read .parent per JS/TS call', () => {
+  const descriptor = Object.getOwnPropertyDescriptor((Parser as any).SyntaxNode.prototype, 'parent')!;
+  let reads = 0;
+  afterEach(() => {
+    Object.defineProperty((Parser as any).SyntaxNode.prototype, 'parent', descriptor);
+  });
+
+  for (const inClass of [false, true]) {
+    it(inClass ? 'in a class with one base' : 'outside a class', () => {
+      Object.defineProperty((Parser as any).SyntaxNode.prototype, 'parent', {
+        ...descriptor,
+        get() { reads++; return descriptor.get!.call(this); },
+      });
+      const count = (n: number): number => {
+        reads = 0;
+        expect(parseFile('/repo/chain.ts', memberChain(n, inClass))).not.toBeNull();
+        return reads;
+      };
+      const short = count(100);
+      expect(count(400)).toBe(short);
+    });
+  }
+
+  it('still names a super call in a long chain after the base', () => {
+    const parsed = parseFile('/repo/chain.ts', memberChain(50, true))!;
+    const calls = parsed.relationships.filter(r => r.predicate === 'CALLS' && r.srcName === 'C.run').map(r => r.dstName);
+    expect(calls).toContain('B.m0');
+  });
 });
 
 describe('growthExponent', () => {

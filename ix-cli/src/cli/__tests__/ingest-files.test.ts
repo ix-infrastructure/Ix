@@ -1184,6 +1184,20 @@ describe("ingestFiles against a fake backend", () => {
     expect(backend.acceptedPatches()).toBe(3);
   });
 
+  it("counts config files over the per-file key limit, and still ingests them", async () => {
+    fixture(2);
+    const keys = Array.from({ length: 501 }, (_, i) => [`k${i}`, 1]);
+    writeFileSync(join(repo, "src", "data.json"), JSON.stringify(Object.fromEntries(keys)), "utf8");
+    writeFileSync(join(repo, "src", "small.json"), JSON.stringify({ a: { b: { c: 1 } } }), "utf8");
+    execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
+
+    const summary = await run();
+
+    expect(summary.filesWithCappedConfig).toBe(1);
+    expect(summary.filesWithParseErrors).toBe(0);
+    expect(backend.acceptedPatches()).toBe(4);
+  });
+
   it("counts a file over the size limit in the summary, so ix map can say so", async () => {
     fixture(2);
     writeFileSync(join(repo, "src", "huge.ts"), `export const big = "${"x".repeat(1024 * 1024 + 10)}";\n`, "utf8");

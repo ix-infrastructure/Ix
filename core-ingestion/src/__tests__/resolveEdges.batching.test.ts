@@ -183,25 +183,31 @@ describe('resolveEdges against a summarized index', () => {
       }
       return { results, index: indexOf(results) };
     }
-    // Best of seven samples, each resolving the batch REPEATS times. One
-    // resolve of a one-file batch is so short that single resolves let one
-    // scheduler hiccup swing the ratio past the old bound on CI runners
-    // although the code was linear; several per sample lifts each sample
-    // well above timer noise.
+    // Best of nine samples per size, each resolving the batch REPEATS times.
+    // One resolve of a one-file batch is so short that single resolves let one
+    // scheduler hiccup swing the ratio past the bound on CI runners although
+    // the code was linear; several per sample lifts each sample well above
+    // timer noise.
+    //
+    // The two sizes are sampled in turn, as in the scaling check above. Timed
+    // in two blocks, a runner that slowed down while the large block ran
+    // charged all of it to the large size (a macOS runner put a linear run at
+    // 11.6x that way); interleaved, a slow stretch lands on both.
     const REPEATS = 5;
-    const time = ({ results, index }: ReturnType<typeof repo>) => Math.min(...Array.from({ length: 7 }, () => {
+    const sizes = [repo(3000), repo(12000)].map((r) => ({ ...r, best: Infinity }));
+    const timeOnce = ({ results, index }: (typeof sizes)[number]) => {
       const t = performance.now();
       for (let i = 0; i < REPEATS; i++) resolveEdges([results[0]], undefined, index);
       return performance.now() - t;
-    }));
-    const small = repo(3000);
-    const large = repo(12000);
-    time(small); // warm up both sizes
-    time(large);
+    };
+    for (const s of sizes) timeOnce(s); // warm up both sizes
+    for (let round = 0; round < 9; round++) {
+      for (const s of sizes) s.best = Math.min(s.best, timeOnce(s));
+    }
     // 4x the files: linear is ~4x (a little more, as the larger index costs a
     // little more per entry), the old per-call de-dup was ~16x. 10 leaves room
     // above linear for slow, noisy runners and still fails the quadratic
     // behaviour by a wide margin.
-    expect(time(large) / time(small)).toBeLessThan(10);
+    expect(sizes[1].best / sizes[0].best).toBeLessThan(10);
   }, 60_000);
 });

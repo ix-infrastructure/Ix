@@ -685,8 +685,49 @@ export function buildPatchWithResolution(
       : { ...first, dstNodeId: nodeId(idPath, `${dstKey}(${signatures[index]})`), overload: true as const });
   };
 
-  const relationshipDstKey = (r: (typeof relationships)[number]): string =>
+  // #1020: the key of a call that has no target in this file. It names no
+  // entity, so the edge is dropped and the call recorded as unresolved.
+  const noTargetKey = (name: string): string => `\0no-target\0${name}`;
+
+  // A member call that cannot be a module-level function (`conn.validate()`
+  // on a parameter, `self.close()`, `$x->m()`) lands only on a member of that
+  // name, and only on the one there is: a `Class.name` key, or the bare key of
+  // a member extracted with no container (a Rust `impl` function, a JS
+  // object-literal method). Same rule as resolveEdges.
+  const bareMembers = new Set(result.bareMembers ?? []);
+  function resolveMemberKey(name: string): string {
+    const keys = [...new Set(nameToQKeys.get(name) ?? [])].filter(key => key !== name || bareMembers.has(name));
+    return keys.length === 1 ? keys[0] : noTargetKey(name);
+  }
+
+  // The destination key every edge id folded before #1020. A CONTAINS edge to
+  // a Java overload names that overload's own node by its identity key (#1139).
+  const legacyDstKey = (r: (typeof relationships)[number]): string =>
     r.predicate === 'CONTAINS' ? r.dstIdentityKey ?? resolveKey(r.dstName, r.srcName) : resolveKey(r.dstName);
+
+  const relationshipDstKey = (r: (typeof relationships)[number]): string => {
+    // A call to a parameter or local names nothing this file declares.
+    if (r.predicate === 'CALLS' && r.localCallee) return noTargetKey(r.dstName);
+    if (r.predicate === 'CALLS' && r.memberCall) return resolveMemberKey(r.dstName);
+    return legacyDstKey(r);
+  };
+
+  /**
+   * The destination key an edge id folds. Ids keep the key they had before
+   * #1020 unless the member rule moved the call to another node in this file:
+   * - An edge resolveEdges tied to a node lands there whatever the same-file
+   *   key says, so it keeps the old key.
+   * - A member call the rule moved folds the member's own key, unsalted. That
+   *   key names one node, so the salt that keeps `foo()` and `Bar::foo()` apart
+   *   is not needed, and the edge gets the id another call to that member
+   *   (`Foo::handle()`) already gives it.
+   */
+  const edgeIdDstKey = (r: (typeof relationships)[number], dstKey: string, dst: ReturnType<typeof resolveDst>): string => {
+    const key = legacyDstKey(r);
+    if (dst.resolution === null && dstKey !== key) return dstKey;
+    const baseKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
+    return r.phpCallKind && (relationshipShapeCounts.get(baseKey) ?? 0) > 1 ? `${key}:${r.phpCallKind}` : key;
+  };
 
   const edgeIdTuple = (srcKey: string, edgeDstKey: string, predicate: EdgePredicate): string =>
     `${srcKey}\x00${edgeDstKey}\x00${predicate}`;
@@ -711,16 +752,12 @@ export function buildPatchWithResolution(
     for (const r of relationships) {
       const srcKey = relationshipSrcKey(r);
       const dstKey = relationshipDstKey(r);
-      const baseKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
-      const edgeDstKey = r.phpCallKind && (relationshipShapeCounts.get(baseKey) ?? 0) > 1
-        ? `${dstKey}:${r.phpCallKind}`
-        : dstKey;
       // A later overload's edge always folds its destination into its id
       // (below), so it cannot collide and must not salt the first overload's.
       for (const dst of resolveDsts(r, dstKey)) {
         // Only edges that are written can collide.
         if (dst.overload || !keepEdge(nodeId(idPath, srcKey), dst)) continue;
-        const tuple = edgeIdTuple(srcKey, edgeDstKey, r.predicate);
+        const tuple = edgeIdTuple(srcKey, edgeIdDstKey(r, dstKey, dst), r.predicate);
         let seen = dstsByTuple.get(tuple);
         if (!seen) { seen = new Set<string>(); dstsByTuple.set(tuple, seen); }
         seen.add(dst.dstNodeId);
@@ -735,7 +772,6 @@ export function buildPatchWithResolution(
     const srcKey = relationshipSrcKey(r);
     const dstKey = relationshipDstKey(r);
 
-    const baseResolutionKey = `${r.srcName}:${r.predicate}:${r.dstName}`;
     const dsts = resolveDsts(r, dstKey).filter(dst => keepEdge(nodeId(idPath, srcKey), dst));
     if (dsts.length === 0) {
       if (r.predicate === 'CALLS') unresolvedCalls.add(nodeId(idPath, srcKey), r.dstName);
@@ -755,9 +791,7 @@ export function buildPatchWithResolution(
         });
       }
 
-      const edgeDstKey = r.phpCallKind && (relationshipShapeCounts.get(baseResolutionKey) ?? 0) > 1
-        ? `${dstKey}:${r.phpCallKind}`
-        : dstKey;
+      const edgeDstKey = edgeIdDstKey(r, dstKey, dst);
       // The phpCallKind salt above exists so `foo()` and `Bar::foo()` keep distinct
       // ids when they resolve to *different* targets. When they resolve to the same
       // node it instead mints two ids for one edge, and since the dedup downstream
