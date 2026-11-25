@@ -2608,9 +2608,12 @@ export async function ingestFiles(
   // files at all, and the backend rewrote every such node because its scope
   // had changed (Ix#1167). The system is sent with each patch instead. It is
   // not part of any id. Best effort: an unanswered lookup sends none, as before.
-  const stitchedSystemId: string | undefined = systemId === undefined
-    ? (await client.workspaceSystem(workspaceId).catch(() => ({ systemId: null }))).systemId ?? undefined
-    : undefined;
+  // Looked up once, on the first commit: a run that sends nothing asks nothing.
+  let stitchedSystemLookup: Promise<string | undefined> | undefined;
+  const stitchedSystem = (): Promise<string | undefined> =>
+    (stitchedSystemLookup ??= systemId === undefined
+      ? client.workspaceSystem(workspaceId).then(r => r.systemId ?? undefined, () => undefined)
+      : Promise.resolve(undefined));
 
   // Schema-version check forces a clean re-ingest when the backend's graph
   // format has changed in a way that invalidates existing node IDs (e.g. the
@@ -3591,12 +3594,7 @@ export async function ingestFiles(
       fileNumber: number,
       filePath: string,
       changed: boolean,
-    ): PreparedPatch => ({
-      patch: stitchedSystemId !== undefined && patch.source.systemId === undefined
-        ? { ...patch, source: { ...patch.source, systemId: stitchedSystemId } }
-        : patch,
-      fileNumber, filePath, changed,
-    });
+    ): PreparedPatch => ({ patch, fileNumber, filePath, changed });
 
     let forcedRelativePaths: Set<string> | undefined;
     /** Whether a workspace-relative path was forced this run. Built on first use, once the set is final. */
@@ -3639,6 +3637,14 @@ export async function ingestFiles(
       },
     ): Promise<number> => {
       if (preparedPatches.length === 0) return 0;
+      // Every patch this run sends comes through here: stamp the stitched
+      // system (see `stitchedSystem`) on the ones that carry none.
+      const stitched = await stitchedSystem();
+      if (stitched !== undefined) {
+        for (const pp of preparedPatches) {
+          if (pp.patch.source.systemId === undefined) pp.patch = { ...pp.patch, source: { ...pp.patch.source, systemId: stitched } };
+        }
+      }
 
       /**
        * Patches the cutoff held back rather than sent (Ix#560).
