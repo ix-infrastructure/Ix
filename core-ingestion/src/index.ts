@@ -318,9 +318,11 @@ export interface ParsedRelationship {
    */
   receiverChain?: string[];
   /**
-   * Set on a typed relationship that only exists for its receiver (the call
-   * also has its own, unchanged relationship). Without an exact member it
-   * resolves to nothing: no edge, no claim, no unresolved-call entry.
+   * Set on a typed relationship that only exists for its receiver: a typed
+   * CALLS (the call also has its own, unchanged relationship), or the Java
+   * REFERENCES from a static call's caller to the class it names
+   * (`Gate.matches()`). Without an exact target (the member, or the one class
+   * in scope) it resolves to nothing: no edge, no claim, no unresolved-call entry.
    */
   receiverOnly?: true;
 }
@@ -523,6 +525,11 @@ const TYPE_BUILTINS = new Set([
   'size_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t', 'int8_t',
   'int16_t', 'int32_t', 'int64_t',
 ]);
+
+// Java: the `java.lang` types among TYPE_BUILTINS. A static use of one of them
+// (`String.valueOf()`) is never looked up as a repo class.
+const JAVA_LANG_TYPES = new Set(['String', 'Integer', 'Long', 'Double', 'Float', 'Boolean', 'Byte', 'Short',
+  'Character', 'Object', 'Void', 'Number', 'Iterable']);
 
 // Builtins to exclude from CALLS edges — split by language family to avoid
 // suppressing valid method names in other languages (e.g. `filter` is a Python
@@ -4027,6 +4034,30 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
     const seenCalls = new Map<string, Set<string>>();
     // Track seen type references per enclosing class/file to avoid duplicate REFERENCES edges
     const seenRefs = new Map<string, Set<string>>();
+    // Java: each REFERENCES by `src\0type`, so a static call's reference to its
+    // class and a type reference to the same class share one relationship.
+    const refRelationships = new Map<string, ParsedRelationship>();
+    // Java: `src` names the type `type` only to reach a static member of it
+    // (`Gate.matches()`, `Gate.MAX`, `Gate::matches`). The reference is
+    // receiver-only: it is written when exactly one class of that name is in
+    // scope, so a JDK type writes nothing. That also makes names in
+    // TYPE_BUILTINS safe here (a repo's own `List` or `Result`), except the
+    // `java.lang` ones, which every file sees without an import.
+    const referenceStaticType = (src: string, type: string): void => {
+      if (JAVA_LANG_TYPES.has(type) || type.length <= 1) return;
+      const refKey = `${src}\x00${type}`;
+      const named = refRelationships.get(refKey);
+      if (named) {
+        // A type reference in this scope already names it: try the type first.
+        if (!named.receiverType) named.receiverType = type;
+        return;
+      }
+      if (!seenRefs.has(src)) seenRefs.set(src, new Set());
+      seenRefs.get(src)!.add(type);
+      const rel: ParsedRelationship = { srcName: src, dstName: type, predicate: 'REFERENCES', receiverType: type, receiverOnly: true };
+      relationships.push(rel);
+      refRelationships.set(refKey, rel);
+    };
     // Map function name → (param name → declared type) for typed-parameter qualifier substitution
     const paramTypeMap = new Map<string, Map<string, string>>();
     // Python: map function name → (variable name → assigned type) for untyped-param qualifier substitution
@@ -4946,6 +4977,11 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
             callRelationships.set(typedKey, rel);
           }
         }
+        // Java `Gate.matches()`: the caller also references the class `Gate`,
+        // which a static-only class would otherwise never be linked to (#1137).
+        if (language === SupportedLanguages.Java && typedReceiver?.staticType && typedReceiver.type) {
+          referenceStaticType(caller, typedReceiver.type);
+        }
         continue;
       }
 
@@ -4968,10 +5004,22 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
         const seen = seenRefs.get(src)!;
         if (!seen.has(typeName)) {
           seen.add(typeName);
-          relationships.push({ srcName: src, dstName: typeName, predicate: 'REFERENCES' });
+          const rel: ParsedRelationship = { srcName: src, dstName: typeName, predicate: 'REFERENCES' };
+          relationships.push(rel);
+          if (language === SupportedLanguages.Java) refRelationships.set(`${src}\x00${typeName}`, rel);
+        } else if (language === SupportedLanguages.Java) {
+          // Also a type reference in its own right, not only a static call's
+          // receiver: it keeps its name-based fallback.
+          delete refRelationships.get(`${src}\x00${typeName}`)?.receiverOnly;
         }
         continue;
       }
+    }
+
+    // Java `Util.MAX` and `Util::parse` reference the class like a static call does.
+    for (const use of receiverFacts?.staticTypeUses?.() ?? []) {
+      checkBudget();
+      referenceStaticType(findEnclosingDefinition(entities, use.line) ?? findEnclosing(classRanges, use.line, '') ?? fileName, use.type);
     }
 
     for (const [bareKey, rel] of jsTsCallRelationship) {
@@ -6682,8 +6730,8 @@ export function resolveEdges(
   /**
    * A Java type name in scope, in the order Java looks: this file, a
    * single-type import, this package, an on-demand import (`import p.*`,
-   * summarized as `p`). The first that has it decides; several files there
-   * mean no type. A qualified `p.T` names its package (or `Outer.T` a nested
+   * summarized as `p`); the last two give top-level types only. The first
+   * that has it decides; several files there mean no type. A qualified `p.T` names its package (or `Outer.T` a nested
    * type of a type in scope). Summaries without Java facts have no package,
    * so they provide nothing.
    */
@@ -6713,9 +6761,12 @@ export function resolveEdges(
     // A single-type import shadows the package, even of a type not in the repo.
     const single = imports.filter(fq => fq.endsWith(`.${type}`));
     if (single.length) return as(single.flatMap(named));
-    const samePackage = summary?.receiverPackage ? inPackage(summary.receiverPackage, type) : [];
+    // A package or an on-demand import puts its top-level types in scope, not
+    // the types nested in them (`Outer.List` is not `List` to another file).
+    const topLevel = (fps: string[]): string[] => fps.filter(fp => fileQKeys.get(fp)?.get(type)?.includes(type));
+    const samePackage = summary?.receiverPackage ? topLevel(inPackage(summary.receiverPackage, type)) : [];
     if (samePackage.length) return as(samePackage);
-    return as(imports.flatMap(pkg => inPackage(pkg, type)));
+    return as(topLevel(imports.flatMap(pkg => inPackage(pkg, type))));
   }
 
   const receiverProviderCache = new Map<string, Array<{ fp: string; type: string }>>();
@@ -7310,6 +7361,22 @@ export function resolveEdges(
         if (target) {
           resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: target.fp, dstName: rel.dstName,
             dstQualifiedKey: target.key, predicate: 'CALLS', confidence: 0.95, tier: 'type' });
+          stats.resolvedType = (stats.resolvedType ?? 0) + 1;
+          continue;
+        }
+        if (rel.receiverOnly) continue;
+      }
+      // Java: a static call's receiver names the one class in scope with that
+      // name (a class and its constructors share one key, so `bestQKey` is
+      // only null for two nested types of that name in one file). A reference that exists only for that receiver stops here when
+      // there is none (a JDK class, an ambiguous name). One that is also a type
+      // reference resolves by name below, as it does within its own file.
+      if (rel.predicate === 'REFERENCES' && rel.receiverType && srcLanguage === SupportedLanguages.Java) {
+        const providers = receiverProviders(srcFilePath, rel.receiverType);
+        const classKey = providers.length === 1 ? bestQKey(fileQKeys, providers[0].fp, providers[0].type) : null;
+        if (classKey !== null && (rel.receiverOnly || providers[0].fp !== srcFilePath)) {
+          resolved.push({ srcFilePath, srcName: rel.srcName, dstFilePath: providers[0].fp, dstName: rel.dstName,
+            dstQualifiedKey: classKey, predicate: 'REFERENCES', confidence: 0.95, tier: 'type' });
           stats.resolvedType = (stats.resolvedType ?? 0) + 1;
           continue;
         }
