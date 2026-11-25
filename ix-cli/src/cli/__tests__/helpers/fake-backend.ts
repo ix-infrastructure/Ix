@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 
 type SentPatch = {
   patchId?: string;
-  source?: { uri?: string; sourceHash?: string; workspaceId?: string; extractor?: string };
+  source?: { uri?: string; sourceHash?: string; workspaceId?: string; systemId?: string; extractor?: string };
   ops?: Array<Record<string, unknown>>;
 };
 
@@ -161,6 +161,8 @@ export class FakeBackend {
   readonly sourceUris: string[] = [];
   /** `source.workspaceId` beside each of `sourceUris`, in the same order. */
   readonly sourceWorkspaceIds: Array<string | undefined> = [];
+  /** `source.systemId` beside each of `sourceUris`, in the same order. */
+  readonly sourceSystemIds: Array<string | undefined> = [];
   /** The ops of the last patch sent for each `source.uri`. */
   readonly lastOps = new Map<string, Array<Record<string, unknown>>>();
   /** The `patchId` of the last patch sent for each `source.uri`. */
@@ -262,6 +264,8 @@ export class FakeBackend {
    * path, which the tests written before it rely on.
    */
   rememberHashes = false;
+  /** What `/v1/stitch/system/{ws}` answers: the system the stitcher put the workspace in. */
+  stitchedSystem: string | null = null;
   /** Answer `/v1/source-hashes` with a 500, as a backend under load does. */
   failSourceHashes = false;
   /**
@@ -759,6 +763,7 @@ export class FakeBackend {
         if (!source?.uri) continue;
         this.sourceUris.push(source.uri);
         this.sourceWorkspaceIds.push(source.workspaceId);
+        this.sourceSystemIds.push(source.systemId);
         this.lastOps.set(source.uri, ops ?? []);
         if (patchId !== undefined) this.lastPatchIds.set(source.uri, patchId);
       }
@@ -902,7 +907,7 @@ export class FakeBackend {
       const answer = this.answerRead(this.readGraph, path, body);
       if (answer !== undefined) return send(answer.code, answer.payload);
     }
-    if (path.startsWith("/v1/stitch/system/")) return send(200, { systemId: null });
+    if (path.startsWith("/v1/stitch/system/")) return send(200, { systemId: this.stitchedSystem });
     // Read by `reconcileRemovedEntities`, which only an incremental run against
     // a stored graph reaches.
     // Without semantics nothing is stored, so every patch is not found: what a

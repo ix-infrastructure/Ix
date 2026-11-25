@@ -2,7 +2,7 @@
   "fixture": "perf-fixture",
   "budgets": {
     "map (fresh)": {
-      "requests": 9,
+      "requests": 10,
       "bytes": 940272,
       "wallMs": 16221
     },

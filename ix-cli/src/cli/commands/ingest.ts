@@ -2600,6 +2600,21 @@ export async function ingestFiles(
   // minutes, past any read deadline counted from here.
   const client = createClient({ deadlineSignal: opts.deadlineSignal, longRunning: true });
 
+  // A workspace the stitcher joined into a system (Ix#225 Half B) has its rows
+  // stamped with that system_id by the stitch, and a system-scoped map matches
+  // on the stamp. But only a complete map stitches: an incremental one, or a
+  // plugin's single-file re-ingest, wrote its rows with no system_id, so each
+  // file it touched dropped out of the system's map until the map found no
+  // files at all, and the backend rewrote every such node because its scope
+  // had changed (Ix#1167). The system is sent with each patch instead. It is
+  // not part of any id. Best effort: an unanswered lookup sends none, as before.
+  // Looked up once, on the first commit: a run that sends nothing asks nothing.
+  let stitchedSystemLookup: Promise<string | undefined> | undefined;
+  const stitchedSystem = (): Promise<string | undefined> =>
+    (stitchedSystemLookup ??= systemId === undefined
+      ? client.workspaceSystem(workspaceId).then(r => r.systemId ?? undefined, () => undefined)
+      : Promise.resolve(undefined));
+
   // Schema-version check forces a clean re-ingest when the backend's graph
   // format has changed in a way that invalidates existing node IDs (e.g. the
   // absolute→relative source_uri migration, or folding workspace_id into ids).
@@ -3622,6 +3637,14 @@ export async function ingestFiles(
       },
     ): Promise<number> => {
       if (preparedPatches.length === 0) return 0;
+      // Every patch this run sends comes through here: stamp the stitched
+      // system (see `stitchedSystem`) on the ones that carry none.
+      const stitched = await stitchedSystem();
+      if (stitched !== undefined) {
+        for (const pp of preparedPatches) {
+          if (pp.patch.source.systemId === undefined) pp.patch = { ...pp.patch, source: { ...pp.patch.source, systemId: stitched } };
+        }
+      }
 
       /**
        * Patches the cutoff held back rather than sent (Ix#560).

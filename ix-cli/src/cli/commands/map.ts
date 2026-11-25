@@ -169,6 +169,7 @@ export function describeEmptyCompletedMap(
         "filesDiscovered" | "patchesApplied" | "idempotentPatches" | "filesSkippedAsUnchanged" | "parseErrors" | "commitErrors"
       >
     | undefined,
+  scope: { workspaceId?: string; systemId?: string } = {},
 ): string | undefined {
   if (!ingest || ingest.filesDiscovered <= 0 || ingest.parseErrors > 0 || ingest.commitErrors > 0) {
     return undefined;
@@ -205,6 +206,14 @@ export function describeEmptyCompletedMap(
   // and the hash lookup comes back empty, so every file is re-submitted.
   if (patches > 0 && ingest.idempotentPatches >= patches && ingest.filesSkippedAsUnchanged === 0) {
     return `Backend reported ${result.outcome}, but mapped 0 files after local ingest found ${files}. The backend answered every one of the ${patches} committed ${patchWord} with 'already applied', so this run wrote nothing — the graph is empty because the commits were deduplicated against patch records the backend still holds, not because the source could not be parsed. That is what a workspace whose graph was deleted without its patch records looks like; the records expire within 24 hours, or an upgraded backend clears them with the reset. ${tail}`;
+  }
+
+  // A system-scoped map matches the system stamp on each row, not the
+  // workspace, so a workspace whose rows lost the stamp maps as empty however
+  // much was ingested (Ix#1167). Name the scope that was sent: it is the one
+  // fact the user cannot see, and the language guess below is wrong for it.
+  if (scope.systemId) {
+    return `Backend reported ${result.outcome}, but mapped 0 files after local ingest found ${files} (${patches} ${patchWord} committed). The map was scoped to system ${scope.systemId}, and the workspace's files may not carry that system. If the workspace was joined to it by the stitcher, run 'ix ingest <root> --force' to register it again. ${tail}`;
   }
 
   return `Backend reported ${result.outcome}, but mapped 0 files after local ingest found ${files} (${patches} ${patchWord} committed). The source graph was ingested, but no architecture hierarchy was created. The active backend may not map this source language yet. ${tail}`;
@@ -352,8 +361,9 @@ export function invalidateBaselineForIncompleteCompletedMap(
     | undefined,
   projectRoot: string,
   invalidate: (root: string) => void = clearMapBaseline,
+  scope: { workspaceId?: string; systemId?: string } = {},
 ): string | undefined {
-  const message = describeEmptyCompletedMap(result, ingest)
+  const message = describeEmptyCompletedMap(result, ingest, scope)
     ?? describeRegionlessCompletedMap(result, ingest);
   if (message) invalidate(projectRoot);
   return message;
@@ -1228,7 +1238,7 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
   // claim them for this ingest's revision. `ensureFreshMap` records the map
   // it computes.
   if (!deferred) {
-    const emptyMapError = invalidateBaselineForIncompleteCompletedMap(result, localIngest, cwd);
+    const emptyMapError = invalidateBaselineForIncompleteCompletedMap(result, localIngest, cwd, undefined, mapRequest);
     if (emptyMapError) {
       emitError(emptyMapError);
       process.exitCode = 1;
