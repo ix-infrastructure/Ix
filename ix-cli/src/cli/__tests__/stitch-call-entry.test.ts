@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import { stitchCallEntry } from "../commands/ingest.js";
+import { loadIngestionModules } from "../commands/ingestion-loader.js";
 
 describe("stitchCallEntry", () => {
   it("offers a call's own relationship to the cross-repo stitch", () => {
@@ -21,5 +22,38 @@ describe("stitchCallEntry", () => {
   it("skips non-calls and builtin member names", () => {
     expect(stitchCallEntry({ predicate: "IMPORTS", srcName: "use.ts", dstName: "dep" }, "src/use.ts")).toBeUndefined();
     expect(stitchCallEntry({ predicate: "CALLS", srcName: "use", dstName: "forEach" }, "src/use.ts")).toBeUndefined();
+  });
+
+  it("never offers a member call on a local, a call to a local or a shadowed import (#1020)", () => {
+    const call = { predicate: "CALLS", srcName: "use", dstName: "validate" };
+    expect(stitchCallEntry({ ...call, memberCall: true }, "src/use.ts")).toBeUndefined();
+    expect(stitchCallEntry({ ...call, localCallee: true }, "src/use.ts")).toBeUndefined();
+    expect(stitchCallEntry({ ...call, importBinding: false }, "src/use.ts")).toBeUndefined();
+    expect(stitchCallEntry({ ...call, importBinding: true }, "src/use.ts")?.symbol).toBe("validate");
+  });
+
+  it("offers only the import-bound and namespace calls of a parsed file (#1020)", async () => {
+    const [ingestion] = await loadIngestionModules();
+    const source = [
+      "import { validate } from 'shared-lib';",
+      "import * as lib from 'shared-lib';",
+      "export function viaParam(conn: { validate(): void }) { conn.validate(); }",
+      "export function shadowed(validate: () => void) { validate(); }",
+      "export function viaImport() { validate(); }",
+      "export function viaNamespace() { lib.check(); }",
+      // A local function of the imported name: the call is that function, not
+      // the package's export (importBinding: false, no localCallee).
+      "export function localFn() { const validate = () => 1; validate(); }",
+      "export function nestedDecl() { function validate() {} validate(); }",
+      "",
+    ].join("\n");
+    const parsed = ingestion.parseFile("src/use.ts", source);
+    expect(parsed).not.toBeNull();
+    const offered = parsed!.relationships
+      .map((r) => stitchCallEntry(r, "src/use.ts"))
+      .filter((c): c is NonNullable<typeof c> => c !== undefined)
+      .map((c) => `${c.caller}->${c.symbol}`)
+      .sort();
+    expect(offered).toEqual(["viaImport->validate", "viaNamespace->check"]);
   });
 });

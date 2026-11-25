@@ -718,7 +718,53 @@ describe('super calls', () => {
       '    def save(self):',
       '        return super().save()',
       '',
-    ].join('\n'))).toEqual(['User.save -> save', 'User.save -> Base.save']);
+    ].join('\n'))).toEqual(['User.save -> Base.save']);
+  });
+
+  /** The CALLS edges `filePath`'s patch writes: `srcKey -> dstFile:dstKey`. */
+  function patchedCalls(files: Record<string, string>, filePath: string): string[] {
+    const parsed = Object.entries(files).map(([path, source]) => parseFile(path, source)!);
+    const file = parsed.find(result => result.filePath === filePath)!;
+    const keyOf = new Map<string, string>();
+    for (const result of parsed) {
+      for (const e of result.entities) {
+        const key = e.container ? `${e.container}.${e.name}` : e.name;
+        keyOf.set(symbolNodeId('ws', result.filePath, key), `${result.filePath}:${key}`);
+      }
+    }
+    const resolved = resolveEdges(parsed).filter(edge => edge.srcFilePath === filePath);
+    return buildPatchWithResolution(file, 'h', 'ws', resolved).ops
+      .flatMap(op => op.type === 'UpsertEdge' && op.predicate === 'CALLS' ? [`${keyOf.get(op.src)} -> ${keyOf.get(op.dst) ?? op.dst}`] : [])
+      .sort();
+  }
+
+  it('links an overriding method\'s super call to the base method only, never to itself or a module function', () => {
+    expect(patchedCalls({
+      '/repo/app/__init__.py': '',
+      '/repo/app/base.py': 'class Base:\n    def close(self):\n        pass\n',
+      '/repo/app/a.py': [
+        'from .base import Base',
+        '',
+        'def close():',
+        '    pass',
+        '',
+        'class C(Base):',
+        '    def close(self):',
+        '        super().close()',
+        '',
+      ].join('\n'),
+    }, '/repo/app/a.py')).toEqual(['/repo/app/a.py:C.close -> /repo/app/base.py:Base.close']);
+    expect(patchedCalls({
+      '/repo/src/base.ts': 'export class Base {\n  close() {}\n}\n',
+      '/repo/src/a.ts': [
+        "import { Base } from './base';",
+        'export function close() {}',
+        'export class C extends Base {',
+        '  close() { super.close(); }',
+        '}',
+        '',
+      ].join('\n'),
+    }, '/repo/src/a.ts')).toEqual(['/repo/src/a.ts:C.close -> /repo/src/base.ts:Base.close']);
   });
 
   it('keeps the bare name when the base is not a single plain name', () => {

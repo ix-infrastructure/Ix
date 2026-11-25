@@ -1907,6 +1907,11 @@ export interface IngestFilesSummary {
    */
   filesWithParseErrors: number;
   /**
+   * JSON, YAML and TOML files with more config keys than one file may emit.
+   * They are in the graph with the keys that fit; the rest are not nodes.
+   */
+  filesWithCappedConfig: number;
+  /**
    * Files skipped because their parse ran past the per-file budget
    * (IX_PARSE_BUDGET_MS, default 10 s), workspace-relative. A subset of the
    * unparsed skips, named because a file that times out does so on every run.
@@ -2277,12 +2282,27 @@ const STITCH_COMMODITY = new Set(['map', 'forEach', 'reduce', 'reduceRight', 'fl
  * receiver-only typed call (ParsedRelationship.receiverOnly) names a target
  * inferred from a local receiver's type; it is written only when it resolves
  * in this workspace, so it is never a cross-repo call candidate.
+ *
+ * The stitch ties a call to a provider's exported top-level symbol, so three
+ * more calls never qualify (#1020): a call to a parameter or local
+ * (`localCallee`), which resolveEdges drops; a call whose name a local
+ * declaration shadows at every use (`importBinding === false`: `function
+ * validate() {}` or `const validate = () => 1` inside the caller), which
+ * resolveEdges keeps off the import and the same-file entity takes; and a
+ * member call that cannot be a module-level function (`memberCall`:
+ * `conn.validate()` on a parameter, `self.close()`), which resolveEdges lands
+ * only on a member. A namespace call (`lib.validate()`) carries no
+ * `memberCall` and is still offered.
  */
 export function stitchCallEntry(
-  rel: { predicate?: unknown; dstName?: unknown; srcName?: unknown; receiverOnly?: unknown },
+  rel: {
+    predicate?: unknown; dstName?: unknown; srcName?: unknown; receiverOnly?: unknown;
+    memberCall?: unknown; localCallee?: unknown; importBinding?: unknown;
+  },
   filePath: string,
 ): { symbol: string; caller: string; callerFilePath: string } | undefined {
   if (rel.predicate !== 'CALLS' || rel.receiverOnly || typeof rel.dstName !== 'string' || typeof rel.srcName !== 'string') return undefined;
+  if (rel.memberCall === true || rel.localCallee === true || rel.importBinding === false) return undefined;
   if (STITCH_COMMODITY.has(rel.dstName)) return undefined;
   return { symbol: rel.dstName, caller: rel.srcName, callerFilePath: filePath };
 }
@@ -2696,6 +2716,7 @@ export async function ingestFiles(
   const unparsedRel = new Set<string>();
   /** Files that parsed with ERROR or MISSING nodes: indexed, but possibly incompletely. */
   let filesWithParseErrors = 0;
+  let filesWithCappedConfig = 0;
   // What `graphUnchanged` is computed from, beside the counters above. Each is
   // a way this run can have written to the graph, or have found it not where
   // the last run left it, without a patch being counted.
@@ -4647,6 +4668,7 @@ export async function ingestFiles(
             batch.push({ filePath: chunk[j].filePath, parsed, hash: chunk[j].hash, previousHash: chunk[j].previousHash, knownHash: chunk[j].knownHash });
             noteSummary(chunk[j].filePath, chunk[j].hash, parsed, currentMtimes.get(chunk[j].absFilePath));
             if (parsed.hasParseErrors) filesWithParseErrors++;
+            if (parsed.configEntriesCapped) filesWithCappedConfig++;
           }
           await pendingFlush;
           pendingFlush = flushBatch(batch);
@@ -4810,6 +4832,7 @@ export async function ingestFiles(
           batch.push({ filePath: f.filePath, parsed, hash: f.hash, previousHash: f.previousHash, knownHash: f.knownHash });
           noteSummary(f.filePath, f.hash, parsed, currentMtimes.get(chunk[j]));
           if (parsed.hasParseErrors) filesWithParseErrors++;
+          if (parsed.configEntriesCapped) filesWithCappedConfig++;
         }
         await pendingFlushB;
         pendingFlushB = flushBatch(batch);
@@ -5469,6 +5492,7 @@ export async function ingestFiles(
     stitchSkipped,
     stitchSkippedRule,
     filesWithParseErrors,
+    filesWithCappedConfig,
     parseTimeouts: timedOutParses(),
     grammarUnavailable,
     graphUnchanged:
@@ -5528,6 +5552,11 @@ export async function ingestFiles(
   if (replayedChanges.size > 0) {
     // stderr and exit 0: nothing failed on this side, and the next run retries.
     process.stderr.write(`  ${describeReplayedChanges(summary.replayedChanges)}\n`);
+  }
+  // Debug only: a repo with a large data file would otherwise print this on
+  // every run, and hooks run `ix map` on every edit. Nothing failed.
+  if (debug && filesWithCappedConfig > 0) {
+    process.stderr.write(`  [debug] config keys capped at the per-file limit in ${filesWithCappedConfig} file(s)\n`);
   }
   if (commitReport.kind === "warn") {
     process.stderr.write(`  ${commitReport.message}\n`);
@@ -5621,6 +5650,7 @@ export async function ingestFiles(
     if (tooLarge > 0) console.log(`  ${chalk.dim('skipped too large:')} ${tooLarge}`);
     if (minifiedLikely > 0) console.log(`  ${chalk.dim('skipped minified:')} ${minifiedLikely}`);
     if (filesWithParseErrors > 0) console.log(`  ${chalk.yellow("parsed with errors:")} ${filesWithParseErrors} ${chalk.dim("(tree-sitter recovered; parts may be missing)")}`);
+    if (filesWithCappedConfig > 0) console.log(`  ${chalk.dim("config keys capped:")} ${filesWithCappedConfig} ${chalk.dim("(files over the per-file limit; the rest are not graph nodes)")}`);
     // #967: name the languages behind part of `skipped`, one line each with
     // why the grammar did not load. A count alone left "why are my Kotlin
     // files not in the graph" with no answer anywhere in the output.
