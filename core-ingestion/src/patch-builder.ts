@@ -14,7 +14,7 @@ import type {
   UpsertEdgeOp,
 } from './schema.js';
 import { resolveEdges } from './index.js';
-import type { FileParseResult, ParsedEntity, ResolutionTier, ResolvedEdge } from './index.js';
+import type { FileParseResult, ParsedEntity, ParsedRelationship, ResolutionTier, ResolvedEdge } from './index.js';
 
 // ---------------------------------------------------------------------------
 // Deterministic UUID from a string (matches existing CLI convention)
@@ -452,17 +452,29 @@ export function buildPatchWithResolution(
     return name;
   }
 
+  // The key a relationship's source node id is folded from. `srcIdentityKey`
+  // is set where the source is an entity with its own identity (a Java
+  // overload after the first); the name alone would land on the first overload.
+  const relationshipSrcKey = (r: ParsedRelationship): string =>
+    r.srcIdentityKey ?? resolveKey(r.srcName);
+
   // UpsertNode for each entity (deduplicated by id — first occurrence wins)
   const seenNodeIds = new Set<string>();
   for (const e of entities) {
-    const qk = entityQKey.get(e)!;
+    const qk = e.identityKey ?? entityQKey.get(e)!;
     const id = nodeId(idPath, qk);
     if (!seenNodeIds.has(id)) {
       seenNodeIds.add(id);
       const lines = { line_start: e.lineStart, line_end: e.lineEnd, language: e.language };
       const attrs: FileNodeAttrs | SymbolNodeAttrs = e.kind === 'file'
         ? { ...lines, role: result.fileRole.role, role_confidence: result.fileRole.role_confidence, role_signals: result.fileRole.role_signals, ...(result.hasParseErrors ? { parse_errors: true } : {}) }
-        : { ...lines, role: result.fileRole.role, role_source: 'inherited_from_file' };
+        : {
+            ...lines, role: result.fileRole.role, role_source: 'inherited_from_file',
+            // A later overload names the node of the first declaration of its
+            // key, which is the id its own bare key folds to.
+            ...(e.identityKey && e.overloadSignature !== undefined ? { overload_of: nodeId(idPath, entityQKey.get(e)!) } : {}),
+            ...(e.overloadSignature !== undefined ? { overload_signature: e.overloadSignature } : {}),
+          };
       ops.push({
         type: 'UpsertNode',
         id,
@@ -503,7 +515,7 @@ export function buildPatchWithResolution(
     // Chunk -[DEFINES]-> Symbol (only for named chunks whose symbol this patch
     // writes; any other would point at a node that does not exist)
     if (chunk.name !== null) {
-      const symbolKey = chunk.container ? `${chunk.container}.${chunk.name}` : chunk.name;
+      const symbolKey = chunk.identityKey ?? (chunk.container ? `${chunk.container}.${chunk.name}` : chunk.name);
       const symbolNid = nodeId(idPath, symbolKey);
       if (seenNodeIds.has(symbolNid)) ops.push({
         type: 'UpsertEdge',
@@ -613,9 +625,10 @@ export function buildPatchWithResolution(
     return keys.length === 1 ? keys[0] : noTargetKey(name);
   }
 
-  // The destination key every edge id folded before #1020.
+  // The destination key every edge id folded before #1020. A CONTAINS edge to
+  // a Java overload names that overload's own node by its identity key (#1139).
   const legacyDstKey = (r: (typeof relationships)[number]): string =>
-    r.predicate === 'CONTAINS' ? resolveKey(r.dstName, r.srcName) : resolveKey(r.dstName);
+    r.predicate === 'CONTAINS' ? r.dstIdentityKey ?? resolveKey(r.dstName, r.srcName) : resolveKey(r.dstName);
 
   const relationshipDstKey = (r: (typeof relationships)[number]): string => {
     // A call to a parameter or local names nothing this file declares.
@@ -662,7 +675,7 @@ export function buildPatchWithResolution(
   {
     const dstsByTuple = new Map<string, Set<string>>();
     for (const r of relationships) {
-      const srcKey = resolveKey(r.srcName);
+      const srcKey = relationshipSrcKey(r);
       const dstKey = relationshipDstKey(r);
       const dst = resolveDst(r, dstKey);
       const edgeDstKey = edgeIdDstKey(r, dstKey, dst);
@@ -679,7 +692,7 @@ export function buildPatchWithResolution(
   }
 
   for (const r of relationships) {
-    const srcKey = resolveKey(r.srcName);
+    const srcKey = relationshipSrcKey(r);
     const dstKey = relationshipDstKey(r);
 
     const dst = resolveDst(r, dstKey);
@@ -744,7 +757,7 @@ export function buildPatchWithResolution(
   for (const r of relationships) {
     // A receiver-only typed call claims nothing the call's own relationship does not.
     if (r.receiverOnly) continue;
-    const srcKey = resolveKey(r.srcName);
+    const srcKey = relationshipSrcKey(r);
     const entityId = nodeId(idPath, srcKey);
     const field = `${r.predicate.toLowerCase()}:${r.dstName}`;
     const claimIdentity = `${entityId}\x00${field}`;
