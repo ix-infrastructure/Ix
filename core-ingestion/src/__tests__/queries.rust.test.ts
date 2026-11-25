@@ -181,10 +181,12 @@ fn make(b: Builder) {
     );
 
     expect(result).not.toBeNull();
+    // `b.build()` is a method call: never a free function `build` (#1020).
     expect(result!.relationships).toContainEqual({
       srcName: 'make',
       dstName: 'build',
       predicate: 'CALLS',
+      memberCall: true,
     });
   });
   it('names a Self:: call by the impl type', () => {
