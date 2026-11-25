@@ -2600,6 +2600,18 @@ export async function ingestFiles(
   // minutes, past any read deadline counted from here.
   const client = createClient({ deadlineSignal: opts.deadlineSignal, longRunning: true });
 
+  // A workspace the stitcher joined into a system (Ix#225 Half B) has its rows
+  // stamped with that system_id by the stitch, and a system-scoped map matches
+  // on the stamp. But only a complete map stitches: an incremental one, or a
+  // plugin's single-file re-ingest, wrote its rows with no system_id, so each
+  // file it touched dropped out of the system's map until the map found no
+  // files at all, and the backend rewrote every such node because its scope
+  // had changed (Ix#1167). The system is sent with each patch instead. It is
+  // not part of any id. Best effort: an unanswered lookup sends none, as before.
+  const stitchedSystemId: string | undefined = systemId === undefined
+    ? (await client.workspaceSystem(workspaceId).catch(() => ({ systemId: null }))).systemId ?? undefined
+    : undefined;
+
   // Schema-version check forces a clean re-ingest when the backend's graph
   // format has changed in a way that invalidates existing node IDs (e.g. the
   // absolute→relative source_uri migration, or folding workspace_id into ids).
@@ -3579,7 +3591,12 @@ export async function ingestFiles(
       fileNumber: number,
       filePath: string,
       changed: boolean,
-    ): PreparedPatch => ({ patch, fileNumber, filePath, changed });
+    ): PreparedPatch => ({
+      patch: stitchedSystemId !== undefined && patch.source.systemId === undefined
+        ? { ...patch, source: { ...patch.source, systemId: stitchedSystemId } }
+        : patch,
+      fileNumber, filePath, changed,
+    });
 
     let forcedRelativePaths: Set<string> | undefined;
     /** Whether a workspace-relative path was forced this run. Built on first use, once the set is final. */

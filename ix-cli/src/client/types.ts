@@ -258,6 +258,10 @@ export interface PatchSource {
   // path. Backend stores it as an opaque attribute for future multi-workspace
   // disambiguation; it does not interpret the value.
   workspaceId?: string;
+  // The system the workspace belongs to: a co-ingested multi-repo system, or
+  // one the stitcher joined it into. Stored on every node and edge the patch
+  // writes; system-scoped reads (`ix map` of a system) match on it.
+  systemId?: string;
 }
 
 // The op shapes are defined once, in graph-schema.ts (a copy of

@@ -124,6 +124,22 @@ describe('describeEmptyCompletedMap', () => {
     expect(message).toContain("the next 'ix map' can reuse unchanged files");
   });
 
+  it('names the system a system-scoped empty map was sent for, not the language (#1167)', () => {
+    const message = describeEmptyCompletedMap(emptyResult, {
+      filesDiscovered: 413,
+      patchesApplied: 0,
+      idempotentPatches: 0,
+      filesSkippedAsUnchanged: 413,
+      parseErrors: 0,
+      commitErrors: 0,
+    }, { systemId: 'a6e82e54' });
+
+    expect(message).toContain('mapped 0 files after local ingest found 413 supported source files');
+    expect(message).toContain('scoped to system a6e82e54');
+    expect(message).toContain("ix ingest <root> --force");
+    expect(message).not.toContain('may not map this source language');
+  });
+
   it('blames deduplication, not the language, when every commit was a replay (#527)', () => {
     const message = describeEmptyCompletedMap(emptyResult, {
       filesDiscovered: 1,
