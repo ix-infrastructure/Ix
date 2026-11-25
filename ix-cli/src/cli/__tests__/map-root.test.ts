@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
 import { registerMapCommand } from "../commands/map.js";
-import { canonicalMapRoot, resolveIngestRoot, resolveIngestRootWithSource, resolveMapRoot } from "../map-root.js";
+import { canonicalMapRoot, NoMapRootError, resolveIngestRoot, resolveIngestRootWithSource, resolveMapRoot } from "../map-root.js";
 import { findWorkspaceForCwd, loadConfig } from "../config.js";
 import { lockPathForTest } from "../single-flight.js";
 
@@ -113,7 +113,7 @@ describe("map root resolution", () => {
     expect(resolveMapRoot(undefined, nested)).toBe(realpathSync.native(registered));
   });
 
-  it("falls back to the default workspace when cwd has no local context", () => {
+  it("refuses, rather than re-mapping the default workspace, when cwd has no local context (#1171)", () => {
     const selected = fixture();
     const bare = fixture();
     writeFileSync(join(home, ".ix", "config.yaml"), [
@@ -126,7 +126,32 @@ describe("map root resolution", () => {
       "",
     ].join("\n"));
 
-    expect(resolveMapRoot(undefined, bare)).toBe(realpathSync.native(selected));
+    expect(() => resolveMapRoot(undefined, bare)).toThrow(NoMapRootError);
+    expect(() => resolveMapRoot(undefined, bare)).toThrow("Run 'ix map .' to map this folder");
+    // An explicit path still maps exactly that folder.
+    expect(resolveMapRoot(".", bare)).toBe(realpathSync.native(bare));
+  });
+
+  it("uses a workspace named with `ix config set workspace` when cwd has no local context", () => {
+    const named = fixture();
+    const other = fixture();
+    const bare = fixture();
+    writeFileSync(join(home, ".ix", "config.yaml"), [
+      "endpoint: http://localhost:8090",
+      "workspace: named",
+      "workspaces:",
+      "  - workspace_id: other-id",
+      "    workspace_name: other",
+      `    root_path: ${other}`,
+      "    default: true",
+      "  - workspace_id: named-id",
+      "    workspace_name: named",
+      `    root_path: ${named}`,
+      "    default: false",
+      "",
+    ].join("\n"));
+
+    expect(resolveMapRoot(undefined, bare)).toBe(realpathSync.native(named));
   });
 
   it.skipIf(process.platform === "win32")("canonicalizes a symlink before deriving workspace identity", () => {

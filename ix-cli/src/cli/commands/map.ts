@@ -990,10 +990,11 @@ async function runMapCommand(pathArg: string | undefined, opts: { format: string
       return;
     }
     const message = err?.message ?? "Invalid map path";
+    const code = err?.name === "NoMapRootError" ? "no_map_root" : "invalid_map_path";
     if (opts.format === "json") {
-      printJson({ error: "invalid_map_path", message });
+      printJson({ error: code, message });
     } else if (opts.format === "llm") {
-      console.log(llmError("invalid_map_path", message));
+      console.log(llmError(code, message));
     } else {
       console.error(chalk.red("Error:"), message);
     }

@@ -3,7 +3,7 @@
 import { realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { canonicalWorkspacePath, findWorkspaceForCwd, gitRootFor, isPathInside, resolveWorkspaceRoot } from "./config.js";
+import { canonicalWorkspacePath, findWorkspaceForCwd, gitRootFor, isPathInside, loadConfig, loadWorkspaces } from "./config.js";
 
 export function canonicalMapRoot(candidate: string): string {
   const resolved = resolve(candidate);
@@ -33,8 +33,14 @@ export function canonicalMapRoot(candidate: string): string {
  *   1. an explicit path argument
  *   2. the registered workspace containing cwd
  *   3. cwd's own git root  <- ahead of the named/default workspace
- *   4. the named/default workspace, for a cwd with no local context at all
- *   5. cwd
+ *   4. the workspace named with `ix config set workspace <name>`
+ *
+ * and nothing else. The default workspace (`default: true`) is not a choice
+ * anyone made: it marks whichever repository was mapped first. A bare
+ * `ix map` in a folder with no local context used to fall back to it, and so
+ * re-mapped that unrelated repository, exited 0 and printed its map, while
+ * the folder itself was never mapped (Ix#1171). That case now stops with a
+ * {@link NoMapRootError} naming the folder and `ix map .`.
  */
 export function resolveMapRoot(pathArg?: string, cwd = process.cwd()): string {
   if (pathArg) return canonicalMapRoot(resolve(cwd, pathArg));
@@ -42,7 +48,22 @@ export function resolveMapRoot(pathArg?: string, cwd = process.cwd()): string {
   const local = localRootFor(cwd);
   if (local) return canonicalMapRoot(local);
 
-  return canonicalMapRoot(resolveWorkspaceRoot(undefined, cwd));
+  const name = loadConfig().workspace;
+  const named = name ? loadWorkspaces().find(w => w.workspace_name === name) : undefined;
+  if (named) return canonicalMapRoot(named.root_path);
+
+  throw new NoMapRootError(resolve(cwd));
+}
+
+/** A bare `ix map` in a folder that is no workspace, no repository, and no named workspace. */
+export class NoMapRootError extends Error {
+  override readonly name = "NoMapRootError";
+  constructor(readonly dir: string) {
+    super(
+      `${dir} is not a mapped workspace or inside a git repository, so a bare 'ix map' has nothing to map here. ` +
+      `Run 'ix map .' to map this folder, or 'ix map <path>' for another one.`,
+    );
+  }
 }
 
 /**
