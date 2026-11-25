@@ -4925,6 +4925,8 @@ export async function ingestFiles(
       let commitLast: Promise<void> = Promise.resolve();
       let commitBefore: Promise<void> = Promise.resolve();
       let commitFailed = false;
+      /** Set when the loop below throws: a chained commit not yet sent is dropped. */
+      let abandoned = false;
       const flushInOrder = async (batch: ParsedFile[]): Promise<void> => {
         if (!overlapPrepare) {
           await commitLast;
@@ -4935,43 +4937,44 @@ export async function ingestFiles(
         if (commitFailed) await commitLast;
         // At most one prepared batch waits behind the commit in flight.
         await commitBefore;
-        let pb: PreparedBatch | null;
-        try {
-          pb = await prepareBatch(batch);
-        } catch (err) {
-          // The commit already in flight finishes first, as it did before.
-          await commitLast.catch(() => undefined);
-          throw err;
-        }
-        if (pb === null) return;
-        const prepared = pb;
+        const prepared = await prepareBatch(batch);
+        if (prepared === null) return;
         commitBefore = commitLast;
-        commitLast = commitLast.then(() => commitBatch(prepared));
+        commitLast = commitLast.then(() => (abandoned ? undefined : commitBatch(prepared)));
         commitLast.catch(() => { commitFailed = true; });
       };
 
-      if (parseOnce) {
-        const batches: Array<ParsedFile[] | undefined> = [];
-        for (let i = 0; i < filePaths.length; i += PARSE_STREAM_CHUNK) {
-          batches.push(await parseChunk(filePaths.slice(i, i + PARSE_STREAM_CHUNK)));
+      try {
+        if (parseOnce) {
+          const batches: Array<ParsedFile[] | undefined> = [];
+          for (let i = 0; i < filePaths.length; i += PARSE_STREAM_CHUNK) {
+            batches.push(await parseChunk(filePaths.slice(i, i + PARSE_STREAM_CHUNK)));
+          }
+          // Every file parsed above has its summary in the table now. Only the
+          // files the parse did not take (minified, empty, too large,
+          // unreadable) are read for the index here, as the pre-pass read them.
+          const indexStart = performance.now();
+          globalIndex = await buildResolutionIndex(ingestion, parseAttempted, true, false, true);
+          timings.goIndexMs = Math.round(performance.now() - indexStart);
+          for (let i = 0; i < batches.length; i++) {
+            const batch = batches[i]!;
+            // Released batch by batch, so memory falls as the run proceeds.
+            batches[i] = undefined;
+            await flushInOrder(batch);
+          }
+        } else {
+          // Commit previous chunk's results while parsing the next chunk.
+          for (let i = 0; i < filePaths.length; i += PARSE_STREAM_CHUNK) {
+            await flushInOrder(await parseChunk(filePaths.slice(i, i + PARSE_STREAM_CHUNK)));
+          }
         }
-        // Every file parsed above has its summary in the table now. Only the
-        // files the parse did not take (minified, empty, too large,
-        // unreadable) are read for the index here, as the pre-pass read them.
-        const indexStart = performance.now();
-        globalIndex = await buildResolutionIndex(ingestion, parseAttempted, true, false, true);
-        timings.goIndexMs = Math.round(performance.now() - indexStart);
-        for (let i = 0; i < batches.length; i++) {
-          const batch = batches[i]!;
-          // Released batch by batch, so memory falls as the run proceeds.
-          batches[i] = undefined;
-          await flushInOrder(batch);
-        }
-      } else {
-        // Commit previous chunk's results while parsing the next chunk.
-        for (let i = 0; i < filePaths.length; i += PARSE_STREAM_CHUNK) {
-          await flushInOrder(await parseChunk(filePaths.slice(i, i + PARSE_STREAM_CHUNK)));
-        }
+      } catch (err) {
+        // A parse or a prepare threw. Nothing queued behind the commit in
+        // flight is sent; that commit finishes first, and if it failed, its
+        // error is the one reported, as when the batches ran one by one.
+        abandoned = true;
+        const commitError = await commitLast.then(() => undefined, (e: unknown) => ({ e }));
+        throw commitError !== undefined ? commitError.e : err;
       }
       await commitLast;
     }

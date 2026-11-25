@@ -31,13 +31,25 @@ const probe = {
   throwOnResolve: undefined as number | undefined,
   /** Fired at each resolve call, with its number. */
   onResolve: undefined as ((n: number) => void) | undefined,
+  /** Second parses of a file (the streamed pass after a pre-pass), counted. */
+  secondParses: 0,
+  /** Answer this second parse (1-based) with a malformed result, if set. */
+  malformedAtSecondParse: undefined as number | undefined,
+  /** Fired when the malformed result is handed out. */
+  onMalformed: undefined as (() => void) | undefined,
 };
 
 vi.mock("../commands/parse-pool.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../commands/parse-pool.js")>();
   const parse = actual.ParsePool.prototype.parse;
   actual.ParsePool.prototype.parse = function (this: unknown, filePath: string, ...rest: unknown[]) {
-    probe.parses.set(filePath, (probe.parses.get(filePath) ?? 0) + 1);
+    const count = (probe.parses.get(filePath) ?? 0) + 1;
+    probe.parses.set(filePath, count);
+    if (count === 2 && ++probe.secondParses === probe.malformedAtSecondParse) {
+      probe.onMalformed?.();
+      // No `entities`: the streamed pass throws reading it, outside any per-file catch.
+      return Promise.resolve({ filePath }) as unknown as ReturnType<typeof parse>;
+    }
     return (parse as (...a: unknown[]) => ReturnType<typeof parse>).call(this, filePath, ...rest);
   } as typeof parse;
   return actual;
@@ -133,6 +145,9 @@ describe("fresh map: parse once, prepare during the commit", () => {
     probe.parses.clear();
     probe.resolveCalls = 0;
     probe.throwOnResolve = undefined;
+    probe.secondParses = 0;
+    probe.malformedAtSecondParse = undefined;
+    probe.onMalformed = undefined;
     probe.onResolve = undefined;
   });
 
@@ -259,5 +274,28 @@ describe("fresh map: parse once, prepare during the commit", () => {
     const bulks = backend.requests.filter(r => r.path === "/v1/patches/bulk");
     expect(bulks).toHaveLength(2);
     expect(bulks.every(r => r.code === 200)).toBe(true);
+  }, 120_000);
+
+  it("drops a commit queued behind the one in flight when the streamed parse throws", async () => {
+    writeFixture(repo);
+    // Streaming (two passes): batch 2 is prepared and chained behind commit 1,
+    // which is held open, and then the parse of chunk 3 throws.
+    process.env.IX_PARSE_ONCE_MAX_FILES = "0";
+    probe.malformedAtSecondParse = 2 * CHUNK + 5;
+    let release!: () => void;
+    const held = new Promise<void>(r => { release = r; });
+    probe.onMalformed = () => { setTimeout(release, 300); };
+    let backend!: FakeBackend;
+    await expect(freshMap("parse-throws", (b) => {
+      backend = b;
+      b.commitGate = (n) => (n === 1 ? Promise.race([held, new Promise<void>(r => setTimeout(r, 5_000))]) : undefined);
+    })).rejects.toThrow();
+    expect(probe.resolveCalls).toBe(2);
+    // Commit 1 landed before the run ended; batch 2's commit was never sent.
+    const bulks = backend.requests.filter(r => r.path === "/v1/patches/bulk");
+    expect(bulks).toHaveLength(1);
+    expect(bulks[0]!.code).toBe(200);
+    await new Promise(r => setTimeout(r, 200));
+    expect(backend.requests.filter(r => r.path === "/v1/patches/bulk")).toHaveLength(1);
   }, 120_000);
 });
