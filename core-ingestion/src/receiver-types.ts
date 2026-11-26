@@ -496,6 +496,65 @@ export function collectReceiverFacts(root: any, language: string, checkBudget: (
   };
 }
 
+/**
+ * The erased parameter list of a Java method or constructor declaration,
+ * `(List,int[],Object)`: what tells two overloads apart (#1139). Each type is
+ * written the way the JVM erases it, by its simple name: type arguments are
+ * dropped, a type variable becomes its first bound (or `Object`), a varargs
+ * parameter is an array, and a qualified name keeps its last segment. Simple
+ * names keep the key free of dots, so `Container.name(...)` still splits on
+ * the first dot. A receiver parameter (`Foo this`) is not a parameter.
+ */
+export function javaErasedSignature(decl: any): string {
+  // Type variables in scope, innermost first: the method's, then each
+  // enclosing type's, up to the first static boundary we do not model.
+  const scopes: any[][] = [];
+  for (let node = decl; node; node = node.parent) {
+    const list = node.childForFieldName?.('type_parameters');
+    if (list) scopes.push(list.namedChildren.filter((p: any) => p.type === 'type_parameter'));
+  }
+  const typeVariable = (name: string): any => {
+    for (const scope of scopes) {
+      const found = scope.find((p: any) => p.namedChildren.find((c: any) => c.type === 'type_identifier')?.text === name);
+      if (found) return found;
+    }
+  };
+  const erase = (type: any, depth = 0): string => {
+    if (!type || depth > 8) return 'Object';
+    switch (type.type) {
+      case 'annotated_type':
+        return erase(type.namedChildren.filter((c: any) => c.type !== 'annotation' && c.type !== 'marker_annotation').at(-1), depth + 1);
+      case 'generic_type':
+        return erase(type.namedChildren.find((c: any) => c.type === 'type_identifier' || c.type === 'scoped_type_identifier'), depth + 1);
+      case 'scoped_type_identifier':
+        return erase(type.namedChildren.filter((c: any) => c.type === 'type_identifier').at(-1), depth + 1);
+      case 'array_type':
+        return erase(type.childForFieldName('element'), depth + 1) + dimensions(type.childForFieldName('dimensions'));
+      case 'type_identifier': {
+        const variable = typeVariable(type.text);
+        if (!variable) return type.text;
+        const bound = variable.namedChildren.find((c: any) => c.type === 'type_bound');
+        return bound ? erase(bound.namedChildren.find((c: any) => c.type !== 'annotation' && c.type !== 'marker_annotation'), depth + 1) : 'Object';
+      }
+      default:
+        // Primitives (`int`, `boolean`, ...) and anything unexpected: as written.
+        return type.text.replace(/\s/g, '');
+    }
+  };
+  const dimensions = (node: any): string => '[]'.repeat((node?.text.match(/\[/g) ?? []).length);
+  const params = decl.childForFieldName('parameters')?.namedChildren ?? [];
+  const erased: string[] = [];
+  for (const param of params) {
+    if (param.type === 'formal_parameter') {
+      erased.push(erase(param.childForFieldName('type')) + dimensions(param.childForFieldName('dimensions')));
+    } else if (param.type === 'spread_parameter') {
+      const type = param.namedChildren.find((c: any) => c.type !== 'modifiers' && c.type !== 'variable_declarator');
+      erased.push(`${erase(type)}[]`);
+    }
+  }
+  return `(${erased.join(',')})`;
+}
+
 /** The innermost Java type declaration or anonymous class body around `pos`. */
 function javaTypeAt(types: Array<{ start: number; end: number; name?: string; superclass?: string }>, pos: number) {
   // Document order: the last range starting at or before `pos` that still

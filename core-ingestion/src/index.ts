@@ -176,7 +176,7 @@ import { SupportedLanguages, languageFromPath } from './languages.js';
 import { LANGUAGE_QUERIES } from './queries.js';
 import { classifyFileRole } from './role-classifier.js';
 import type { RoleClassification } from './role-classifier.js';
-import { callReceiver, collectReceiverFacts } from './receiver-types.js';
+import { callReceiver, collectReceiverFacts, javaErasedSignature } from './receiver-types.js';
 import { summarySignature, type FileSummary } from './symbol-index.js';
 export type { FileSummary } from './symbol-index.js';
 
@@ -199,6 +199,21 @@ export interface ParsedEntity {
    * index entities under their fully-qualified path.
    */
   packageScope?: string;
+  /**
+   * Java: the erased parameter list (`(String,int)`) of an overload whose
+   * signature differs from the first overload of its name in the class. It is
+   * part of the entity's key, `Container.name(String,int)`, so each overload
+   * is its own node (#1139). Absent on the first overload, on a method that
+   * is not overloaded, and on an overload whose erased signature matches the
+   * first: those keep `Container.name`.
+   */
+  signature?: string;
+}
+
+/** The key a parse result's own nodes and call sources use for an entity. */
+export function entityKey(e: Pick<ParsedEntity, 'name' | 'container' | 'signature'>): string {
+  const base = e.container ? `${e.container}.${e.name}` : e.name;
+  return e.signature ? `${base}${e.signature}` : base;
 }
 
 /** A semantic code span extracted from the AST. The primary LLM retrieval unit. */
@@ -216,6 +231,8 @@ export interface ParsedChunk {
   language: string;
   /** Name of the directly enclosing class/trait/interface, if any. */
   container?: string;
+  /** The `signature` of the entity this chunk defines (ParsedEntity.signature). */
+  signature?: string;
 }
 
 export interface ParsedRelationship {
@@ -3995,7 +4012,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
       endByte: number;
       language: SupportedLanguages;
       container?: string;
+      signature?: string;
     }> = [];
+    // Java methods, for the overload keys (#1139).
+    const javaCallables: Array<{ entity: ParsedEntity; chunk: { signature?: string }; contains: ParsedRelationship; decl: any }> = [];
 
     // Track class ranges for containment: [name, startLine, endLine]
     const classRanges: Array<{ name: string; start: number; end: number }> = [];
@@ -4218,7 +4238,7 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           ? heritageClassCapture.node.text
           : (enclosing ?? undefined);
 
-        entities.push({
+        const entity: ParsedEntity = {
           name,
           kind,
           lineStart,
@@ -4230,9 +4250,10 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
               ? phpNamespaceForNode(defNode, phpNamespaces.spans)
               : undefined
           ),
-        });
+        };
+        entities.push(entity);
 
-        pendingChunks.push({
+        const pendingChunk: (typeof pendingChunks)[number] = {
           name,
           chunkKind: kind,
           lineStart,
@@ -4241,17 +4262,20 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           endByte,
           language,
           container: enclosing ?? undefined,
-        });
+        };
+        pendingChunks.push(pendingChunk);
 
         if (kind === 'class' || kind === 'interface' || kind === 'trait') {
           classRanges.push({ name, start: lineStart, end: lineEnd });
         }
         if (!effectiveContainer && isBareMemberDefinition(defNode, kind)) bareMembers.add(name);
 
-        if (effectiveContainer) {
-          relationships.push({ srcName: effectiveContainer, dstName: name, predicate: 'CONTAINS' });
-        } else {
-          relationships.push({ srcName: fileName, dstName: name, predicate: 'CONTAINS' });
+        const contains: ParsedRelationship = { srcName: effectiveContainer ?? fileName, dstName: name, predicate: 'CONTAINS' };
+        relationships.push(contains);
+        // Methods only: a constructor has no container (findEnclosing skips the
+        // class of its own name), so it is keyed by the class name already.
+        if (language === SupportedLanguages.Java && effectiveContainer && defNode.type === 'method_declaration') {
+          javaCallables.push({ entity, chunk: pendingChunk, contains, decl: defNode });
         }
         continue;
       }
@@ -4431,6 +4455,27 @@ export function parseFile(filePath: string, source: string, opts: ParseFileOptio
           declaredTypeMap.get(scope)!.set(typedVarName.node.text, typedVarType.node.text);
           continue;
         }
+      }
+    }
+
+    // Java overloads (#1139): the first of a name in a class keeps
+    // `Container.name`, so its id, and every caller resolved to it, stays as it
+    // was. A later overload with another erased signature is keyed
+    // `Container.name(T1,T2)`; one with the same erased signature stays on the
+    // node it duplicates. Set before the call pass, so findEnclosingDefinition
+    // gives each overload's calls to that overload. The CONTAINS edge names it
+    // the same way, and patch-builder resolves that name to its node.
+    if (javaCallables.length > 1) {
+      const firstSignature = new Map<string, string>();
+      for (const callable of javaCallables) {
+        const base = entityKey(callable.entity);
+        const signature = javaErasedSignature(callable.decl);
+        const first = firstSignature.get(base);
+        if (first === undefined) { firstSignature.set(base, signature); continue; }
+        if (signature === first) continue;
+        callable.entity.signature = signature;
+        callable.chunk.signature = signature;
+        callable.contains.dstName = `${callable.entity.name}${signature}`;
       }
     }
 
@@ -7044,7 +7089,7 @@ export function resolveEdges(
   }
 
   function sameScopeDefines(result: FileParseResult, srcName: string, dstName: string): boolean {
-    const sourceEntities = result.entities.filter(e => e.name === srcName || qualifiedKey(e) === srcName);
+    const sourceEntities = result.entities.filter(e => e.name === srcName || entityKey(e) === srcName);
     if (sourceEntities.length === 0) return false;
     return result.entities.some(definition =>
       definition.name === dstName && sourceEntities.some(source =>
@@ -7869,5 +7914,5 @@ function findEnclosingDefinition(
       }
     }
   }
-  return best ? (best.container ? `${best.container}.${best.name}` : best.name) : null;
+  return best ? entityKey(best) : null;
 }

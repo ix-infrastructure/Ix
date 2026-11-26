@@ -2308,6 +2308,27 @@ export function stitchCallEntry(
 }
 
 /**
+ * The stitch-def keys an entity registers, each with the node key its symbol
+ * node is built from. A def is found by its bare name (export aliases, the
+ * locally-defined check) and, for a member, by its qualified key, because a
+ * call from inside a method has the qualified srcName (`Ora.constructor`).
+ *
+ * A Java overload after the first carries `signature` (#1139): its node key
+ * and the srcName of the calls inside it are `Container.name(T1,T2)`, the same
+ * as core-ingestion's entityKey(). It is registered under that key too, so its
+ * cross-repo calls are not dropped. Its bare name keeps pointing at
+ * `Container.name`, the first overload's node, as it did before overloads had
+ * their own nodes.
+ */
+export function stitchDefKeys(e: { name: string; container?: string; signature?: string }): Array<[string, string]> {
+  const qk = e.container ? `${e.container}.${e.name}` : e.name;
+  const keys: Array<[string, string]> = [[e.name, qk]];
+  if (qk !== e.name) keys.push([qk, qk]);
+  if (e.signature) keys.push([`${qk}${e.signature}`, `${qk}${e.signature}`]);
+  return keys;
+}
+
+/**
  * Did the run finish with the graph fully matching what it set out to ingest?
  *
  * Three things are conditional on this: persisting the mtime cache, the
@@ -2532,16 +2553,12 @@ export async function ingestFiles(
     if (spec.startsWith('@')) { const parts = spec.split('/'); return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null; }
     return spec.split('/')[0] || null;
   };
-  const collectStitch = (parsedFiles: Array<{ filePath: string; entities?: Array<{ name: string; kind: string; container?: string }>; relationships?: Array<{ predicate: string; srcName?: string; dstName?: string; importRaw?: string }>; importBindings?: Array<{ pkg: string; local: string; imported: string }>; exportPublicNames?: Array<{ local: string; public: string; source?: string }> }>): void => {
+  const collectStitch = (parsedFiles: Array<{ filePath: string; entities?: Array<{ name: string; kind: string; container?: string; signature?: string }>; relationships?: Array<{ predicate: string; srcName?: string; dstName?: string; importRaw?: string }>; importBindings?: Array<{ pkg: string; local: string; imported: string }>; exportPublicNames?: Array<{ local: string; public: string; source?: string }> }>): void => {
     for (const p of parsedFiles) {
       stitchFiles.push(p.filePath);
       for (const e of (p.entities ?? [])) {
         const qk = e.container ? `${e.container}.${e.name}` : e.name;
-        stitchDefs.set(e.name, { qk, filePath: p.filePath });
-        // A call FROM inside a class/namespace method has a QUALIFIED srcName
-        // (e.g. "Ora.constructor"); also key the def by its qualified key so the
-        // caller node resolves (else cross-repo calls from methods are dropped).
-        if (qk !== e.name) stitchDefs.set(qk, { qk, filePath: p.filePath });
+        for (const [key, nodeKey] of stitchDefKeys(e)) stitchDefs.set(key, { qk: nodeKey, filePath: p.filePath });
         if (!e.container && (e.kind === 'function' || e.kind === 'class') && !stitchExportNames.has(e.name)) {
           stitchExportNames.add(e.name);
           stitchExports.push({ name: e.name, nodeId: symbolNodeId(workspaceId, p.filePath, qk) });

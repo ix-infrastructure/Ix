@@ -118,11 +118,34 @@ function phpCallKinds(): Record<string, unknown>[] {
   return buildRepo([result!], () => 'ws');
 }
 
+function javaOverloads(): Record<string, unknown>[] {
+  // #1139: the first overload keeps `Over.handle`; the others fold their
+  // erased signature, and each holds only its own calls.
+  const source = [
+    'class Over {',
+    '  void handle(String s) { First.one(); }',
+    '  void handle(int n) { Second.two(); }',
+    '  <T extends Comparable<T>> void handle(java.util.List<T> xs, T... rest) { Third.three(); }',
+    '  void run() { handle(1); }',
+    '}',
+    '',
+  ].join('\n');
+  const results = [
+    ['Over.java', source],
+    ['First.java', 'class First { static void one() {} }\n'],
+    ['Second.java', 'class Second { static void two() {} }\n'],
+    ['Third.java', 'class Third { static void three() {} }\n'],
+  ].map(([filePath, text]) => parseFile(`src/${filePath}`, text, { budgetMs: 0 }));
+  expect(results.every((r) => r !== null)).toBe(true);
+  return buildRepo(results as FileParseResult[], () => 'ws');
+}
+
 /** Every golden case by the name extractor-output.json records it under. */
 const CASES: ReadonlyArray<readonly [string, () => Record<string, unknown>[] | null]> = [
   ...repos.map((repo) => [repo, () => fixtureRepo(repo)] as const),
   ['co-ingest of mini-repo and scala-repo', coIngest],
   ['PHP calls that differ only in call kind', phpCallKinds],
+  ['Java overloads', javaOverloads],
 ];
 
 describe('buildPatchWithResolution golden output (the CLI path)', () => {
@@ -144,6 +167,10 @@ describe('buildPatchWithResolution golden output (the CLI path)', () => {
 
   it('is unchanged for PHP calls that differ only in call kind', () => {
     expect(phpCallKinds()).toMatchSnapshot();
+  });
+
+  it('is unchanged for Java overloads', () => {
+    expect(javaOverloads()).toMatchSnapshot();
   });
 });
 

@@ -13,7 +13,7 @@ import type {
   SymbolNodeAttrs,
   UpsertEdgeOp,
 } from './schema.js';
-import { resolveEdges } from './index.js';
+import { entityKey, resolveEdges } from './index.js';
 import type { FileParseResult, ParsedEntity, ResolutionTier, ResolvedEdge } from './index.js';
 
 // ---------------------------------------------------------------------------
@@ -413,17 +413,24 @@ export function buildPatchWithResolution(
   // Build a qualified-key map so that same-named entities in different
   // enclosing classes within the same file get distinct nodeIds.
   // e.g.  ClassA.update  vs  ClassB.update  instead of both being "update".
+  // A Java overload after the first also folds its erased signature (#1139):
+  // `Over.handle(int)`.
   const entityQKey = new Map<ParsedEntity, string>();
   for (const e of entities) {
-    entityQKey.set(e, e.container ? `${e.container}.${e.name}` : e.name);
+    entityQKey.set(e, entityKey(e));
   }
 
   // Reverse lookup: plain name → list of qualified keys (for edge resolution).
+  // An overload is listed under its name only by the key of the first one, so
+  // a call by name still lands where it did before overloads had their own
+  // nodes; the overload's own key is listed under `name(signature)`, the name
+  // its CONTAINS relationship gives it.
   const nameToQKeys = new Map<string, string[]>();
   for (const [e, qk] of entityQKey) {
-    const list = nameToQKeys.get(e.name) ?? [];
+    const name = e.signature ? `${e.name}${e.signature}` : e.name;
+    const list = nameToQKeys.get(name) ?? [];
     list.push(qk);
-    nameToQKeys.set(e.name, list);
+    nameToQKeys.set(name, list);
   }
 
   // Set of all qualified keys defined in this file — used to distinguish same-file
@@ -503,7 +510,7 @@ export function buildPatchWithResolution(
     // Chunk -[DEFINES]-> Symbol (only for named chunks whose symbol this patch
     // writes; any other would point at a node that does not exist)
     if (chunk.name !== null) {
-      const symbolKey = chunk.container ? `${chunk.container}.${chunk.name}` : chunk.name;
+      const symbolKey = entityKey({ name: chunk.name, container: chunk.container, signature: chunk.signature });
       const symbolNid = nodeId(idPath, symbolKey);
       if (seenNodeIds.has(symbolNid)) ops.push({
         type: 'UpsertEdge',
