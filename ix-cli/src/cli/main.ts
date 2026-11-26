@@ -7,6 +7,7 @@
 // ~200 modules behind the command registry would already be loaded.
 
 import * as nodeModule from "node:module";
+import { lstatSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -38,8 +39,9 @@ const MIN_NODE_MAJOR = 22;
 // no-op. The default directory is shared by every user of the machine, so on a
 // shared host another user may own it (mode 700) and Node cannot use it. Then
 // the cache goes in a directory of this user's own next to it,
-// `node-compile-cache-<uid>`. If that fails too, the CLI runs without one: it
-// only costs speed.
+// `node-compile-cache-<uid>`, made private (0700). If that fails, or the
+// directory is not private to this user, the CLI runs without one: it only
+// costs speed.
 try {
   const { enableCompileCache, constants } = nodeModule as {
     enableCompileCache?: (dir?: string) => { status?: number } | undefined;
@@ -50,7 +52,20 @@ try {
     const failed = constants?.compileCacheStatus?.FAILED;
     const uid = process.getuid?.();
     if (failed !== undefined && result?.status === failed && uid !== undefined) {
-      enableCompileCache(join(tmpdir(), `node-compile-cache-${uid}`));
+      // The OS temp dir is writable by every user, so another one could make
+      // this directory first, or a symlink in its place, and own the code V8
+      // loads from it. It is used only when it is a real directory this user
+      // owns that nobody else can read or write.
+      const dir = join(tmpdir(), `node-compile-cache-${uid}`);
+      try {
+        mkdirSync(dir, { mode: 0o700 });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      }
+      const st = lstatSync(dir);
+      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid && (st.mode & 0o077) === 0) {
+        enableCompileCache(dir);
+      }
     }
   }
 } catch {

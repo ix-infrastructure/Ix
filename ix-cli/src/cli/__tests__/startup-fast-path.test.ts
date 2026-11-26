@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import * as nodeModule from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -416,9 +416,34 @@ describe("the compile cache", () => {
     writeFileSync(join(box.tmp, "node-compile-cache"), "");
     expect(await runCli(["--version"], { cwd: box.cwd, env: box.env })).toEqual(versionOnly);
     expect(statSync(join(box.tmp, "node-compile-cache")).isFile()).toBe(true);
-    expect(statSync(join(box.tmp, `node-compile-cache-${uid}`)).isDirectory()).toBe(true);
+    const own = statSync(join(box.tmp, `node-compile-cache-${uid}`));
+    expect(own.isDirectory()).toBe(true);
+    expect(own.mode & 0o777).toBe(0o700);
+    expect(readdirSync(join(box.tmp, `node-compile-cache-${uid}`))).not.toEqual([]);
     expect(readdirSync(box.ixHomeDir)).toEqual([]);
     expect(readdirSync(box.cwd)).toEqual([]);
+  }, 60_000);
+
+  // Another user can make the fallback directory first in a shared temp dir.
+  // One others can write, or a symlink to anywhere, is never used.
+  it.skipIf(!supported || uid === undefined)("does not use a fallback directory others can read or write", async () => {
+    const box = sandbox();
+    writeFileSync(join(box.tmp, "node-compile-cache"), "");
+    const dir = join(box.tmp, `node-compile-cache-${uid}`);
+    mkdirSync(dir, { mode: 0o777 });
+    chmodSync(dir, 0o777);
+    expect(await runCli(["--version"], { cwd: box.cwd, env: box.env })).toEqual(versionOnly);
+    expect(readdirSync(dir)).toEqual([]);
+  }, 60_000);
+
+  it.skipIf(!supported || uid === undefined)("does not follow a symlink in the fallback's place", async () => {
+    const box = sandbox();
+    writeFileSync(join(box.tmp, "node-compile-cache"), "");
+    const target = tempDir("ix-cc-target-");
+    chmodSync(target, 0o700);
+    symlinkSync(target, join(box.tmp, `node-compile-cache-${uid}`), "dir");
+    expect(await runCli(["--version"], { cwd: box.cwd, env: box.env })).toEqual(versionOnly);
+    expect(readdirSync(target)).toEqual([]);
   }, 60_000);
 
   it("is silently skipped when no directory can be created", async () => {
