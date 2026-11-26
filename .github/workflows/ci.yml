@@ -65,6 +65,12 @@ jobs:
       # Toolchain-free like the NUL guard above (stdlib python3 is preinstalled,
       # and the script shells out only to `git ls-files` / `git check-attr`), so
       # it belongs here rather than behind the npm install below.
+      # The check's own failure paths, exercised before the check runs. A gate
+      # whose failure path is never tested is a claim, not a guard: these cover
+      # shebang/BOM/CRLF ordering, existing notices, exclusions and the
+      # empty-scope failure. Stdlib only, beside the script it tests.
+      - name: Copyright header check tests
+        run: python3 .github/scripts/test_copyright_headers.py
       - name: Copyright headers on every source file
         run: python3 .github/scripts/copyright-headers.py
       # ── Workflow wiring ─────────────────────────────────────────────────
