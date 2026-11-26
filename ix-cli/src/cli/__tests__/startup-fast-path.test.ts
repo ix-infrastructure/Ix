@@ -406,11 +406,25 @@ describe("the compile cache", () => {
     expect(existsSync(missing)).toBe(false);
   }, 60_000);
 
-  it("is silently skipped when its directory cannot be created", async () => {
-    // A regular file where the directory has to go fails for every user,
-    // root included, on every platform.
+  // A regular file where a directory has to go fails for every user, root
+  // included, on every platform: it stands in for a default directory another
+  // user owns.
+  const uid = process.getuid?.();
+
+  it.skipIf(!supported || uid === undefined)("moves to a directory of this user's own when the default cannot be used", async () => {
     const box = sandbox();
     writeFileSync(join(box.tmp, "node-compile-cache"), "");
+    expect(await runCli(["--version"], { cwd: box.cwd, env: box.env })).toEqual(versionOnly);
+    expect(statSync(join(box.tmp, "node-compile-cache")).isFile()).toBe(true);
+    expect(statSync(join(box.tmp, `node-compile-cache-${uid}`)).isDirectory()).toBe(true);
+    expect(readdirSync(box.ixHomeDir)).toEqual([]);
+    expect(readdirSync(box.cwd)).toEqual([]);
+  }, 60_000);
+
+  it("is silently skipped when no directory can be created", async () => {
+    const box = sandbox();
+    writeFileSync(join(box.tmp, "node-compile-cache"), "");
+    if (uid !== undefined) writeFileSync(join(box.tmp, `node-compile-cache-${uid}`), "");
     expect(await runCli(["--version"], { cwd: box.cwd, env: box.env })).toEqual(versionOnly);
     const read = await runCli(["read", "a.txt", "--format", "json"], { env: box.env });
     expect(read.status).toBe(0);

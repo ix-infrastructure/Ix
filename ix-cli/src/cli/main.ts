@@ -7,6 +7,8 @@
 // ~200 modules behind the command registry would already be loaded.
 
 import * as nodeModule from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Runtime Node version guard. Runs before any command work so users on an
 // unsupported Node get an actionable message instead of a cryptic "fetch
@@ -33,12 +35,23 @@ const MIN_NODE_MAJOR = 22;
 // Node's own settings win, and then this calls nothing: NODE_COMPILE_CACHE has
 // already been applied before this line runs, and NODE_DISABLE_COMPILE_CACHE
 // (any value, as Node reads it) turns the cache off. Absent on 22.0: then a
-// no-op. A directory that cannot be created or written is reported in the
-// return value, which is ignored: it only costs speed.
+// no-op. The default directory is shared by every user of the machine, so on a
+// shared host another user may own it (mode 700) and Node cannot use it. Then
+// the cache goes in a directory of this user's own next to it,
+// `node-compile-cache-<uid>`. If that fails too, the CLI runs without one: it
+// only costs speed.
 try {
-  const { enableCompileCache } = nodeModule as { enableCompileCache?: () => unknown };
+  const { enableCompileCache, constants } = nodeModule as {
+    enableCompileCache?: (dir?: string) => { status?: number } | undefined;
+    constants?: { compileCacheStatus?: { FAILED?: number } };
+  };
   if (enableCompileCache && process.env.NODE_COMPILE_CACHE === undefined && process.env.NODE_DISABLE_COMPILE_CACHE === undefined) {
-    enableCompileCache();
+    const result = enableCompileCache();
+    const failed = constants?.compileCacheStatus?.FAILED;
+    const uid = process.getuid?.();
+    if (failed !== undefined && result?.status === failed && uid !== undefined) {
+      enableCompileCache(join(tmpdir(), `node-compile-cache-${uid}`));
+    }
   }
 } catch {
   // A cache that cannot be opened only costs speed.
