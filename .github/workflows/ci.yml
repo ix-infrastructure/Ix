@@ -65,6 +65,12 @@ jobs:
       # Toolchain-free like the NUL guard above (stdlib python3 is preinstalled,
       # and the script shells out only to `git ls-files` / `git check-attr`), so
       # it belongs here rather than behind the npm install below.
+      # The check's own failure paths, exercised before the check runs. A gate
+      # whose failure path is never tested is a claim, not a guard: these cover
+      # shebang/BOM/CRLF ordering, existing notices, exclusions and the
+      # empty-scope failure. Stdlib only, beside the script it tests.
+      - name: Copyright header check tests
+        run: python3 .github/scripts/test_copyright_headers.py
       - name: Copyright headers on every source file
         run: python3 .github/scripts/copyright-headers.py
       # ── Workflow wiring ─────────────────────────────────────────────────
@@ -172,6 +178,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The check-attr path parser is the part of the suite whose behavior is
+      # platform-specific: Windows text-mode stdin added a trailing CR to every
+      # path except the last. Run the stdlib tests on the real Windows matrix
+      # leg, not only in the Ubuntu static job, so that regression is guarded
+      # where it occurs. Toolchain-free, so it can fail before the native build.
+      - name: Copyright header check tests (Windows)
+        if: runner.os == 'Windows'
+        run: python .github/scripts/test_copyright_headers.py
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}

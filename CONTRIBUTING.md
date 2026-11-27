@@ -61,7 +61,10 @@ and the parser smoke test.
 
 ```bash
 # From the repo root
-python3 .github/scripts/copyright-headers.py   # copyright header on every source file (--fix adds them)
+python3 .github/scripts/copyright-headers.py   # Linux/macOS; --fix adds missing headers
+python  .github/scripts/copyright-headers.py   # Windows, where python3 is not on PATH
+python .github/scripts/test_copyright_headers.py   # Windows regression tests
+python3 .github/scripts/test_copyright_headers.py  # scanner regression tests
 node ix-cli/scripts/check-links.mjs            # dead links in markdown (--offline skips the URL probes)
 
 cd ix-cli
@@ -278,12 +281,28 @@ by the `Lint & Typecheck` job, so it gates merges through the required `CI Passe
 check. If you add a file and it goes red, fix every offender at once:
 
 ```bash
-python3 .github/scripts/copyright-headers.py --fix
+python3 .github/scripts/copyright-headers.py --fix   # Linux/macOS
+python  .github/scripts/copyright-headers.py --fix   # Windows, where python3 is not on PATH
 ```
+
+The check resolves the repository root, so it scans the whole tree even when you
+run it from a nested directory. If a file names a different copyright holder,
+`--fix` reports it and leaves the file untouched; it never inserts a second
+notice.
 
 Test fixtures, vendored code, and anything marked `linguist-generated` in
 `.gitattributes` are deliberately exempt — the parser tests snapshot fixture line
 numbers, and generated files lose the header on their next regeneration.
+
+The check fails when it finds no source files at all, so a wrong working
+directory cannot turn it green. `--fix` keeps a shebang, UTF-8 BOM, CRLF ending
+and coding declaration in place, is idempotent, and never inserts a second
+header into a file that already names a copyright holder. Its tests run beside
+it in the same CI job:
+
+```bash
+python3 .github/scripts/test_copyright_headers.py
+```
 
 ## Security Checks
 
