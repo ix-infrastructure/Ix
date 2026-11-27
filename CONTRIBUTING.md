@@ -63,6 +63,7 @@ and the parser smoke test.
 # From the repo root
 python3 .github/scripts/copyright-headers.py   # Linux/macOS; --fix adds missing headers
 python  .github/scripts/copyright-headers.py   # Windows, where python3 is not on PATH
+python .github/scripts/test_copyright_headers.py   # Windows regression tests
 python3 .github/scripts/test_copyright_headers.py  # scanner regression tests
 node ix-cli/scripts/check-links.mjs            # dead links in markdown (--offline skips the URL probes)
 
